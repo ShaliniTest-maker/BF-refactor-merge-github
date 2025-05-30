@@ -1,0 +1,444 @@
+{
+  "metadata": {
+    "version": "1.0.0",
+    "description": "Historical performance trend data for Node.js to Python/Flask migration tracking",
+    "project": "BF-refactor-merge",
+    "created_date": "2024-01-01T00:00:00Z",
+    "last_updated": "2024-12-15T10:30:00Z",
+    "variance_threshold": 0.10,
+    "baseline_source": "nodejs_baseline_metrics.json",
+    "monitoring_period_days": 90,
+    "data_retention_days": 365
+  },
+  "baseline_evolution": {
+    "nodejs_baseline": {
+      "established_date": "2024-01-01T00:00:00Z",
+      "version": "16.20.2",
+      "environment": "production-equivalent",
+      "metrics": {
+        "response_time": {
+          "avg_ms": 145.2,
+          "p95_ms": 285.0,
+          "p99_ms": 450.0
+        },
+        "throughput": {
+          "requests_per_second": 120.5,
+          "concurrent_users_supported": 850
+        },
+        "resource_utilization": {
+          "cpu_percent_avg": 42.3,
+          "memory_mb_avg": 185.7,
+          "memory_mb_peak": 245.0
+        },
+        "database_performance": {
+          "query_avg_ms": 12.4,
+          "connection_pool_efficiency": 0.92,
+          "redis_avg_ms": 2.1
+        }
+      }
+    },
+    "python_milestones": [
+      {
+        "deployment_id": "py-001",
+        "date": "2024-03-15T14:20:00Z",
+        "version": "python-3.11.8",
+        "stage": "initial_migration",
+        "variance_from_baseline": {
+          "response_time": 0.08,
+          "throughput": -0.05,
+          "cpu_utilization": 0.12,
+          "memory_usage": 0.15,
+          "database_queries": 0.06
+        },
+        "compliance_status": "WITHIN_THRESHOLD",
+        "notes": "Initial Flask migration completed, minor memory overhead observed"
+      },
+      {
+        "deployment_id": "py-015",
+        "date": "2024-06-20T09:45:00Z",
+        "version": "python-3.11.9",
+        "stage": "optimization_phase_1",
+        "variance_from_baseline": {
+          "response_time": 0.04,
+          "throughput": 0.02,
+          "cpu_utilization": 0.06,
+          "memory_usage": 0.08,
+          "database_queries": 0.03
+        },
+        "compliance_status": "WITHIN_THRESHOLD",
+        "notes": "Performance optimizations implemented, approaching baseline parity"
+      },
+      {
+        "deployment_id": "py-032",
+        "date": "2024-09-10T16:30:00Z",
+        "version": "python-3.11.10",
+        "stage": "production_ready",
+        "variance_from_baseline": {
+          "response_time": 0.02,
+          "throughput": 0.01,
+          "cpu_utilization": 0.03,
+          "memory_usage": 0.05,
+          "database_queries": 0.01
+        },
+        "compliance_status": "WITHIN_THRESHOLD",
+        "notes": "Production readiness achieved, all metrics within ≤10% variance"
+      }
+    ]
+  },
+  "performance_trends": {
+    "weekly_aggregates": [
+      {
+        "week_start": "2024-12-01T00:00:00Z",
+        "week_end": "2024-12-07T23:59:59Z",
+        "deployment_count": 3,
+        "metrics": {
+          "response_time": {
+            "avg_ms": 148.7,
+            "trend": "stable",
+            "variance_from_baseline": 0.024,
+            "regression_score": 0.1
+          },
+          "throughput": {
+            "avg_rps": 122.1,
+            "trend": "improving",
+            "variance_from_baseline": 0.013,
+            "regression_score": 0.05
+          },
+          "error_rate": {
+            "avg_percent": 0.08,
+            "trend": "stable",
+            "threshold_breaches": 0
+          },
+          "resource_utilization": {
+            "cpu_avg": 43.8,
+            "memory_avg_mb": 195.2,
+            "trend": "stable",
+            "variance_from_baseline": 0.051
+          }
+        },
+        "quality_metrics": {
+          "code_coverage": 94.2,
+          "static_analysis_issues": 0,
+          "security_vulnerabilities": 0,
+          "test_success_rate": 99.8
+        }
+      },
+      {
+        "week_start": "2024-12-08T00:00:00Z",
+        "week_end": "2024-12-14T23:59:59Z",
+        "deployment_count": 2,
+        "metrics": {
+          "response_time": {
+            "avg_ms": 146.3,
+            "trend": "improving",
+            "variance_from_baseline": 0.008,
+            "regression_score": 0.02
+          },
+          "throughput": {
+            "avg_rps": 121.8,
+            "trend": "stable",
+            "variance_from_baseline": 0.011,
+            "regression_score": 0.03
+          },
+          "error_rate": {
+            "avg_percent": 0.06,
+            "trend": "improving",
+            "threshold_breaches": 0
+          },
+          "resource_utilization": {
+            "cpu_avg": 42.1,
+            "memory_avg_mb": 189.4,
+            "trend": "improving",
+            "variance_from_baseline": 0.020
+          }
+        },
+        "quality_metrics": {
+          "code_coverage": 94.8,
+          "static_analysis_issues": 0,
+          "security_vulnerabilities": 0,
+          "test_success_rate": 100.0
+        }
+      }
+    ],
+    "monthly_summaries": [
+      {
+        "month": "2024-11",
+        "deployments": 12,
+        "performance_score": 92.5,
+        "variance_trend": "improving",
+        "avg_variance_from_baseline": 0.035,
+        "max_variance_observed": 0.089,
+        "threshold_breaches": 0,
+        "regression_incidents": 1,
+        "optimization_wins": [
+          "Database connection pooling optimization - 15% query performance improvement",
+          "Memory management enhancement - 8% memory usage reduction",
+          "Cache layer optimization - 12% response time improvement"
+        ]
+      },
+      {
+        "month": "2024-12",
+        "deployments": 8,
+        "performance_score": 95.3,
+        "variance_trend": "stable",
+        "avg_variance_from_baseline": 0.022,
+        "max_variance_observed": 0.067,
+        "threshold_breaches": 0,
+        "regression_incidents": 0,
+        "optimization_wins": [
+          "Async database operations refinement - 5% query performance improvement",
+          "Memory profiling implementation - 3% memory optimization",
+          "Response caching enhancement - 7% response time improvement"
+        ]
+      }
+    ]
+  },
+  "regression_detection": {
+    "monitoring_windows": {
+      "immediate": "5_minutes",
+      "short_term": "1_hour",
+      "medium_term": "24_hours",
+      "long_term": "7_days"
+    },
+    "detection_thresholds": {
+      "response_time_degradation": 0.15,
+      "throughput_degradation": 0.10,
+      "error_rate_increase": 0.05,
+      "memory_growth": 0.20,
+      "cpu_spike": 0.25
+    },
+    "recent_incidents": [
+      {
+        "incident_id": "REG-2024-11-15-001",
+        "detected_at": "2024-11-15T14:22:00Z",
+        "deployment_id": "py-029",
+        "severity": "medium",
+        "metric_affected": "response_time",
+        "variance_observed": 0.12,
+        "duration_minutes": 45,
+        "root_cause": "Database connection pool configuration issue",
+        "resolution": "Connection pool size increased from 10 to 15 connections",
+        "resolution_time_minutes": 38,
+        "prevented_impact": "Production deployment blocked until resolution"
+      }
+    ],
+    "false_positive_rate": 0.03,
+    "detection_accuracy": 0.94,
+    "mean_time_to_detection_minutes": 8.5,
+    "mean_time_to_resolution_minutes": 42.3
+  },
+  "deployment_impact_analysis": {
+    "deployment_categories": {
+      "feature_releases": {
+        "avg_performance_impact": 0.02,
+        "typical_variance_range": [-0.01, 0.05],
+        "rollback_rate": 0.01
+      },
+      "performance_optimizations": {
+        "avg_performance_impact": -0.08,
+        "typical_variance_range": [-0.15, 0.02],
+        "rollback_rate": 0.00
+      },
+      "security_patches": {
+        "avg_performance_impact": 0.01,
+        "typical_variance_range": [-0.01, 0.03],
+        "rollback_rate": 0.02
+      },
+      "dependency_updates": {
+        "avg_performance_impact": 0.03,
+        "typical_variance_range": [-0.02, 0.08],
+        "rollback_rate": 0.05
+      }
+    },
+    "rollback_triggers": [
+      {
+        "condition": "response_time_variance_exceeds",
+        "threshold": 0.10,
+        "action": "automatic_rollback",
+        "grace_period_minutes": 15
+      },
+      {
+        "condition": "error_rate_exceeds",
+        "threshold": 0.005,
+        "action": "automatic_rollback",
+        "grace_period_minutes": 5
+      },
+      {
+        "condition": "throughput_degrades",
+        "threshold": 0.15,
+        "action": "manual_review_required",
+        "grace_period_minutes": 30
+      }
+    ],
+    "blue_green_metrics": {
+      "avg_switchover_time_seconds": 12.3,
+      "successful_switches": 127,
+      "failed_switches": 2,
+      "switch_success_rate": 0.984
+    }
+  },
+  "quality_evolution": {
+    "code_quality_trends": {
+      "test_coverage": {
+        "current": 94.8,
+        "trend_30_days": "improving",
+        "improvement_rate_percent": 1.2,
+        "target": 95.0
+      },
+      "static_analysis": {
+        "flake8_violations": {
+          "current": 0,
+          "trend_30_days": "stable",
+          "target": 0
+        },
+        "mypy_errors": {
+          "current": 0,
+          "trend_30_days": "stable",
+          "target": 0
+        },
+        "complexity_violations": {
+          "current": 2,
+          "trend_30_days": "improving",
+          "target": 0
+        }
+      },
+      "security_posture": {
+        "critical_vulnerabilities": 0,
+        "high_severity_findings": 0,
+        "medium_severity_findings": 1,
+        "last_security_scan": "2024-12-15T09:00:00Z",
+        "scan_frequency_hours": 24
+      }
+    },
+    "testing_effectiveness": {
+      "test_execution_time_trends": {
+        "unit_tests_seconds": 45.2,
+        "integration_tests_seconds": 180.7,
+        "performance_tests_seconds": 420.1,
+        "total_pipeline_minutes": 18.5,
+        "trend": "stable"
+      },
+      "flaky_test_tracking": {
+        "flaky_tests_identified": 3,
+        "stabilization_rate": 0.89,
+        "avg_stabilization_time_days": 5.2
+      }
+    }
+  },
+  "baseline_drift_monitoring": {
+    "drift_detection": {
+      "enabled": true,
+      "sensitivity": "medium",
+      "evaluation_frequency_hours": 24,
+      "drift_threshold": 0.05
+    },
+    "recent_drift_events": [
+      {
+        "event_id": "DRIFT-2024-12-01",
+        "detected_at": "2024-12-01T06:00:00Z",
+        "metric": "database_query_performance",
+        "drift_magnitude": 0.06,
+        "trend": "gradual_improvement",
+        "action_taken": "baseline_adjustment_approved",
+        "new_baseline_effective": "2024-12-02T00:00:00Z",
+        "approval_authority": "performance_team_lead"
+      }
+    ],
+    "baseline_adjustments": {
+      "total_adjustments": 4,
+      "last_adjustment": "2024-12-02T00:00:00Z",
+      "adjustment_frequency_days": 30.5,
+      "approval_rate": 0.92
+    }
+  },
+  "alerting_configuration": {
+    "alert_channels": [
+      "slack_performance_team",
+      "email_on_call_engineer",
+      "pagerduty_critical_only"
+    ],
+    "notification_thresholds": {
+      "performance_degradation": {
+        "warning": 0.08,
+        "critical": 0.10,
+        "escalation_minutes": 15
+      },
+      "error_rate_spike": {
+        "warning": 0.003,
+        "critical": 0.005,
+        "escalation_minutes": 5
+      },
+      "resource_exhaustion": {
+        "warning": 0.80,
+        "critical": 0.90,
+        "escalation_minutes": 10
+      }
+    },
+    "alert_suppression": {
+      "maintenance_windows": true,
+      "deployment_grace_period_minutes": 10,
+      "alert_correlation_enabled": true
+    }
+  },
+  "data_sources": {
+    "prometheus_metrics": {
+      "endpoint": "http://monitoring.internal:9090",
+      "retention_days": 90,
+      "scrape_interval_seconds": 15
+    },
+    "application_logs": {
+      "log_level": "INFO",
+      "structured_logging": true,
+      "retention_days": 30
+    },
+    "ci_cd_pipeline": {
+      "source": "github_actions",
+      "performance_job_timeout_minutes": 30,
+      "baseline_comparison_enabled": true
+    },
+    "load_testing": {
+      "locust_reports": "tests/performance/reports/",
+      "apache_bench_logs": "tests/performance/reports/ab/",
+      "test_frequency": "per_deployment"
+    }
+  },
+  "analysis_insights": {
+    "performance_summary": {
+      "overall_migration_success": true,
+      "variance_compliance_rate": 0.98,
+      "performance_improvement_areas": [
+        "Database connection pooling optimization opportunities",
+        "Memory management fine-tuning potential",
+        "Cache hit ratio enhancement possibilities"
+      ],
+      "risk_factors": [
+        "Dependency update performance impact monitoring needed",
+        "Load testing coverage gaps in extreme scenarios",
+        "Memory growth trend requires continued monitoring"
+      ]
+    },
+    "recommendations": [
+      {
+        "priority": "high",
+        "category": "monitoring",
+        "description": "Implement automated baseline adjustment workflow to reduce manual overhead",
+        "estimated_effort_days": 5,
+        "expected_benefit": "Reduced false positive alerts and improved baseline accuracy"
+      },
+      {
+        "priority": "medium",
+        "category": "optimization",
+        "description": "Investigate memory usage patterns for potential optimization opportunities",
+        "estimated_effort_days": 8,
+        "expected_benefit": "5-10% memory usage reduction potential"
+      },
+      {
+        "priority": "low",
+        "category": "testing",
+        "description": "Expand load testing scenarios to include edge cases and extreme load patterns",
+        "estimated_effort_days": 3,
+        "expected_benefit": "Improved confidence in performance under stress conditions"
+      }
+    ]
+  }
+}
