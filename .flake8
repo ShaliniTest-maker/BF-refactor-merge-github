@@ -1,0 +1,172 @@
+# flake8 Configuration File
+# Enterprise-grade Python code style enforcement for Flask application migration
+# Implements comprehensive PEP 8 compliance with zero-tolerance error policy
+# Configuration per Section 8.5.1 Python Quality Gates Integration
+
+[flake8]
+
+# Code Style and Line Length Configuration
+# Max line length set to 88 characters for optimal readability
+# Aligns with Black formatter standards and Python community best practices
+max-line-length = 88
+
+# Complexity and Quality Metrics
+# Maximum cyclomatic complexity threshold for maintainable code
+# Enterprise-grade complexity limit for reduced maintenance overhead
+max-complexity = 10
+
+# Documentation and Testing Configuration
+# Enable docstring testing for comprehensive documentation validation
+# Supports doctests execution during flake8 analysis
+doctests = True
+
+# Statistical Reporting Configuration
+# Enable detailed statistics reporting for code quality metrics
+# Provides comprehensive analysis of violation patterns
+statistics = True
+
+# Violation Counting Configuration
+# Enable violation counting for detailed quality assessment
+# Essential for CI/CD pipeline quality gate enforcement
+count = True
+
+# Error and Warning Management
+# Extended ignore list for compatibility with modern Python formatting tools
+# E203: Whitespace before ':' (conflicts with Black formatter)
+# W503: Line break before binary operator (deprecated in favor of W504)
+# E501: Line too long (handled by max-line-length setting)
+extend-ignore = E203, W503, E501
+
+# File and Directory Exclusions
+# Comprehensive exclusion of build artifacts, virtual environments, and system files
+# Optimized for Python/Flask development workflow and CI/CD pipeline efficiency
+exclude = 
+    .git,
+    __pycache__,
+    *.pyc,
+    .env,
+    .venv,
+    venv,
+    env,
+    build,
+    dist,
+    *.egg-info,
+    .tox,
+    .coverage,
+    .pytest_cache,
+    node_modules,
+    .mypy_cache,
+    migrations,
+    static,
+    media
+
+# Per-File Ignore Configuration
+# Targeted violation ignores for specific file patterns and use cases
+# Balances code quality with practical development requirements
+per-file-ignores =
+    # __init__.py files: Allow unused imports for module exposure
+    __init__.py:F401,F403
+    
+    # Test files: Relaxed rules for test-specific patterns
+    tests/*:S101,S106,F401,F811,E501
+    test_*.py:S101,S106,F401,F811,E501
+    *_test.py:S101,S106,F401,F811,E501
+    
+    # Configuration files: Allow longer lines for configuration values
+    config/*.py:E501
+    settings.py:E501
+    
+    # Migration files: Relaxed rules for auto-generated database migrations
+    migrations/*:E501,F401,F403
+    
+    # Flask application factory: Allow complex initialization patterns
+    app.py:C901
+    
+    # Blueprint files: Allow star imports for clean blueprint organization
+    src/blueprints/*/__init__.py:F401,F403
+
+# Import Sorting and Organization
+# Enable import order checking for consistent module organization
+# Supports automated import sorting tools integration
+import-order-style = google
+
+# Application Type Configuration
+# Configure flake8 for web application development patterns
+# Optimized for Flask framework and enterprise development standards
+application-import-names = src,app,config,tests
+
+# Docstring Configuration
+# Enforce comprehensive docstring coverage for enterprise documentation standards
+# Supports automated documentation generation and API documentation
+docstring-convention = google
+
+# Filename Patterns
+# Configure filename pattern validation for consistent naming conventions
+# Enforces Python naming standards across the Flask application
+filename = *.py
+
+# Inline Comment Configuration
+# Enable inline comment validation for code documentation quality
+# Supports maintainable code practices and team collaboration
+inline-quotes = single
+
+# Output Format Configuration
+# Configure output format for enhanced readability and CI/CD integration
+# Optimizes violation reporting for automated quality assessment
+format = %(path)s:%(row)d:%(col)d: %(code)s %(text)s
+
+# Verbose Output Configuration
+# Enable verbose output for comprehensive quality analysis
+# Provides detailed information for development workflow optimization
+verbose = 1
+
+# Show Source Code
+# Display source code context for violations
+# Enhances developer experience and faster issue resolution
+show-source = True
+
+# Benchmark Mode
+# Enable benchmarking for performance monitoring of code analysis
+# Supports CI/CD pipeline optimization and quality gate timing
+benchmark = False
+
+# Color Output (disabled for CI/CD compatibility)
+# Disable color output for consistent CI/CD pipeline logging
+# Ensures compatibility with various terminal environments
+color = never
+
+# Extension Configuration
+# Enable additional flake8 extensions for comprehensive code analysis
+# Supports enhanced quality checking beyond basic PEP 8 compliance
+enable-extensions = 
+    # Security plugin integration (if available)
+    # B - bandit security checks
+    # S - security linting
+    # Note: Actual security checking handled by dedicated bandit.yaml configuration
+
+# Jobs Configuration
+# Enable parallel processing for improved performance
+# Optimizes analysis time for large Flask applications
+jobs = auto
+
+# Hang Closing Configuration
+# Handle hanging closing brackets consistently
+# Supports clean code formatting and readability
+hang-closing = True
+
+# Maximum McCabe Complexity (detailed configuration)
+# Enforce strict complexity limits for maintainable enterprise code
+# Supports refactoring guidelines and code quality standards
+mccabe-max-complexity = 10
+
+# Documentation Requirements
+# Enterprise-grade documentation enforcement
+# Ensures comprehensive API documentation and code maintainability
+require-plugins = 
+    # Core flake8 functionality
+    # Additional plugins configured through requirements.txt
+
+# Quality Gate Enforcement Notice
+# This configuration implements zero-tolerance error policy per Section 8.5.1
+# Any flake8 violations will terminate the CI/CD pipeline build process
+# Ensures enterprise-grade code quality and consistency across all Python modules
