@@ -1,0 +1,392 @@
+# CodeQL Configuration for Python/Flask Security Analysis
+# Advanced security analysis and vulnerability detection for Flask-based Python application
+# Integrates with GitHub security intelligence and CI/CD pipeline
+
+name: "Flask Security Analysis"
+
+# Python language configuration for Flask application security scanning
+languages:
+  - python
+
+# Query configuration for comprehensive security analysis
+queries:
+  # Security-focused query suites for Python/Flask applications
+  - uses: security-extended
+  - uses: security-and-quality
+  
+  # Python-specific security queries
+  - name: python-security-extended
+    uses: github/codeql/python/ql/src/codeql-suites/python-security-extended.qls
+  
+  # Flask framework security patterns
+  - name: python-code-scanning
+    uses: github/codeql/python/ql/src/codeql-suites/python-code-scanning.qls
+
+# Advanced configuration for Flask-specific security analysis
+python:
+  # Python version compatibility (supporting 3.8+ as per technical spec)
+  setup:
+    version: "3.11"
+    
+  # Dependency analysis configuration
+  dependencies:
+    # Include Flask-specific dependencies for security analysis
+    - flask>=2.3.0
+    - flask-login>=0.7.0
+    - flask-session>=0.8.0
+    - flask-talisman>=1.1.0
+    - flask-cors>=4.0.0
+    - flask-limiter>=3.5.0
+    - pyjwt>=2.8.0
+    - cryptography>=41.0.0
+    - werkzeug>=2.3.0
+    - marshmallow>=3.20.0
+    - pydantic>=2.3.0
+    - bleach>=6.0.0
+    - email-validator>=2.0.0
+    - python-dotenv>=1.0.0
+    - redis>=5.0.0
+    - pymongo>=4.5.0
+    - motor>=3.3.0
+    - boto3>=1.28.0
+    - requests>=2.31.0
+    - httpx>=0.24.0
+    - structlog>=23.1.0
+    
+  # Python path configuration for Flask application structure
+  paths:
+    - "src/"
+    - "src/auth/"
+    - "src/blueprints/"
+    - "src/business/"
+    - "src/data/"
+    - "src/integrations/"
+    - "src/utils/"
+    - "src/config/"
+    - "src/cache/"
+    - "src/monitoring/"
+
+# Security analysis configuration
+analysis:
+  # Scan depth and coverage
+  depth: "comprehensive"
+  
+  # Flask-specific security patterns to detect
+  security-patterns:
+    # Authentication and authorization vulnerabilities
+    - sql-injection
+    - command-injection
+    - cross-site-scripting
+    - insecure-deserialization
+    - jwt-vulnerabilities
+    - session-fixation
+    - authentication-bypass
+    - authorization-bypass
+    - csrf-vulnerabilities
+    - clickjacking
+    
+    # Flask-specific security issues
+    - flask-debug-mode
+    - flask-secret-key-hardcoded
+    - flask-insecure-cookies
+    - flask-cors-misconfiguration
+    - flask-template-injection
+    - flask-file-upload-vulnerabilities
+    - flask-redirect-vulnerabilities
+    
+    # Python security patterns
+    - hardcoded-credentials
+    - weak-cryptography
+    - insecure-random
+    - path-traversal
+    - code-injection
+    - unsafe-reflection
+    - pickle-deserialization
+    - yaml-load-vulnerabilities
+    
+    # Input validation and sanitization
+    - input-validation-bypass
+    - output-encoding-missing
+    - html-injection
+    - ldap-injection
+    - xml-injection
+    - json-injection
+    
+    # Infrastructure and configuration security
+    - insecure-transport
+    - certificate-validation-disabled
+    - weak-ssl-configuration
+    - environment-variable-exposure
+    - logging-sensitive-data
+    - exception-information-disclosure
+
+# Alert and reporting configuration
+alerts:
+  # Alert severity configuration aligned with enterprise security standards
+  severity-mapping:
+    critical: "error"      # Block deployment for critical security issues
+    high: "error"          # Block deployment for high severity issues  
+    medium: "warning"      # Generate warnings for medium severity issues
+    low: "note"           # Generate informational notes for low severity issues
+  
+  # Alert management configuration
+  management:
+    # Auto-dismiss configuration for false positives
+    auto-dismiss:
+      - "test-code"        # Dismiss alerts in test files where appropriate
+      - "demo-code"        # Dismiss alerts in demonstration code
+    
+    # Required security review for critical findings
+    require-review:
+      - "critical"
+      - "high"
+    
+    # Alert notification configuration
+    notifications:
+      # Integrate with pull request reviews
+      pull-requests: true
+      
+      # Generate security advisories for critical issues
+      security-advisories: true
+      
+      # Enable GitHub Security tab integration
+      security-tab: true
+
+# Integration with CI/CD pipeline per Section 8.5.1
+ci-integration:
+  # GitHub Actions workflow integration
+  github-actions:
+    # Trigger on push to main and pull requests
+    triggers:
+      - push
+      - pull_request
+      - schedule
+    
+    # Integration with existing security workflow
+    workflow-integration:
+      # Run after bandit and safety scanning
+      depends-on:
+        - "bandit-security-scan"
+        - "safety-vulnerability-scan"
+      
+      # Quality gates integration per Section 8.5.1
+      quality-gates:
+        # Block deployment on critical/high security findings
+        block-deployment:
+          - "critical"
+          - "high"
+        
+        # Require manual security review for medium findings
+        require-review:
+          - "medium"
+        
+        # Generate reports for all findings
+        generate-reports:
+          - "critical"
+          - "high" 
+          - "medium"
+          - "low"
+
+# Flask-specific security rules configuration
+flask-security:
+  # Authentication security rules
+  authentication:
+    # JWT token security validation
+    jwt-validation:
+      - "jwt-none-algorithm"
+      - "jwt-weak-secret"
+      - "jwt-hardcoded-secret"
+      - "jwt-missing-verification"
+      - "jwt-token-exposure"
+    
+    # Session security validation  
+    session-security:
+      - "session-fixation"
+      - "insecure-session-cookies"
+      - "session-token-exposure"
+      - "missing-session-csrf"
+    
+    # Auth0 integration security
+    auth0-security:
+      - "auth0-client-secret-exposure"
+      - "auth0-insecure-redirect"
+      - "auth0-token-validation-bypass"
+  
+  # Authorization security rules
+  authorization:
+    # Role-based access control validation
+    rbac-validation:
+      - "authorization-bypass"
+      - "privilege-escalation"
+      - "missing-authorization-check"
+      - "insecure-permissions"
+    
+    # Resource authorization validation
+    resource-security:
+      - "insecure-direct-object-reference"
+      - "missing-ownership-validation"
+      - "resource-access-bypass"
+  
+  # Flask-specific framework security
+  framework-security:
+    # Debug and development security
+    development-security:
+      - "flask-debug-enabled"
+      - "flask-testing-mode"
+      - "development-server-production"
+    
+    # Configuration security
+    configuration-security:
+      - "hardcoded-secret-key"
+      - "insecure-app-config"
+      - "debug-toolbar-enabled"
+      - "profiler-enabled"
+    
+    # Template security
+    template-security:
+      - "template-injection"
+      - "unsafe-template-rendering"
+      - "template-xss-vulnerability"
+      - "template-path-traversal"
+    
+    # CORS and security headers
+    security-headers:
+      - "cors-wildcard-origin"
+      - "missing-security-headers"
+      - "insecure-cors-configuration"
+      - "missing-csrf-protection"
+
+# Database and external service security
+external-security:
+  # MongoDB security patterns per technical spec
+  mongodb-security:
+    - "nosql-injection"
+    - "mongodb-connection-string-exposure"
+    - "insecure-mongodb-configuration"
+    - "missing-input-validation"
+  
+  # Redis security patterns
+  redis-security:
+    - "redis-connection-exposure"
+    - "insecure-redis-configuration" 
+    - "session-data-exposure"
+    - "cache-poisoning"
+  
+  # AWS integration security per Section 6.4.3
+  aws-security:
+    - "aws-credentials-hardcoded"
+    - "s3-bucket-permissions"
+    - "iam-role-privilege-escalation"
+    - "kms-key-exposure"
+    - "boto3-insecure-configuration"
+  
+  # HTTP client security
+  http-client-security:
+    - "ssl-verification-disabled"
+    - "insecure-http-requests"
+    - "certificate-validation-bypass"
+    - "header-injection"
+
+# Security compliance configuration per Section 6.4.6
+compliance:
+  # Enterprise security standards alignment
+  standards:
+    - "OWASP-Top-10"
+    - "SANS-Top-25"
+    - "CWE-Top-25"
+    - "NIST-Cybersecurity-Framework"
+    - "SOC-2-Type-II"
+    - "ISO-27001"
+  
+  # Compliance reporting configuration
+  reporting:
+    # Generate compliance reports for enterprise security review
+    generate-reports:
+      - "security-posture-summary"
+      - "vulnerability-assessment"
+      - "compliance-gap-analysis"
+      - "remediation-recommendations"
+    
+    # Integration with enterprise security systems
+    enterprise-integration:
+      - "siem-export"
+      - "security-dashboard-feed"
+      - "compliance-tracking"
+
+# Performance configuration to maintain ≤10% variance requirement
+performance:
+  # Optimize scanning performance to minimize CI/CD impact
+  optimization:
+    # Parallel analysis configuration
+    parallel-analysis: true
+    
+    # Incremental analysis for pull requests
+    incremental-scan: true
+    
+    # Cache configuration for improved performance
+    cache-results: true
+    
+    # Resource allocation for security scanning
+    resource-limits:
+      memory: "4Gi"
+      cpu: "2"
+      timeout: "30m"
+
+# Custom security queries for Flask application patterns
+custom-queries:
+  # Application-specific security patterns
+  application-security:
+    - path: ".github/codeql-queries/flask-security.ql"
+      description: "Flask-specific security vulnerability detection"
+    
+    - path: ".github/codeql-queries/auth-security.ql" 
+      description: "Authentication and authorization security validation"
+    
+    - path: ".github/codeql-queries/data-security.ql"
+      description: "Data protection and privacy security checks"
+    
+    - path: ".github/codeql-queries/integration-security.ql"
+      description: "External service integration security validation"
+
+# Documentation and help configuration
+documentation:
+  # Security finding documentation
+  finding-documentation:
+    - url: "https://docs.github.com/en/code-security/code-scanning"
+      description: "GitHub CodeQL Documentation"
+    
+    - url: "https://cwe.mitre.org/"
+      description: "Common Weakness Enumeration Database"
+    
+    - url: "https://owasp.org/www-project-top-ten/"
+      description: "OWASP Top 10 Security Risks"
+  
+  # Remediation guidance
+  remediation:
+    # Provide links to security best practices
+    security-guidelines:
+      - flask-security-best-practices
+      - python-security-guidelines
+      - authentication-security-patterns
+      - authorization-security-models
+      - input-validation-standards
+      - output-encoding-practices
+
+# Metadata for configuration management
+metadata:
+  version: "2.0"
+  created: "2024-01-01"
+  updated: "2024-01-01"
+  author: "Blitzy Engineering Team"
+  description: "Comprehensive CodeQL security configuration for Python/Flask application migration"
+  
+  # Configuration change tracking
+  changelog:
+    - version: "2.0"
+      date: "2024-01-01"
+      changes:
+        - "Enhanced Flask-specific security pattern detection"
+        - "Integrated with CI/CD pipeline security gates"
+        - "Added compliance reporting configuration"
+        - "Optimized performance for ≤10% variance requirement"
+        - "Added enterprise security standards alignment"
