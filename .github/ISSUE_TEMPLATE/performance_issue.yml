@@ -1,0 +1,512 @@
+name: 🚀 Performance Issue Report
+description: Report performance issues, variance exceeding ≤10% requirement, or performance degradation for Flask migration monitoring with automated baseline comparison and variance calculation
+title: "[PERFORMANCE] "
+labels: ["performance", "monitoring", "baseline-comparison"]
+projects: ["flask-migration"]
+assignees:
+  - performance-engineering-team
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 🚀 Flask Migration Performance Issue Report
+        
+        This template is specifically designed for performance issues related to the Node.js to Flask migration project. 
+        All performance metrics are compared against Node.js baseline with a **critical ≤10% variance requirement**.
+        
+        **⚠️ Critical Performance Thresholds:**
+        - Response time variance: **≤10% from Node.js baseline**
+        - CPU utilization: **≤70% sustained, >90% critical**
+        - Memory usage: **≤80% allocated, >95% critical** 
+        - Database response time: **≤200ms average, >500ms critical**
+        - Python GC pause time: **≤100ms average, >300ms critical**
+
+  - type: dropdown
+    id: performance_severity
+    attributes:
+      label: Performance Issue Severity
+      description: Select the severity based on variance from Node.js baseline and system impact
+      options:
+        - "🟢 Minor (≤5% variance from baseline)"
+        - "🟡 Warning (5-8% variance from baseline)"
+        - "🟠 Critical (8-10% variance from baseline)"
+        - "🔴 Emergency (>10% variance - EXCEEDS REQUIREMENT)"
+        - "⚫ System Degradation (>15% variance + service impact)"
+      default: 1
+    validations:
+      required: true
+
+  - type: dropdown
+    id: performance_category
+    attributes:
+      label: Performance Category
+      description: Select the primary performance category affected
+      options:
+        - "Response Time & Latency"
+        - "Throughput & Concurrent Capacity"
+        - "Memory Usage & GC Performance"
+        - "CPU Utilization & Processing"
+        - "Database Query Performance"
+        - "External Service Integration"
+        - "WSGI Server Performance"
+        - "Container Resource Utilization"
+      default: 0
+    validations:
+      required: true
+
+  - type: textarea
+    id: performance_metrics
+    attributes:
+      label: Current Performance Metrics
+      description: |
+        Provide current performance metrics and variance from Node.js baseline.
+        Include Prometheus metrics, APM data, or performance monitoring output.
+      placeholder: |
+        **Response Time Metrics:**
+        - Current average: XXXms
+        - Node.js baseline: XXXms  
+        - Variance: +X.X% (TARGET: ≤10%)
+        
+        **CPU Utilization:**
+        - Current average: XX%
+        - Peak utilization: XX%
+        - Sustained duration: XX minutes
+        
+        **Memory Metrics:**
+        - Current usage: XXX MB (XX% of allocated)
+        - GC pause time: XXms average
+        - Memory growth rate: XX%
+        
+        **Throughput:**
+        - Current: XXX req/sec
+        - Node.js baseline: XXX req/sec
+        - Variance: +/-X.X%
+    validations:
+      required: true
+
+  - type: textarea
+    id: baseline_comparison
+    attributes:
+      label: Node.js Baseline Comparison
+      description: |
+        Detailed comparison against Node.js performance baseline.
+        Reference baseline data from tests/performance/baseline_data.py
+      placeholder: |
+        **Baseline Reference:**
+        - Node.js response time: XXXms (95th percentile)
+        - Node.js throughput: XXX req/sec
+        - Node.js memory usage: XXX MB
+        - Node.js CPU utilization: XX%
+        
+        **Current Flask Performance:**
+        - Flask response time: XXXms (95th percentile)
+        - Flask throughput: XXX req/sec  
+        - Flask memory usage: XXX MB
+        - Flask CPU utilization: XX%
+        
+        **Variance Analysis:**
+        - Response time variance: +/-X.X%
+        - Throughput variance: +/-X.X%
+        - Memory variance: +/-X.X%
+        - CPU variance: +/-X.X%
+    validations:
+      required: true
+
+  - type: dropdown
+    id: affected_endpoints
+    attributes:
+      label: Affected API Endpoints
+      description: Select endpoints experiencing performance issues
+      options:
+        - "All endpoints (system-wide issue)"
+        - "Authentication endpoints (/auth/*)"
+        - "User management endpoints (/users/*)"
+        - "Business logic endpoints (/api/*)"
+        - "Data processing endpoints (/data/*)"
+        - "External integration endpoints (/integrations/*)"
+        - "Health check endpoints (/health/*)"
+        - "Specific endpoint (specify in description)"
+      default: 0
+    validations:
+      required: true
+
+  - type: textarea
+    id: load_testing_results
+    attributes:
+      label: Load Testing Results
+      description: |
+        Results from Locust load testing and Apache Bench performance measurement.
+        Include test configuration and performance degradation patterns.
+      placeholder: |
+        **Locust Load Testing:**
+        - Test configuration: XX concurrent users, XX spawn rate
+        - Duration: XX minutes
+        - Success rate: XX%
+        - Average response time: XXXms
+        - 95th percentile: XXXms
+        - Requests per second: XXX
+        - Failures: XX (describe any failures)
+        
+        **Apache Bench Results:**
+        - Command: ab -n 1000 -c 50 http://localhost:5000/endpoint
+        - Time taken: X.XXX seconds
+        - Requests per second: XXX.XX [#/sec]
+        - Time per request: XX.XXX [ms] (mean)
+        - Time per request: X.XXX [ms] (mean, across concurrent requests)
+        - Transfer rate: XXX.XX [Kbytes/sec] received
+        
+        **Performance Degradation Pattern:**
+        - [ ] Gradual degradation over time
+        - [ ] Sudden performance drop
+        - [ ] Performance spikes/intermittent issues
+        - [ ] Load-dependent degradation
+        - [ ] Memory leak indicators
+    validations:
+      required: false
+
+  - type: textarea
+    id: monitoring_data
+    attributes:
+      label: Monitoring & Observability Data
+      description: |
+        Include Prometheus metrics, APM traces, container metrics, and dashboard screenshots.
+        Provide monitoring data from performance testing period.
+      placeholder: |
+        **Prometheus Metrics:**
+        - prometheus-client 0.17+ metrics: [paste relevant metrics]
+        - Flask-Metrics data: [request timing metrics]
+        - Custom migration metrics: [performance variance gauges]
+        
+        **APM Integration:**
+        - Datadog/New Relic trace IDs: 
+        - Distributed tracing data:
+        - Request flow analysis:
+        
+        **Container Metrics (cAdvisor):**
+        - CPU utilization trend:
+        - Memory usage pattern:
+        - Network I/O metrics:
+        - Disk I/O performance:
+        
+        **WSGI Server Metrics:**
+        - Gunicorn worker utilization:
+        - Request queue depth:
+        - Worker response times:
+        
+        **Database Performance:**
+        - MongoDB query times:
+        - Connection pool status:
+        - Query performance degradation:
+    validations:
+      required: false
+
+  - type: dropdown
+    id: performance_testing_environment
+    attributes:
+      label: Performance Testing Environment
+      description: Environment where performance issue was detected
+      options:
+        - "Local Development (docker-compose)"
+        - "CI/CD Pipeline Testing"
+        - "Staging Environment"
+        - "Pre-production Load Testing"
+        - "Production Environment"
+        - "Performance Testing Environment"
+        - "Blue-Green Deployment Testing"
+      default: 2
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: performance_test_execution
+    attributes:
+      label: Performance Test Execution
+      description: Check all performance tests executed to identify this issue
+      options:
+        - label: "Locust load testing with progressive scaling (10-1000 users)"
+        - label: "Apache Bench HTTP performance measurement"
+        - label: "Node.js baseline comparison validation"
+        - label: "Memory profiling and leak detection"
+        - label: "Database query performance analysis"
+        - label: "Container resource utilization monitoring"
+        - label: "WSGI server performance analysis"
+        - label: "Python GC pause time measurement"
+        - label: "End-to-end API workflow testing"
+        - label: "Sustained load testing (30+ minutes)"
+
+  - type: textarea
+    id: ci_cd_integration
+    attributes:
+      label: CI/CD Pipeline Integration
+      description: |
+        Performance test automation and CI/CD pipeline integration details.
+        Include GitHub Actions workflow execution and automated validation results.
+      placeholder: |
+        **GitHub Actions Performance Workflow:**
+        - Workflow run ID:
+        - Performance job status:
+        - Automated validation results:
+        
+        **Performance Quality Gates:**
+        - [ ] Coverage validation passed (≥90%)
+        - [ ] Static analysis passed (flake8, mypy)
+        - [ ] Security scanning passed (bandit, safety)
+        - [ ] Unit/integration tests passed
+        - [ ] Performance baseline comparison
+        - [ ] ≤10% variance requirement validation
+        
+        **Pipeline Performance Impact:**
+        - Test execution time: XX minutes
+        - Resource utilization during testing:
+        - Performance regression detection:
+        - Automated rollback triggered: Yes/No
+        
+        **Deployment Considerations:**
+        - Blue-green deployment status:
+        - Traffic splitting configuration:
+        - Feature flag status:
+        - Rollback procedures executed:
+    validations:
+      required: false
+
+  - type: dropdown
+    id: variance_calculation_method
+    attributes:
+      label: Variance Calculation Method
+      description: Method used to calculate performance variance from Node.js baseline
+      options:
+        - "Automated baseline comparison (tests/performance/baseline_validator.py)"
+        - "Manual metrics comparison"
+        - "Prometheus Alertmanager threshold detection"
+        - "APM dashboard comparison"
+        - "Custom performance monitoring script"
+        - "Statistical analysis of performance data"
+      default: 0
+    validations:
+      required: true
+
+  - type: textarea
+    id: rollback_procedures
+    attributes:
+      label: Rollback & Recovery Procedures
+      description: |
+        Document rollback procedures executed or recommended for performance recovery.
+        Include feature flag management and traffic restoration steps.
+      placeholder: |
+        **Automated Rollback Status:**
+        - Performance degradation detected: [timestamp]
+        - Rollback triggered automatically: Yes/No
+        - Rollback completion status: 
+        
+        **Feature Flag Management:**
+        - Current feature flag state:
+        - Flask migration flag disabled: Yes/No
+        - Traffic reverted to Node.js: XX%
+        - Performance baseline restored: Yes/No
+        
+        **Manual Recovery Steps:**
+        1. [Step-by-step recovery procedures]
+        2. [Configuration changes applied]
+        3. [Validation steps performed]
+        
+        **Traffic Management:**
+        - Load balancer configuration:
+        - Blue-green deployment state:
+        - Gradual traffic restoration plan:
+        
+        **Performance Validation Post-Recovery:**
+        - Node.js baseline performance confirmed:
+        - System stability verified:
+        - Monitoring systems reset:
+    validations:
+      required: false
+
+  - type: textarea
+    id: root_cause_analysis
+    attributes:
+      label: Root Cause Analysis
+      description: |
+        Analysis of potential root causes for performance degradation.
+        Include code changes, configuration modifications, or environmental factors.
+      placeholder: |
+        **Potential Root Causes:**
+        - [ ] Recent code deployment
+        - [ ] Configuration changes
+        - [ ] Database schema modifications
+        - [ ] External service degradation
+        - [ ] Infrastructure changes
+        - [ ] Resource allocation changes
+        - [ ] Python version/dependency updates
+        - [ ] Container configuration changes
+        
+        **Code Analysis:**
+        - Recent commits affecting performance:
+        - Business logic changes:
+        - Database query modifications:
+        - Memory allocation patterns:
+        
+        **Infrastructure Analysis:**
+        - Container resource limits:
+        - Network configuration changes:
+        - Database performance:
+        - External service dependencies:
+        
+        **Environmental Factors:**
+        - Load patterns:
+        - Traffic volume changes:
+        - Time-of-day performance correlation:
+        - Geographic distribution impact:
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: investigation_steps
+    attributes:
+      label: Investigation Steps Completed
+      description: Check all investigation and diagnostic steps already performed
+      options:
+        - label: "Reviewed Prometheus performance dashboards"
+        - label: "Analyzed APM distributed traces"
+        - label: "Examined container resource utilization"
+        - label: "Investigated database query performance"
+        - label: "Analyzed Python GC behavior and memory patterns"
+        - label: "Reviewed WSGI server worker utilization"
+        - label: "Compared with Node.js baseline metrics"
+        - label: "Executed load testing for performance reproduction"
+        - label: "Analyzed recent code changes and deployments"
+        - label: "Investigated external service dependencies"
+        - label: "Reviewed system logs for error patterns"
+        - label: "Analyzed performance trends over time"
+
+  - type: textarea
+    id: performance_optimization
+    attributes:
+      label: Performance Optimization Recommendations
+      description: |
+        Suggested optimization strategies and performance improvement recommendations.
+        Include specific technical recommendations and implementation priority.
+      placeholder: |
+        **Immediate Optimization Steps:**
+        1. [High-priority optimization recommendations]
+        2. [Configuration adjustments]
+        3. [Code optimization opportunities]
+        
+        **Resource Optimization:**
+        - Container resource allocation:
+        - WSGI worker configuration:
+        - Database connection pooling:
+        - Memory management improvements:
+        
+        **Code Optimization:**
+        - Algorithm improvements:
+        - Database query optimization:
+        - Caching strategy enhancements:
+        - Python-specific optimizations:
+        
+        **Infrastructure Optimization:**
+        - Horizontal scaling recommendations:
+        - Load balancer configuration:
+        - Network optimization:
+        - Storage performance improvements:
+        
+        **Monitoring Enhancement:**
+        - Additional metrics collection:
+        - Alert threshold adjustments:
+        - Dashboard improvements:
+        - Automated optimization triggers:
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional Context & Impact
+      description: |
+        Any additional context, business impact, user reports, or related issues.
+        Include timeline, escalation requirements, and stakeholder communication.
+      placeholder: |
+        **Business Impact:**
+        - User-facing performance degradation: Yes/No
+        - Service availability impact:
+        - Customer complaints or reports:
+        - Revenue/operational impact:
+        
+        **Timeline & Urgency:**
+        - Issue first detected: [timestamp]
+        - Performance degradation duration:
+        - Escalation requirements:
+        - Fix deadline/SLA requirements:
+        
+        **Related Issues:**
+        - Related GitHub issues:
+        - Similar performance patterns:
+        - Previous incidents:
+        
+        **Stakeholder Communication:**
+        - Operations team notified: Yes/No
+        - Performance engineering team engaged: Yes/No
+        - Customer communication required: Yes/No
+        - Executive visibility: Yes/No
+        
+        **Migration Context:**
+        - Migration phase/percentage:
+        - Node.js fallback available: Yes/No
+        - Risk tolerance for further testing:
+        - Go-live timeline impact:
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: next_steps
+    attributes:
+      label: Required Next Steps
+      description: Immediate actions and follow-up steps for performance issue resolution
+      options:
+        - label: "🔴 Immediate rollback to Node.js baseline (>10% variance)"
+        - label: "🟡 Performance engineering team investigation"
+        - label: "📊 Extended performance monitoring and data collection"
+        - label: "🛠️ Code optimization and performance tuning"
+        - label: "⚙️ Infrastructure scaling and resource optimization"
+        - label: "🧪 Additional load testing and validation"
+        - label: "📋 Update performance testing baseline data"
+        - label: "🔧 Configuration tuning and adjustment"
+        - label: "📈 Enhanced monitoring and alerting setup"
+        - label: "📚 Performance playbook and documentation update"
+        - label: "🎯 Stakeholder communication and status updates"
+        - label: "✅ Post-resolution validation and testing"
+
+  - type: markdown
+    attributes:
+      value: |
+        ---
+        
+        ### 🛠️ Performance Engineering Resources
+        
+        **Performance Testing Framework:**
+        - `tests/performance/baseline_data.py` - Node.js baseline metrics
+        - `tests/performance/performance_config.py` - Performance testing configuration
+        - `tests/performance/locustfile.py` - Locust load testing scenarios
+        - `tests/performance/test_baseline_comparison.py` - Automated variance validation
+        - `tests/performance/test_benchmark.py` - Apache Bench integration
+        
+        **Monitoring & Observability:**
+        - Prometheus metrics collection (prometheus-client 0.17+)
+        - Flask-Metrics request timing measurement
+        - Container metrics via cAdvisor integration
+        - APM integration (Datadog/New Relic)
+        - WSGI server instrumentation (Gunicorn)
+        
+        **Critical Performance Requirements:**
+        - **≤10% variance from Node.js baseline** (Section 0.1.1)
+        - Response time equivalence with ±10% acceptable variance
+        - Memory consumption with ±15% acceptable variance
+        - Concurrent request capacity preservation or improvement
+        - Database query performance equivalence with ±10% variance
+        
+        **Emergency Contacts:**
+        - Performance Engineering Team: @performance-engineering-team
+        - Operations Team: @operations-team
+        - Migration Project Lead: @migration-lead
+        
+        For immediate performance emergencies (>10% variance), contact the on-call performance engineer via PagerDuty escalation.
