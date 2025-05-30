@@ -1,0 +1,385 @@
+name: 🐛 Flask Migration Bug Report
+description: Report bugs and issues encountered during the Node.js to Python/Flask migration project
+title: "[BUG] "
+labels: ["bug", "flask-migration", "needs-triage"]
+projects: ["flask-migration"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 🔄 Flask Migration Bug Report
+
+        Thank you for reporting a bug in the Node.js to Python/Flask migration project. This template captures comprehensive context needed for effective troubleshooting and resolution.
+        
+        **Important**: This template aligns with our technical specification requirements including ≤10% performance variance, comprehensive security validation, and CI/CD pipeline integration.
+
+  - type: input
+    id: summary
+    attributes:
+      label: "🎯 Bug Summary"
+      description: "Provide a clear, concise description of the bug"
+      placeholder: "Brief description of the issue encountered during Flask migration"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: "⚠️ Severity Level"
+      description: "Select the severity impact of this bug on the migration project"
+      options:
+        - "🔴 Critical - Blocks migration progress"
+        - "🟠 High - Significant impact on functionality"
+        - "🟡 Medium - Moderate impact with workaround available" 
+        - "🟢 Low - Minor issue with minimal impact"
+        - "🔵 Enhancement - Improvement suggestion"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component_category
+    attributes:
+      label: "🧩 Component Category"
+      description: "Select the primary component category affected"
+      options:
+        - "🌐 Web Server Layer (Flask WSGI)"
+        - "🔀 API Routing System (Flask Blueprints)"
+        - "🔧 Middleware Pipeline (Flask decorators)"
+        - "🔐 Authentication Module (Auth0/PyJWT)"
+        - "📊 Business Logic Modules"
+        - "🗄️ Data Access Components (PyMongo/Motor)"
+        - "🔗 External Integrations (AWS/Auth0)"
+        - "⚡ Performance & Optimization"
+        - "🛡️ Security Implementation"
+        - "🧪 Testing Infrastructure"
+        - "🚀 CI/CD Pipeline"
+        - "📝 Documentation"
+        - "🔧 Configuration Management"
+        - "🐳 Containerization (Docker/K8s)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_behavior
+    attributes:
+      label: "✅ Expected Behavior"
+      description: "Describe what should happen based on Node.js baseline"
+      placeholder: "Detailed description of expected behavior from original Node.js implementation"
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual_behavior
+    attributes:
+      label: "❌ Actual Behavior"
+      description: "Describe what actually happens in the Flask implementation"
+      placeholder: "Detailed description of actual behavior observed in Flask migration"
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction_steps
+    attributes:
+      label: "🔄 Steps to Reproduce"
+      description: "Provide detailed steps to reproduce the issue"
+      placeholder: |
+        1. 
+        2. 
+        3. 
+        4. 
+      value: |
+        1. 
+        2. 
+        3. 
+        4. 
+    validations:
+      required: true
+
+  - type: textarea
+    id: nodejs_baseline
+    attributes:
+      label: "📊 Node.js Baseline Comparison"
+      description: "Provide comparison data with original Node.js implementation"
+      placeholder: |
+        **Node.js Version**: 
+        **Express.js Version**: 
+        **Baseline Behavior**: 
+        **Performance Metrics**: 
+        **Error Patterns**: 
+      value: |
+        **Node.js Version**: 
+        **Express.js Version**: 
+        **Baseline Behavior**: 
+        **Performance Metrics**: 
+        **Error Patterns**: 
+    validations:
+      required: false
+
+  - type: textarea
+    id: performance_impact
+    attributes:
+      label: "⚡ Performance Impact Assessment"
+      description: "Assess performance impact against ≤10% variance requirement (Section 0.1.1)"
+      placeholder: |
+        **Response Time Variance**: 
+        **Memory Usage Comparison**: 
+        **CPU Utilization Impact**: 
+        **Database Query Performance**: 
+        **Concurrent Request Handling**: 
+        **Load Testing Results**: 
+        **Performance Baseline Compliance**: 
+      value: |
+        **Response Time Variance**: 
+        **Memory Usage Comparison**: 
+        **CPU Utilization Impact**: 
+        **Database Query Performance**: 
+        **Concurrent Request Handling**: 
+        **Load Testing Results**: 
+        **Performance Baseline Compliance**: 
+    validations:
+      required: false
+
+  - type: textarea
+    id: security_implications
+    attributes:
+      label: "🛡️ Security Implications"
+      description: "Assess security impact per Section 0.3.3 Security Considerations"
+      placeholder: |
+        **Authentication Impact**: 
+        **Authorization Changes**: 
+        **Data Protection Concerns**: 
+        **Flask-Talisman Headers**: 
+        **Auth0 Integration Status**: 
+        **JWT Token Validation**: 
+        **Session Management**: 
+        **Input Validation**: 
+        **Security Headers**: 
+        **Vulnerability Assessment**: 
+      value: |
+        **Authentication Impact**: 
+        **Authorization Changes**: 
+        **Data Protection Concerns**: 
+        **Flask-Talisman Headers**: 
+        **Auth0 Integration Status**: 
+        **JWT Token Validation**: 
+        **Session Management**: 
+        **Input Validation**: 
+        **Security Headers**: 
+        **Vulnerability Assessment**: 
+    validations:
+      required: false
+
+  - type: textarea
+    id: environment_info
+    attributes:
+      label: "🔧 Environment Information"
+      description: "Provide comprehensive environment details"
+      placeholder: |
+        **Python Version**: 
+        **Flask Version**: 
+        **Operating System**: 
+        **Container Runtime**: 
+        **Database Versions**: 
+        **Redis Version**: 
+        **Dependencies**: 
+      value: |
+        **Python Version**: 
+        **Flask Version**: 
+        **Operating System**: 
+        **Container Runtime**: 
+        **MongoDB Version**: 
+        **Redis Version**: 
+        **Key Dependencies**: 
+          - PyJWT: 
+          - Flask-Login: 
+          - Flask-Talisman: 
+          - PyMongo: 
+          - redis-py: 
+    validations:
+      required: true
+
+  - type: textarea
+    id: error_logs
+    attributes:
+      label: "📝 Error Logs and Stack Traces"
+      description: "Include relevant error logs, stack traces, and debugging information"
+      placeholder: |
+        ```
+        Paste your error logs here
+        ```
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: cicd_context
+    attributes:
+      label: "🚀 CI/CD Pipeline Context"
+      description: "Provide CI/CD pipeline information per Section 6.6.2"
+      placeholder: |
+        **Pipeline Stage**: 
+        **GitHub Actions Run**: 
+        **Test Results**: 
+        **Static Analysis**: 
+          - flake8: 
+          - mypy: 
+          - bandit: 
+        **Security Scans**: 
+          - safety: 
+          - Trivy: 
+        **Test Coverage**: 
+        **Performance Tests**: 
+        **Quality Gates**: 
+        **Deployment Environment**: 
+      value: |
+        **Pipeline Stage**: 
+        **GitHub Actions Run**: 
+        **Test Results**: 
+        **Static Analysis**: 
+          - flake8: 
+          - mypy: 
+          - bandit: 
+        **Security Scans**: 
+          - safety: 
+          - Trivy: 
+        **Test Coverage**: 
+        **Performance Tests**: 
+        **Quality Gates**: 
+        **Deployment Environment**: 
+    validations:
+      required: false
+
+  - type: textarea
+    id: test_results
+    attributes:
+      label: "🧪 Test Results and Coverage"
+      description: "Include test execution results and coverage information"
+      placeholder: |
+        **Unit Test Results**: 
+        **Integration Test Results**: 
+        **Performance Test Results**: 
+        **Security Test Results**: 
+        **Code Coverage**: 
+        **Test Failures**: 
+      value: |
+        **Unit Test Results**: 
+        **Integration Test Results**: 
+        **Performance Test Results**: 
+        **Security Test Results**: 
+        **Code Coverage**: 
+        **Test Failures**: 
+    validations:
+      required: false
+
+  - type: dropdown
+    id: migration_phase
+    attributes:
+      label: "🔄 Migration Phase"
+      description: "Select the current migration phase where the bug occurred"
+      options:
+        - "🏗️ Flask Application Foundation Setup"
+        - "🔧 Core Infrastructure Migration"
+        - "🔐 Authentication System Conversion"
+        - "🛣️ API Endpoint Migration"
+        - "💼 Business Logic Translation"
+        - "🗄️ Data Access Layer Conversion"
+        - "🔗 External Integration Migration"
+        - "🧪 Testing and Validation"
+        - "🚀 Deployment and Production"
+        - "📊 Performance Optimization"
+        - "🛡️ Security Hardening"
+        - "📚 Documentation Updates"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: affected_systems
+    attributes:
+      label: "🎯 Affected Systems and Integrations"
+      description: "Select all systems and integrations affected by this bug"
+      options:
+        - label: "🌐 Flask WSGI Application Server"
+        - label: "🔀 Flask Blueprints (API Routing)"
+        - label: "🔐 Auth0 Authentication Integration"
+        - label: "🎫 JWT Token Processing (PyJWT)"
+        - label: "🗄️ MongoDB Database (PyMongo/Motor)"
+        - label: "💾 Redis Cache and Sessions"
+        - label: "☁️ AWS Services Integration (S3/CloudWatch)"
+        - label: "🔒 Flask-Talisman Security Headers"
+        - label: "🐳 Docker Containerization"
+        - label: "☸️ Kubernetes Orchestration"
+        - label: "🚀 GitHub Actions CI/CD Pipeline"
+        - label: "📊 Monitoring and Observability"
+        - label: "🧪 Testing Infrastructure"
+        - label: "📱 External APIs and Webhooks"
+        - label: "🔧 Configuration Management"
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: "🔧 Workaround or Mitigation"
+      description: "Describe any temporary workaround or mitigation implemented"
+      placeholder: "Describe any temporary solutions or workarounds currently in place"
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: "📄 Additional Context"
+      description: "Any additional information, screenshots, or context that would help in resolution"
+      placeholder: "Include any additional context, related issues, screenshots, or other relevant information"
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: requirements_impact
+    attributes:
+      label: "📋 Technical Requirements Impact"
+      description: "Check all technical requirements potentially impacted by this bug"
+      options:
+        - label: "⚡ Performance requirement (≤10% variance from Node.js baseline)"
+        - label: "🛡️ Security controls (Auth0/JWT/encryption)"
+        - label: "🔒 Compliance requirements (SOC 2/ISO 27001)"
+        - label: "🧪 Testing standards (≥90% coverage requirement)"
+        - label: "🚀 CI/CD pipeline functionality"
+        - label: "📊 Monitoring and observability"
+        - label: "🔗 External service integrations"
+        - label: "🗄️ Database compatibility and performance"
+        - label: "🏗️ API surface compatibility (zero changes)"
+        - label: "📱 Client application compatibility"
+
+  - type: dropdown
+    id: urgency
+    attributes:
+      label: "⏰ Resolution Urgency"
+      description: "How urgently does this need to be resolved?"
+      options:
+        - "🚨 Immediate - Blocking critical migration milestone"
+        - "🔥 High - Needed for next sprint/release"
+        - "📅 Normal - Can be addressed in current sprint"
+        - "📋 Low - Can be included in backlog"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: "✅ Bug Report Checklist"
+      description: "Confirm you have completed the following"
+      options:
+        - label: "I have searched existing issues to avoid duplicates"
+          required: true
+        - label: "I have provided sufficient detail for reproduction"
+          required: true
+        - label: "I have included relevant logs and error messages"
+          required: true
+        - label: "I have assessed the performance and security impact"
+          required: true
+        - label: "I have identified the migration phase and affected components"
+          required: true
+        - label: "I have provided Node.js baseline comparison when applicable"
+          required: false
+        - label: "I have included CI/CD pipeline context when applicable"
+          required: false
