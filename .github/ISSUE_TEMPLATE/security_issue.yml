@@ -1,0 +1,302 @@
+name: 🔒 Security Issue Report
+description: Report security vulnerabilities, configuration issues, or compliance violations in the Flask migration project
+title: "[SECURITY] "
+labels: ["security", "needs-review", "priority-high", "security-gate"]
+projects: ["security-review"]
+assignees:
+  - security-team
+body:
+  - type: markdown
+    attributes:
+      value: |
+        # Security Issue Report
+        
+        Thank you for reporting a security issue. Security is a top priority for our Flask migration project. 
+        This template helps ensure comprehensive security review and rapid resolution.
+        
+        **⚠️ CRITICAL SECURITY NOTICE:**
+        - For critical security vulnerabilities, consider reporting via private security advisory
+        - All security issues are treated with high priority per Section 0.3.3 Security Considerations
+        - Security gate enforcement may block deployments until resolution
+        
+        **Enterprise Compliance Requirements:**
+        - All security findings must comply with SOC 2, ISO 27001, and enterprise security policies
+        - Critical and high-severity findings trigger automated security review workflows
+        - Security team notification is automatic for compliance tracking
+
+  - type: dropdown
+    id: security_category
+    attributes:
+      label: Security Issue Category
+      description: Select the primary security category for this issue
+      options:
+        - Authentication Vulnerability (JWT, Auth0, session management)
+        - Authorization Bypass (RBAC, permission validation, access control)
+        - Input Validation (XSS, injection, data sanitization)
+        - Cryptographic Issue (encryption, key management, TLS/SSL)
+        - Configuration Security (Flask settings, environment variables)
+        - Dependency Vulnerability (CVE in requirements.txt)
+        - Container Security (Docker, base image vulnerabilities)
+        - Network Security (HTTPS, CORS, header enforcement)
+        - Data Protection (PII handling, data masking, GDPR compliance)
+        - Compliance Violation (SOC 2, ISO 27001, enterprise policy)
+        - Infrastructure Security (AWS, database, Redis configuration)
+        - Other Security Issue
+    validations:
+      required: true
+
+  - type: dropdown
+    id: severity_level
+    attributes:
+      label: Security Severity Level
+      description: Assess the security impact following enterprise security classification
+      options:
+        - 🔴 Critical (Immediate security risk, data breach potential)
+        - 🟠 High (Significant security risk, exploitation possible)
+        - 🟡 Medium (Moderate security risk, limited exploitation)
+        - 🟢 Low (Minor security concern, minimal risk)
+        - ℹ️ Informational (Security best practice improvement)
+    validations:
+      required: true
+
+  - type: textarea
+    id: security_description
+    attributes:
+      label: Security Issue Description
+      description: Provide a detailed description of the security vulnerability or concern
+      placeholder: |
+        Describe the security issue including:
+        - What security vulnerability was discovered
+        - How it could be exploited or what risk it poses
+        - Which components or files are affected
+        - Any observed security impact or potential consequences
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction_steps
+    attributes:
+      label: Reproduction Steps
+      description: Provide step-by-step instructions to reproduce the security issue
+      placeholder: |
+        1. Navigate to...
+        2. Configure/Set...
+        3. Execute/Send...
+        4. Observe security vulnerability...
+        
+        Include any specific configuration, input data, or conditions needed to reproduce the issue.
+    validations:
+      required: true
+
+  - type: textarea
+    id: affected_components
+    attributes:
+      label: Affected Components
+      description: List all affected components, files, and dependencies
+      placeholder: |
+        - Flask components: (e.g., authentication middleware, route handlers)
+        - Dependencies: (e.g., PyJWT, cryptography, Flask-Talisman)
+        - Configuration files: (e.g., environment variables, certificates)
+        - Database/Cache: (e.g., MongoDB, Redis connection security)
+        - External integrations: (e.g., Auth0, AWS services)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: bandit_analysis
+    attributes:
+      label: Bandit Security Analysis Status
+      description: Has this issue been detected by bandit security scanning?
+      options:
+        - ✅ Detected by bandit (include scan results below)
+        - ❌ Not detected by bandit (potential false negative)
+        - 🔍 Requires bandit analysis (please run security scan)
+        - ➖ Not applicable to bandit scanning
+    validations:
+      required: true
+
+  - type: textarea
+    id: bandit_results
+    attributes:
+      label: Bandit Scan Results
+      description: Include relevant bandit security scan output if available
+      placeholder: |
+        ```
+        Paste bandit scan results here, including:
+        - Test ID and security finding
+        - Severity and confidence level
+        - Affected file and line number
+        - Security issue description
+        ```
+        
+        If not detected by bandit, explain why this might be a scanning gap.
+
+  - type: dropdown
+    id: dependency_vulnerability
+    attributes:
+      label: Dependency Vulnerability Analysis
+      description: Is this related to a dependency vulnerability in requirements.txt?
+      options:
+        - 🔍 Yes - dependency vulnerability (include safety/pip-audit results)
+        - ❌ No - application code vulnerability
+        - 🧪 Requires dependency scan (please run safety/pip-audit)
+        - ➖ Not applicable
+    validations:
+      required: true
+
+  - type: textarea
+    id: dependency_scan_results
+    attributes:
+      label: Dependency Vulnerability Details
+      description: Include safety or pip-audit scan results if this is a dependency issue
+      placeholder: |
+        ```
+        Safety/pip-audit scan results:
+        - Package name and version
+        - CVE identifier
+        - Vulnerability description
+        - Recommended remediation
+        ```
+        
+        Include details about affected dependencies and available patches.
+
+  - type: dropdown
+    id: security_gate_impact
+    attributes:
+      label: Security Gate Impact
+      description: How does this issue affect CI/CD security gates and deployment approval?
+      options:
+        - 🚫 Blocks deployment (critical/high severity)
+        - ⚠️ Requires security review approval
+        - ✅ Allows deployment with remediation plan
+        - ➖ No immediate deployment impact
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: enterprise_compliance
+    attributes:
+      label: Enterprise Compliance Impact
+      description: Check all compliance frameworks potentially affected by this security issue
+      options:
+        - label: SOC 2 Type II compliance requirements
+        - label: ISO 27001 information security management
+        - label: PCI DSS payment card industry standards
+        - label: GDPR data protection and privacy
+        - label: SOX financial reporting and audit trails
+        - label: OWASP Top 10 security standards
+        - label: Enterprise security policy violations
+        - label: No compliance impact identified
+
+  - type: textarea
+    id: security_impact_assessment
+    attributes:
+      label: Security Impact Assessment
+      description: Assess the potential security impact and business risk
+      placeholder: |
+        Provide assessment of:
+        - Data confidentiality impact (PII, credentials, business data)
+        - System integrity impact (unauthorized modifications)
+        - Service availability impact (DoS, system disruption)
+        - Compliance and regulatory impact
+        - Potential business consequences
+    validations:
+      required: true
+
+  - type: textarea
+    id: migration_context
+    attributes:
+      label: Flask Migration Context
+      description: How does this security issue relate to the Node.js to Python migration?
+      placeholder: |
+        Provide context about:
+        - Was this issue present in the original Node.js implementation?
+        - Is this a new security risk introduced during migration?
+        - How does this affect migration timeline and security validation?
+        - Any Node.js vs Python security pattern differences
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed_remediation
+    attributes:
+      label: Proposed Security Remediation
+      description: Suggest potential security fixes or remediation approaches
+      placeholder: |
+        Proposed remediation strategies:
+        - Immediate mitigation steps (temporary fixes)
+        - Long-term security improvements
+        - Configuration changes required
+        - Code modifications needed
+        - Dependencies to update or replace
+        - Security testing validation approach
+
+  - type: dropdown
+    id: security_testing_needed
+    attributes:
+      label: Security Testing Requirements
+      description: What additional security testing is needed to validate the fix?
+      options:
+        - 🔬 Penetration testing required
+        - 🧪 Security regression testing needed
+        - 🔍 Enhanced bandit/safety scanning
+        - 📊 Compliance validation testing
+        - 🔄 No additional testing required
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional Security Context
+      description: Any additional information relevant to this security issue
+      placeholder: |
+        Include any additional context such as:
+        - Related security issues or CVEs
+        - External security research or advisories
+        - Internal security team consultation
+        - Previous similar security incidents
+        - Security monitoring or alerting details
+
+  - type: checkboxes
+    id: security_workflow_integration
+    attributes:
+      label: Security Workflow Integration
+      description: Integration with automated security review workflows
+      options:
+        - label: Trigger security team notification
+        - label: Update security scanning baselines
+        - label: Require security architect review
+        - label: Schedule security regression testing
+        - label: Update security documentation
+        - label: Create security training update
+        - label: Coordinate with compliance team
+        - label: Notify external security vendors (if applicable)
+
+  - type: markdown
+    attributes:
+      value: |
+        ---
+        
+        ## Security Review Process
+        
+        **Automated Actions:**
+        - Security team notification will be sent automatically
+        - CI/CD security gates will be updated based on severity
+        - Compliance tracking will be initiated for enterprise requirements
+        
+        **Next Steps:**
+        1. Security team triage and impact assessment
+        2. Technical security review and validation
+        3. Remediation planning and implementation
+        4. Security testing and validation
+        5. Compliance verification and documentation
+        
+        **Emergency Procedures:**
+        For critical security issues requiring immediate attention, contact the security team directly via secure channels.
+        
+        **Related Documentation:**
+        - Section 0.3.3 Security Considerations
+        - Section 6.6.2 Quality Gates (Security)
+        - Section 6.6.3 Security Scanning Requirements
+        - Enterprise Security Policy Documentation
