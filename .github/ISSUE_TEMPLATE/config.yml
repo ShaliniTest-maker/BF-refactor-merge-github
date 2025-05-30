@@ -1,0 +1,46 @@
+# GitHub Issue Template Configuration
+# Flask Migration Project - Node.js to Python/Flask Conversion
+# Supports enterprise project management with CI/CD integration
+
+# Issue template configuration for organized project tracking
+# Integrates with existing GitHub workflows and quality assurance processes
+# Per technical specification requirements for comprehensive project management
+
+blank_issues_enabled: false
+contact_links:
+  # Enterprise Support and Escalation Contacts
+  - name: "🚨 Critical Performance Issue - Emergency Escalation"
+    url: "https://support.company.com/performance-emergency"
+    about: "Report critical performance degradation >10% variance from Node.js baseline requiring immediate rollback procedures per Section 4.4.5"
+  
+  - name: "🔒 Security Vulnerability - Immediate Security Review"
+    url: "https://security.company.com/vulnerability-report"
+    about: "Report critical security findings requiring immediate security team review per Section 0.3.3 Security Considerations"
+  
+  - name: "📋 Enterprise Project Management Support"
+    url: "https://pm.company.com/flask-migration-support"
+    about: "Contact enterprise project management team for timeline, scope, or resource allocation questions"
+  
+  - name: "🔧 Technical Architecture Review Board"
+    url: "https://architecture.company.com/review-request"
+    about: "Request architectural guidance for complex migration decisions or framework integration questions"
+  
+  - name: "📊 Performance Engineering Team Consultation"
+    url: "https://engineering.company.com/performance-consultation"
+    about: "Consult with Performance Engineering Team for optimization strategies and baseline comparison analysis"
+  
+  - name: "🧪 Quality Assurance Team Support"
+    url: "https://qa.company.com/testing-support"
+    about: "Contact QA team for testing strategy questions, coverage requirements, or CI/CD pipeline support per Section 6.6.2"
+  
+  - name: "📖 Flask Migration Documentation Hub"
+    url: "https://docs.company.com/flask-migration"
+    about: "Access comprehensive migration documentation, troubleshooting guides, and implementation examples"
+  
+  - name: "💬 Developer Community Support"
+    url: "https://community.company.com/flask-migration"
+    about: "Join developer community discussions, share best practices, and get peer support for migration challenges"
+
+# Template ordering and configuration
+# Organized by business impact and frequency of use
+# Supports enterprise workflow integration requirements
