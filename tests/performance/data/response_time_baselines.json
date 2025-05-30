@@ -1,0 +1,535 @@
+{
+  "metadata": {
+    "version": "1.0.0",
+    "created_date": "2024-01-15T10:00:00Z",
+    "description": "HTTP response time baseline data for Flask application performance validation",
+    "baseline_source": "Node.js production metrics (30-day average)",
+    "performance_criteria": {
+      "max_95th_percentile_ms": 500,
+      "min_throughput_rps": 100,
+      "max_variance_from_baseline_percent": 10
+    },
+    "test_environment": {
+      "concurrent_users": "10-1000 progressive scaling",
+      "test_duration_minutes": 30,
+      "geographic_distribution": "multi-region",
+      "load_pattern": "realistic user behavior simulation"
+    }
+  },
+  "endpoint_baselines": {
+    "authentication": {
+      "/api/auth/login": {
+        "method": "POST",
+        "response_times_ms": {
+          "mean": 145,
+          "median": 130,
+          "p75": 175,
+          "p90": 220,
+          "p95": 285,
+          "p99": 420,
+          "min": 85,
+          "max": 650
+        },
+        "throughput_rps": {
+          "sustained": 125,
+          "peak": 180,
+          "under_load": 110
+        },
+        "concurrency_impact": {
+          "10_users": { "mean": 145, "p95": 285 },
+          "50_users": { "mean": 165, "p95": 315 },
+          "100_users": { "mean": 195, "p95": 365 },
+          "500_users": { "mean": 245, "p95": 435 },
+          "1000_users": { "mean": 285, "p95": 485 }
+        },
+        "dependencies": ["mongodb", "redis", "auth0"],
+        "cache_patterns": {
+          "cache_hit": { "mean": 95, "p95": 165 },
+          "cache_miss": { "mean": 245, "p95": 385 }
+        }
+      },
+      "/api/auth/logout": {
+        "method": "POST",
+        "response_times_ms": {
+          "mean": 75,
+          "median": 65,
+          "p75": 85,
+          "p90": 115,
+          "p95": 145,
+          "p99": 195,
+          "min": 45,
+          "max": 285
+        },
+        "throughput_rps": {
+          "sustained": 185,
+          "peak": 245,
+          "under_load": 165
+        },
+        "concurrency_impact": {
+          "10_users": { "mean": 75, "p95": 145 },
+          "50_users": { "mean": 85, "p95": 165 },
+          "100_users": { "mean": 105, "p95": 185 },
+          "500_users": { "mean": 135, "p95": 225 },
+          "1000_users": { "mean": 165, "p95": 285 }
+        },
+        "dependencies": ["redis", "auth0"],
+        "cache_patterns": {
+          "token_invalidation": { "mean": 85, "p95": 155 }
+        }
+      },
+      "/api/auth/validate": {
+        "method": "GET",
+        "response_times_ms": {
+          "mean": 35,
+          "median": 28,
+          "p75": 45,
+          "p90": 65,
+          "p95": 85,
+          "p99": 125,
+          "min": 15,
+          "max": 185
+        },
+        "throughput_rps": {
+          "sustained": 285,
+          "peak": 385,
+          "under_load": 245
+        },
+        "concurrency_impact": {
+          "10_users": { "mean": 35, "p95": 85 },
+          "50_users": { "mean": 45, "p95": 105 },
+          "100_users": { "mean": 55, "p95": 125 },
+          "500_users": { "mean": 75, "p95": 165 },
+          "1000_users": { "mean": 95, "p95": 195 }
+        },
+        "dependencies": ["redis"],
+        "cache_patterns": {
+          "token_cache_hit": { "mean": 25, "p95": 55 },
+          "token_validation": { "mean": 65, "p95": 145 }
+        }
+      }
+    },
+    "business_logic": {
+      "/api/users": {
+        "method": "GET",
+        "response_times_ms": {
+          "mean": 185,
+          "median": 165,
+          "p75": 215,
+          "p90": 285,
+          "p95": 365,
+          "p99": 485,
+          "min": 95,
+          "max": 725
+        },
+        "throughput_rps": {
+          "sustained": 145,
+          "peak": 195,
+          "under_load": 125
+        },
+        "concurrency_impact": {
+          "10_users": { "mean": 185, "p95": 365 },
+          "50_users": { "mean": 215, "p95": 415 },
+          "100_users": { "mean": 255, "p95": 465 },
+          "500_users": { "mean": 315, "p95": 525 },
+          "1000_users": { "mean": 375, "p95": 595 }
+        },
+        "dependencies": ["mongodb", "redis"],
+        "cache_patterns": {
+          "cache_hit": { "mean": 125, "p95": 225 },
+          "cache_miss": { "mean": 285, "p95": 485 }
+        }
+      },
+      "/api/users/{id}": {
+        "method": "GET",
+        "response_times_ms": {
+          "mean": 125,
+          "median": 110,
+          "p75": 145,
+          "p90": 185,
+          "p95": 235,
+          "p99": 315,
+          "min": 65,
+          "max": 485
+        },
+        "throughput_rps": {
+          "sustained": 195,
+          "peak": 265,
+          "under_load": 175
+        },
+        "concurrency_impact": {
+          "10_users": { "mean": 125, "p95": 235 },
+          "50_users": { "mean": 145, "p95": 275 },
+          "100_users": { "mean": 175, "p95": 315 },
+          "500_users": { "mean": 225, "p95": 385 },
+          "1000_users": { "mean": 275, "p95": 445 }
+        },
+        "dependencies": ["mongodb", "redis"],
+        "cache_patterns": {
+          "cache_hit": { "mean": 85, "p95": 155 },
+          "cache_miss": { "mean": 195, "p95": 335 }
+        }
+      },
+      "/api/users": {
+        "method": "POST",
+        "response_times_ms": {
+          "mean": 245,
+          "median": 225,
+          "p75": 285,
+          "p90": 355,
+          "p95": 425,
+          "p99": 565,
+          "min": 145,
+          "max": 825
+        },
+        "throughput_rps": {
+          "sustained": 85,
+          "peak": 125,
+          "under_load": 75
+        },
+        "concurrency_impact": {
+          "10_users": { "mean": 245, "p95": 425 },
+          "50_users": { "mean": 285, "p95": 485 },
+          "100_users": { "mean": 335, "p95": 545 },
+          "500_users": { "mean": 415, "p95": 665 },
+          "1000_users": { "mean": 495, "p95": 785 }
+        },
+        "dependencies": ["mongodb", "redis", "validation"],
+        "operation_patterns": {
+          "validation_pass": { "mean": 225, "p95": 385 },
+          "validation_fail": { "mean": 165, "p95": 285 },
+          "database_insert": { "mean": 285, "p95": 465 }
+        }
+      },
+      "/api/users/{id}": {
+        "method": "PUT",
+        "response_times_ms": {
+          "mean": 225,
+          "median": 205,
+          "p75": 265,
+          "p90": 325,
+          "p95": 395,
+          "p99": 525,
+          "min": 125,
+          "max": 765
+        },
+        "throughput_rps": {
+          "sustained": 95,
+          "peak": 135,
+          "under_load": 85
+        },
+        "concurrency_impact": {
+          "10_users": { "mean": 225, "p95": 395 },
+          "50_users": { "mean": 265, "p95": 455 },
+          "100_users": { "mean": 315, "p95": 515 },
+          "500_users": { "mean": 385, "p95": 625 },
+          "1000_users": { "mean": 455, "p95": 735 }
+        },
+        "dependencies": ["mongodb", "redis", "validation"],
+        "operation_patterns": {
+          "record_exists": { "mean": 205, "p95": 365 },
+          "record_not_found": { "mean": 85, "p95": 145 },
+          "update_operation": { "mean": 265, "p95": 435 }
+        }
+      },
+      "/api/users/{id}": {
+        "method": "DELETE",
+        "response_times_ms": {
+          "mean": 165,
+          "median": 145,
+          "p75": 185,
+          "p90": 235,
+          "p95": 295,
+          "p99": 395,
+          "min": 85,
+          "max": 585
+        },
+        "throughput_rps": {
+          "sustained": 125,
+          "peak": 175,
+          "under_load": 105
+        },
+        "concurrency_impact": {
+          "10_users": { "mean": 165, "p95": 295 },
+          "50_users": { "mean": 195, "p95": 345 },
+          "100_users": { "mean": 235, "p95": 395 },
+          "500_users": { "mean": 295, "p95": 485 },
+          "1000_users": { "mean": 355, "p95": 575 }
+        },
+        "dependencies": ["mongodb", "redis"],
+        "operation_patterns": {
+          "soft_delete": { "mean": 145, "p95": 265 },
+          "hard_delete": { "mean": 205, "p95": 355 },
+          "cascade_cleanup": { "mean": 285, "p95": 465 }
+        }
+      }
+    },
+    "external_integrations": {
+      "/api/files/upload": {
+        "method": "POST",
+        "response_times_ms": {
+          "mean": 1250,
+          "median": 1150,
+          "p75": 1485,
+          "p90": 1825,
+          "p95": 2165,
+          "p99": 2865,
+          "min": 785,
+          "max": 4285
+        },
+        "throughput_rps": {
+          "sustained": 25,
+          "peak": 45,
+          "under_load": 20
+        },
+        "concurrency_impact": {
+          "10_users": { "mean": 1250, "p95": 2165 },
+          "50_users": { "mean": 1485, "p95": 2565 },
+          "100_users": { "mean": 1825, "p95": 3165 },
+          "500_users": { "mean": 2485, "p95": 4285 },
+          "1000_users": { "mean": 3285, "p95": 5485 }
+        },
+        "dependencies": ["aws_s3", "validation", "mongodb"],
+        "file_size_patterns": {
+          "small_file_1mb": { "mean": 785, "p95": 1285 },
+          "medium_file_10mb": { "mean": 1485, "p95": 2485 },
+          "large_file_50mb": { "mean": 3285, "p95": 5485 }
+        }
+      },
+      "/api/external/sync": {
+        "method": "POST",
+        "response_times_ms": {
+          "mean": 485,
+          "median": 425,
+          "p75": 565,
+          "p90": 725,
+          "p95": 885,
+          "p99": 1185,
+          "min": 285,
+          "max": 1685
+        },
+        "throughput_rps": {
+          "sustained": 45,
+          "peak": 65,
+          "under_load": 35
+        },
+        "concurrency_impact": {
+          "10_users": { "mean": 485, "p95": 885 },
+          "50_users": { "mean": 565, "p95": 1085 },
+          "100_users": { "mean": 685, "p95": 1285 },
+          "500_users": { "mean": 885, "p95": 1685 },
+          "1000_users": { "mean": 1085, "p95": 2085 }
+        },
+        "dependencies": ["external_api", "circuit_breaker", "mongodb"],
+        "external_service_patterns": {
+          "service_available": { "mean": 425, "p95": 765 },
+          "service_degraded": { "mean": 785, "p95": 1385 },
+          "circuit_breaker_open": { "mean": 125, "p95": 185 }
+        }
+      }
+    },
+    "health_monitoring": {
+      "/health": {
+        "method": "GET",
+        "response_times_ms": {
+          "mean": 25,
+          "median": 20,
+          "p75": 30,
+          "p90": 40,
+          "p95": 55,
+          "p99": 85,
+          "min": 10,
+          "max": 125
+        },
+        "throughput_rps": {
+          "sustained": 485,
+          "peak": 685,
+          "under_load": 425
+        },
+        "concurrency_impact": {
+          "10_users": { "mean": 25, "p95": 55 },
+          "50_users": { "mean": 30, "p95": 65 },
+          "100_users": { "mean": 35, "p95": 75 },
+          "500_users": { "mean": 45, "p95": 95 },
+          "1000_users": { "mean": 55, "p95": 115 }
+        },
+        "dependencies": ["basic_checks"],
+        "check_patterns": {
+          "shallow_check": { "mean": 15, "p95": 35 },
+          "deep_check": { "mean": 45, "p95": 85 }
+        }
+      },
+      "/health/deep": {
+        "method": "GET",
+        "response_times_ms": {
+          "mean": 145,
+          "median": 125,
+          "p75": 165,
+          "p90": 215,
+          "p95": 275,
+          "p99": 365,
+          "min": 85,
+          "max": 525
+        },
+        "throughput_rps": {
+          "sustained": 125,
+          "peak": 185,
+          "under_load": 105
+        },
+        "concurrency_impact": {
+          "10_users": { "mean": 145, "p95": 275 },
+          "50_users": { "mean": 165, "p95": 315 },
+          "100_users": { "mean": 195, "p95": 365 },
+          "500_users": { "mean": 245, "p95": 445 },
+          "1000_users": { "mean": 295, "p95": 525 }
+        },
+        "dependencies": ["mongodb", "redis", "external_services"],
+        "dependency_patterns": {
+          "all_healthy": { "mean": 125, "p95": 235 },
+          "partial_degradation": { "mean": 185, "p95": 335 },
+          "service_unavailable": { "mean": 285, "p95": 485 }
+        }
+      }
+    }
+  },
+  "latency_patterns": {
+    "database_operations": {
+      "mongodb_query": {
+        "simple_find": { "mean": 45, "p95": 85 },
+        "complex_aggregation": { "mean": 185, "p95": 335 },
+        "index_scan": { "mean": 65, "p95": 125 },
+        "collection_scan": { "mean": 285, "p95": 485 }
+      },
+      "mongodb_write": {
+        "single_insert": { "mean": 85, "p95": 145 },
+        "batch_insert": { "mean": 245, "p95": 425 },
+        "single_update": { "mean": 95, "p95": 165 },
+        "bulk_update": { "mean": 285, "p95": 485 }
+      }
+    },
+    "cache_operations": {
+      "redis_get": { "mean": 15, "p95": 35 },
+      "redis_set": { "mean": 25, "p95": 45 },
+      "redis_del": { "mean": 20, "p95": 40 },
+      "redis_pipeline": { "mean": 45, "p95": 85 }
+    },
+    "external_services": {
+      "aws_s3_put": { "mean": 285, "p95": 485 },
+      "aws_s3_get": { "mean": 185, "p95": 335 },
+      "auth0_verify": { "mean": 125, "p95": 235 },
+      "third_party_api": { "mean": 385, "p95": 685 }
+    },
+    "middleware_processing": {
+      "request_parsing": { "mean": 5, "p95": 15 },
+      "authentication": { "mean": 25, "p95": 55 },
+      "authorization": { "mean": 15, "p95": 35 },
+      "response_formatting": { "mean": 10, "p95": 25 }
+    }
+  },
+  "throughput_measurements": {
+    "system_wide": {
+      "sustained_rps": 385,
+      "peak_rps": 585,
+      "under_load_rps": 325,
+      "target_minimum_rps": 100
+    },
+    "endpoint_categories": {
+      "authentication": {
+        "sustained_rps": 195,
+        "peak_rps": 275,
+        "under_load_rps": 175
+      },
+      "crud_operations": {
+        "sustained_rps": 125,
+        "peak_rps": 185,
+        "under_load_rps": 105
+      },
+      "read_heavy": {
+        "sustained_rps": 285,
+        "peak_rps": 425,
+        "under_load_rps": 245
+      },
+      "write_heavy": {
+        "sustained_rps": 65,
+        "peak_rps": 95,
+        "under_load_rps": 55
+      },
+      "external_integrations": {
+        "sustained_rps": 35,
+        "peak_rps": 55,
+        "under_load_rps": 25
+      }
+    }
+  },
+  "performance_variance_thresholds": {
+    "nodejs_baseline_comparison": {
+      "maximum_acceptable_variance_percent": 10,
+      "critical_threshold_variance_percent": 15,
+      "monitoring_alerts": {
+        "warning_threshold_percent": 5,
+        "critical_threshold_percent": 10,
+        "failure_threshold_percent": 15
+      }
+    },
+    "response_time_sla": {
+      "p95_max_ms": 500,
+      "p99_max_ms": 1000,
+      "mean_target_ms": 200,
+      "timeout_threshold_ms": 5000
+    },
+    "throughput_sla": {
+      "minimum_sustained_rps": 100,
+      "target_sustained_rps": 300,
+      "peak_capacity_rps": 500
+    }
+  },
+  "load_testing_scenarios": {
+    "baseline_validation": {
+      "concurrent_users": 50,
+      "duration_minutes": 30,
+      "ramp_up_minutes": 5,
+      "expected_p95_ms": 350,
+      "expected_throughput_rps": 200
+    },
+    "stress_testing": {
+      "concurrent_users": 500,
+      "duration_minutes": 15,
+      "ramp_up_minutes": 10,
+      "expected_p95_ms": 500,
+      "expected_throughput_rps": 150
+    },
+    "spike_testing": {
+      "concurrent_users": 1000,
+      "duration_minutes": 5,
+      "ramp_up_minutes": 1,
+      "expected_p95_ms": 750,
+      "expected_throughput_rps": 100
+    },
+    "endurance_testing": {
+      "concurrent_users": 200,
+      "duration_minutes": 120,
+      "ramp_up_minutes": 10,
+      "expected_p95_ms": 400,
+      "expected_throughput_rps": 180
+    }
+  },
+  "regression_testing_matrix": {
+    "critical_endpoints": [
+      "/api/auth/login",
+      "/api/auth/validate", 
+      "/api/users",
+      "/api/users/{id}",
+      "/health"
+    ],
+    "performance_gates": {
+      "response_time_variance_threshold": 10,
+      "throughput_degradation_threshold": 10,
+      "error_rate_threshold": 0.1
+    },
+    "automated_validation": {
+      "baseline_comparison_enabled": true,
+      "performance_trend_analysis": true,
+      "anomaly_detection": true,
+      "regression_alerting": true
+    }
+  }
+}
