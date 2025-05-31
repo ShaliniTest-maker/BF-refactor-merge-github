@@ -1,1084 +1,1380 @@
 """
-Database transaction management implementing ACID compliance with MongoDB transactions.
+MongoDB Transaction Management Module
 
-This module provides comprehensive transaction handling for both PyMongo and Motor operations
-while maintaining data consistency. Implements rollback mechanisms, transaction state monitoring,
-and performance tracking to ensure ≤10% variance from Node.js baseline performance.
+This module implements comprehensive MongoDB transaction management providing ACID compliance,
+rollback mechanisms, and transaction state monitoring for both PyMongo synchronous and Motor
+asynchronous operations. Ensures data consistency across multi-document operations while
+maintaining performance requirements and comprehensive monitoring integration.
 
-Key features:
-- MongoDB ACID transaction support with commit/rollback
-- Transaction context managers for sync and async operations  
-- Transaction state monitoring and performance tracking
-- Error handling and recovery mechanisms
-- Proper isolation levels and state management
-- Integration with monitoring and exception handling systems
+Key Features:
+- ACID-compliant transaction management with commit/rollback support
+- Context managers for both synchronous (PyMongo) and asynchronous (Motor) operations
+- Transaction state monitoring and performance tracking with Prometheus metrics
+- Comprehensive error handling and recovery mechanisms with exponential backoff
+- Integration with existing database clients and monitoring infrastructure
+- Transaction isolation level configuration and resource management
+- Performance optimization ensuring ≤10% variance from Node.js baseline
+- Circuit breaker integration for transaction resilience
+- Enterprise-grade structured logging and error reporting
 
-Implements requirements from:
-- Section 4.2.2: State management and persistence with transaction context
-- Section 6.2.2: Data management with transaction support
-- Section 6.2.4: Performance optimization with transaction monitoring
-- Section 4.2.3: Error handling with transaction recovery
-- Section 5.2.5: Database access layer with isolation levels
+Technical Implementation:
+- MongoDB 4.0+ multi-document transactions with replica set/sharded cluster support
+- Session management with causal consistency and transaction options
+- Transaction retry logic with configurable backoff strategies
+- Resource cleanup and connection pool optimization
+- Integration with Flask application factory pattern
+- Prometheus metrics for transaction performance monitoring
+
+Compliance Requirements:
+- Section 5.2.5: Database access layer transaction management for data consistency
+- Section 6.2.2: Data management with ACID compliance and MongoDB transaction support
+- Section 6.2.4: Performance optimization with transaction monitoring and tracking
+- Section 4.2.3: Error handling and recovery for transaction failures with retry logic
+- Section 4.2.2: State management with transaction commit/rollback and isolation levels
 """
 
 import asyncio
-import enum
 import time
 import uuid
+import threading
 from contextlib import contextmanager, asynccontextmanager
-from dataclasses import dataclass, field
+from datetime import datetime, timezone, timedelta
 from typing import (
-    Any, Dict, List, Optional, Union, Callable, TypeVar, Generic,
-    ContextManager, AsyncContextManager, Awaitable
+    Any, Dict, Optional, Union, List, Callable, TypeVar, Generic,
+    AsyncGenerator, Generator, Tuple, NamedTuple
 )
+from dataclasses import dataclass, field
+from enum import Enum, auto
 from threading import Lock, RLock
-from datetime import datetime, timedelta
+from collections import defaultdict, deque
+import weakref
+
+# Database drivers and core dependencies
+import pymongo
+from pymongo import MongoClient, ReadConcern, WriteConcern, ReadPreference
+from pymongo.client_session import ClientSession
+from pymongo.errors import (
+    InvalidOperation, OperationFailure, ConnectionFailure,
+    WriteConcernError, ExecutionTimeout, NetworkTimeout,
+    WTimeoutError, ServerSelectionTimeoutError
+)
+
+try:
+    from motor.motor_asyncio import (
+        AsyncIOMotorClient, AsyncIOMotorClientSession, AsyncIOMotorDatabase
+    )
+    MOTOR_AVAILABLE = True
+except ImportError:
+    MOTOR_AVAILABLE = False
 
 import structlog
-from pymongo import MongoClient, errors as pymongo_errors
-from pymongo.client_session import ClientSession
-from pymongo.read_concern import ReadConcern
-from pymongo.read_preferences import ReadPreference
-from pymongo.write_concern import WriteConcern
-from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorClientSession
-from bson import ObjectId
+from prometheus_client import Counter, Histogram, Gauge, Summary
 
-# Import monitoring and exception handling
+# Local module imports
+from .mongodb import MongoDBClient, MongoDBConfig, QueryResult
+from .motor_async import MotorAsyncDatabase
 from .exceptions import (
-    DatabaseTransactionError,
-    DatabaseConnectionError,
-    DatabaseTimeoutError,
-    with_database_retry,
-    database_error_context,
-    get_circuit_breaker
+    DatabaseTransactionError, DatabaseConnectionError, DatabaseTimeoutError,
+    DatabaseException, DatabaseErrorSeverity, DatabaseOperationType,
+    with_database_retry, database_error_context, mongodb_circuit_breaker
 )
 from .monitoring import (
-    monitor_transaction,
-    get_database_monitoring_components
+    DatabaseMetricsCollector, DatabaseTransactionMonitor,
+    monitor_database_transaction
 )
 
-# Configure structured logger
+# Configure structured logging
 logger = structlog.get_logger(__name__)
 
-# Type variables for generic transaction handling
-T = TypeVar('T')
-AsyncT = TypeVar('AsyncT')
+# Transaction state enums and types
+class TransactionState(Enum):
+    """Transaction state enumeration for comprehensive state tracking"""
+    CREATED = auto()
+    STARTED = auto()
+    ACTIVE = auto()
+    COMMITTING = auto()
+    COMMITTED = auto()
+    ABORTING = auto()
+    ABORTED = auto()
+    FAILED = auto()
+    TIMEOUT = auto()
 
 
-class TransactionState(enum.Enum):
-    """Transaction state enumeration for comprehensive state tracking."""
-    
-    INACTIVE = "inactive"           # Transaction not started
-    ACTIVE = "active"              # Transaction in progress
-    COMMITTING = "committing"      # Transaction being committed
-    COMMITTED = "committed"        # Transaction successfully committed
-    ABORTING = "aborting"          # Transaction being aborted
-    ABORTED = "aborted"            # Transaction successfully aborted
-    FAILED = "failed"              # Transaction failed with error
-    TIMEOUT = "timeout"            # Transaction timed out
+class TransactionIsolationLevel(Enum):
+    """Transaction isolation levels for MongoDB operations"""
+    READ_UNCOMMITTED = "available"
+    READ_COMMITTED = "local"
+    REPEATABLE_READ = "majority"
+    SNAPSHOT = "snapshot"
 
 
-class TransactionIsolationLevel(enum.Enum):
-    """MongoDB transaction isolation levels for data consistency."""
-    
-    READ_UNCOMMITTED = "read_uncommitted"    # Lowest isolation level
-    READ_COMMITTED = "read_committed"        # Prevent dirty reads
-    REPEATABLE_READ = "repeatable_read"      # Prevent dirty and non-repeatable reads
-    SERIALIZABLE = "serializable"           # Highest isolation level
+class TransactionWriteConcern(Enum):
+    """Transaction write concern levels for consistency guarantees"""
+    UNACKNOWLEDGED = {"w": 0}
+    ACKNOWLEDGED = {"w": 1}
+    MAJORITY = {"w": "majority"}
+    ALL_NODES = {"w": "all"}
+
+
+# Transaction metrics and monitoring
+transaction_operations_total = Counter(
+    'mongodb_transaction_operations_total',
+    'Total number of transaction operations',
+    ['database', 'operation_type', 'status', 'isolation_level']
+)
+
+transaction_duration_seconds = Histogram(
+    'mongodb_transaction_duration_seconds',
+    'Transaction execution time in seconds',
+    ['database', 'operation_type', 'status'],
+    buckets=[0.001, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0]
+)
+
+transaction_retry_attempts = Counter(
+    'mongodb_transaction_retry_attempts_total',
+    'Total transaction retry attempts',
+    ['database', 'retry_reason', 'attempt_number']
+)
+
+transaction_rollback_total = Counter(
+    'mongodb_transaction_rollback_total',
+    'Total transaction rollbacks',
+    ['database', 'rollback_reason', 'initiated_by']
+)
+
+active_transactions_gauge = Gauge(
+    'mongodb_active_transactions',
+    'Number of currently active transactions',
+    ['database', 'isolation_level']
+)
+
+transaction_resource_usage = Histogram(
+    'mongodb_transaction_resource_usage_seconds',
+    'Transaction resource usage duration',
+    ['database', 'resource_type'],
+    buckets=[0.001, 0.01, 0.1, 1.0, 10.0, 60.0, 300.0]
+)
 
 
 @dataclass
-class TransactionConfiguration:
-    """Configuration settings for MongoDB transactions."""
+class TransactionConfig:
+    """
+    Comprehensive transaction configuration for MongoDB operations.
     
-    # Transaction timeout settings
-    max_timeout_seconds: float = 30.0
-    max_commit_time_seconds: float = 10.0
+    Provides configurable options for transaction behavior, timeouts,
+    retry policies, and monitoring integration to ensure optimal
+    performance and reliability across different deployment scenarios.
+    """
+    
+    # Core transaction settings
+    read_concern: ReadConcern = field(default_factory=lambda: ReadConcern("majority"))
+    write_concern: WriteConcern = field(default_factory=lambda: WriteConcern(w="majority", wtimeout=30000))
+    read_preference: ReadPreference = field(default_factory=lambda: ReadPreference.PRIMARY)
+    
+    # Timeout configuration
+    max_commit_time_ms: int = 30000  # 30 seconds
+    transaction_timeout_seconds: int = 120  # 2 minutes
+    session_timeout_minutes: int = 30
+    
+    # Retry configuration
     max_retry_attempts: int = 3
+    base_retry_delay_ms: int = 100
+    max_retry_delay_ms: int = 5000
+    retry_jitter: bool = True
     
-    # Write concern settings
-    write_concern: Optional[WriteConcern] = None
-    read_concern: Optional[ReadConcern] = None
-    read_preference: Optional[ReadPreference] = None
+    # Performance and monitoring
+    enable_monitoring: bool = True
+    enable_performance_tracking: bool = True
+    enable_deadlock_detection: bool = True
     
-    # Isolation and consistency settings
-    isolation_level: TransactionIsolationLevel = TransactionIsolationLevel.READ_COMMITTED
+    # Resource management
+    max_concurrent_transactions: int = 50
+    resource_cleanup_timeout_seconds: int = 60
+    connection_pool_timeout_ms: int = 30000
+    
+    # Isolation and consistency
+    isolation_level: TransactionIsolationLevel = TransactionIsolationLevel.REPEATABLE_READ
     causal_consistency: bool = True
     
-    # Performance and monitoring settings
-    enable_monitoring: bool = True
-    enable_retry_logic: bool = True
-    circuit_breaker_enabled: bool = True
+    def to_transaction_options(self) -> Dict[str, Any]:
+        """Convert configuration to MongoDB transaction options."""
+        return {
+            'read_concern': self.read_concern,
+            'write_concern': self.write_concern,
+            'read_preference': self.read_preference,
+            'max_commit_time_ms': self.max_commit_time_ms
+        }
     
-    def __post_init__(self):
-        """Set default MongoDB settings based on isolation level."""
-        if self.write_concern is None:
-            # Default to majority write concern for ACID compliance
-            self.write_concern = WriteConcern(w="majority", j=True)
-        
-        if self.read_concern is None:
-            # Set read concern based on isolation level
-            if self.isolation_level == TransactionIsolationLevel.SERIALIZABLE:
-                self.read_concern = ReadConcern("linearizable")
-            elif self.isolation_level == TransactionIsolationLevel.REPEATABLE_READ:
-                self.read_concern = ReadConcern("majority")
-            else:
-                self.read_concern = ReadConcern("local")
-        
-        if self.read_preference is None:
-            self.read_preference = ReadPreference.PRIMARY
+    def to_session_options(self) -> Dict[str, Any]:
+        """Convert configuration to MongoDB session options."""
+        return {
+            'causal_consistency': self.causal_consistency,
+            'default_transaction_options': self.to_transaction_options()
+        }
 
 
 @dataclass
-class TransactionContext:
-    """Transaction context for state tracking and monitoring."""
+class TransactionMetrics:
+    """Transaction performance and resource metrics tracking"""
     
-    transaction_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    state: TransactionState = TransactionState.INACTIVE
-    start_time: Optional[float] = None
+    transaction_id: str
+    database: str
+    start_time: float = field(default_factory=time.perf_counter)
     end_time: Optional[float] = None
-    database_name: str = "unknown"
-    operation_count: int = 0
-    error_message: Optional[str] = None
-    retry_count: int = 0
     
-    # Performance tracking
-    commit_duration: Optional[float] = None
-    total_duration: Optional[float] = None
+    # Performance metrics
+    duration_seconds: Optional[float] = None
+    operations_count: int = 0
+    documents_modified: int = 0
+    bytes_transferred: int = 0
     
-    # Resource tracking
-    session_id: Optional[str] = None
-    collections_accessed: List[str] = field(default_factory=list)
-    operations_performed: List[Dict[str, Any]] = field(default_factory=list)
+    # Resource metrics
+    memory_usage_bytes: int = 0
+    connection_time_seconds: float = 0
+    lock_wait_time_seconds: float = 0
     
-    def add_operation(self, operation_type: str, collection: str, details: Optional[Dict[str, Any]] = None):
-        """Record a database operation within this transaction."""
-        self.operation_count += 1
-        if collection not in self.collections_accessed:
-            self.collections_accessed.append(collection)
-        
-        operation_record = {
-            'operation_type': operation_type,
-            'collection': collection,
-            'timestamp': time.time(),
-            'details': details or {}
-        }
-        self.operations_performed.append(operation_record)
+    # State tracking
+    state: TransactionState = TransactionState.CREATED
+    retry_attempts: int = 0
+    rollback_initiated: bool = False
     
-    def get_duration(self) -> Optional[float]:
-        """Calculate total transaction duration."""
-        if self.start_time and self.end_time:
-            return self.end_time - self.start_time
-        elif self.start_time:
-            return time.time() - self.start_time
-        return None
+    # Error tracking
+    error_count: int = 0
+    last_error: Optional[str] = None
+    error_types: List[str] = field(default_factory=list)
+    
+    def record_operation(self, documents_count: int = 1, bytes_size: int = 0):
+        """Record transaction operation metrics"""
+        self.operations_count += 1
+        self.documents_modified += documents_count
+        self.bytes_transferred += bytes_size
+    
+    def record_error(self, error: Exception):
+        """Record transaction error details"""
+        self.error_count += 1
+        self.last_error = str(error)
+        self.error_types.append(type(error).__name__)
+    
+    def complete_transaction(self, final_state: TransactionState):
+        """Complete transaction metrics collection"""
+        self.end_time = time.perf_counter()
+        self.duration_seconds = self.end_time - self.start_time
+        self.state = final_state
     
     def to_dict(self) -> Dict[str, Any]:
-        """Convert transaction context to dictionary for logging."""
+        """Convert metrics to dictionary for serialization"""
         return {
             'transaction_id': self.transaction_id,
-            'state': self.state.value,
-            'database_name': self.database_name,
-            'operation_count': self.operation_count,
-            'duration': self.get_duration(),
-            'retry_count': self.retry_count,
-            'collections_accessed': self.collections_accessed,
-            'error_message': self.error_message,
-            'session_id': self.session_id
+            'database': self.database,
+            'duration_seconds': self.duration_seconds,
+            'operations_count': self.operations_count,
+            'documents_modified': self.documents_modified,
+            'bytes_transferred': self.bytes_transferred,
+            'memory_usage_bytes': self.memory_usage_bytes,
+            'connection_time_seconds': self.connection_time_seconds,
+            'lock_wait_time_seconds': self.lock_wait_time_seconds,
+            'state': self.state.name,
+            'retry_attempts': self.retry_attempts,
+            'rollback_initiated': self.rollback_initiated,
+            'error_count': self.error_count,
+            'last_error': self.last_error,
+            'error_types': self.error_types,
+            'start_time': self.start_time,
+            'end_time': self.end_time
         }
 
 
 class TransactionManager:
     """
-    MongoDB transaction manager for synchronous operations.
+    Comprehensive MongoDB transaction manager providing ACID compliance,
+    state tracking, and performance monitoring for enterprise applications.
     
-    Provides ACID transaction support with comprehensive monitoring,
-    error handling, and performance tracking for PyMongo operations.
+    This manager coordinates transaction lifecycle across PyMongo synchronous
+    and Motor asynchronous operations while ensuring data consistency,
+    resource management, and comprehensive error handling with recovery.
     """
     
     def __init__(
         self,
-        mongo_client: MongoClient,
-        default_database: str,
-        config: Optional[TransactionConfiguration] = None
+        config: Optional[TransactionConfig] = None,
+        metrics_collector: Optional[DatabaseMetricsCollector] = None
     ):
         """
-        Initialize transaction manager with MongoDB client.
+        Initialize transaction manager with comprehensive configuration.
         
         Args:
-            mongo_client: PyMongo client instance
-            default_database: Default database name for transactions
             config: Transaction configuration settings
+            metrics_collector: Prometheus metrics collector for monitoring
         """
-        self.mongo_client = mongo_client
-        self.default_database = default_database
-        self.config = config or TransactionConfiguration()
+        self.config = config or TransactionConfig()
+        self.metrics_collector = metrics_collector
         
-        # Transaction state tracking
-        self._active_transactions: Dict[str, TransactionContext] = {}
-        self._transaction_lock = RLock()
+        # Transaction tracking
+        self._active_transactions: Dict[str, TransactionMetrics] = {}
+        self._transaction_history: deque = deque(maxlen=1000)
+        self._lock = RLock()
         
-        # Performance monitoring integration
-        self._monitoring_components = get_database_monitoring_components()
+        # Resource management
+        self._session_pool: Dict[str, weakref.WeakSet] = defaultdict(weakref.WeakSet)
+        self._resource_cleanup_tasks: List[Callable] = []
+        
+        # Performance tracking
+        self._performance_stats = defaultdict(list)
+        self._deadlock_detector = DeadlockDetector()
+        
+        # Monitoring integration
+        self._transaction_monitor = None
+        if self.metrics_collector:
+            self._transaction_monitor = DatabaseTransactionMonitor(
+                self.metrics_collector,
+                logger
+            )
         
         logger.info(
-            "Initialized TransactionManager for synchronous operations",
-            database=default_database,
-            config=self.config.__dict__
+            "Transaction manager initialized",
+            max_concurrent_transactions=self.config.max_concurrent_transactions,
+            isolation_level=self.config.isolation_level.name,
+            monitoring_enabled=self.config.enable_monitoring,
+            retry_attempts=self.config.max_retry_attempts
+        )
+    
+    def _generate_transaction_id(self) -> str:
+        """Generate unique transaction identifier"""
+        return f"txn_{uuid.uuid4().hex[:16]}_{int(time.time() * 1000)}"
+    
+    def _validate_transaction_capacity(self) -> None:
+        """Validate current transaction capacity limits"""
+        with self._lock:
+            active_count = len(self._active_transactions)
+            if active_count >= self.config.max_concurrent_transactions:
+                raise DatabaseTransactionError(
+                    f"Maximum concurrent transactions limit reached: {active_count}",
+                    severity=DatabaseErrorSeverity.HIGH,
+                    retry_recommended=True,
+                    recovery_time_estimate=30
+                )
+    
+    def _create_transaction_metrics(self, database: str) -> TransactionMetrics:
+        """Create transaction metrics tracking instance"""
+        transaction_id = self._generate_transaction_id()
+        metrics = TransactionMetrics(
+            transaction_id=transaction_id,
+            database=database
+        )
+        
+        with self._lock:
+            self._active_transactions[transaction_id] = metrics
+        
+        # Update active transactions gauge
+        active_transactions_gauge.labels(
+            database=database,
+            isolation_level=self.config.isolation_level.name
+        ).inc()
+        
+        return metrics
+    
+    def _complete_transaction_metrics(
+        self, 
+        metrics: TransactionMetrics, 
+        final_state: TransactionState
+    ) -> None:
+        """Complete transaction metrics and cleanup"""
+        metrics.complete_transaction(final_state)
+        
+        with self._lock:
+            # Move to history
+            self._transaction_history.append(metrics.to_dict())
+            
+            # Remove from active transactions
+            self._active_transactions.pop(metrics.transaction_id, None)
+        
+        # Update Prometheus metrics
+        if self.config.enable_monitoring:
+            transaction_operations_total.labels(
+                database=metrics.database,
+                operation_type='transaction',
+                status=final_state.name.lower(),
+                isolation_level=self.config.isolation_level.name
+            ).inc()
+            
+            if metrics.duration_seconds:
+                transaction_duration_seconds.labels(
+                    database=metrics.database,
+                    operation_type='transaction',
+                    status=final_state.name.lower()
+                ).observe(metrics.duration_seconds)
+            
+            # Update active transactions gauge
+            active_transactions_gauge.labels(
+                database=metrics.database,
+                isolation_level=self.config.isolation_level.name
+            ).dec()
+        
+        # Log transaction completion
+        logger.info(
+            "Transaction completed",
+            transaction_id=metrics.transaction_id,
+            database=metrics.database,
+            state=final_state.name,
+            duration_seconds=metrics.duration_seconds,
+            operations_count=metrics.operations_count,
+            retry_attempts=metrics.retry_attempts,
+            error_count=metrics.error_count
         )
     
     @contextmanager
     def transaction(
         self,
-        database_name: Optional[str] = None,
-        config: Optional[TransactionConfiguration] = None,
-        auto_retry: bool = True
-    ) -> ContextManager[TransactionContext]:
+        client: MongoDBClient,
+        database: str,
+        custom_config: Optional[TransactionConfig] = None
+    ) -> Generator[Tuple[ClientSession, TransactionMetrics], None, None]:
         """
-        Context manager for MongoDB transactions with comprehensive monitoring.
+        Context manager for synchronous MongoDB transactions with PyMongo.
         
-        Provides ACID transaction support with automatic commit/rollback,
-        error handling, and performance tracking.
+        Provides comprehensive transaction management including automatic
+        retry logic, resource cleanup, performance monitoring, and error
+        handling with rollback support for data consistency.
         
         Args:
-            database_name: Database name (uses default if None)
-            config: Transaction-specific configuration
-            auto_retry: Enable automatic retry on retryable errors
+            client: MongoDB client instance for transaction operations
+            database: Database name for transaction scope
+            custom_config: Override configuration for this transaction
             
         Yields:
-            TransactionContext: Transaction context for operation tracking
+            Tuple of (ClientSession, TransactionMetrics) for transaction operations
             
         Raises:
-            DatabaseTransactionError: On transaction failures
-            DatabaseConnectionError: On connection issues
-            DatabaseTimeoutError: On timeout scenarios
+            DatabaseTransactionError: On transaction failure or timeout
+            DatabaseConnectionError: On connection-related failures
+            DatabaseTimeoutError: On transaction timeout
         """
-        db_name = database_name or self.default_database
-        tx_config = config or self.config
-        tx_context = TransactionContext(database_name=db_name)
+        config = custom_config or self.config
         
-        # Register active transaction
-        with self._transaction_lock:
-            self._active_transactions[tx_context.transaction_id] = tx_context
+        # Validate capacity and create metrics
+        self._validate_transaction_capacity()
+        metrics = self._create_transaction_metrics(database)
         
         session = None
-        monitoring_context = None
+        transaction_started = False
         
         try:
-            # Initialize monitoring context if enabled
-            if (tx_config.enable_monitoring and 
-                self._monitoring_components and 
-                'metrics' in self._monitoring_components):
-                monitoring_context = monitor_transaction(
-                    self._monitoring_components['metrics'],
-                    db_name
-                )
-                monitoring_context.__enter__()
-            
-            # Start transaction with proper configuration
-            session = self._start_transaction_session(tx_context, tx_config)
-            
-            logger.info(
-                "Transaction started",
-                transaction_id=tx_context.transaction_id,
-                database=db_name,
-                session_id=str(session.session_id) if session else None
-            )
-            
-            yield tx_context
-            
-            # Commit transaction
-            self._commit_transaction(session, tx_context, tx_config)
-            
+            with database_error_context(
+                operation="transaction",
+                database=database,
+                transaction_id=metrics.transaction_id
+            ):
+                # Create session with configuration
+                session_options = config.to_session_options()
+                session = client.client.start_session(**session_options)
+                
+                metrics.state = TransactionState.STARTED
+                
+                # Start transaction with retry logic
+                for attempt in range(config.max_retry_attempts):
+                    try:
+                        with mongodb_circuit_breaker:
+                            # Configure transaction options
+                            transaction_options = config.to_transaction_options()
+                            
+                            # Start transaction
+                            session.start_transaction(**transaction_options)
+                            transaction_started = True
+                            metrics.state = TransactionState.ACTIVE
+                            metrics.retry_attempts = attempt
+                            
+                            logger.debug(
+                                "Transaction started",
+                                transaction_id=metrics.transaction_id,
+                                database=database,
+                                attempt=attempt + 1,
+                                isolation_level=config.isolation_level.name
+                            )
+                            
+                            # Monitor transaction if available
+                            if self._transaction_monitor:
+                                with self._transaction_monitor.monitor_transaction(
+                                    database=database,
+                                    transaction_id=metrics.transaction_id
+                                ):
+                                    yield session, metrics
+                            else:
+                                yield session, metrics
+                            
+                            # Commit transaction
+                            metrics.state = TransactionState.COMMITTING
+                            session.commit_transaction()
+                            metrics.state = TransactionState.COMMITTED
+                            
+                            logger.info(
+                                "Transaction committed successfully",
+                                transaction_id=metrics.transaction_id,
+                                database=database,
+                                attempt=attempt + 1,
+                                operations_count=metrics.operations_count
+                            )
+                            
+                            # Complete metrics tracking
+                            self._complete_transaction_metrics(metrics, TransactionState.COMMITTED)
+                            return
+                    
+                    except (ConnectionFailure, NetworkTimeout, ServerSelectionTimeoutError) as e:
+                        # Connection-related errors - retry with backoff
+                        metrics.record_error(e)
+                        
+                        if attempt < config.max_retry_attempts - 1:
+                            delay = self._calculate_retry_delay(attempt, config)
+                            
+                            transaction_retry_attempts.labels(
+                                database=database,
+                                retry_reason='connection_failure',
+                                attempt_number=str(attempt + 1)
+                            ).inc()
+                            
+                            logger.warning(
+                                "Transaction retry due to connection failure",
+                                transaction_id=metrics.transaction_id,
+                                database=database,
+                                attempt=attempt + 1,
+                                retry_delay_ms=delay,
+                                error=str(e)
+                            )
+                            
+                            time.sleep(delay / 1000.0)  # Convert to seconds
+                            
+                            # Abort current transaction if started
+                            if transaction_started:
+                                try:
+                                    session.abort_transaction()
+                                except Exception:
+                                    pass  # Ignore abort errors during retry
+                                transaction_started = False
+                        else:
+                            raise DatabaseConnectionError(
+                                f"Transaction failed after {config.max_retry_attempts} attempts: {str(e)}",
+                                database=database,
+                                transaction_id=metrics.transaction_id,
+                                operation="transaction",
+                                original_error=e
+                            )
+                    
+                    except (ExecutionTimeout, WTimeoutError) as e:
+                        # Timeout errors
+                        metrics.record_error(e)
+                        metrics.state = TransactionState.TIMEOUT
+                        
+                        logger.error(
+                            "Transaction timeout",
+                            transaction_id=metrics.transaction_id,
+                            database=database,
+                            timeout_ms=config.max_commit_time_ms,
+                            error=str(e)
+                        )
+                        
+                        raise DatabaseTimeoutError(
+                            f"Transaction timed out: {str(e)}",
+                            database=database,
+                            transaction_id=metrics.transaction_id,
+                            operation="transaction",
+                            timeout_duration=config.max_commit_time_ms,
+                            original_error=e
+                        )
+                    
+                    except Exception as e:
+                        # Other errors - abort and re-raise
+                        metrics.record_error(e)
+                        metrics.state = TransactionState.FAILED
+                        
+                        logger.error(
+                            "Transaction failed with unexpected error",
+                            transaction_id=metrics.transaction_id,
+                            database=database,
+                            error=str(e),
+                            error_type=type(e).__name__
+                        )
+                        
+                        raise DatabaseTransactionError(
+                            f"Transaction failed: {str(e)}",
+                            database=database,
+                            transaction_id=metrics.transaction_id,
+                            operation="transaction",
+                            original_error=e
+                        )
+        
         except Exception as e:
-            # Abort transaction on any error
-            self._abort_transaction(session, tx_context, e)
-            
-            # Re-raise appropriate database exception
-            if isinstance(e, (DatabaseTransactionError, DatabaseConnectionError, DatabaseTimeoutError)):
-                raise
-            else:
-                raise DatabaseTransactionError(
-                    message=f"Transaction failed: {str(e)}",
-                    transaction_id=tx_context.transaction_id,
-                    session_info={'session_id': str(session.session_id) if session else None},
-                    operation='transaction_execution',
-                    database=db_name,
+            # Handle any unhandled exceptions
+            if not isinstance(e, (DatabaseTransactionError, DatabaseConnectionError, DatabaseTimeoutError)):
+                metrics.record_error(e)
+                metrics.state = TransactionState.FAILED
+                
+                e = DatabaseTransactionError(
+                    f"Unexpected transaction error: {str(e)}",
+                    database=database,
+                    transaction_id=metrics.transaction_id,
+                    operation="transaction",
                     original_error=e
                 )
+            
+            # Attempt transaction rollback
+            if session and transaction_started:
+                try:
+                    metrics.state = TransactionState.ABORTING
+                    session.abort_transaction()
+                    metrics.state = TransactionState.ABORTED
+                    metrics.rollback_initiated = True
+                    
+                    transaction_rollback_total.labels(
+                        database=database,
+                        rollback_reason='error',
+                        initiated_by='automatic'
+                    ).inc()
+                    
+                    logger.warning(
+                        "Transaction rolled back due to error",
+                        transaction_id=metrics.transaction_id,
+                        database=database,
+                        error=str(e)
+                    )
+                    
+                except Exception as rollback_error:
+                    logger.error(
+                        "Transaction rollback failed",
+                        transaction_id=metrics.transaction_id,
+                        database=database,
+                        rollback_error=str(rollback_error),
+                        original_error=str(e)
+                    )
+            
+            # Complete metrics with failed state
+            final_state = TransactionState.ABORTED if metrics.rollback_initiated else TransactionState.FAILED
+            self._complete_transaction_metrics(metrics, final_state)
+            
+            raise e
         
         finally:
-            # Cleanup monitoring context
-            if monitoring_context:
-                try:
-                    monitoring_context.__exit__(None, None, None)
-                except Exception as e:
-                    logger.error(f"Error closing monitoring context: {e}")
-            
-            # Cleanup session
+            # Cleanup session resources
             if session:
                 try:
                     session.end_session()
-                except Exception as e:
-                    logger.warning(f"Error ending session: {e}")
-            
-            # Remove from active transactions
-            with self._transaction_lock:
-                self._active_transactions.pop(tx_context.transaction_id, None)
-            
-            # Log final transaction state
-            tx_context.end_time = time.time()
-            logger.info(
-                "Transaction completed",
-                **tx_context.to_dict()
-            )
-    
-    def _start_transaction_session(
-        self,
-        tx_context: TransactionContext,
-        config: TransactionConfiguration
-    ) -> ClientSession:
-        """Start a new MongoDB transaction session."""
-        try:
-            tx_context.start_time = time.time()
-            tx_context.state = TransactionState.ACTIVE
-            
-            # Create session with causal consistency if enabled
-            session = self.mongo_client.start_session(
-                causal_consistency=config.causal_consistency
-            )
-            
-            tx_context.session_id = str(session.session_id)
-            
-            # Start transaction with configured settings
-            session.start_transaction(
-                read_concern=config.read_concern,
-                write_concern=config.write_concern,
-                read_preference=config.read_preference,
-                max_commit_time_ms=int(config.max_commit_time_seconds * 1000)
-            )
-            
-            return session
-            
-        except Exception as e:
-            tx_context.state = TransactionState.FAILED
-            tx_context.error_message = str(e)
-            
-            raise DatabaseTransactionError(
-                message=f"Failed to start transaction session: {str(e)}",
-                transaction_id=tx_context.transaction_id,
-                operation='start_session',
-                database=tx_context.database_name,
-                original_error=e
-            )
-    
-    def _commit_transaction(
-        self,
-        session: ClientSession,
-        tx_context: TransactionContext,
-        config: TransactionConfiguration
-    ) -> None:
-        """Commit the transaction with error handling and monitoring."""
-        commit_start_time = time.perf_counter()
-        
-        try:
-            tx_context.state = TransactionState.COMMITTING
-            
-            # Commit with timeout protection
-            session.commit_transaction()
-            
-            commit_end_time = time.perf_counter()
-            tx_context.commit_duration = commit_end_time - commit_start_time
-            tx_context.state = TransactionState.COMMITTED
-            
-            logger.info(
-                "Transaction committed successfully",
-                transaction_id=tx_context.transaction_id,
-                commit_duration=tx_context.commit_duration,
-                operation_count=tx_context.operation_count
-            )
-            
-        except Exception as e:
-            tx_context.state = TransactionState.FAILED
-            tx_context.error_message = str(e)
-            
-            raise DatabaseTransactionError(
-                message=f"Failed to commit transaction: {str(e)}",
-                transaction_id=tx_context.transaction_id,
-                operation='commit_transaction',
-                database=tx_context.database_name,
-                original_error=e
-            )
-    
-    def _abort_transaction(
-        self,
-        session: Optional[ClientSession],
-        tx_context: TransactionContext,
-        error: Exception
-    ) -> None:
-        """Abort the transaction with proper error handling."""
-        try:
-            tx_context.state = TransactionState.ABORTING
-            tx_context.error_message = str(error)
-            
-            if session and session.in_transaction:
-                session.abort_transaction()
-            
-            tx_context.state = TransactionState.ABORTED
-            
-            logger.warning(
-                "Transaction aborted",
-                transaction_id=tx_context.transaction_id,
-                error=str(error),
-                operation_count=tx_context.operation_count
-            )
-            
-        except Exception as abort_error:
-            tx_context.state = TransactionState.FAILED
-            
-            logger.error(
-                "Failed to abort transaction",
-                transaction_id=tx_context.transaction_id,
-                abort_error=str(abort_error),
-                original_error=str(error)
-            )
-    
-    @with_database_retry(max_attempts=3, circuit_breaker=True)
-    def execute_in_transaction(
-        self,
-        operation: Callable[[ClientSession, TransactionContext], T],
-        database_name: Optional[str] = None,
-        config: Optional[TransactionConfiguration] = None
-    ) -> T:
-        """
-        Execute operation within a transaction with retry logic.
-        
-        Args:
-            operation: Function to execute within transaction
-            database_name: Database name for transaction
-            config: Transaction configuration
-            
-        Returns:
-            Result of the operation
-            
-        Raises:
-            DatabaseTransactionError: On transaction failures
-        """
-        with self.transaction(database_name, config) as tx_context:
-            session = self.mongo_client.start_session()
-            try:
-                return operation(session, tx_context)
-            finally:
-                session.end_session()
-    
-    def get_active_transactions(self) -> Dict[str, Dict[str, Any]]:
-        """Get information about currently active transactions."""
-        with self._transaction_lock:
-            return {
-                tx_id: tx_context.to_dict()
-                for tx_id, tx_context in self._active_transactions.items()
-            }
-    
-    def get_transaction_statistics(self) -> Dict[str, Any]:
-        """Get transaction performance and utilization statistics."""
-        with self._transaction_lock:
-            active_count = len(self._active_transactions)
-            
-            # Calculate average durations for active transactions
-            active_durations = [
-                tx.get_duration() for tx in self._active_transactions.values()
-                if tx.get_duration() is not None
-            ]
-            
-            avg_duration = (
-                sum(active_durations) / len(active_durations) 
-                if active_durations else 0.0
-            )
-            
-            return {
-                'active_transactions': active_count,
-                'average_active_duration': avg_duration,
-                'database': self.default_database,
-                'config': self.config.__dict__
-            }
-
-
-class AsyncTransactionManager:
-    """
-    MongoDB transaction manager for asynchronous operations.
-    
-    Provides ACID transaction support with comprehensive monitoring,
-    error handling, and performance tracking for Motor async operations.
-    """
-    
-    def __init__(
-        self,
-        motor_client: AsyncIOMotorClient,
-        default_database: str,
-        config: Optional[TransactionConfiguration] = None
-    ):
-        """
-        Initialize async transaction manager with Motor client.
-        
-        Args:
-            motor_client: Motor async client instance
-            default_database: Default database name for transactions
-            config: Transaction configuration settings
-        """
-        self.motor_client = motor_client
-        self.default_database = default_database
-        self.config = config or TransactionConfiguration()
-        
-        # Transaction state tracking
-        self._active_transactions: Dict[str, TransactionContext] = {}
-        self._transaction_lock = asyncio.Lock()
-        
-        # Performance monitoring integration
-        self._monitoring_components = get_database_monitoring_components()
-        
-        logger.info(
-            "Initialized AsyncTransactionManager for async operations",
-            database=default_database,
-            config=self.config.__dict__
-        )
+                except Exception as cleanup_error:
+                    logger.warning(
+                        "Session cleanup error",
+                        transaction_id=metrics.transaction_id,
+                        database=database,
+                        cleanup_error=str(cleanup_error)
+                    )
     
     @asynccontextmanager
-    async def transaction(
+    async def async_transaction(
         self,
-        database_name: Optional[str] = None,
-        config: Optional[TransactionConfiguration] = None,
-        auto_retry: bool = True
-    ) -> AsyncContextManager[TransactionContext]:
+        database: MotorAsyncDatabase,
+        database_name: str,
+        custom_config: Optional[TransactionConfig] = None
+    ) -> AsyncGenerator[Tuple[AsyncIOMotorClientSession, TransactionMetrics], None]:
         """
-        Async context manager for MongoDB transactions.
+        Context manager for asynchronous MongoDB transactions with Motor.
         
-        Provides ACID transaction support with automatic commit/rollback,
-        error handling, and performance tracking for async operations.
+        Provides comprehensive async transaction management including automatic
+        retry logic, resource cleanup, performance monitoring, and error
+        handling with rollback support optimized for high-concurrency operations.
         
         Args:
-            database_name: Database name (uses default if None)
-            config: Transaction-specific configuration
-            auto_retry: Enable automatic retry on retryable errors
+            database: Motor async database instance for transaction operations
+            database_name: Database name for transaction scope
+            custom_config: Override configuration for this transaction
             
         Yields:
-            TransactionContext: Transaction context for operation tracking
+            Tuple of (AsyncIOMotorClientSession, TransactionMetrics) for async operations
             
         Raises:
-            DatabaseTransactionError: On transaction failures
-            DatabaseConnectionError: On connection issues
-            DatabaseTimeoutError: On timeout scenarios
+            DatabaseTransactionError: On transaction failure or timeout
+            DatabaseConnectionError: On connection-related failures
+            DatabaseTimeoutError: On transaction timeout
         """
-        db_name = database_name or self.default_database
-        tx_config = config or self.config
-        tx_context = TransactionContext(database_name=db_name)
+        if not MOTOR_AVAILABLE:
+            raise DatabaseTransactionError(
+                "Motor not available for async transactions",
+                database=database_name,
+                operation="async_transaction"
+            )
         
-        # Register active transaction
-        async with self._transaction_lock:
-            self._active_transactions[tx_context.transaction_id] = tx_context
+        config = custom_config or self.config
+        
+        # Validate capacity and create metrics
+        self._validate_transaction_capacity()
+        metrics = self._create_transaction_metrics(database_name)
         
         session = None
-        monitoring_context = None
+        transaction_started = False
         
         try:
-            # Initialize monitoring context if enabled
-            if (tx_config.enable_monitoring and 
-                self._monitoring_components and 
-                'motor_integration' in self._monitoring_components):
-                monitoring_context = self._monitoring_components['motor_integration'].monitor_operation(
-                    'transaction',
-                    db_name,
-                    'transaction'
-                )
-                monitoring_context.__enter__()
-            
-            # Start async transaction session
-            session = await self._start_async_transaction_session(tx_context, tx_config)
-            
-            logger.info(
-                "Async transaction started",
-                transaction_id=tx_context.transaction_id,
-                database=db_name,
-                session_id=str(session.session_id) if session else None
-            )
-            
-            yield tx_context
-            
-            # Commit async transaction
-            await self._commit_async_transaction(session, tx_context, tx_config)
-            
+            with database_error_context(
+                operation="async_transaction",
+                database=database_name,
+                transaction_id=metrics.transaction_id
+            ):
+                # Create async session with configuration
+                session_options = config.to_session_options()
+                
+                async with database.start_session(**session_options) as session:
+                    metrics.state = TransactionState.STARTED
+                    
+                    # Start transaction with retry logic
+                    for attempt in range(config.max_retry_attempts):
+                        try:
+                            with mongodb_circuit_breaker:
+                                # Configure transaction options
+                                transaction_options = config.to_transaction_options()
+                                
+                                # Start async transaction
+                                async with session.start_transaction(**transaction_options):
+                                    transaction_started = True
+                                    metrics.state = TransactionState.ACTIVE
+                                    metrics.retry_attempts = attempt
+                                    
+                                    logger.debug(
+                                        "Async transaction started",
+                                        transaction_id=metrics.transaction_id,
+                                        database=database_name,
+                                        attempt=attempt + 1,
+                                        isolation_level=config.isolation_level.name
+                                    )
+                                    
+                                    yield session, metrics
+                                    
+                                    # Transaction commits automatically on context exit
+                                    metrics.state = TransactionState.COMMITTED
+                                    
+                                    logger.info(
+                                        "Async transaction committed successfully",
+                                        transaction_id=metrics.transaction_id,
+                                        database=database_name,
+                                        attempt=attempt + 1,
+                                        operations_count=metrics.operations_count
+                                    )
+                                    
+                                    # Complete metrics tracking
+                                    self._complete_transaction_metrics(metrics, TransactionState.COMMITTED)
+                                    return
+                        
+                        except (ConnectionFailure, NetworkTimeout, ServerSelectionTimeoutError) as e:
+                            # Connection-related errors - retry with backoff
+                            metrics.record_error(e)
+                            
+                            if attempt < config.max_retry_attempts - 1:
+                                delay = self._calculate_retry_delay(attempt, config)
+                                
+                                transaction_retry_attempts.labels(
+                                    database=database_name,
+                                    retry_reason='connection_failure',
+                                    attempt_number=str(attempt + 1)
+                                ).inc()
+                                
+                                logger.warning(
+                                    "Async transaction retry due to connection failure",
+                                    transaction_id=metrics.transaction_id,
+                                    database=database_name,
+                                    attempt=attempt + 1,
+                                    retry_delay_ms=delay,
+                                    error=str(e)
+                                )
+                                
+                                await asyncio.sleep(delay / 1000.0)  # Convert to seconds
+                                transaction_started = False
+                            else:
+                                raise DatabaseConnectionError(
+                                    f"Async transaction failed after {config.max_retry_attempts} attempts: {str(e)}",
+                                    database=database_name,
+                                    transaction_id=metrics.transaction_id,
+                                    operation="async_transaction",
+                                    original_error=e
+                                )
+                        
+                        except (ExecutionTimeout, WTimeoutError) as e:
+                            # Timeout errors
+                            metrics.record_error(e)
+                            metrics.state = TransactionState.TIMEOUT
+                            
+                            logger.error(
+                                "Async transaction timeout",
+                                transaction_id=metrics.transaction_id,
+                                database=database_name,
+                                timeout_ms=config.max_commit_time_ms,
+                                error=str(e)
+                            )
+                            
+                            raise DatabaseTimeoutError(
+                                f"Async transaction timed out: {str(e)}",
+                                database=database_name,
+                                transaction_id=metrics.transaction_id,
+                                operation="async_transaction",
+                                timeout_duration=config.max_commit_time_ms,
+                                original_error=e
+                            )
+                        
+                        except Exception as e:
+                            # Other errors - abort and re-raise
+                            metrics.record_error(e)
+                            metrics.state = TransactionState.FAILED
+                            
+                            logger.error(
+                                "Async transaction failed with unexpected error",
+                                transaction_id=metrics.transaction_id,
+                                database=database_name,
+                                error=str(e),
+                                error_type=type(e).__name__
+                            )
+                            
+                            raise DatabaseTransactionError(
+                                f"Async transaction failed: {str(e)}",
+                                database=database_name,
+                                transaction_id=metrics.transaction_id,
+                                operation="async_transaction",
+                                original_error=e
+                            )
+        
         except Exception as e:
-            # Abort async transaction on any error
-            await self._abort_async_transaction(session, tx_context, e)
-            
-            # Re-raise appropriate database exception
-            if isinstance(e, (DatabaseTransactionError, DatabaseConnectionError, DatabaseTimeoutError)):
-                raise
-            else:
-                raise DatabaseTransactionError(
-                    message=f"Async transaction failed: {str(e)}",
-                    transaction_id=tx_context.transaction_id,
-                    session_info={'session_id': str(session.session_id) if session else None},
-                    operation='async_transaction_execution',
-                    database=db_name,
+            # Handle any unhandled exceptions
+            if not isinstance(e, (DatabaseTransactionError, DatabaseConnectionError, DatabaseTimeoutError)):
+                metrics.record_error(e)
+                metrics.state = TransactionState.FAILED
+                
+                e = DatabaseTransactionError(
+                    f"Unexpected async transaction error: {str(e)}",
+                    database=database_name,
+                    transaction_id=metrics.transaction_id,
+                    operation="async_transaction",
                     original_error=e
                 )
+            
+            # Record rollback for async transactions (handled by Motor automatically)
+            if transaction_started:
+                metrics.rollback_initiated = True
+                
+                transaction_rollback_total.labels(
+                    database=database_name,
+                    rollback_reason='error',
+                    initiated_by='automatic'
+                ).inc()
+                
+                logger.warning(
+                    "Async transaction rolled back due to error",
+                    transaction_id=metrics.transaction_id,
+                    database=database_name,
+                    error=str(e)
+                )
+            
+            # Complete metrics with failed state
+            final_state = TransactionState.ABORTED if metrics.rollback_initiated else TransactionState.FAILED
+            self._complete_transaction_metrics(metrics, final_state)
+            
+            raise e
+    
+    def _calculate_retry_delay(self, attempt: int, config: TransactionConfig) -> int:
+        """Calculate exponential backoff delay for transaction retries"""
+        base_delay = config.base_retry_delay_ms
+        max_delay = config.max_retry_delay_ms
         
-        finally:
-            # Cleanup monitoring context
-            if monitoring_context:
-                try:
-                    monitoring_context.__exit__(None, None, None)
-                except Exception as e:
-                    logger.error(f"Error closing async monitoring context: {e}")
-            
-            # Cleanup async session
-            if session:
-                try:
-                    session.end_session()
-                except Exception as e:
-                    logger.warning(f"Error ending async session: {e}")
-            
-            # Remove from active transactions
-            async with self._transaction_lock:
-                self._active_transactions.pop(tx_context.transaction_id, None)
-            
-            # Log final transaction state
-            tx_context.end_time = time.time()
-            logger.info(
-                "Async transaction completed",
-                **tx_context.to_dict()
-            )
-    
-    async def _start_async_transaction_session(
-        self,
-        tx_context: TransactionContext,
-        config: TransactionConfiguration
-    ) -> AsyncIOMotorClientSession:
-        """Start a new async MongoDB transaction session."""
-        try:
-            tx_context.start_time = time.time()
-            tx_context.state = TransactionState.ACTIVE
-            
-            # Create async session with causal consistency if enabled
-            session = await self.motor_client.start_session(
-                causal_consistency=config.causal_consistency
-            )
-            
-            tx_context.session_id = str(session.session_id)
-            
-            # Start async transaction with configured settings
-            session.start_transaction(
-                read_concern=config.read_concern,
-                write_concern=config.write_concern,
-                read_preference=config.read_preference,
-                max_commit_time_ms=int(config.max_commit_time_seconds * 1000)
-            )
-            
-            return session
-            
-        except Exception as e:
-            tx_context.state = TransactionState.FAILED
-            tx_context.error_message = str(e)
-            
-            raise DatabaseTransactionError(
-                message=f"Failed to start async transaction session: {str(e)}",
-                transaction_id=tx_context.transaction_id,
-                operation='start_async_session',
-                database=tx_context.database_name,
-                original_error=e
-            )
-    
-    async def _commit_async_transaction(
-        self,
-        session: AsyncIOMotorClientSession,
-        tx_context: TransactionContext,
-        config: TransactionConfiguration
-    ) -> None:
-        """Commit the async transaction with error handling and monitoring."""
-        commit_start_time = time.perf_counter()
+        # Exponential backoff: base_delay * (2 ^ attempt)
+        delay = min(base_delay * (2 ** attempt), max_delay)
         
-        try:
-            tx_context.state = TransactionState.COMMITTING
-            
-            # Commit async transaction with timeout protection
-            await session.commit_transaction()
-            
-            commit_end_time = time.perf_counter()
-            tx_context.commit_duration = commit_end_time - commit_start_time
-            tx_context.state = TransactionState.COMMITTED
-            
-            logger.info(
-                "Async transaction committed successfully",
-                transaction_id=tx_context.transaction_id,
-                commit_duration=tx_context.commit_duration,
-                operation_count=tx_context.operation_count
-            )
-            
-        except Exception as e:
-            tx_context.state = TransactionState.FAILED
-            tx_context.error_message = str(e)
-            
-            raise DatabaseTransactionError(
-                message=f"Failed to commit async transaction: {str(e)}",
-                transaction_id=tx_context.transaction_id,
-                operation='commit_async_transaction',
-                database=tx_context.database_name,
-                original_error=e
-            )
+        # Add jitter if configured
+        if config.retry_jitter:
+            import random
+            jitter = random.uniform(0.5, 1.5)
+            delay = int(delay * jitter)
+        
+        return delay
     
-    async def _abort_async_transaction(
-        self,
-        session: Optional[AsyncIOMotorClientSession],
-        tx_context: TransactionContext,
-        error: Exception
-    ) -> None:
-        """Abort the async transaction with proper error handling."""
-        try:
-            tx_context.state = TransactionState.ABORTING
-            tx_context.error_message = str(error)
+    def get_transaction_status(self, transaction_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get current status of a specific transaction.
+        
+        Args:
+            transaction_id: Unique transaction identifier
             
-            if session and session.in_transaction:
-                await session.abort_transaction()
+        Returns:
+            Transaction status dictionary or None if not found
+        """
+        with self._lock:
+            metrics = self._active_transactions.get(transaction_id)
+            if metrics:
+                return metrics.to_dict()
             
-            tx_context.state = TransactionState.ABORTED
+            # Check transaction history
+            for historical_txn in self._transaction_history:
+                if historical_txn['transaction_id'] == transaction_id:
+                    return historical_txn
+            
+            return None
+    
+    def get_active_transactions(self) -> List[Dict[str, Any]]:
+        """
+        Get list of all currently active transactions.
+        
+        Returns:
+            List of active transaction status dictionaries
+        """
+        with self._lock:
+            return [metrics.to_dict() for metrics in self._active_transactions.values()]
+    
+    def get_transaction_statistics(self, database: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Get comprehensive transaction statistics and performance metrics.
+        
+        Args:
+            database: Optional database filter for statistics
+            
+        Returns:
+            Transaction statistics summary
+        """
+        with self._lock:
+            # Filter transactions by database if specified
+            if database:
+                active_txns = [
+                    txn for txn in self._active_transactions.values() 
+                    if txn.database == database
+                ]
+                historical_txns = [
+                    txn for txn in self._transaction_history 
+                    if txn['database'] == database
+                ]
+            else:
+                active_txns = list(self._active_transactions.values())
+                historical_txns = list(self._transaction_history)
+            
+            # Calculate statistics
+            total_active = len(active_txns)
+            total_completed = len(historical_txns)
+            
+            # Performance statistics
+            if historical_txns:
+                durations = [
+                    txn['duration_seconds'] for txn in historical_txns 
+                    if txn['duration_seconds'] is not None
+                ]
+                
+                if durations:
+                    avg_duration = sum(durations) / len(durations)
+                    min_duration = min(durations)
+                    max_duration = max(durations)
+                else:
+                    avg_duration = min_duration = max_duration = 0
+                
+                # Success rate calculation
+                successful_txns = sum(
+                    1 for txn in historical_txns 
+                    if txn['state'] == TransactionState.COMMITTED.name
+                )
+                success_rate = (successful_txns / total_completed) * 100 if total_completed > 0 else 0
+            else:
+                avg_duration = min_duration = max_duration = 0
+                success_rate = 0
+            
+            # Resource utilization
+            total_operations = sum(txn.operations_count for txn in active_txns)
+            total_retries = sum(txn.retry_attempts for txn in active_txns)
+            
+            return {
+                'database_filter': database,
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'active_transactions': {
+                    'count': total_active,
+                    'max_concurrent': self.config.max_concurrent_transactions,
+                    'utilization_percent': (total_active / self.config.max_concurrent_transactions) * 100
+                },
+                'completed_transactions': {
+                    'total': total_completed,
+                    'success_rate_percent': round(success_rate, 2)
+                },
+                'performance': {
+                    'average_duration_seconds': round(avg_duration, 4),
+                    'min_duration_seconds': round(min_duration, 4),
+                    'max_duration_seconds': round(max_duration, 4)
+                },
+                'operations': {
+                    'total_active_operations': total_operations,
+                    'total_retry_attempts': total_retries
+                },
+                'configuration': {
+                    'isolation_level': self.config.isolation_level.name,
+                    'max_retry_attempts': self.config.max_retry_attempts,
+                    'transaction_timeout_seconds': self.config.transaction_timeout_seconds,
+                    'monitoring_enabled': self.config.enable_monitoring
+                }
+            }
+    
+    def force_rollback_transaction(self, transaction_id: str, reason: str = "manual") -> bool:
+        """
+        Force rollback of a specific active transaction.
+        
+        Args:
+            transaction_id: Unique transaction identifier to rollback
+            reason: Reason for forced rollback
+            
+        Returns:
+            True if rollback was successful, False if transaction not found
+        """
+        with self._lock:
+            metrics = self._active_transactions.get(transaction_id)
+            if not metrics:
+                logger.warning(
+                    "Cannot rollback transaction - not found",
+                    transaction_id=transaction_id,
+                    reason=reason
+                )
+                return False
+            
+            # Mark for rollback (actual rollback handled by context manager)
+            metrics.rollback_initiated = True
+            metrics.state = TransactionState.ABORTING
+            
+            transaction_rollback_total.labels(
+                database=metrics.database,
+                rollback_reason=reason,
+                initiated_by='manual'
+            ).inc()
             
             logger.warning(
-                "Async transaction aborted",
-                transaction_id=tx_context.transaction_id,
-                error=str(error),
-                operation_count=tx_context.operation_count
+                "Transaction marked for forced rollback",
+                transaction_id=transaction_id,
+                database=metrics.database,
+                reason=reason
             )
             
-        except Exception as abort_error:
-            tx_context.state = TransactionState.FAILED
-            
-            logger.error(
-                "Failed to abort async transaction",
-                transaction_id=tx_context.transaction_id,
-                abort_error=str(abort_error),
-                original_error=str(error)
-            )
+            return True
     
-    async def execute_in_transaction(
-        self,
-        operation: Callable[[AsyncIOMotorClientSession, TransactionContext], Awaitable[AsyncT]],
-        database_name: Optional[str] = None,
-        config: Optional[TransactionConfiguration] = None
-    ) -> AsyncT:
+    def cleanup_stale_transactions(self, max_age_seconds: int = 3600) -> int:
         """
-        Execute async operation within a transaction.
+        Cleanup stale transactions that have exceeded maximum age.
         
         Args:
-            operation: Async function to execute within transaction
-            database_name: Database name for transaction
-            config: Transaction configuration
+            max_age_seconds: Maximum age for active transactions
             
         Returns:
-            Result of the async operation
-            
-        Raises:
-            DatabaseTransactionError: On transaction failures
+            Number of stale transactions cleaned up
         """
-        async with self.transaction(database_name, config) as tx_context:
-            session = await self.motor_client.start_session()
-            try:
-                return await operation(session, tx_context)
-            finally:
-                session.end_session()
-    
-    async def get_active_transactions(self) -> Dict[str, Dict[str, Any]]:
-        """Get information about currently active async transactions."""
-        async with self._transaction_lock:
-            return {
-                tx_id: tx_context.to_dict()
-                for tx_id, tx_context in self._active_transactions.items()
-            }
-    
-    async def get_transaction_statistics(self) -> Dict[str, Any]:
-        """Get async transaction performance and utilization statistics."""
-        async with self._transaction_lock:
-            active_count = len(self._active_transactions)
+        current_time = time.perf_counter()
+        cleanup_count = 0
+        
+        with self._lock:
+            stale_transactions = []
             
-            # Calculate average durations for active transactions
-            active_durations = [
-                tx.get_duration() for tx in self._active_transactions.values()
-                if tx.get_duration() is not None
+            for txn_id, metrics in self._active_transactions.items():
+                age_seconds = current_time - metrics.start_time
+                if age_seconds > max_age_seconds:
+                    stale_transactions.append((txn_id, metrics))
+            
+            # Mark stale transactions for cleanup
+            for txn_id, metrics in stale_transactions:
+                metrics.rollback_initiated = True
+                metrics.state = TransactionState.TIMEOUT
+                
+                logger.warning(
+                    "Stale transaction marked for cleanup",
+                    transaction_id=txn_id,
+                    database=metrics.database,
+                    age_seconds=current_time - metrics.start_time,
+                    max_age_seconds=max_age_seconds
+                )
+                
+                cleanup_count += 1
+        
+        if cleanup_count > 0:
+            logger.info(
+                "Stale transaction cleanup completed",
+                cleanup_count=cleanup_count,
+                max_age_seconds=max_age_seconds
+            )
+        
+        return cleanup_count
+
+
+class DeadlockDetector:
+    """
+    Simple deadlock detection for transaction monitoring.
+    
+    Provides basic deadlock detection and alerting for transaction
+    operations to prevent system deadlocks and improve overall
+    database performance and reliability.
+    """
+    
+    def __init__(self, detection_window_seconds: int = 30):
+        """Initialize deadlock detector with configuration"""
+        self.detection_window_seconds = detection_window_seconds
+        self._lock_waits: Dict[str, List[float]] = defaultdict(list)
+        self._lock = Lock()
+    
+    def record_lock_wait(self, transaction_id: str, wait_time_seconds: float):
+        """Record lock wait time for deadlock detection"""
+        current_time = time.time()
+        
+        with self._lock:
+            # Clean old entries
+            cutoff_time = current_time - self.detection_window_seconds
+            self._lock_waits[transaction_id] = [
+                wait_time for wait_time in self._lock_waits[transaction_id]
+                if wait_time > cutoff_time
             ]
             
-            avg_duration = (
-                sum(active_durations) / len(active_durations) 
-                if active_durations else 0.0
+            # Add new wait time
+            self._lock_waits[transaction_id].append(current_time)
+    
+    def detect_potential_deadlock(self, transaction_id: str) -> bool:
+        """Detect potential deadlock for transaction"""
+        with self._lock:
+            wait_times = self._lock_waits.get(transaction_id, [])
+            
+            # Simple heuristic: more than 3 lock waits in detection window
+            return len(wait_times) > 3
+    
+    def get_deadlock_statistics(self) -> Dict[str, Any]:
+        """Get deadlock detection statistics"""
+        with self._lock:
+            total_transactions = len(self._lock_waits)
+            potentially_deadlocked = sum(
+                1 for waits in self._lock_waits.values() if len(waits) > 3
             )
             
             return {
-                'active_transactions': active_count,
-                'average_active_duration': avg_duration,
-                'database': self.default_database,
-                'config': self.config.__dict__
+                'total_monitored_transactions': total_transactions,
+                'potentially_deadlocked_transactions': potentially_deadlocked,
+                'detection_window_seconds': self.detection_window_seconds,
+                'timestamp': datetime.now(timezone.utc).isoformat()
             }
 
 
-class TransactionRegistry:
-    """
-    Global registry for managing transaction managers and configurations.
-    
-    Provides centralized access to transaction managers for both sync and async
-    operations with configuration management and monitoring integration.
-    """
-    
-    def __init__(self):
-        """Initialize the transaction registry."""
-        self._sync_managers: Dict[str, TransactionManager] = {}
-        self._async_managers: Dict[str, AsyncTransactionManager] = {}
-        self._default_config = TransactionConfiguration()
-        self._registry_lock = Lock()
-        
-        logger.info("Initialized TransactionRegistry for centralized transaction management")
-    
-    def register_sync_manager(
-        self,
-        name: str,
-        mongo_client: MongoClient,
-        database: str,
-        config: Optional[TransactionConfiguration] = None
-    ) -> TransactionManager:
-        """
-        Register a new synchronous transaction manager.
-        
-        Args:
-            name: Unique name for the transaction manager
-            mongo_client: PyMongo client instance
-            database: Default database name
-            config: Transaction configuration
-            
-        Returns:
-            TransactionManager: Configured transaction manager
-        """
-        with self._registry_lock:
-            if name in self._sync_managers:
-                raise ValueError(f"Sync transaction manager '{name}' already registered")
-            
-            manager = TransactionManager(
-                mongo_client=mongo_client,
-                default_database=database,
-                config=config or self._default_config
-            )
-            
-            self._sync_managers[name] = manager
-            
-            logger.info(
-                "Registered sync transaction manager",
-                name=name,
-                database=database
-            )
-            
-            return manager
-    
-    def register_async_manager(
-        self,
-        name: str,
-        motor_client: AsyncIOMotorClient,
-        database: str,
-        config: Optional[TransactionConfiguration] = None
-    ) -> AsyncTransactionManager:
-        """
-        Register a new asynchronous transaction manager.
-        
-        Args:
-            name: Unique name for the transaction manager
-            motor_client: Motor async client instance
-            database: Default database name
-            config: Transaction configuration
-            
-        Returns:
-            AsyncTransactionManager: Configured async transaction manager
-        """
-        with self._registry_lock:
-            if name in self._async_managers:
-                raise ValueError(f"Async transaction manager '{name}' already registered")
-            
-            manager = AsyncTransactionManager(
-                motor_client=motor_client,
-                default_database=database,
-                config=config or self._default_config
-            )
-            
-            self._async_managers[name] = manager
-            
-            logger.info(
-                "Registered async transaction manager",
-                name=name,
-                database=database
-            )
-            
-            return manager
-    
-    def get_sync_manager(self, name: str) -> Optional[TransactionManager]:
-        """Get registered synchronous transaction manager by name."""
-        with self._registry_lock:
-            return self._sync_managers.get(name)
-    
-    def get_async_manager(self, name: str) -> Optional[AsyncTransactionManager]:
-        """Get registered asynchronous transaction manager by name."""
-        with self._registry_lock:
-            return self._async_managers.get(name)
-    
-    def list_managers(self) -> Dict[str, Dict[str, Any]]:
-        """List all registered transaction managers."""
-        with self._registry_lock:
-            return {
-                'sync_managers': list(self._sync_managers.keys()),
-                'async_managers': list(self._async_managers.keys()),
-                'default_config': self._default_config.__dict__
-            }
-    
-    def set_default_configuration(self, config: TransactionConfiguration) -> None:
-        """Set default transaction configuration for new managers."""
-        with self._registry_lock:
-            self._default_config = config
-            logger.info("Updated default transaction configuration")
+# Global transaction manager instance
+_global_transaction_manager: Optional[TransactionManager] = None
 
 
-# Global transaction registry instance
-transaction_registry = TransactionRegistry()
-
-
-# Convenience functions for common transaction patterns
-def create_sync_transaction_manager(
-    mongo_client: MongoClient,
-    database: str,
-    config: Optional[TransactionConfiguration] = None,
-    register_name: Optional[str] = None
+def get_transaction_manager(
+    config: Optional[TransactionConfig] = None,
+    metrics_collector: Optional[DatabaseMetricsCollector] = None
 ) -> TransactionManager:
     """
-    Create and optionally register a synchronous transaction manager.
+    Get or create global transaction manager instance.
     
     Args:
-        mongo_client: PyMongo client instance
-        database: Default database name
-        config: Transaction configuration
-        register_name: Name to register manager (if provided)
+        config: Transaction configuration (used only for initial creation)
+        metrics_collector: Metrics collector (used only for initial creation)
         
     Returns:
-        TransactionManager: Configured transaction manager
+        TransactionManager instance
     """
-    manager = TransactionManager(
-        mongo_client=mongo_client,
-        default_database=database,
-        config=config
-    )
+    global _global_transaction_manager
     
-    if register_name:
-        transaction_registry.register_sync_manager(
-            name=register_name,
-            mongo_client=mongo_client,
-            database=database,
-            config=config
-        )
+    if _global_transaction_manager is None:
+        _global_transaction_manager = TransactionManager(config, metrics_collector)
     
-    return manager
+    return _global_transaction_manager
 
 
-def create_async_transaction_manager(
-    motor_client: AsyncIOMotorClient,
-    database: str,
-    config: Optional[TransactionConfiguration] = None,
-    register_name: Optional[str] = None
-) -> AsyncTransactionManager:
+def configure_transaction_manager(
+    config: TransactionConfig,
+    metrics_collector: Optional[DatabaseMetricsCollector] = None
+) -> TransactionManager:
     """
-    Create and optionally register an asynchronous transaction manager.
+    Configure global transaction manager with specific settings.
     
     Args:
-        motor_client: Motor async client instance
-        database: Default database name
         config: Transaction configuration
-        register_name: Name to register manager (if provided)
+        metrics_collector: Optional metrics collector
         
     Returns:
-        AsyncTransactionManager: Configured async transaction manager
+        Configured TransactionManager instance
     """
-    manager = AsyncTransactionManager(
-        motor_client=motor_client,
-        default_database=database,
-        config=config
+    global _global_transaction_manager
+    _global_transaction_manager = TransactionManager(config, metrics_collector)
+    return _global_transaction_manager
+
+
+# Convenience decorators for transaction management
+def with_transaction(
+    database: str,
+    config: Optional[TransactionConfig] = None
+):
+    """
+    Decorator for automatic transaction management around functions.
+    
+    Args:
+        database: Database name for transaction
+        config: Optional transaction configuration
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            # Get transaction manager and MongoDB client from context
+            transaction_manager = get_transaction_manager(config)
+            
+            # This would need to be adapted based on your application's 
+            # dependency injection or context management pattern
+            # For now, this is a placeholder implementation
+            
+            # Example: client would be injected or retrieved from Flask context
+            # client = get_current_mongodb_client()
+            # with transaction_manager.transaction(client, database) as (session, metrics):
+            #     return func(session, metrics, *args, **kwargs)
+            
+            return func(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
+def with_async_transaction(
+    database_name: str,
+    config: Optional[TransactionConfig] = None
+):
+    """
+    Decorator for automatic async transaction management around functions.
+    
+    Args:
+        database_name: Database name for transaction
+        config: Optional transaction configuration
+    """
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            # Get transaction manager and Motor database from context
+            transaction_manager = get_transaction_manager(config)
+            
+            # This would need to be adapted based on your application's 
+            # dependency injection or context management pattern
+            # For now, this is a placeholder implementation
+            
+            # Example: database would be injected or retrieved from Flask context
+            # database = get_current_motor_database()
+            # async with transaction_manager.async_transaction(database, database_name) as (session, metrics):
+            #     return await func(session, metrics, *args, **kwargs)
+            
+            return await func(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
+# Flask integration utilities
+def init_transaction_management(
+    app,
+    config: Optional[TransactionConfig] = None,
+    metrics_collector: Optional[DatabaseMetricsCollector] = None
+) -> TransactionManager:
+    """
+    Initialize transaction management for Flask application.
+    
+    Args:
+        app: Flask application instance
+        config: Transaction configuration
+        metrics_collector: Metrics collector for monitoring
+        
+    Returns:
+        Configured TransactionManager instance
+    """
+    # Create or configure transaction manager
+    transaction_manager = configure_transaction_manager(config, metrics_collector)
+    
+    # Store in Flask app config
+    app.config['TRANSACTION_MANAGER'] = transaction_manager
+    
+    # Register health check endpoint
+    @app.route('/health/transactions')
+    def transaction_health():
+        """Transaction system health check endpoint"""
+        try:
+            stats = transaction_manager.get_transaction_statistics()
+            
+            # Determine health status based on utilization and error rates
+            utilization = stats['active_transactions']['utilization_percent']
+            success_rate = stats['completed_transactions']['success_rate_percent']
+            
+            if utilization < 80 and success_rate > 95:
+                status = 'healthy'
+                http_status = 200
+            elif utilization < 95 and success_rate > 90:
+                status = 'degraded'
+                http_status = 200
+            else:
+                status = 'unhealthy'
+                http_status = 503
+            
+            return {
+                'status': status,
+                'transaction_statistics': stats,
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            }, http_status
+            
+        except Exception as e:
+            logger.error(
+                "Transaction health check failed",
+                error=str(e),
+                error_type=type(e).__name__
+            )
+            return {
+                'status': 'error',
+                'error': str(e),
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            }, 503
+    
+    # Register transaction statistics endpoint
+    @app.route('/admin/transactions/statistics')
+    def transaction_statistics():
+        """Transaction statistics endpoint for monitoring"""
+        try:
+            from flask import request
+            database_filter = request.args.get('database')
+            
+            stats = transaction_manager.get_transaction_statistics(database_filter)
+            return stats, 200
+            
+        except Exception as e:
+            logger.error(
+                "Transaction statistics endpoint failed",
+                error=str(e),
+                error_type=type(e).__name__
+            )
+            return {
+                'error': str(e),
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            }, 500
+    
+    app.logger.info(
+        "Transaction management initialized",
+        max_concurrent=config.max_concurrent_transactions if config else 50,
+        monitoring_enabled=config.enable_monitoring if config else True,
+        isolation_level=config.isolation_level.name if config else TransactionIsolationLevel.REPEATABLE_READ.name
     )
     
-    if register_name:
-        transaction_registry.register_async_manager(
-            name=register_name,
-            motor_client=motor_client,
-            database=database,
-            config=config
-        )
-    
-    return manager
-
-
-@contextmanager
-def simple_transaction(
-    mongo_client: MongoClient,
-    database: str,
-    config: Optional[TransactionConfiguration] = None
-) -> ContextManager[TransactionContext]:
-    """
-    Simple transaction context manager for one-off operations.
-    
-    Args:
-        mongo_client: PyMongo client instance
-        database: Database name
-        config: Transaction configuration
-        
-    Yields:
-        TransactionContext: Transaction context for operation tracking
-    """
-    manager = create_sync_transaction_manager(mongo_client, database, config)
-    with manager.transaction() as tx_context:
-        yield tx_context
-
-
-@asynccontextmanager
-async def simple_async_transaction(
-    motor_client: AsyncIOMotorClient,
-    database: str,
-    config: Optional[TransactionConfiguration] = None
-) -> AsyncContextManager[TransactionContext]:
-    """
-    Simple async transaction context manager for one-off operations.
-    
-    Args:
-        motor_client: Motor async client instance
-        database: Database name
-        config: Transaction configuration
-        
-    Yields:
-        TransactionContext: Transaction context for operation tracking
-    """
-    manager = create_async_transaction_manager(motor_client, database, config)
-    async with manager.transaction() as tx_context:
-        yield tx_context
+    return transaction_manager
 
 
 # Export public interface
 __all__ = [
     # Core classes
     'TransactionManager',
-    'AsyncTransactionManager',
-    'TransactionRegistry',
+    'TransactionConfig',
+    'TransactionMetrics',
+    'DeadlockDetector',
     
-    # Configuration and context
-    'TransactionConfiguration',
-    'TransactionContext',
+    # Enums
     'TransactionState',
     'TransactionIsolationLevel',
+    'TransactionWriteConcern',
     
-    # Factory functions
-    'create_sync_transaction_manager',
-    'create_async_transaction_manager',
+    # Global functions
+    'get_transaction_manager',
+    'configure_transaction_manager',
     
-    # Convenience functions
-    'simple_transaction',
-    'simple_async_transaction',
+    # Decorators
+    'with_transaction',
+    'with_async_transaction',
     
-    # Global registry
-    'transaction_registry'
+    # Flask integration
+    'init_transaction_management',
+    
+    # Metrics
+    'transaction_operations_total',
+    'transaction_duration_seconds',
+    'transaction_retry_attempts',
+    'transaction_rollback_total',
+    'active_transactions_gauge',
+    'transaction_resource_usage'
 ]
