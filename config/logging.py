@@ -1,1017 +1,1281 @@
 """
-Structured logging configuration module implementing structlog 23.1+ for JSON-formatted 
-logging, enterprise log aggregation, security audit trails, and monitoring integration.
+Structured Logging Configuration Module
 
-This module replaces Node.js winston/morgan logging patterns with Python-based structured
-logging, providing comprehensive security audit capabilities, enterprise SIEM integration,
-and performance monitoring support per Section 3.6.1 and 6.4.2 requirements.
+This module implements comprehensive structured logging using structlog 23.1+ with
+JSON formatting, enterprise log aggregation, security audit trails, and monitoring
+integration. This replaces Node.js winston/morgan logging patterns while providing
+enhanced enterprise-grade logging capabilities for Flask applications.
 
 Key Features:
-- structlog 23.1+ for structured logging equivalent to Node.js patterns
-- python-json-logger 2.0+ for JSON log formatting
-- Security audit logging for authentication and authorization events
-- Enterprise log aggregation with Splunk/ELK Stack integration
-- Performance monitoring and error tracking integration
-- Flask application monitoring with request/response tracking
-- Rate limiting violation and circuit breaker event logging
-- JWT validation and permission cache event monitoring
+- structlog 23.1+ for structured logging equivalent to Node.js patterns (Section 3.6.1)
+- python-json-logger 2.0+ for JSON log formatting and enterprise aggregation (Section 3.6.1)
+- Comprehensive security audit logging for enterprise compliance (Section 6.4.2)
+- Enterprise logging system integration for Splunk/ELK Stack (Section 3.6.1)
+- Performance monitoring and error tracking integration (Section 3.6.1)
+- Circuit breaker and health check event logging (Section 4.5.2)
+- OpenTelemetry tracing integration for distributed logging (Section 4.5.1)
+- Prometheus metrics correlation and monitoring (Section 3.6.2)
 
 Dependencies:
 - structlog 23.1+ for structured logging framework
-- python-json-logger 2.0+ for JSON formatting
-- prometheus-client 0.17+ for metrics collection
-- config.settings for application configuration
+- python-json-logger 2.0+ for JSON log formatting
+- pythonjsonlogger for enterprise log formatting
+- opentelemetry-api 1.20+ for distributed tracing correlation
+- config.settings for centralized configuration management
+
+Author: Flask Migration Team
+Version: 1.0.0
+Migration Phase: Node.js to Python/Flask Migration (Section 0.1.1)
 """
 
-import structlog
 import logging
 import logging.config
 import sys
 import os
 import json
-from datetime import datetime, timezone
-from typing import Dict, Any, Optional, List, Union
-from pathlib import Path
-from prometheus_client import Counter, Histogram, Gauge
 import traceback
+import threading
+from pathlib import Path
+from typing import Dict, Any, Optional, List, Union, Callable
+from datetime import datetime, timezone
+from contextlib import contextmanager
 from functools import wraps
 
-# Import configuration settings
+import structlog
+from pythonjsonlogger import jsonlogger
+from structlog.types import EventDict, WrappedLogger
+from structlog._config import BoundLoggerLazyProxy
+
+# Optional OpenTelemetry integration for distributed tracing
 try:
-    from config.settings import get_config
+    from opentelemetry import trace
+    from opentelemetry.trace import get_current_span
+    OPENTELEMETRY_AVAILABLE = True
 except ImportError:
-    # Fallback for cases where settings might not be available during initialization
-    def get_config():
-        return type('Config', (), {
-            'LOG_LEVEL': os.getenv('LOG_LEVEL', 'INFO'),
-            'LOG_FORMAT': os.getenv('LOG_FORMAT', 'json'),
-            'ENVIRONMENT': os.getenv('FLASK_ENV', 'production'),
-            'ENABLE_SECURITY_AUDIT': os.getenv('ENABLE_SECURITY_AUDIT', 'true').lower() == 'true',
-            'SIEM_INTEGRATION_ENABLED': os.getenv('SIEM_INTEGRATION_ENABLED', 'true').lower() == 'true',
-            'LOG_FILE_PATH': os.getenv('LOG_FILE_PATH', '/var/log/flask-app'),
-            'MAX_LOG_FILE_SIZE': int(os.getenv('MAX_LOG_FILE_SIZE', '104857600')),  # 100MB
-            'LOG_BACKUP_COUNT': int(os.getenv('LOG_BACKUP_COUNT', '5')),
-        })()
+    OPENTELEMETRY_AVAILABLE = False
+    trace = None
+    get_current_span = None
+
+# Optional Prometheus integration for metrics correlation
+try:
+    from prometheus_client import Counter, Histogram, Gauge
+    PROMETHEUS_AVAILABLE = True
+except ImportError:
+    PROMETHEUS_AVAILABLE = False
+    Counter = Histogram = Gauge = None
+
+from config.settings import get_config
+
+
+class LoggingConfigurationError(Exception):
+    """Custom exception for logging configuration validation errors."""
+    pass
 
 
 class SecurityAuditLogger:
     """
-    Comprehensive security audit logging for authentication, authorization, and security events
-    with structured JSON formatting and enterprise compliance support per Section 6.4.2.
+    Comprehensive security audit logging implementation for Flask applications
+    with structured event logging, threat detection, and compliance reporting.
     
-    This class provides specialized logging methods for security events, threat detection,
-    compliance reporting, and integration with Security Information and Event Management (SIEM)
-    systems for enterprise-grade security monitoring.
+    This class provides enterprise-grade security event logging capabilities
+    with integration to SIEM systems and security monitoring platforms as
+    specified in Section 6.4.2.
     """
     
-    def __init__(self):
-        """Initialize security audit logger with structured logging configuration."""
-        self.logger = structlog.get_logger("security.audit")
-        self.metrics = SecurityMetrics()
+    def __init__(self, logger_name: str = "security.audit"):
+        """
+        Initialize security audit logger with structured logging configuration.
+        
+        Args:
+            logger_name: Logger name for security events
+        """
+        self.logger = structlog.get_logger(logger_name)
+        self.metrics = SecurityMetrics() if PROMETHEUS_AVAILABLE else None
     
     def log_authentication_event(
         self,
         event_type: str,
-        user_id: Optional[str],
-        result: str,
+        user_id: Optional[str] = None,
+        result: str = "unknown",
         source_ip: Optional[str] = None,
         user_agent: Optional[str] = None,
-        auth_method: str = "jwt",
         additional_context: Optional[Dict[str, Any]] = None
     ) -> None:
         """
-        Log comprehensive authentication events with security context and metrics tracking.
+        Log authentication events with comprehensive security context.
         
         Args:
-            event_type: Type of authentication event (login, logout, token_refresh, etc.)
-            user_id: User identifier (None for failed attempts)
-            result: Authentication result (success, failure, expired, invalid)
-            source_ip: Client IP address for geolocation and threat analysis
-            user_agent: User agent string for device fingerprinting
-            auth_method: Authentication method used (jwt, oauth, mfa)
-            additional_context: Additional security context information
+            event_type: Type of authentication event (login, logout, token_refresh)
+            user_id: User identifier (masked for privacy)
+            result: Authentication result (success, failure, blocked)
+            source_ip: Client IP address
+            user_agent: User agent string
+            additional_context: Additional security context
         """
         log_data = {
-            'event_category': 'authentication',
-            'event_type': event_type,
-            'user_id': user_id,
-            'result': result,
-            'auth_method': auth_method,
-            'source_ip': source_ip,
-            'user_agent': user_agent,
-            'timestamp': datetime.now(timezone.utc).isoformat(),
-            'severity': 'HIGH' if result == 'failure' else 'INFO',
-            'compliance_tags': ['SOC2', 'ISO27001', 'GDPR'],
+            "event_category": "authentication",
+            "event_type": event_type,
+            "result": result,
+            "user_id": self._mask_user_id(user_id) if user_id else None,
+            "source_ip": source_ip,
+            "user_agent": user_agent,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "severity": "high" if result == "failure" else "info"
         }
         
-        # Add additional context if provided
         if additional_context:
             log_data.update(additional_context)
         
-        # Update security metrics
-        self.metrics.record_authentication_event(result)
+        # Add distributed tracing context if available
+        if OPENTELEMETRY_AVAILABLE and get_current_span():
+            span = get_current_span()
+            span_context = span.get_span_context()
+            log_data.update({
+                "trace_id": format(span_context.trace_id, "032x"),
+                "span_id": format(span_context.span_id, "016x")
+            })
         
-        # Log with appropriate severity level
-        if result == 'success':
-            self.logger.info("Authentication successful", **log_data)
-        else:
+        if result == "failure":
             self.logger.warning("Authentication failed", **log_data)
+            if self.metrics:
+                self.metrics.auth_failures.inc()
+        else:
+            self.logger.info("Authentication event", **log_data)
+            if self.metrics:
+                self.metrics.auth_success.inc()
     
     def log_authorization_event(
         self,
         event_type: str,
-        user_id: str,
-        resource: str,
-        action: str,
-        result: str,
+        user_id: Optional[str] = None,
+        resource: Optional[str] = None,
         permissions: Optional[List[str]] = None,
-        resource_id: Optional[str] = None,
+        result: str = "unknown",
         endpoint: Optional[str] = None,
         additional_context: Optional[Dict[str, Any]] = None
     ) -> None:
         """
-        Log authorization decisions with comprehensive security context and RBAC details.
+        Log authorization events with resource and permission context.
         
         Args:
-            event_type: Type of authorization event (permission_check, resource_access, etc.)
-            user_id: User identifier making the request
+            event_type: Type of authorization event (permission_check, access_grant, access_deny)
+            user_id: User identifier (masked for privacy)
             resource: Resource being accessed
-            action: Action being attempted (read, write, delete, etc.)
-            result: Authorization result (granted, denied, escalated)
-            permissions: List of permissions checked
-            resource_id: Specific resource identifier
-            endpoint: API endpoint being accessed
+            permissions: Required permissions
+            result: Authorization result (granted, denied, error)
+            endpoint: API endpoint accessed
             additional_context: Additional authorization context
         """
         log_data = {
-            'event_category': 'authorization',
-            'event_type': event_type,
-            'user_id': user_id,
-            'resource': resource,
-            'resource_id': resource_id,
-            'action': action,
-            'result': result,
-            'permissions': permissions or [],
-            'endpoint': endpoint,
-            'timestamp': datetime.now(timezone.utc).isoformat(),
-            'severity': 'MEDIUM' if result == 'denied' else 'INFO',
-            'compliance_tags': ['SOX', 'HIPAA', 'PCI_DSS'],
+            "event_category": "authorization",
+            "event_type": event_type,
+            "result": result,
+            "user_id": self._mask_user_id(user_id) if user_id else None,
+            "resource": resource,
+            "permissions": permissions or [],
+            "endpoint": endpoint,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "severity": "warning" if result == "denied" else "info"
         }
         
-        # Add additional context if provided
         if additional_context:
             log_data.update(additional_context)
         
-        # Update security metrics
-        self.metrics.record_authorization_event(result)
+        # Add distributed tracing context if available
+        if OPENTELEMETRY_AVAILABLE and get_current_span():
+            span = get_current_span()
+            span_context = span.get_span_context()
+            log_data.update({
+                "trace_id": format(span_context.trace_id, "032x"),
+                "span_id": format(span_context.span_id, "016x")
+            })
         
-        # Log with appropriate severity level
-        if result == 'granted':
-            self.logger.info("Authorization granted", **log_data)
-        else:
+        if result == "denied":
             self.logger.warning("Authorization denied", **log_data)
+            if self.metrics:
+                self.metrics.authz_denials.inc()
+        else:
+            self.logger.info("Authorization event", **log_data)
+            if self.metrics:
+                self.metrics.authz_grants.inc()
     
     def log_security_violation(
         self,
         violation_type: str,
-        user_id: Optional[str],
-        details: str,
-        severity: str = "HIGH",
+        severity: str = "high",
+        user_id: Optional[str] = None,
         source_ip: Optional[str] = None,
-        endpoint: Optional[str] = None,
-        additional_context: Optional[Dict[str, Any]] = None
+        details: Optional[Dict[str, Any]] = None
     ) -> None:
         """
-        Log security violations and potential threats with comprehensive incident context.
+        Log security violations for threat detection and incident response.
         
         Args:
-            violation_type: Type of security violation (rate_limit, injection, xss, etc.)
-            user_id: User identifier (if known)
-            details: Detailed description of the violation
-            severity: Violation severity (LOW, MEDIUM, HIGH, CRITICAL)
-            source_ip: Source IP address for threat intelligence
-            endpoint: Affected endpoint
-            additional_context: Additional security context
+            violation_type: Type of security violation (rate_limit, injection_attempt, etc.)
+            severity: Violation severity (low, medium, high, critical)
+            user_id: User identifier (masked for privacy)
+            source_ip: Source IP address
+            details: Additional violation details
         """
         log_data = {
-            'event_category': 'security_violation',
-            'violation_type': violation_type,
-            'user_id': user_id,
-            'details': details,
-            'severity': severity,
-            'source_ip': source_ip,
-            'endpoint': endpoint,
-            'timestamp': datetime.now(timezone.utc).isoformat(),
-            'requires_investigation': severity in ['HIGH', 'CRITICAL'],
-            'compliance_tags': ['SECURITY_INCIDENT', 'SOC_ALERT'],
+            "event_category": "security_violation",
+            "violation_type": violation_type,
+            "severity": severity,
+            "user_id": self._mask_user_id(user_id) if user_id else None,
+            "source_ip": source_ip,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "requires_investigation": severity in ["high", "critical"]
         }
         
-        # Add additional context if provided
-        if additional_context:
-            log_data.update(additional_context)
+        if details:
+            log_data.update(details)
         
-        # Update security metrics
-        self.metrics.record_security_violation(violation_type, severity)
+        # Add distributed tracing context if available
+        if OPENTELEMETRY_AVAILABLE and get_current_span():
+            span = get_current_span()
+            span_context = span.get_span_context()
+            log_data.update({
+                "trace_id": format(span_context.trace_id, "032x"),
+                "span_id": format(span_context.span_id, "016x")
+            })
         
-        # Log as error for high severity violations
-        if severity in ['HIGH', 'CRITICAL']:
+        if severity == "critical":
+            self.logger.critical("Critical security violation detected", **log_data)
+        elif severity == "high":
             self.logger.error("Security violation detected", **log_data)
         else:
-            self.logger.warning("Security violation detected", **log_data)
+            self.logger.warning("Security event detected", **log_data)
+        
+        if self.metrics:
+            self.metrics.security_violations.labels(
+                violation_type=violation_type,
+                severity=severity
+            ).inc()
     
-    def log_rate_limit_violation(
+    def log_data_access_event(
         self,
-        user_id: Optional[str],
-        endpoint: str,
-        limit_type: str,
-        current_rate: int,
-        limit_threshold: int,
-        source_ip: Optional[str] = None,
+        operation: str,
+        resource_type: str,
+        resource_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        result: str = "success",
         additional_context: Optional[Dict[str, Any]] = None
     ) -> None:
         """
-        Log rate limiting violations with detailed rate analysis for threat detection.
+        Log data access events for compliance and audit requirements.
         
         Args:
-            user_id: User identifier (if authenticated)
-            endpoint: Endpoint being rate limited
-            limit_type: Type of rate limit (per_minute, per_hour, burst)
-            current_rate: Current request rate
-            limit_threshold: Rate limit threshold
-            source_ip: Source IP address
-            additional_context: Additional rate limiting context
+            operation: Data operation (read, write, delete, export)
+            resource_type: Type of resource accessed
+            resource_id: Resource identifier (masked for privacy)
+            user_id: User performing the operation
+            result: Operation result (success, failure, partial)
+            additional_context: Additional audit context
         """
         log_data = {
-            'event_category': 'rate_limiting',
-            'event_type': 'rate_limit_violation',
-            'user_id': user_id,
-            'endpoint': endpoint,
-            'limit_type': limit_type,
-            'current_rate': current_rate,
-            'limit_threshold': limit_threshold,
-            'source_ip': source_ip,
-            'timestamp': datetime.now(timezone.utc).isoformat(),
-            'severity': 'MEDIUM',
-            'potential_attack': current_rate > (limit_threshold * 2),
+            "event_category": "data_access",
+            "operation": operation,
+            "resource_type": resource_type,
+            "resource_id": self._mask_resource_id(resource_id) if resource_id else None,
+            "user_id": self._mask_user_id(user_id) if user_id else None,
+            "result": result,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "compliance_event": True
         }
         
-        # Add additional context if provided
         if additional_context:
             log_data.update(additional_context)
         
-        # Update security metrics
-        self.metrics.record_rate_limit_violation(endpoint)
+        # Add distributed tracing context if available
+        if OPENTELEMETRY_AVAILABLE and get_current_span():
+            span = get_current_span()
+            span_context = span.get_span_context()
+            log_data.update({
+                "trace_id": format(span_context.trace_id, "032x"),
+                "span_id": format(span_context.span_id, "016x")
+            })
         
-        self.logger.warning("Rate limit violation", **log_data)
+        self.logger.info("Data access event", **log_data)
+        
+        if self.metrics:
+            self.metrics.data_access_events.labels(
+                operation=operation,
+                resource_type=resource_type,
+                result=result
+            ).inc()
     
-    def log_circuit_breaker_event(
-        self,
-        service: str,
-        event: str,
-        failure_count: int,
-        circuit_state: str,
-        additional_info: Optional[Dict[str, Any]] = None
-    ) -> None:
+    def _mask_user_id(self, user_id: str) -> str:
         """
-        Log circuit breaker events for service resilience monitoring and alerting.
+        Mask user ID for privacy protection while maintaining audit capability.
         
         Args:
-            service: Service name (auth0, database, external_api)
-            event: Circuit breaker event (opened, closed, half_open, failure)
-            failure_count: Current failure count
-            circuit_state: Current circuit breaker state
-            additional_info: Additional circuit breaker context
+            user_id: Original user identifier
+            
+        Returns:
+            Masked user identifier
         """
-        log_data = {
-            'event_category': 'circuit_breaker',
-            'service': service,
-            'circuit_event': event,
-            'failure_count': failure_count,
-            'circuit_state': circuit_state,
-            'timestamp': datetime.now(timezone.utc).isoformat(),
-            'severity': 'HIGH' if event == 'opened' else 'INFO',
-            'monitoring_tags': ['SERVICE_HEALTH', 'AVAILABILITY'],
-        }
+        if not user_id or len(user_id) < 4:
+            return "****"
+        return f"{user_id[:2]}***{user_id[-2:]}"
+    
+    def _mask_resource_id(self, resource_id: str) -> str:
+        """
+        Mask resource ID for privacy protection while maintaining audit capability.
         
-        # Add additional context if provided
-        if additional_info:
-            log_data.update(additional_info)
-        
-        # Update circuit breaker metrics
-        self.metrics.record_circuit_breaker_event(service, event)
-        
-        if event == 'opened':
-            self.logger.error("Circuit breaker opened", **log_data)
-        else:
-            self.logger.info("Circuit breaker event", **log_data)
+        Args:
+            resource_id: Original resource identifier
+            
+        Returns:
+            Masked resource identifier
+        """
+        if not resource_id or len(resource_id) < 4:
+            return "****"
+        return f"{resource_id[:3]}***{resource_id[-3:]}"
 
 
 class PerformanceLogger:
     """
-    Performance monitoring logger for Flask application metrics, request tracking,
-    and baseline compliance monitoring per Section 3.6.1 requirements.
-    
-    This class provides specialized logging for performance metrics, request timing,
-    database query performance, and external service integration performance to
-    ensure ≤10% variance compliance with Node.js baseline performance.
+    Performance monitoring logger for tracking system performance metrics,
+    database operations, external service calls, and compliance with the
+    ≤10% variance requirement from Node.js baseline.
     """
     
-    def __init__(self):
-        """Initialize performance logger with metrics collection."""
-        self.logger = structlog.get_logger("performance.monitoring")
-        self.metrics = PerformanceMetrics()
+    def __init__(self, logger_name: str = "performance.monitoring"):
+        """
+        Initialize performance logger with metrics collection.
+        
+        Args:
+            logger_name: Logger name for performance events
+        """
+        self.logger = structlog.get_logger(logger_name)
+        self.metrics = PerformanceMetrics() if PROMETHEUS_AVAILABLE else None
     
     def log_request_performance(
         self,
-        method: str,
         endpoint: str,
+        method: str,
+        duration_ms: float,
         status_code: int,
-        response_time: float,
         user_id: Optional[str] = None,
-        request_size: Optional[int] = None,
-        response_size: Optional[int] = None,
         additional_context: Optional[Dict[str, Any]] = None
     ) -> None:
         """
-        Log detailed request performance metrics for baseline compliance monitoring.
+        Log HTTP request performance metrics.
         
         Args:
+            endpoint: API endpoint accessed
             method: HTTP method
-            endpoint: API endpoint
-            status_code: HTTP status code
-            response_time: Request response time in seconds
-            user_id: User identifier (if authenticated)
-            request_size: Request payload size in bytes
-            response_size: Response payload size in bytes
+            duration_ms: Request duration in milliseconds
+            status_code: HTTP response status code
+            user_id: User making the request
             additional_context: Additional performance context
         """
         log_data = {
-            'event_category': 'performance',
-            'event_type': 'request_performance',
-            'method': method,
-            'endpoint': endpoint,
-            'status_code': status_code,
-            'response_time_ms': round(response_time * 1000, 2),
-            'user_id': user_id,
-            'request_size_bytes': request_size,
-            'response_size_bytes': response_size,
-            'timestamp': datetime.now(timezone.utc).isoformat(),
-            'performance_grade': self._calculate_performance_grade(response_time),
+            "event_category": "performance",
+            "event_type": "http_request",
+            "endpoint": endpoint,
+            "method": method,
+            "duration_ms": duration_ms,
+            "status_code": status_code,
+            "user_id": user_id,
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
         
-        # Add additional context if provided
         if additional_context:
             log_data.update(additional_context)
         
-        # Update performance metrics
-        self.metrics.record_request_performance(method, endpoint, response_time, status_code)
+        # Add distributed tracing context if available
+        if OPENTELEMETRY_AVAILABLE and get_current_span():
+            span = get_current_span()
+            span_context = span.get_span_context()
+            log_data.update({
+                "trace_id": format(span_context.trace_id, "032x"),
+                "span_id": format(span_context.span_id, "016x")
+            })
         
-        # Log with appropriate level based on performance
-        if response_time > 5.0:  # 5 seconds threshold
-            self.logger.warning("Slow request performance", **log_data)
+        # Log at different levels based on performance
+        if duration_ms > 5000:  # > 5 seconds
+            self.logger.warning("Slow request detected", **log_data)
+        elif duration_ms > 1000:  # > 1 second
+            self.logger.info("Request completed", **log_data)
         else:
-            self.logger.info("Request performance", **log_data)
+            self.logger.debug("Request completed", **log_data)
+        
+        if self.metrics:
+            self.metrics.request_duration.labels(
+                endpoint=endpoint,
+                method=method,
+                status=str(status_code)
+            ).observe(duration_ms / 1000)  # Convert to seconds for Prometheus
     
-    def log_database_performance(
+    def log_database_operation(
         self,
         operation: str,
         collection: str,
-        query_time: float,
+        duration_ms: float,
+        result: str = "success",
         record_count: Optional[int] = None,
-        index_used: Optional[bool] = None,
         additional_context: Optional[Dict[str, Any]] = None
     ) -> None:
         """
-        Log database operation performance for MongoDB query optimization.
+        Log database operation performance metrics.
         
         Args:
-            operation: Database operation (find, insert, update, delete)
-            collection: MongoDB collection name
-            query_time: Query execution time in seconds
+            operation: Database operation type (find, insert, update, delete)
+            collection: Database collection name
+            duration_ms: Operation duration in milliseconds
+            result: Operation result (success, failure, timeout)
             record_count: Number of records affected
-            index_used: Whether database index was used
             additional_context: Additional database context
         """
         log_data = {
-            'event_category': 'database_performance',
-            'operation': operation,
-            'collection': collection,
-            'query_time_ms': round(query_time * 1000, 2),
-            'record_count': record_count,
-            'index_used': index_used,
-            'timestamp': datetime.now(timezone.utc).isoformat(),
-            'requires_optimization': query_time > 1.0,  # 1 second threshold
+            "event_category": "performance",
+            "event_type": "database_operation",
+            "operation": operation,
+            "collection": collection,
+            "duration_ms": duration_ms,
+            "result": result,
+            "record_count": record_count,
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
         
-        # Add additional context if provided
         if additional_context:
             log_data.update(additional_context)
         
-        # Update database performance metrics
-        self.metrics.record_database_performance(operation, collection, query_time)
+        # Add distributed tracing context if available
+        if OPENTELEMETRY_AVAILABLE and get_current_span():
+            span = get_current_span()
+            span_context = span.get_span_context()
+            log_data.update({
+                "trace_id": format(span_context.trace_id, "032x"),
+                "span_id": format(span_context.span_id, "016x")
+            })
         
-        if query_time > 2.0:  # 2 seconds threshold for warnings
-            self.logger.warning("Slow database query", **log_data)
+        # Log at different levels based on performance and result
+        if result != "success":
+            self.logger.error("Database operation failed", **log_data)
+        elif duration_ms > 1000:  # > 1 second
+            self.logger.warning("Slow database operation", **log_data)
         else:
-            self.logger.info("Database performance", **log_data)
+            self.logger.debug("Database operation completed", **log_data)
+        
+        if self.metrics:
+            self.metrics.db_operation_duration.labels(
+                operation=operation,
+                collection=collection,
+                result=result
+            ).observe(duration_ms / 1000)  # Convert to seconds for Prometheus
     
-    def log_cache_performance(
+    def log_external_service_call(
         self,
-        operation: str,
-        cache_key: str,
-        cache_hit: bool,
-        operation_time: float,
-        cache_size: Optional[int] = None,
+        service_name: str,
+        endpoint: str,
+        duration_ms: float,
+        status_code: Optional[int] = None,
+        result: str = "success",
         additional_context: Optional[Dict[str, Any]] = None
     ) -> None:
         """
-        Log Redis cache performance for optimization and monitoring.
+        Log external service call performance metrics.
         
         Args:
-            operation: Cache operation (get, set, delete, exists)
-            cache_key: Redis cache key pattern
-            cache_hit: Whether operation resulted in cache hit
-            operation_time: Cache operation time in seconds
-            cache_size: Size of cached data in bytes
-            additional_context: Additional cache context
+            service_name: Name of external service
+            endpoint: Service endpoint called
+            duration_ms: Call duration in milliseconds
+            status_code: HTTP status code if applicable
+            result: Call result (success, failure, timeout, circuit_open)
+            additional_context: Additional service context
         """
         log_data = {
-            'event_category': 'cache_performance',
-            'operation': operation,
-            'cache_key_pattern': self._mask_cache_key(cache_key),
-            'cache_hit': cache_hit,
-            'operation_time_ms': round(operation_time * 1000, 2),
-            'cache_size_bytes': cache_size,
-            'timestamp': datetime.now(timezone.utc).isoformat(),
-            'cache_efficiency': 'optimal' if cache_hit and operation_time < 0.1 else 'suboptimal',
+            "event_category": "performance",
+            "event_type": "external_service_call",
+            "service_name": service_name,
+            "endpoint": endpoint,
+            "duration_ms": duration_ms,
+            "status_code": status_code,
+            "result": result,
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
         
-        # Add additional context if provided
         if additional_context:
             log_data.update(additional_context)
         
-        # Update cache performance metrics
-        self.metrics.record_cache_performance(operation, cache_hit, operation_time)
+        # Add distributed tracing context if available
+        if OPENTELEMETRY_AVAILABLE and get_current_span():
+            span = get_current_span()
+            span_context = span.get_span_context()
+            log_data.update({
+                "trace_id": format(span_context.trace_id, "032x"),
+                "span_id": format(span_context.span_id, "016x")
+            })
         
-        self.logger.info("Cache performance", **log_data)
-    
-    def _calculate_performance_grade(self, response_time: float) -> str:
-        """Calculate performance grade based on response time."""
-        if response_time < 0.1:
-            return 'EXCELLENT'
-        elif response_time < 0.5:
-            return 'GOOD'
-        elif response_time < 1.0:
-            return 'FAIR'
-        elif response_time < 2.0:
-            return 'POOR'
+        # Log at different levels based on result and performance
+        if result in ["failure", "timeout"]:
+            self.logger.error("External service call failed", **log_data)
+        elif result == "circuit_open":
+            self.logger.warning("Circuit breaker open", **log_data)
+        elif duration_ms > 5000:  # > 5 seconds
+            self.logger.warning("Slow external service call", **log_data)
         else:
-            return 'CRITICAL'
-    
-    def _mask_cache_key(self, cache_key: str) -> str:
-        """Mask sensitive information in cache keys for logging."""
-        # Replace user IDs and sensitive identifiers with placeholders
-        import re
-        masked_key = re.sub(r':\w{8,}:', ':***:', cache_key)
-        masked_key = re.sub(r'user_id_\w+', 'user_id_***', masked_key)
-        return masked_key
+            self.logger.debug("External service call completed", **log_data)
+        
+        if self.metrics:
+            self.metrics.external_service_duration.labels(
+                service=service_name,
+                result=result
+            ).observe(duration_ms / 1000)  # Convert to seconds for Prometheus
 
 
-class SecurityMetrics:
+class CircuitBreakerLogger:
     """
-    Prometheus metrics collection for security events and monitoring integration.
-    
-    This class provides comprehensive metrics collection for security-related events
-    including authentication, authorization, security violations, and threat detection
-    for integration with enterprise monitoring and alerting systems.
+    Circuit breaker event logger for tracking service resilience patterns
+    and system health monitoring as specified in Section 4.5.2.
     """
     
-    def __init__(self):
-        """Initialize security metrics collectors."""
-        # Authentication metrics
-        self.auth_requests_total = Counter(
-            'auth_requests_total',
-            'Total authentication requests by result',
-            ['result', 'auth_method']
-        )
+    def __init__(self, logger_name: str = "circuit_breaker"):
+        """
+        Initialize circuit breaker logger.
         
-        # Authorization metrics
-        self.authz_decisions_total = Counter(
-            'authz_decisions_total',
-            'Total authorization decisions by result',
-            ['result', 'resource_type']
-        )
-        
-        # Security violation metrics
-        self.security_violations_total = Counter(
-            'security_violations_total',
-            'Total security violations by type and severity',
-            ['violation_type', 'severity']
-        )
-        
-        # Rate limiting metrics
-        self.rate_limit_violations_total = Counter(
-            'rate_limit_violations_total',
-            'Total rate limit violations by endpoint',
-            ['endpoint']
-        )
-        
-        # Circuit breaker metrics
-        self.circuit_breaker_events_total = Counter(
-            'circuit_breaker_events_total',
-            'Total circuit breaker events by service and event type',
-            ['service', 'event_type']
-        )
-        
-        # Security event timing
-        self.security_event_duration = Histogram(
-            'security_event_duration_seconds',
-            'Security event processing duration',
-            ['event_type']
-        )
+        Args:
+            logger_name: Logger name for circuit breaker events
+        """
+        self.logger = structlog.get_logger(logger_name)
+        self.metrics = CircuitBreakerMetrics() if PROMETHEUS_AVAILABLE else None
     
-    def record_authentication_event(self, result: str, auth_method: str = 'jwt') -> None:
-        """Record authentication event metrics."""
-        self.auth_requests_total.labels(result=result, auth_method=auth_method).inc()
-    
-    def record_authorization_event(self, result: str, resource_type: str = 'api') -> None:
-        """Record authorization decision metrics."""
-        self.authz_decisions_total.labels(result=result, resource_type=resource_type).inc()
-    
-    def record_security_violation(self, violation_type: str, severity: str) -> None:
-        """Record security violation metrics."""
-        self.security_violations_total.labels(
-            violation_type=violation_type, 
-            severity=severity
-        ).inc()
-    
-    def record_rate_limit_violation(self, endpoint: str) -> None:
-        """Record rate limit violation metrics."""
-        self.rate_limit_violations_total.labels(endpoint=endpoint).inc()
-    
-    def record_circuit_breaker_event(self, service: str, event_type: str) -> None:
-        """Record circuit breaker event metrics."""
-        self.circuit_breaker_events_total.labels(
-            service=service, 
-            event_type=event_type
-        ).inc()
-
-
-class PerformanceMetrics:
-    """
-    Prometheus metrics collection for performance monitoring and baseline compliance.
-    
-    This class provides comprehensive performance metrics collection for request timing,
-    database performance, cache efficiency, and external service integration performance
-    to ensure ≤10% variance compliance monitoring.
-    """
-    
-    def __init__(self):
-        """Initialize performance metrics collectors."""
-        # Request performance metrics
-        self.request_duration_seconds = Histogram(
-            'flask_request_duration_seconds',
-            'Flask request duration in seconds',
-            ['method', 'endpoint', 'status_code'],
-            buckets=[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
-        )
-        
-        # Database performance metrics
-        self.database_query_duration_seconds = Histogram(
-            'database_query_duration_seconds',
-            'Database query duration in seconds',
-            ['operation', 'collection'],
-            buckets=[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0]
-        )
-        
-        # Cache performance metrics
-        self.cache_operation_duration_seconds = Histogram(
-            'cache_operation_duration_seconds',
-            'Cache operation duration in seconds',
-            ['operation'],
-            buckets=[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0]
-        )
-        
-        self.cache_hit_ratio = Gauge(
-            'cache_hit_ratio',
-            'Cache hit ratio percentage',
-            ['cache_type']
-        )
-        
-        # External service performance
-        self.external_service_duration_seconds = Histogram(
-            'external_service_duration_seconds',
-            'External service call duration in seconds',
-            ['service', 'operation'],
-            buckets=[0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0]
-        )
-    
-    def record_request_performance(
-        self, 
-        method: str, 
-        endpoint: str, 
-        response_time: float, 
-        status_code: int
+    def log_state_change(
+        self,
+        service_name: str,
+        previous_state: str,
+        new_state: str,
+        failure_count: int,
+        additional_context: Optional[Dict[str, Any]] = None
     ) -> None:
-        """Record request performance metrics."""
-        self.request_duration_seconds.labels(
-            method=method,
-            endpoint=endpoint,
-            status_code=status_code
-        ).observe(response_time)
-    
-    def record_database_performance(
-        self, 
-        operation: str, 
-        collection: str, 
-        query_time: float
-    ) -> None:
-        """Record database performance metrics."""
-        self.database_query_duration_seconds.labels(
-            operation=operation,
-            collection=collection
-        ).observe(query_time)
-    
-    def record_cache_performance(
-        self, 
-        operation: str, 
-        cache_hit: bool, 
-        operation_time: float
-    ) -> None:
-        """Record cache performance metrics."""
-        self.cache_operation_duration_seconds.labels(operation=operation).observe(operation_time)
+        """
+        Log circuit breaker state changes.
         
-        # Update cache hit ratio (simplified calculation)
-        current_ratio = self.cache_hit_ratio.labels(cache_type='redis')._value.get() or 0.0
-        new_ratio = (current_ratio + (1.0 if cache_hit else 0.0)) / 2
-        self.cache_hit_ratio.labels(cache_type='redis').set(new_ratio)
+        Args:
+            service_name: Name of the service
+            previous_state: Previous circuit breaker state
+            new_state: New circuit breaker state
+            failure_count: Current failure count
+            additional_context: Additional context
+        """
+        log_data = {
+            "event_category": "circuit_breaker",
+            "event_type": "state_change",
+            "service_name": service_name,
+            "previous_state": previous_state,
+            "new_state": new_state,
+            "failure_count": failure_count,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "severity": "high" if new_state == "open" else "info"
+        }
+        
+        if additional_context:
+            log_data.update(additional_context)
+        
+        # Add distributed tracing context if available
+        if OPENTELEMETRY_AVAILABLE and get_current_span():
+            span = get_current_span()
+            span_context = span.get_span_context()
+            log_data.update({
+                "trace_id": format(span_context.trace_id, "032x"),
+                "span_id": format(span_context.span_id, "016x")
+            })
+        
+        if new_state == "open":
+            self.logger.error("Circuit breaker opened", **log_data)
+        elif new_state == "closed" and previous_state == "open":
+            self.logger.info("Circuit breaker recovered", **log_data)
+        else:
+            self.logger.info("Circuit breaker state change", **log_data)
+        
+        if self.metrics:
+            self.metrics.state_changes.labels(
+                service=service_name,
+                new_state=new_state
+            ).inc()
 
 
-def add_flask_request_context(logger, method_name, event_dict):
-    """
-    Add Flask request context to log entries for comprehensive request tracking.
+# Prometheus metrics classes (if prometheus_client is available)
+if PROMETHEUS_AVAILABLE:
+    class SecurityMetrics:
+        """Prometheus metrics for security events."""
+        
+        def __init__(self):
+            self.auth_success = Counter(
+                'security_auth_success_total',
+                'Total successful authentications'
+            )
+            self.auth_failures = Counter(
+                'security_auth_failures_total',
+                'Total authentication failures'
+            )
+            self.authz_grants = Counter(
+                'security_authz_grants_total',
+                'Total authorization grants'
+            )
+            self.authz_denials = Counter(
+                'security_authz_denials_total',
+                'Total authorization denials'
+            )
+            self.security_violations = Counter(
+                'security_violations_total',
+                'Total security violations',
+                ['violation_type', 'severity']
+            )
+            self.data_access_events = Counter(
+                'security_data_access_total',
+                'Total data access events',
+                ['operation', 'resource_type', 'result']
+            )
     
-    This processor adds Flask request context including request ID, user information,
-    endpoint details, and request metadata to all log entries for enhanced traceability
-    and debugging capabilities in enterprise environments.
+    class PerformanceMetrics:
+        """Prometheus metrics for performance monitoring."""
+        
+        def __init__(self):
+            self.request_duration = Histogram(
+                'http_request_duration_seconds',
+                'HTTP request duration',
+                ['endpoint', 'method', 'status']
+            )
+            self.db_operation_duration = Histogram(
+                'database_operation_duration_seconds',
+                'Database operation duration',
+                ['operation', 'collection', 'result']
+            )
+            self.external_service_duration = Histogram(
+                'external_service_duration_seconds',
+                'External service call duration',
+                ['service', 'result']
+            )
+    
+    class CircuitBreakerMetrics:
+        """Prometheus metrics for circuit breaker events."""
+        
+        def __init__(self):
+            self.state_changes = Counter(
+                'circuit_breaker_state_changes_total',
+                'Circuit breaker state changes',
+                ['service', 'new_state']
+            )
+else:
+    # Stub classes when Prometheus is not available
+    class SecurityMetrics:
+        def __init__(self):
+            pass
+    
+    class PerformanceMetrics:
+        def __init__(self):
+            pass
+    
+    class CircuitBreakerMetrics:
+        def __init__(self):
+            pass
+
+
+class EnterpriseJSONFormatter(jsonlogger.JsonFormatter):
+    """
+    Enhanced JSON log formatter for enterprise log aggregation systems
+    with SIEM integration support and compliance features.
+    """
+    
+    def __init__(self, *args, **kwargs):
+        """Initialize enterprise JSON formatter with enhanced fields."""
+        # Define consistent field names for enterprise log aggregation
+        format_string = ' '.join([
+            '%(asctime)s',
+            '%(name)s',
+            '%(levelname)s',
+            '%(message)s',
+            '%(pathname)s',
+            '%(lineno)d',
+            '%(funcName)s',
+            '%(process)d',
+            '%(thread)d'
+        ])
+        super().__init__(format_string, *args, **kwargs)
+    
+    def add_fields(self, log_record: Dict[str, Any], record: logging.LogRecord, message_dict: Dict[str, Any]) -> None:
+        """
+        Add enterprise-specific fields to log records.
+        
+        Args:
+            log_record: Dictionary to be logged
+            record: Python logging record
+            message_dict: Message dictionary from structlog
+        """
+        super().add_fields(log_record, record, message_dict)
+        
+        # Add enterprise-specific fields
+        log_record['service'] = 'flask-application'
+        log_record['environment'] = os.getenv('FLASK_ENV', 'production')
+        log_record['application'] = 'flask-migration-app'
+        log_record['version'] = os.getenv('APP_VERSION', '1.0.0')
+        
+        # Add process and thread information for debugging
+        log_record['process_id'] = os.getpid()
+        log_record['thread_id'] = threading.get_ident()
+        
+        # Add hostname for distributed system identification
+        import socket
+        log_record['hostname'] = socket.gethostname()
+        
+        # Ensure timestamp is in ISO format for SIEM systems
+        if not log_record.get('timestamp'):
+            log_record['timestamp'] = datetime.now(timezone.utc).isoformat()
+        
+        # Add log schema version for compatibility
+        log_record['log_schema_version'] = '1.0'
+
+
+def add_trace_context(logger: WrappedLogger, method_name: str, event_dict: EventDict) -> EventDict:
+    """
+    Add OpenTelemetry trace context to log entries for distributed tracing correlation.
+    
+    Args:
+        logger: Wrapped logger instance
+        method_name: Logging method name
+        event_dict: Event dictionary to enhance
+        
+    Returns:
+        Enhanced event dictionary with trace context
+    """
+    if OPENTELEMETRY_AVAILABLE and get_current_span():
+        span = get_current_span()
+        span_context = span.get_span_context()
+        if span_context.is_valid:
+            event_dict['trace_id'] = format(span_context.trace_id, "032x")
+            event_dict['span_id'] = format(span_context.span_id, "016x")
+            event_dict['trace_flags'] = format(span_context.trace_flags, "02x")
+    
+    return event_dict
+
+
+def add_request_context(logger: WrappedLogger, method_name: str, event_dict: EventDict) -> EventDict:
+    """
+    Add Flask request context to log entries when available.
+    
+    Args:
+        logger: Wrapped logger instance
+        method_name: Logging method name
+        event_dict: Event dictionary to enhance
+        
+    Returns:
+        Enhanced event dictionary with request context
     """
     try:
-        from flask import request, g, has_request_context
-        from flask_login import current_user
-        
-        if has_request_context():
-            # Add request context information
+        from flask import request, g
+        if request:
             event_dict['request_id'] = getattr(g, 'request_id', None)
-            event_dict['method'] = request.method
-            event_dict['url'] = request.url
-            event_dict['endpoint'] = request.endpoint
             event_dict['remote_addr'] = request.remote_addr
-            event_dict['user_agent'] = request.headers.get('User-Agent', '')
+            event_dict['method'] = request.method
+            event_dict['path'] = request.path
+            event_dict['user_agent'] = request.headers.get('User-Agent')
             
             # Add user context if available
-            if hasattr(current_user, 'id') and current_user.is_authenticated:
-                event_dict['user_id'] = current_user.id
-                event_dict['authenticated'] = True
-            else:
-                event_dict['authenticated'] = False
-            
-            # Add request headers (sanitized)
-            event_dict['content_type'] = request.headers.get('Content-Type', '')
-            event_dict['content_length'] = request.headers.get('Content-Length', 0)
-            
-    except (ImportError, RuntimeError):
-        # Flask context not available or not in request context
+            if hasattr(g, 'current_user') and g.current_user:
+                event_dict['user_id'] = getattr(g.current_user, 'id', None)
+    except (RuntimeError, ImportError):
+        # Outside of Flask request context or Flask not available
         pass
     
     return event_dict
 
 
-def add_environment_context(logger, method_name, event_dict):
+def add_exception_context(logger: WrappedLogger, method_name: str, event_dict: EventDict) -> EventDict:
     """
-    Add environment and application context to log entries.
+    Add exception context to log entries for error tracking.
     
-    This processor adds environment-specific information, application metadata,
-    and deployment context to log entries for comprehensive operational visibility
-    and troubleshooting support in enterprise environments.
+    Args:
+        logger: Wrapped logger instance
+        method_name: Logging method name
+        event_dict: Event dictionary to enhance
+        
+    Returns:
+        Enhanced event dictionary with exception context
     """
-    config = get_config()
-    
-    event_dict['environment'] = getattr(config, 'ENVIRONMENT', 'unknown')
-    event_dict['application'] = 'flask-security-system'
-    event_dict['version'] = os.getenv('APP_VERSION', 'unknown')
-    event_dict['hostname'] = os.getenv('HOSTNAME', 'unknown')
-    event_dict['pod_name'] = os.getenv('POD_NAME', 'unknown')
-    event_dict['namespace'] = os.getenv('KUBERNETES_NAMESPACE', 'default')
+    if 'exc_info' in event_dict and event_dict['exc_info']:
+        # Extract exception information
+        exc_type, exc_value, exc_traceback = event_dict['exc_info']
+        event_dict['exception_type'] = exc_type.__name__ if exc_type else None
+        event_dict['exception_message'] = str(exc_value) if exc_value else None
+        
+        # Add stack trace for error analysis
+        if exc_traceback:
+            event_dict['stack_trace'] = ''.join(traceback.format_tb(exc_traceback))
     
     return event_dict
 
 
-def add_security_context(logger, method_name, event_dict):
+def filter_sensitive_data(logger: WrappedLogger, method_name: str, event_dict: EventDict) -> EventDict:
     """
-    Add security context and compliance tags to log entries.
+    Filter sensitive data from log entries for security compliance.
     
-    This processor enriches log entries with security context, compliance tags,
-    and threat intelligence information for SIEM integration and security
-    monitoring in enterprise environments.
+    Args:
+        logger: Wrapped logger instance
+        method_name: Logging method name
+        event_dict: Event dictionary to filter
+        
+    Returns:
+        Filtered event dictionary with sensitive data masked
     """
-    # Add security metadata
-    event_dict['log_classification'] = 'internal'
-    event_dict['data_classification'] = 'business_sensitive'
-    
-    # Add compliance context based on event category
-    event_category = event_dict.get('event_category', '')
-    if event_category in ['authentication', 'authorization']:
-        event_dict['compliance_required'] = True
-        event_dict['retention_years'] = 7
-    elif event_category == 'security_violation':
-        event_dict['compliance_required'] = True
-        event_dict['retention_years'] = 10
-        event_dict['security_alert'] = True
-    
-    return event_dict
-
-
-def configure_structured_logging():
-    """
-    Configure comprehensive structured logging with enterprise-grade features.
-    
-    This function sets up structlog 23.1+ with JSON formatting, security audit
-    capabilities, performance monitoring, and enterprise SIEM integration
-    per Section 3.6.1 and 6.4.2 requirements.
-    
-    Features:
-    - JSON formatted logs for enterprise log aggregation
-    - Security audit logging with compliance tags
-    - Performance metrics integration
-    - Flask request context enrichment
-    - Error tracking with stack traces
-    - Enterprise SIEM compatibility
-    """
-    config = get_config()
-    
-    # Configure standard library logging
-    logging.basicConfig(
-        format="%(message)s",
-        stream=sys.stdout,
-        level=getattr(logging, config.LOG_LEVEL.upper(), logging.INFO),
-    )
-    
-    # Configure structlog processors
-    processors = [
-        # Filter logs by level
-        structlog.stdlib.filter_by_level,
-        
-        # Add logger name
-        structlog.stdlib.add_logger_name,
-        
-        # Add log level
-        structlog.stdlib.add_log_level,
-        
-        # Process positional arguments
-        structlog.stdlib.PositionalArgumentsFormatter(),
-        
-        # Add timestamps in ISO format
-        structlog.processors.TimeStamper(fmt="iso"),
-        
-        # Add stack info for debugging
-        structlog.processors.StackInfoRenderer(),
-        
-        # Format exception information
-        structlog.processors.format_exc_info,
-        
-        # Handle Unicode properly
-        structlog.processors.UnicodeDecoder(),
-        
-        # Add Flask request context
-        add_flask_request_context,
-        
-        # Add environment context
-        add_environment_context,
-        
-        # Add security context
-        add_security_context,
+    sensitive_fields = [
+        'password', 'secret', 'token', 'key', 'auth', 'credential',
+        'ssn', 'social_security', 'credit_card', 'cc_number'
     ]
     
-    # Add JSON renderer for structured output
-    if config.LOG_FORMAT.lower() == 'json':
-        processors.append(structlog.processors.JSONRenderer())
-    else:
-        # Use console renderer for development
-        processors.append(structlog.dev.ConsoleRenderer())
+    def mask_sensitive_value(value: Any) -> Any:
+        """Mask sensitive values while preserving type."""
+        if isinstance(value, str) and len(value) > 4:
+            return f"{value[:2]}***{value[-2:]}"
+        elif isinstance(value, str):
+            return "***"
+        return "***"
     
-    # Configure structlog
-    structlog.configure(
-        processors=processors,
-        wrapper_class=structlog.stdlib.LoggerFactory(),
-        context_class=dict,
-        logger_factory=structlog.stdlib.LoggerFactory(),
-        cache_logger_on_first_use=True,
-    )
+    def filter_dict(data: Dict[str, Any]) -> Dict[str, Any]:
+        """Recursively filter dictionary for sensitive data."""
+        filtered = {}
+        for key, value in data.items():
+            key_lower = key.lower()
+            if any(sensitive in key_lower for sensitive in sensitive_fields):
+                filtered[key] = mask_sensitive_value(value)
+            elif isinstance(value, dict):
+                filtered[key] = filter_dict(value)
+            elif isinstance(value, list):
+                filtered[key] = [
+                    filter_dict(item) if isinstance(item, dict) else item
+                    for item in value
+                ]
+            else:
+                filtered[key] = value
+        return filtered
     
-    # Configure application-specific loggers
-    _configure_application_loggers(config)
-    
-    # Initialize security and performance loggers
-    global security_audit_logger, performance_logger
-    security_audit_logger = SecurityAuditLogger()
-    performance_logger = PerformanceLogger()
+    return filter_dict(event_dict)
 
 
-def _configure_application_loggers(config):
+class LoggingConfiguration:
     """
-    Configure application-specific loggers with appropriate levels and handlers.
-    
-    This function sets up specialized loggers for different application components
-    including security audit, performance monitoring, database operations, and
-    external service integration with enterprise-grade logging configuration.
+    Comprehensive logging configuration manager for Flask applications
+    implementing enterprise-grade structured logging with security audit
+    capabilities and monitoring integration.
     """
-    # Security audit logger configuration
-    security_logger = logging.getLogger('security')
-    security_logger.setLevel(logging.INFO)
     
-    # Performance monitoring logger configuration
-    performance_logger = logging.getLogger('performance')
-    performance_logger.setLevel(logging.INFO)
+    def __init__(self, config: Optional[Any] = None):
+        """
+        Initialize logging configuration with Flask application settings.
+        
+        Args:
+            config: Flask configuration object or None to load from settings
+        """
+        self.config = config or get_config()
+        self.is_configured = False
+        self._validate_configuration()
     
-    # Database operations logger configuration
-    database_logger = logging.getLogger('database')
-    database_logger.setLevel(getattr(logging, config.LOG_LEVEL.upper(), logging.INFO))
+    def _validate_configuration(self) -> None:
+        """
+        Validate logging configuration requirements.
+        
+        Raises:
+            LoggingConfigurationError: When configuration is invalid
+        """
+        required_attrs = ['LOG_LEVEL', 'LOG_FORMAT']
+        missing_attrs = [attr for attr in required_attrs if not hasattr(self.config, attr)]
+        
+        if missing_attrs:
+            raise LoggingConfigurationError(
+                f"Missing required logging configuration: {', '.join(missing_attrs)}"
+            )
     
-    # External services logger configuration
-    external_logger = logging.getLogger('external_services')
-    external_logger.setLevel(logging.INFO)
+    def configure_structured_logging(self) -> None:
+        """
+        Configure structlog with enterprise-grade processors and formatters.
+        
+        This method implements comprehensive structured logging configuration
+        as specified in Section 3.6.1 with JSON formatting for enterprise
+        log aggregation systems.
+        """
+        # Configure standard library logging first
+        self._configure_stdlib_logging()
+        
+        # Define structlog processors pipeline
+        processors = [
+            # Add trace context for distributed logging
+            add_trace_context,
+            # Add Flask request context when available
+            add_request_context,
+            # Add exception context for error tracking
+            add_exception_context,
+            # Filter sensitive data for security compliance
+            filter_sensitive_data,
+            # Standard structlog processors
+            structlog.stdlib.filter_by_level,
+            structlog.stdlib.add_logger_name,
+            structlog.stdlib.add_log_level,
+            structlog.stdlib.PositionalArgumentsFormatter(),
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.StackInfoRenderer(),
+            structlog.processors.format_exc_info,
+            structlog.processors.UnicodeDecoder(),
+        ]
+        
+        # Add JSON formatting for enterprise log aggregation
+        if self.config.LOG_FORMAT.lower() == 'json':
+            processors.append(structlog.processors.JSONRenderer())
+        else:
+            processors.append(structlog.dev.ConsoleRenderer())
+        
+        # Configure structlog
+        structlog.configure(
+            processors=processors,
+            wrapper_class=structlog.stdlib.LoggerFactory(),
+            context_class=dict,
+            logger_factory=structlog.stdlib.LoggerFactory(),
+            cache_logger_on_first_use=True,
+        )
+        
+        self.is_configured = True
     
-    # Flask application logger configuration
-    flask_logger = logging.getLogger('flask')
-    flask_logger.setLevel(getattr(logging, config.LOG_LEVEL.upper(), logging.INFO))
+    def _configure_stdlib_logging(self) -> None:
+        """
+        Configure Python standard library logging with enterprise formatters.
+        """
+        # Create log directory if specified
+        log_file = getattr(self.config, 'LOG_FILE', None)
+        if log_file:
+            log_path = Path(log_file)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Configure logging handlers
+        handlers = self._create_log_handlers()
+        
+        # Configure root logger
+        logging.basicConfig(
+            level=getattr(logging, self.config.LOG_LEVEL.upper()),
+            handlers=handlers,
+            force=True  # Override any existing configuration
+        )
+        
+        # Configure specific loggers for different components
+        self._configure_component_loggers()
     
-    # Suppress noisy third-party loggers in production
-    if getattr(config, 'ENVIRONMENT', 'production') == 'production':
-        logging.getLogger('urllib3').setLevel(logging.WARNING)
-        logging.getLogger('requests').setLevel(logging.WARNING)
-        logging.getLogger('boto3').setLevel(logging.WARNING)
-        logging.getLogger('botocore').setLevel(logging.WARNING)
+    def _create_log_handlers(self) -> List[logging.Handler]:
+        """
+        Create logging handlers for different output destinations.
+        
+        Returns:
+            List of configured logging handlers
+        """
+        handlers = []
+        
+        # Console handler for development and container environments
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(self._create_formatter())
+        handlers.append(console_handler)
+        
+        # File handler if log file is specified
+        log_file = getattr(self.config, 'LOG_FILE', None)
+        if log_file:
+            file_handler = logging.FileHandler(log_file)
+            file_handler.setFormatter(self._create_formatter())
+            handlers.append(file_handler)
+        
+        # Rotating file handler for production environments
+        if hasattr(self.config, 'LOG_ROTATION_ENABLED') and self.config.LOG_ROTATION_ENABLED:
+            from logging.handlers import RotatingFileHandler
+            rotation_handler = RotatingFileHandler(
+                log_file or 'logs/app.log',
+                maxBytes=getattr(self.config, 'LOG_MAX_BYTES', 10 * 1024 * 1024),  # 10MB
+                backupCount=getattr(self.config, 'LOG_BACKUP_COUNT', 5)
+            )
+            rotation_handler.setFormatter(self._create_formatter())
+            handlers.append(rotation_handler)
+        
+        return handlers
+    
+    def _create_formatter(self) -> logging.Formatter:
+        """
+        Create appropriate log formatter based on configuration.
+        
+        Returns:
+            Configured log formatter
+        """
+        if self.config.LOG_FORMAT.lower() == 'json':
+            return EnterpriseJSONFormatter()
+        else:
+            return logging.Formatter(
+                fmt='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                datefmt='%Y-%m-%d %H:%M:%S'
+            )
+    
+    def _configure_component_loggers(self) -> None:
+        """
+        Configure specific loggers for different application components.
+        """
+        # Security logger configuration
+        security_logger = logging.getLogger('security')
+        security_logger.setLevel(logging.INFO)
+        
+        # Performance logger configuration
+        performance_logger = logging.getLogger('performance')
+        performance_logger.setLevel(
+            logging.DEBUG if self.config.DEBUG else logging.INFO
+        )
+        
+        # Circuit breaker logger configuration
+        circuit_breaker_logger = logging.getLogger('circuit_breaker')
+        circuit_breaker_logger.setLevel(logging.INFO)
+        
+        # Database logger configuration
+        db_logger = logging.getLogger('database')
+        db_logger.setLevel(
+            logging.DEBUG if self.config.DEBUG else logging.WARNING
+        )
+        
+        # External service logger configuration
+        external_logger = logging.getLogger('external_services')
+        external_logger.setLevel(logging.INFO)
+        
+        # Suppress verbose third-party library logging
+        self._suppress_verbose_loggers()
+    
+    def _suppress_verbose_loggers(self) -> None:
+        """
+        Suppress verbose logging from third-party libraries.
+        """
+        verbose_loggers = [
+            'urllib3.connectionpool',
+            'requests.packages.urllib3',
+            'boto3.session',
+            'botocore.client',
+            'werkzeug'
+        ]
+        
+        for logger_name in verbose_loggers:
+            logger = logging.getLogger(logger_name)
+            logger.setLevel(logging.WARNING)
+    
+    def get_security_logger(self) -> SecurityAuditLogger:
+        """
+        Get configured security audit logger instance.
+        
+        Returns:
+            Configured SecurityAuditLogger instance
+        """
+        if not self.is_configured:
+            self.configure_structured_logging()
+        
+        return SecurityAuditLogger()
+    
+    def get_performance_logger(self) -> PerformanceLogger:
+        """
+        Get configured performance logger instance.
+        
+        Returns:
+            Configured PerformanceLogger instance
+        """
+        if not self.is_configured:
+            self.configure_structured_logging()
+        
+        return PerformanceLogger()
+    
+    def get_circuit_breaker_logger(self) -> CircuitBreakerLogger:
+        """
+        Get configured circuit breaker logger instance.
+        
+        Returns:
+            Configured CircuitBreakerLogger instance
+        """
+        if not self.is_configured:
+            self.configure_structured_logging()
+        
+        return CircuitBreakerLogger()
 
 
-def get_logger(name: str = None) -> structlog.BoundLogger:
-    """
-    Get a configured structlog logger instance with enterprise-grade features.
-    
-    Args:
-        name: Logger name (optional, defaults to caller's module name)
-    
-    Returns:
-        Configured structlog BoundLogger instance with security and performance tracking
-    
-    Example:
-        >>> logger = get_logger(__name__)
-        >>> logger.info("Application started", component="auth_service")
-    """
-    return structlog.get_logger(name)
-
-
-def get_security_logger() -> SecurityAuditLogger:
-    """
-    Get the security audit logger instance for security event logging.
-    
-    Returns:
-        SecurityAuditLogger instance configured for enterprise security monitoring
-    
-    Example:
-        >>> security_logger = get_security_logger()
-        >>> security_logger.log_authentication_event("login", "user123", "success")
-    """
-    return security_audit_logger
-
-
-def get_performance_logger() -> PerformanceLogger:
-    """
-    Get the performance logger instance for performance monitoring.
-    
-    Returns:
-        PerformanceLogger instance configured for performance tracking and baseline compliance
-    
-    Example:
-        >>> perf_logger = get_performance_logger()
-        >>> perf_logger.log_request_performance("GET", "/api/users", 200, 0.250)
-    """
-    return performance_logger
-
-
-def log_exception(
-    logger: structlog.BoundLogger,
-    exception: Exception,
-    context: Optional[Dict[str, Any]] = None,
-    user_id: Optional[str] = None,
-    request_id: Optional[str] = None
-) -> None:
-    """
-    Log exceptions with comprehensive context and stack trace information.
-    
-    This function provides standardized exception logging with security context,
-    performance impact analysis, and comprehensive debugging information for
-    enterprise-grade error tracking and incident response.
-    
-    Args:
-        logger: Structlog logger instance
-        exception: Exception to log
-        context: Additional context information
-        user_id: User identifier (if available)
-        request_id: Request identifier for tracing
-    
-    Example:
-        >>> try:
-        ...     risky_operation()
-        ... except Exception as e:
-        ...     log_exception(logger, e, {"operation": "user_creation"}, "user123")
-    """
-    log_data = {
-        'event_category': 'error',
-        'exception_type': type(exception).__name__,
-        'exception_message': str(exception),
-        'stack_trace': traceback.format_exc(),
-        'user_id': user_id,
-        'request_id': request_id,
-        'timestamp': datetime.now(timezone.utc).isoformat(),
-        'severity': 'HIGH',
-    }
-    
-    # Add additional context if provided
-    if context:
-        log_data.update(context)
-    
-    # Log the exception with error level
-    logger.error("Application exception occurred", **log_data)
-
-
-# Global logger instances (initialized by configure_structured_logging)
-security_audit_logger: Optional[SecurityAuditLogger] = None
-performance_logger: Optional[PerformanceLogger] = None
-
-
-# Enterprise logging configuration decorator
-def log_performance(operation_name: str):
+# Decorator for logging function performance
+def log_performance(
+    operation_name: Optional[str] = None,
+    include_args: bool = False,
+    include_result: bool = False
+) -> Callable:
     """
     Decorator for automatic performance logging of function execution.
     
-    This decorator provides automatic performance monitoring for critical
-    application functions with comprehensive timing analysis and performance
-    grade calculation for baseline compliance monitoring.
-    
     Args:
-        operation_name: Name of the operation being monitored
-    
-    Example:
-        >>> @log_performance("user_authentication")
-        ... def authenticate_user(username, password):
-        ...     # Authentication logic
-        ...     return user
+        operation_name: Custom operation name for logging
+        include_args: Whether to include function arguments in logs
+        include_result: Whether to include function result in logs
+        
+    Returns:
+        Decorated function with performance logging
     """
-    def decorator(func):
+    def decorator(func: Callable) -> Callable:
         @wraps(func)
         def wrapper(*args, **kwargs):
             start_time = datetime.now(timezone.utc)
+            logger = structlog.get_logger(f"performance.{func.__module__}")
+            op_name = operation_name or f"{func.__module__}.{func.__name__}"
+            
+            log_data = {
+                "operation": op_name,
+                "start_time": start_time.isoformat()
+            }
+            
+            if include_args:
+                log_data["args"] = str(args)
+                log_data["kwargs"] = kwargs
             
             try:
                 result = func(*args, **kwargs)
                 end_time = datetime.now(timezone.utc)
-                duration = (end_time - start_time).total_seconds()
+                duration_ms = (end_time - start_time).total_seconds() * 1000
                 
-                # Log successful operation performance
-                if performance_logger:
-                    logger = get_logger(func.__module__)
-                    logger.info(
-                        "Operation completed",
-                        operation=operation_name,
-                        function=func.__name__,
-                        duration_seconds=duration,
-                        success=True,
-                        timestamp=end_time.isoformat()
-                    )
+                log_data.update({
+                    "duration_ms": duration_ms,
+                    "result": "success",
+                    "end_time": end_time.isoformat()
+                })
                 
+                if include_result:
+                    log_data["return_value"] = str(result)
+                
+                logger.info("Operation completed", **log_data)
                 return result
                 
             except Exception as e:
                 end_time = datetime.now(timezone.utc)
-                duration = (end_time - start_time).total_seconds()
+                duration_ms = (end_time - start_time).total_seconds() * 1000
                 
-                # Log failed operation performance
-                logger = get_logger(func.__module__)
-                log_exception(
-                    logger, 
-                    e, 
-                    {
-                        'operation': operation_name,
-                        'function': func.__name__,
-                        'duration_seconds': duration,
-                        'success': False
-                    }
-                )
+                log_data.update({
+                    "duration_ms": duration_ms,
+                    "result": "error",
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                    "end_time": end_time.isoformat()
+                })
+                
+                logger.error("Operation failed", **log_data, exc_info=True)
                 raise
         
         return wrapper
     return decorator
 
 
-# Initialize logging configuration
-configure_structured_logging()
+@contextmanager
+def log_context(**context_data):
+    """
+    Context manager for adding context data to all log entries within the context.
+    
+    Args:
+        **context_data: Context data to add to log entries
+        
+    Yields:
+        Context manager with logging context
+    """
+    structlog.contextvars.clear_contextvars()
+    for key, value in context_data.items():
+        structlog.contextvars.bind_contextvars(**{key: value})
+    
+    try:
+        yield
+    finally:
+        structlog.contextvars.clear_contextvars()
+
+
+# Global logging configuration instance
+_logging_config: Optional[LoggingConfiguration] = None
+
+
+def configure_application_logging(app_config: Optional[Any] = None) -> LoggingConfiguration:
+    """
+    Configure application logging for Flask applications.
+    
+    This function should be called during Flask application initialization
+    to set up comprehensive structured logging with enterprise features.
+    
+    Args:
+        app_config: Flask application configuration
+        
+    Returns:
+        Configured LoggingConfiguration instance
+    """
+    global _logging_config
+    
+    if _logging_config is None:
+        _logging_config = LoggingConfiguration(app_config)
+        _logging_config.configure_structured_logging()
+    
+    return _logging_config
+
+
+def get_logger(name: str) -> BoundLoggerLazyProxy:
+    """
+    Get a configured structlog logger instance.
+    
+    Args:
+        name: Logger name
+        
+    Returns:
+        Configured structlog logger
+    """
+    if _logging_config is None:
+        configure_application_logging()
+    
+    return structlog.get_logger(name)
+
+
+def get_security_logger() -> SecurityAuditLogger:
+    """
+    Get the configured security audit logger.
+    
+    Returns:
+        Configured SecurityAuditLogger instance
+    """
+    if _logging_config is None:
+        configure_application_logging()
+    
+    return _logging_config.get_security_logger()
+
+
+def get_performance_logger() -> PerformanceLogger:
+    """
+    Get the configured performance logger.
+    
+    Returns:
+        Configured PerformanceLogger instance
+    """
+    if _logging_config is None:
+        configure_application_logging()
+    
+    return _logging_config.get_performance_logger()
+
+
+def get_circuit_breaker_logger() -> CircuitBreakerLogger:
+    """
+    Get the configured circuit breaker logger.
+    
+    Returns:
+        Configured CircuitBreakerLogger instance
+    """
+    if _logging_config is None:
+        configure_application_logging()
+    
+    return _logging_config.get_circuit_breaker_logger()
+
+
+# Export public interface
+__all__ = [
+    'LoggingConfiguration',
+    'SecurityAuditLogger',
+    'PerformanceLogger',
+    'CircuitBreakerLogger',
+    'EnterpriseJSONFormatter',
+    'configure_application_logging',
+    'get_logger',
+    'get_security_logger',
+    'get_performance_logger',
+    'get_circuit_breaker_logger',
+    'log_performance',
+    'log_context',
+    'LoggingConfigurationError'
+]
