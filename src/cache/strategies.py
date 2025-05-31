@@ -1,1271 +1,2614 @@
 """
-Cache Invalidation Strategies and TTL Management Module
+Cache Invalidation Strategies, TTL Management Policies, and Cache Key Pattern Organization
 
-This module implements intelligent cache invalidation patterns, TTL management policies,
-cache key pattern organization, and cache warming strategies for enterprise-grade
-cache lifecycle optimization and data consistency. Designed to provide equivalent
-performance to Node.js caching patterns while supporting distributed cache coordination
-and multi-tenant cache management per Section 5.2.7 and Section 6.1.3.
+This module implements comprehensive cache invalidation strategies, intelligent TTL management
+policies, cache warming strategies, and cache key namespace management for enterprise-grade
+cache lifecycle optimization. Provides data consistency management, distributed cache
+coordination, and performance optimization equivalent to Node.js caching patterns.
 
 Key Features:
-- Intelligent cache invalidation strategies for data consistency
-- Dynamic TTL management policies for cache lifecycle optimization
-- Hierarchical cache key pattern organization with namespace management
+- Multi-tier cache invalidation strategies with data consistency guarantees
+- Intelligent TTL management based on data access patterns and business rules
+- Cache key pattern organization with namespace management for multi-tenant systems
 - Proactive cache warming strategies for performance optimization
-- Multi-tenant cache namespace management for enterprise deployments
-- Cache partitioning and distributed coordination for horizontal scaling
-- Fallback cache strategies for resilience and graceful degradation
+- Distributed cache coordination for multi-instance Flask deployments
+- Cache partitioning and sharding for horizontal scaling
+- Integration with monitoring and circuit breaker patterns per Section 6.1.3
+
+Architecture Integration:
+- Seamless integration with src/cache/client.py RedisClient infrastructure
+- Enterprise monitoring integration via src/cache/monitoring.py metrics collection
+- Circuit breaker patterns for cache resilience and graceful degradation
+- Performance optimization maintaining ≤10% variance from Node.js baseline per Section 0.1.1
+- Flask Blueprint integration for centralized cache strategy management
 
 Performance Requirements:
-- Maintain ≤10% variance from Node.js baseline per Section 0.1.1
-- Support distributed cache coordination across multiple Flask instances
-- Optimize cache effectiveness through intelligent warming and invalidation
-- Provide enterprise-grade cache lifecycle management
+- Cache invalidation latency: ≤5ms for single key, ≤50ms for pattern-based invalidation
+- TTL calculation performance: ≤1ms for policy evaluation and expiration setting
+- Cache warming throughput: ≥1000 keys/second for bulk population operations
+- Distributed coordination latency: ≤10ms for multi-instance cache synchronization
+- Memory efficiency: ≤20% overhead for strategy metadata and coordination structures
+
+References:
+- Section 5.2.7: Caching layer responsibilities and cache invalidation/TTL management
+- Section 6.1.3: Fallback cache strategies and distributed cache coordination
+- Section 5.4.1: Monitoring and observability for cache performance tracking
+- Section 6.1.3: Resilience mechanisms including circuit breaker patterns
 """
 
+import asyncio
 import hashlib
 import json
-import time
-import threading
-import weakref
-from abc import ABC, abstractmethod
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from enum import Enum
-from typing import (
-    Any, Dict, List, Optional, Set, Union, Callable, Pattern, Tuple,
-    NamedTuple, TypeVar, Generic
-)
+import math
+import random
 import re
-import asyncio
-from contextlib import asynccontextmanager
-import structlog
-from threading import RLock
+import time
+import traceback
+from abc import ABC, abstractmethod
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from enum import Enum
+from functools import wraps
+from threading import Lock, RLock
+from typing import (
+    Any, Dict, List, Optional, Set, Union, Callable, Tuple, 
+    Pattern, TypeVar, Generic, NamedTuple, AsyncIterator
+)
 
-# Import monitoring for metrics tracking
-from .monitoring import cache_monitor, monitor_cache_operation
+import structlog
+from redis.exceptions import RedisError, ConnectionError, TimeoutError
+
+from .client import RedisClient, get_redis_client
+from .monitoring import CacheMonitoringManager, monitor_cache_operation
+from .exceptions import (
+    CacheError, CacheInvalidationError, CacheKeyError,
+    CacheOperationTimeoutError, CircuitBreakerOpenError
+)
 
 # Configure structured logging for enterprise integration
 logger = structlog.get_logger(__name__)
 
-# Type definitions for better type safety
-CacheKey = str
-CacheValue = Any
-NamespaceId = str
-TenantId = str
-ExpirationTime = Union[int, float, timedelta]
-
+# Type variables for generic cache strategy operations
 T = TypeVar('T')
+KeyType = Union[str, bytes]
+ValueType = Any
 
 
-class CacheInvalidationTrigger(Enum):
+class CacheInvalidationPattern(Enum):
     """
-    Enumeration of cache invalidation trigger types for data consistency.
+    Cache invalidation pattern types for different consistency requirements.
     
-    Provides structured invalidation events that can trigger cache cleanup
-    operations based on various system events and data changes.
+    Implements various invalidation strategies optimized for different data
+    consistency needs and performance characteristics per Section 5.2.7.
     """
-    MANUAL = "manual"              # Explicit invalidation request
-    TTL_EXPIRED = "ttl_expired"    # Time-based expiration
-    DATA_UPDATED = "data_updated"  # Underlying data modification
-    DEPENDENCY_CHANGED = "dependency_changed"  # Dependent cache entry changed
-    MEMORY_PRESSURE = "memory_pressure"  # Memory usage threshold exceeded
-    PATTERN_MATCH = "pattern_match"  # Pattern-based bulk invalidation
-    EVENT_DRIVEN = "event_driven"  # External event notification
-    HEALTH_CHECK = "health_check"  # Periodic health check cleanup
-
-
-class CacheWarmingPriority(Enum):
-    """
-    Cache warming priority levels for intelligent preloading strategies.
-    
-    Defines priority ordering for cache warming operations to optimize
-    resource usage and ensure critical data is loaded first.
-    """
-    CRITICAL = 1    # Business-critical data requiring immediate availability
-    HIGH = 2        # Frequently accessed data with high performance impact
-    MEDIUM = 3      # Moderately accessed data for general performance
-    LOW = 4         # Background data for opportunistic warming
-    BACKGROUND = 5  # Lowest priority for bulk warming operations
+    IMMEDIATE = "immediate"          # Immediate invalidation for critical data
+    LAZY = "lazy"                   # Lazy invalidation for non-critical data
+    WRITE_THROUGH = "write_through" # Immediate write-through invalidation
+    WRITE_BEHIND = "write_behind"   # Delayed write-behind invalidation
+    TIME_BASED = "time_based"       # Time-based expiration invalidation
+    EVENT_DRIVEN = "event_driven"   # Event-triggered invalidation
+    CASCADE = "cascade"             # Cascading invalidation for related data
+    PATTERN_BASED = "pattern_based" # Pattern-based bulk invalidation
 
 
 class TTLPolicy(Enum):
     """
-    TTL management policy types for cache lifecycle optimization.
+    TTL (Time-To-Live) policy types for intelligent cache expiration management.
     
-    Defines different strategies for determining cache entry expiration
-    times based on access patterns and data characteristics.
+    Provides multiple TTL calculation strategies based on data access patterns,
+    business requirements, and performance optimization needs per Section 5.2.7.
     """
-    STATIC = "static"              # Fixed TTL value
-    SLIDING = "sliding"            # Reset TTL on access
-    ADAPTIVE = "adaptive"          # Adjust TTL based on usage patterns
-    HIERARCHICAL = "hierarchical"  # TTL inheritance from parent namespaces
-    PERFORMANCE_BASED = "performance_based"  # TTL based on performance metrics
+    FIXED = "fixed"                 # Fixed TTL for predictable data
+    SLIDING = "sliding"             # Sliding TTL based on access patterns
+    ADAPTIVE = "adaptive"           # Adaptive TTL based on hit rates
+    BUSINESS_HOURS = "business_hours" # Business hours-aware TTL
+    DECAY = "decay"                 # Exponential decay TTL
+    LAST_MODIFIED = "last_modified" # TTL based on data modification time
+    ACCESS_FREQUENCY = "access_frequency" # TTL based on access frequency
+    COST_AWARE = "cost_aware"       # TTL based on computation cost
+
+
+class CacheWarmingStrategy(Enum):
+    """
+    Cache warming strategy types for proactive cache population.
+    
+    Implements intelligent cache warming patterns for performance optimization
+    and user experience improvement per Section 5.2.7 performance optimization.
+    """
+    PRELOAD = "preload"             # Preload during application startup
+    BACKGROUND = "background"       # Background warming during operation
+    PREDICTIVE = "predictive"       # Predictive warming based on patterns
+    SCHEDULE_BASED = "schedule_based" # Scheduled warming operations
+    DEMAND_DRIVEN = "demand_driven" # Demand-driven warming on cache misses
+    CASCADING = "cascading"         # Cascading warming for related data
 
 
 @dataclass
 class CacheKeyPattern:
     """
-    Cache key pattern definition for organized key structure management.
+    Cache key pattern definition for organized namespace management.
     
-    Provides structured approach to cache key organization with namespace
-    support, versioning, and pattern-based operations for enterprise
-    cache management requirements.
+    Provides structured cache key organization with namespace hierarchy,
+    pattern matching, and validation for enterprise cache management.
     """
-    namespace: str                    # Primary namespace identifier
-    entity_type: str                 # Type of cached entity (user, session, etc.)
-    identifier: str                  # Unique entity identifier
-    version: Optional[str] = None    # Optional version for cache migration
-    tenant_id: Optional[str] = None  # Multi-tenant isolation identifier
-    sub_namespace: Optional[str] = None  # Additional namespace subdivision
+    namespace: str                          # Primary namespace (e.g., 'user', 'session')
+    pattern: str                           # Key pattern template (e.g., 'user:{id}:profile')
+    ttl_policy: TTLPolicy = TTLPolicy.FIXED # Default TTL policy for this pattern
+    invalidation_pattern: CacheInvalidationPattern = CacheInvalidationPattern.IMMEDIATE
+    warming_strategy: Optional[CacheWarmingStrategy] = None
+    priority: int = 1                      # Cache priority (1=highest, 10=lowest)
+    tags: Set[str] = field(default_factory=set) # Tags for tag-based invalidation
+    metadata: Dict[str, Any] = field(default_factory=dict) # Additional metadata
     
-    def to_key(self) -> CacheKey:
-        """
-        Generate standardized cache key from pattern components.
+    def __post_init__(self):
+        """Validate and normalize cache key pattern."""
+        if not self.namespace:
+            raise CacheKeyError("Cache key pattern namespace cannot be empty")
         
-        Returns:
-            Formatted cache key string with proper namespace hierarchy
-        """
-        key_parts = [self.namespace]
+        if not self.pattern:
+            raise CacheKeyError("Cache key pattern cannot be empty")
         
-        if self.tenant_id:
-            key_parts.append(f"tenant:{self.tenant_id}")
+        # Normalize namespace and pattern
+        self.namespace = self.namespace.strip().lower()
+        self.pattern = self.pattern.strip()
         
-        if self.sub_namespace:
-            key_parts.append(self.sub_namespace)
-        
-        key_parts.extend([self.entity_type, self.identifier])
-        
-        if self.version:
-            key_parts.append(f"v:{self.version}")
-        
-        return ":".join(key_parts)
+        # Validate pattern format
+        if not re.match(r'^[a-zA-Z0-9_:\-\{\}]+$', self.pattern):
+            raise CacheKeyError(
+                f"Invalid cache key pattern format: {self.pattern}",
+                key_pattern=self.pattern,
+                validation_errors=["Pattern contains invalid characters"]
+            )
     
-    @classmethod
-    def from_key(cls, key: CacheKey) -> Optional['CacheKeyPattern']:
+    def generate_key(self, **kwargs) -> str:
         """
-        Parse cache key back into pattern components.
+        Generate cache key from pattern template with provided parameters.
         
         Args:
-            key: Cache key string to parse
+            **kwargs: Parameters to substitute in pattern template
             
         Returns:
-            CacheKeyPattern instance or None if parsing fails
+            Generated cache key
+            
+        Raises:
+            CacheKeyError: If required parameters are missing
         """
         try:
-            parts = key.split(":")
-            if len(parts) < 3:
-                return None
+            # Use format string replacement for key generation
+            key = self.pattern.format(**kwargs)
             
-            namespace = parts[0]
-            tenant_id = None
-            sub_namespace = None
-            version = None
+            # Add namespace prefix
+            full_key = f"{self.namespace}:{key}"
             
-            # Parse optional components
-            idx = 1
-            if idx < len(parts) and parts[idx].startswith("tenant:"):
-                tenant_id = parts[idx][7:]  # Remove "tenant:" prefix
-                idx += 1
+            # Validate generated key length (Redis key limit)
+            if len(full_key) > 512:
+                raise CacheKeyError(
+                    f"Generated cache key exceeds maximum length: {len(full_key)} > 512",
+                    key=full_key,
+                    key_pattern=self.pattern
+                )
             
-            if idx < len(parts) and not parts[idx] in ["user", "session", "data", "auth"]:
-                sub_namespace = parts[idx]
-                idx += 1
+            return full_key
             
-            if idx + 1 < len(parts):
-                entity_type = parts[idx]
-                identifier = parts[idx + 1]
-                idx += 2
-            else:
-                return None
-            
-            if idx < len(parts) and parts[idx].startswith("v:"):
-                version = parts[idx][2:]  # Remove "v:" prefix
-            
-            return cls(
-                namespace=namespace,
-                entity_type=entity_type,
-                identifier=identifier,
-                version=version,
-                tenant_id=tenant_id,
-                sub_namespace=sub_namespace
+        except KeyError as e:
+            missing_param = str(e).strip("'")
+            raise CacheKeyError(
+                f"Missing required parameter for cache key pattern: {missing_param}",
+                key_pattern=self.pattern,
+                validation_errors=[f"Missing parameter: {missing_param}"]
             )
-        except Exception as e:
-            logger.warning(
-                "cache_key_parsing_failed",
-                key=key,
-                error_message=str(e)
-            )
-            return None
+    
+    def matches_key(self, key: str) -> bool:
+        """
+        Check if a cache key matches this pattern.
+        
+        Args:
+            key: Cache key to check
+            
+        Returns:
+            True if key matches pattern
+        """
+        if not key.startswith(f"{self.namespace}:"):
+            return False
+        
+        # Convert pattern to regex for matching
+        pattern_regex = self.pattern
+        pattern_regex = re.escape(pattern_regex)
+        pattern_regex = pattern_regex.replace(r'\{[^}]+\}', r'[^:]+')
+        pattern_regex = f"^{self.namespace}:{pattern_regex}$"
+        
+        return bool(re.match(pattern_regex, key))
 
 
 @dataclass
 class TTLConfiguration:
     """
-    TTL configuration with policy-specific parameters for cache lifecycle management.
+    TTL configuration for cache strategies with policy-specific parameters.
     
-    Provides comprehensive TTL management configuration supporting various
-    expiration strategies and performance optimization parameters.
+    Provides comprehensive TTL management configuration supporting multiple
+    TTL policies and adaptive expiration strategies per Section 5.2.7.
     """
-    policy: TTLPolicy
-    base_ttl_seconds: int                    # Base TTL value in seconds
-    min_ttl_seconds: int = 60               # Minimum TTL to prevent thrashing
-    max_ttl_seconds: int = 86400            # Maximum TTL for memory management
-    sliding_window_seconds: int = 3600      # Sliding window extension on access
-    adaptive_factor: float = 1.0            # Adaptive adjustment multiplier
-    performance_threshold_ms: float = 100.0 # Performance threshold for adaptive TTL
+    policy: TTLPolicy                       # TTL policy type
+    base_ttl: int = 300                    # Base TTL in seconds (5 minutes default)
+    min_ttl: int = 60                      # Minimum TTL in seconds
+    max_ttl: int = 3600                    # Maximum TTL in seconds (1 hour default)
+    sliding_window: int = 300              # Sliding window for access-based TTL
+    decay_factor: float = 0.5              # Decay factor for exponential decay
+    business_hours_multiplier: float = 2.0  # TTL multiplier during business hours
+    hit_rate_threshold: float = 0.8        # Hit rate threshold for adaptive TTL
+    access_frequency_weight: float = 0.3   # Weight for access frequency in calculations
+    cost_computation_factor: float = 1.0   # Factor for cost-aware TTL calculations
     
-    def calculate_ttl(self, access_count: int = 0, avg_latency_ms: float = 0.0,
-                     last_access_time: Optional[float] = None) -> int:
+    def __post_init__(self):
+        """Validate TTL configuration parameters."""
+        if self.base_ttl <= 0:
+            raise ValueError("Base TTL must be positive")
+        
+        if self.min_ttl <= 0 or self.min_ttl > self.max_ttl:
+            raise ValueError("Invalid TTL range: min_ttl must be positive and <= max_ttl")
+        
+        if self.decay_factor <= 0 or self.decay_factor >= 1:
+            raise ValueError("Decay factor must be between 0 and 1")
+        
+        if self.hit_rate_threshold < 0 or self.hit_rate_threshold > 1:
+            raise ValueError("Hit rate threshold must be between 0 and 1")
+
+
+class CacheStrategyMetrics:
+    """
+    Metrics collection for cache strategy performance monitoring.
+    
+    Tracks strategy effectiveness, performance characteristics, and provides
+    insights for optimization and Node.js baseline comparison per Section 5.4.1.
+    """
+    
+    def __init__(self):
+        self.invalidation_counts = defaultdict(int)
+        self.invalidation_latencies = defaultdict(list)
+        self.ttl_calculation_times = defaultdict(list)
+        self.warming_operations = defaultdict(int)
+        self.warming_success_rates = defaultdict(list)
+        self.cache_hit_rates = defaultdict(deque)
+        self.pattern_usage_stats = defaultdict(int)
+        self.last_reset = time.time()
+        self._lock = RLock()
+    
+    def record_invalidation(self, pattern: CacheInvalidationPattern, latency_ms: float, 
+                          keys_affected: int = 1):
+        """Record cache invalidation metrics."""
+        with self._lock:
+            self.invalidation_counts[pattern.value] += keys_affected
+            self.invalidation_latencies[pattern.value].append(latency_ms)
+            
+            # Keep only recent latency measurements (last 1000)
+            if len(self.invalidation_latencies[pattern.value]) > 1000:
+                self.invalidation_latencies[pattern.value] = \
+                    self.invalidation_latencies[pattern.value][-1000:]
+    
+    def record_ttl_calculation(self, policy: TTLPolicy, calculation_time_ms: float):
+        """Record TTL calculation performance metrics."""
+        with self._lock:
+            self.ttl_calculation_times[policy.value].append(calculation_time_ms)
+            
+            # Keep only recent measurements (last 1000)
+            if len(self.ttl_calculation_times[policy.value]) > 1000:
+                self.ttl_calculation_times[policy.value] = \
+                    self.ttl_calculation_times[policy.value][-1000:]
+    
+    def record_warming_operation(self, strategy: CacheWarmingStrategy, success: bool, 
+                               keys_warmed: int = 1):
+        """Record cache warming operation metrics."""
+        with self._lock:
+            self.warming_operations[strategy.value] += keys_warmed
+            self.warming_success_rates[strategy.value].append(1.0 if success else 0.0)
+            
+            # Keep only recent success rate measurements (last 100)
+            if len(self.warming_success_rates[strategy.value]) > 100:
+                self.warming_success_rates[strategy.value] = \
+                    self.warming_success_rates[strategy.value][-100:]
+    
+    def update_hit_rate(self, namespace: str, hit_rate: float):
+        """Update cache hit rate for namespace."""
+        with self._lock:
+            self.cache_hit_rates[namespace].append((time.time(), hit_rate))
+            
+            # Keep only recent hit rates (last 24 hours worth at 1-minute intervals)
+            cutoff_time = time.time() - 86400  # 24 hours
+            while (self.cache_hit_rates[namespace] and 
+                   self.cache_hit_rates[namespace][0][0] < cutoff_time):
+                self.cache_hit_rates[namespace].popleft()
+    
+    def record_pattern_usage(self, pattern_name: str):
+        """Record cache pattern usage statistics."""
+        with self._lock:
+            self.pattern_usage_stats[pattern_name] += 1
+    
+    def get_performance_summary(self) -> Dict[str, Any]:
+        """Get comprehensive performance summary for monitoring."""
+        with self._lock:
+            current_time = time.time()
+            uptime_hours = (current_time - self.last_reset) / 3600
+            
+            summary = {
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'uptime_hours': uptime_hours,
+                'invalidation_performance': {},
+                'ttl_performance': {},
+                'warming_performance': {},
+                'hit_rate_trends': {},
+                'pattern_usage': dict(self.pattern_usage_stats)
+            }
+            
+            # Calculate invalidation performance metrics
+            for pattern, latencies in self.invalidation_latencies.items():
+                if latencies:
+                    summary['invalidation_performance'][pattern] = {
+                        'avg_latency_ms': sum(latencies) / len(latencies),
+                        'max_latency_ms': max(latencies),
+                        'min_latency_ms': min(latencies),
+                        'total_operations': self.invalidation_counts[pattern],
+                        'operations_per_hour': self.invalidation_counts[pattern] / max(uptime_hours, 0.1)
+                    }
+            
+            # Calculate TTL calculation performance
+            for policy, times in self.ttl_calculation_times.items():
+                if times:
+                    summary['ttl_performance'][policy] = {
+                        'avg_calculation_time_ms': sum(times) / len(times),
+                        'max_calculation_time_ms': max(times),
+                        'calculations_count': len(times)
+                    }
+            
+            # Calculate warming performance
+            for strategy, success_rates in self.warming_success_rates.items():
+                if success_rates:
+                    summary['warming_performance'][strategy] = {
+                        'success_rate': sum(success_rates) / len(success_rates),
+                        'total_operations': self.warming_operations[strategy],
+                        'operations_per_hour': self.warming_operations[strategy] / max(uptime_hours, 0.1)
+                    }
+            
+            # Calculate hit rate trends
+            for namespace, hit_rates in self.cache_hit_rates.items():
+                if hit_rates:
+                    recent_rates = [rate for _, rate in hit_rates[-60:]]  # Last hour
+                    if recent_rates:
+                        summary['hit_rate_trends'][namespace] = {
+                            'current_hit_rate': recent_rates[-1],
+                            'avg_hit_rate_1h': sum(recent_rates) / len(recent_rates),
+                            'trend_direction': 'up' if len(recent_rates) > 1 and recent_rates[-1] > recent_rates[0] else 'down'
+                        }
+            
+            return summary
+
+
+class BaseCacheStrategy(ABC):
+    """
+    Abstract base class for cache strategies providing common infrastructure.
+    
+    Defines the interface and common functionality for all cache strategy
+    implementations including monitoring, error handling, and performance tracking.
+    """
+    
+    def __init__(self, redis_client: Optional[RedisClient] = None, 
+                 monitoring: Optional[CacheMonitoringManager] = None):
         """
-        Calculate effective TTL based on policy and access patterns.
+        Initialize base cache strategy with Redis client and monitoring.
         
         Args:
-            access_count: Number of times cache entry has been accessed
-            avg_latency_ms: Average access latency for performance-based TTL
-            last_access_time: Unix timestamp of last access for sliding TTL
+            redis_client: Redis client instance for cache operations
+            monitoring: Cache monitoring manager for metrics collection
+        """
+        self.redis_client = redis_client or get_redis_client()
+        self.monitoring = monitoring
+        self.metrics = CacheStrategyMetrics()
+        self.logger = structlog.get_logger(f"cache.strategy.{self.__class__.__name__}")
+        self._lock = RLock()
+        
+        # Strategy configuration
+        self.circuit_breaker_threshold = 5
+        self.circuit_breaker_timeout = 60
+        self.max_batch_size = 1000
+        self.operation_timeout = 30.0
+        
+        self.logger.info(
+            "Cache strategy initialized",
+            strategy_type=self.__class__.__name__,
+            circuit_breaker_threshold=self.circuit_breaker_threshold,
+            max_batch_size=self.max_batch_size
+        )
+    
+    @abstractmethod
+    def execute(self, *args, **kwargs) -> Any:
+        """Execute the cache strategy operation."""
+        pass
+    
+    def _handle_redis_error(self, error: Exception, operation: str) -> None:
+        """
+        Handle Redis errors with appropriate exception translation.
+        
+        Args:
+            error: Original Redis exception
+            operation: Description of the operation that failed
+            
+        Raises:
+            Appropriate CacheError subclass
+        """
+        if isinstance(error, ConnectionError):
+            raise CircuitBreakerOpenError(
+                message=f"Redis connection failed during {operation}",
+                failure_count=self.circuit_breaker_threshold,
+                recovery_timeout=self.circuit_breaker_timeout
+            )
+        elif isinstance(error, TimeoutError):
+            raise CacheOperationTimeoutError(
+                message=f"Cache operation timeout during {operation}",
+                operation=operation,
+                timeout_duration=self.operation_timeout
+            )
+        else:
+            raise CacheError(
+                message=f"Cache strategy operation failed: {operation}",
+                error_code="CACHE_STRATEGY_ERROR",
+                details={'operation': operation, 'original_error': str(error)}
+            )
+    
+    def _validate_keys(self, keys: Union[str, List[str]]) -> List[str]:
+        """
+        Validate and normalize cache keys for operations.
+        
+        Args:
+            keys: Single key or list of keys to validate
+            
+        Returns:
+            List of validated keys
+            
+        Raises:
+            CacheKeyError: If any keys are invalid
+        """
+        if isinstance(keys, str):
+            keys = [keys]
+        
+        validated_keys = []
+        validation_errors = []
+        
+        for key in keys:
+            if not isinstance(key, str):
+                validation_errors.append(f"Key must be string, got {type(key)}")
+                continue
+            
+            if not key.strip():
+                validation_errors.append("Key cannot be empty")
+                continue
+            
+            if len(key) > 512:
+                validation_errors.append(f"Key exceeds maximum length: {len(key)} > 512")
+                continue
+            
+            validated_keys.append(key.strip())
+        
+        if validation_errors:
+            raise CacheKeyError(
+                message="Cache key validation failed",
+                validation_errors=validation_errors
+            )
+        
+        return validated_keys
+    
+    def get_metrics_summary(self) -> Dict[str, Any]:
+        """Get strategy-specific metrics summary."""
+        return self.metrics.get_performance_summary()
+
+
+class CacheInvalidationStrategy(BaseCacheStrategy):
+    """
+    Comprehensive cache invalidation strategy implementing multiple invalidation
+    patterns for data consistency management and distributed cache coordination.
+    
+    Provides intelligent cache invalidation with support for immediate, lazy,
+    pattern-based, and event-driven invalidation patterns per Section 5.2.7
+    cache invalidation and TTL management requirements.
+    """
+    
+    def __init__(self, redis_client: Optional[RedisClient] = None, 
+                 monitoring: Optional[CacheMonitoringManager] = None):
+        super().__init__(redis_client, monitoring)
+        
+        # Invalidation pattern configurations
+        self.pattern_configs = {
+            CacheInvalidationPattern.IMMEDIATE: {'batch_size': 100, 'timeout': 5.0},
+            CacheInvalidationPattern.LAZY: {'batch_size': 1000, 'timeout': 30.0},
+            CacheInvalidationPattern.WRITE_THROUGH: {'batch_size': 50, 'timeout': 10.0},
+            CacheInvalidationPattern.WRITE_BEHIND: {'batch_size': 500, 'timeout': 60.0},
+            CacheInvalidationPattern.TIME_BASED: {'batch_size': 200, 'timeout': 15.0},
+            CacheInvalidationPattern.EVENT_DRIVEN: {'batch_size': 100, 'timeout': 5.0},
+            CacheInvalidationPattern.CASCADE: {'batch_size': 100, 'timeout': 20.0},
+            CacheInvalidationPattern.PATTERN_BASED: {'batch_size': 1000, 'timeout': 30.0}
+        }
+        
+        # Tag-based invalidation tracking
+        self.tag_key_mapping = defaultdict(set)
+        self.key_tag_mapping = defaultdict(set)
+        
+        # Distributed coordination tracking
+        self.pending_invalidations = defaultdict(set)
+        self.invalidation_locks = defaultdict(Lock)
+        
+        self.logger.info("Cache invalidation strategy initialized")
+    
+    def execute(self, keys: Union[str, List[str]], 
+                pattern: CacheInvalidationPattern = CacheInvalidationPattern.IMMEDIATE,
+                **kwargs) -> Dict[str, Any]:
+        """
+        Execute cache invalidation strategy with specified pattern.
+        
+        Args:
+            keys: Cache keys to invalidate
+            pattern: Invalidation pattern to use
+            **kwargs: Additional pattern-specific parameters
+            
+        Returns:
+            Dictionary containing invalidation results and metrics
+        """
+        start_time = time.perf_counter()
+        validated_keys = self._validate_keys(keys)
+        
+        try:
+            if pattern == CacheInvalidationPattern.IMMEDIATE:
+                result = self._immediate_invalidation(validated_keys, **kwargs)
+            elif pattern == CacheInvalidationPattern.LAZY:
+                result = self._lazy_invalidation(validated_keys, **kwargs)
+            elif pattern == CacheInvalidationPattern.WRITE_THROUGH:
+                result = self._write_through_invalidation(validated_keys, **kwargs)
+            elif pattern == CacheInvalidationPattern.WRITE_BEHIND:
+                result = self._write_behind_invalidation(validated_keys, **kwargs)
+            elif pattern == CacheInvalidationPattern.TIME_BASED:
+                result = self._time_based_invalidation(validated_keys, **kwargs)
+            elif pattern == CacheInvalidationPattern.EVENT_DRIVEN:
+                result = self._event_driven_invalidation(validated_keys, **kwargs)
+            elif pattern == CacheInvalidationPattern.CASCADE:
+                result = self._cascade_invalidation(validated_keys, **kwargs)
+            elif pattern == CacheInvalidationPattern.PATTERN_BASED:
+                result = self._pattern_based_invalidation(validated_keys, **kwargs)
+            else:
+                raise CacheInvalidationError(
+                    f"Unsupported invalidation pattern: {pattern}",
+                    keys=validated_keys
+                )
+            
+            # Record metrics
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            self.metrics.record_invalidation(pattern, duration_ms, len(validated_keys))
+            
+            # Update monitoring
+            if self.monitoring:
+                self.monitoring.record_cache_operation('invalidate', 'redis', duration_ms / 1000, 'success')
+            
+            self.logger.info(
+                "Cache invalidation completed",
+                pattern=pattern.value,
+                keys_count=len(validated_keys),
+                duration_ms=duration_ms,
+                success_count=result.get('success_count', 0),
+                error_count=result.get('error_count', 0)
+            )
+            
+            return result
+            
+        except Exception as e:
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            
+            # Update monitoring for failure
+            if self.monitoring:
+                self.monitoring.record_cache_operation('invalidate', 'redis', duration_ms / 1000, 'error')
+            
+            self.logger.error(
+                "Cache invalidation failed",
+                pattern=pattern.value,
+                keys_count=len(validated_keys),
+                duration_ms=duration_ms,
+                error_message=str(e),
+                error_type=type(e).__name__
+            )
+            
+            self._handle_redis_error(e, f"invalidation with pattern {pattern.value}")
+    
+    def _immediate_invalidation(self, keys: List[str], **kwargs) -> Dict[str, Any]:
+        """
+        Immediate cache invalidation for critical data consistency.
+        
+        Args:
+            keys: Cache keys to invalidate immediately
+            **kwargs: Additional parameters
+            
+        Returns:
+            Invalidation results
+        """
+        config = self.pattern_configs[CacheInvalidationPattern.IMMEDIATE]
+        batch_size = kwargs.get('batch_size', config['batch_size'])
+        
+        success_count = 0
+        error_count = 0
+        errors = []
+        
+        # Process keys in batches for performance
+        for i in range(0, len(keys), batch_size):
+            batch_keys = keys[i:i + batch_size]
+            
+            try:
+                deleted_count = self.redis_client.delete(*batch_keys)
+                success_count += deleted_count
+                
+                # Log successful invalidations
+                for key in batch_keys[:deleted_count]:
+                    self._track_invalidation(key, CacheInvalidationPattern.IMMEDIATE)
+                
+            except Exception as e:
+                error_count += len(batch_keys)
+                error_msg = f"Failed to invalidate batch {i//batch_size + 1}: {str(e)}"
+                errors.append(error_msg)
+                
+                self.logger.warning(
+                    "Immediate invalidation batch failed",
+                    batch_start=i,
+                    batch_size=len(batch_keys),
+                    error_message=str(e)
+                )
+        
+        return {
+            'pattern': CacheInvalidationPattern.IMMEDIATE.value,
+            'total_keys': len(keys),
+            'success_count': success_count,
+            'error_count': error_count,
+            'errors': errors,
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
+    
+    def _lazy_invalidation(self, keys: List[str], **kwargs) -> Dict[str, Any]:
+        """
+        Lazy cache invalidation for non-critical data with delayed processing.
+        
+        Args:
+            keys: Cache keys to invalidate lazily
+            **kwargs: Additional parameters including delay
+            
+        Returns:
+            Invalidation results
+        """
+        delay_seconds = kwargs.get('delay_seconds', 5)
+        mark_for_deletion = kwargs.get('mark_for_deletion', True)
+        
+        success_count = 0
+        
+        if mark_for_deletion:
+            # Mark keys for lazy deletion with expiration
+            pipeline = self.redis_client.pipeline()
+            
+            for key in keys:
+                # Set very short TTL to mark for lazy deletion
+                pipeline.expire(key, delay_seconds)
+                self._track_invalidation(key, CacheInvalidationPattern.LAZY)
+            
+            try:
+                results = pipeline.execute()
+                success_count = sum(1 for result in results if result)
+            except Exception as e:
+                self.logger.warning(
+                    "Lazy invalidation marking failed",
+                    keys_count=len(keys),
+                    error_message=str(e)
+                )
+        else:
+            # Immediate deletion for lazy invalidation
+            success_count = self.redis_client.delete(*keys)
+            for key in keys[:success_count]:
+                self._track_invalidation(key, CacheInvalidationPattern.LAZY)
+        
+        return {
+            'pattern': CacheInvalidationPattern.LAZY.value,
+            'total_keys': len(keys),
+            'success_count': success_count,
+            'error_count': len(keys) - success_count,
+            'delay_seconds': delay_seconds,
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
+    
+    def _write_through_invalidation(self, keys: List[str], **kwargs) -> Dict[str, Any]:
+        """
+        Write-through invalidation ensuring immediate consistency.
+        
+        Args:
+            keys: Cache keys to invalidate with write-through
+            **kwargs: Additional parameters including update_callback
+            
+        Returns:
+            Invalidation results
+        """
+        update_callback = kwargs.get('update_callback')
+        success_count = 0
+        error_count = 0
+        errors = []
+        
+        for key in keys:
+            try:
+                # Delete from cache
+                deleted = self.redis_client.delete(key)
+                
+                # Execute update callback if provided
+                if update_callback and callable(update_callback):
+                    try:
+                        update_callback(key)
+                    except Exception as e:
+                        self.logger.warning(
+                            "Write-through update callback failed",
+                            key=key,
+                            error_message=str(e)
+                        )
+                
+                if deleted:
+                    success_count += 1
+                    self._track_invalidation(key, CacheInvalidationPattern.WRITE_THROUGH)
+                
+            except Exception as e:
+                error_count += 1
+                error_msg = f"Write-through invalidation failed for key {key}: {str(e)}"
+                errors.append(error_msg)
+        
+        return {
+            'pattern': CacheInvalidationPattern.WRITE_THROUGH.value,
+            'total_keys': len(keys),
+            'success_count': success_count,
+            'error_count': error_count,
+            'errors': errors,
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
+    
+    def _write_behind_invalidation(self, keys: List[str], **kwargs) -> Dict[str, Any]:
+        """
+        Write-behind invalidation with delayed consistency updates.
+        
+        Args:
+            keys: Cache keys to invalidate with write-behind
+            **kwargs: Additional parameters including delay and update_callback
+            
+        Returns:
+            Invalidation results
+        """
+        delay_seconds = kwargs.get('delay_seconds', 30)
+        update_callback = kwargs.get('update_callback')
+        
+        # Immediate cache invalidation
+        success_count = self.redis_client.delete(*keys)
+        
+        # Track invalidated keys
+        for key in keys[:success_count]:
+            self._track_invalidation(key, CacheInvalidationPattern.WRITE_BEHIND)
+        
+        # Schedule delayed update if callback provided
+        if update_callback and callable(update_callback):
+            # In a production system, this would use a task queue like Celery
+            # For now, we'll store the pending operations
+            with self._lock:
+                for key in keys[:success_count]:
+                    self.pending_invalidations['write_behind'].add((key, time.time() + delay_seconds))
+        
+        return {
+            'pattern': CacheInvalidationPattern.WRITE_BEHIND.value,
+            'total_keys': len(keys),
+            'success_count': success_count,
+            'error_count': len(keys) - success_count,
+            'delay_seconds': delay_seconds,
+            'pending_updates': len(keys[:success_count]) if update_callback else 0,
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
+    
+    def _time_based_invalidation(self, keys: List[str], **kwargs) -> Dict[str, Any]:
+        """
+        Time-based invalidation with scheduled expiration.
+        
+        Args:
+            keys: Cache keys to invalidate based on time
+            **kwargs: Additional parameters including expiration_time
+            
+        Returns:
+            Invalidation results
+        """
+        expiration_time = kwargs.get('expiration_time')
+        ttl_seconds = kwargs.get('ttl_seconds', 3600)  # Default 1 hour
+        
+        if expiration_time:
+            if isinstance(expiration_time, datetime):
+                ttl_seconds = int((expiration_time - datetime.now(timezone.utc)).total_seconds())
+            else:
+                ttl_seconds = int(expiration_time)
+        
+        # Ensure positive TTL
+        ttl_seconds = max(1, ttl_seconds)
+        
+        success_count = 0
+        pipeline = self.redis_client.pipeline()
+        
+        for key in keys:
+            pipeline.expire(key, ttl_seconds)
+        
+        try:
+            results = pipeline.execute()
+            success_count = sum(1 for result in results if result)
+            
+            # Track invalidations
+            for key in keys[:success_count]:
+                self._track_invalidation(key, CacheInvalidationPattern.TIME_BASED)
+                
+        except Exception as e:
+            self.logger.warning(
+                "Time-based invalidation failed",
+                keys_count=len(keys),
+                ttl_seconds=ttl_seconds,
+                error_message=str(e)
+            )
+        
+        return {
+            'pattern': CacheInvalidationPattern.TIME_BASED.value,
+            'total_keys': len(keys),
+            'success_count': success_count,
+            'error_count': len(keys) - success_count,
+            'ttl_seconds': ttl_seconds,
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
+    
+    def _event_driven_invalidation(self, keys: List[str], **kwargs) -> Dict[str, Any]:
+        """
+        Event-driven invalidation triggered by specific events.
+        
+        Args:
+            keys: Cache keys to invalidate based on events
+            **kwargs: Additional parameters including event_type and metadata
+            
+        Returns:
+            Invalidation results
+        """
+        event_type = kwargs.get('event_type', 'unknown')
+        event_metadata = kwargs.get('event_metadata', {})
+        
+        # Immediate invalidation for event-driven pattern
+        success_count = self.redis_client.delete(*keys)
+        
+        # Track event-driven invalidations with metadata
+        for key in keys[:success_count]:
+            self._track_invalidation(key, CacheInvalidationPattern.EVENT_DRIVEN, {
+                'event_type': event_type,
+                'metadata': event_metadata
+            })
+        
+        self.logger.info(
+            "Event-driven invalidation completed",
+            event_type=event_type,
+            keys_count=len(keys),
+            success_count=success_count,
+            event_metadata=event_metadata
+        )
+        
+        return {
+            'pattern': CacheInvalidationPattern.EVENT_DRIVEN.value,
+            'total_keys': len(keys),
+            'success_count': success_count,
+            'error_count': len(keys) - success_count,
+            'event_type': event_type,
+            'event_metadata': event_metadata,
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
+    
+    def _cascade_invalidation(self, keys: List[str], **kwargs) -> Dict[str, Any]:
+        """
+        Cascading invalidation for related data with dependency tracking.
+        
+        Args:
+            keys: Root cache keys to invalidate with cascading
+            **kwargs: Additional parameters including dependency_patterns
+            
+        Returns:
+            Invalidation results
+        """
+        dependency_patterns = kwargs.get('dependency_patterns', [])
+        max_cascade_depth = kwargs.get('max_cascade_depth', 3)
+        
+        all_keys_to_invalidate = set(keys)
+        
+        # Find related keys based on dependency patterns
+        for pattern in dependency_patterns:
+            if isinstance(pattern, str):
+                # Simple pattern matching
+                related_keys = self._find_keys_by_pattern(pattern)
+                all_keys_to_invalidate.update(related_keys)
+            elif callable(pattern):
+                # Custom dependency function
+                try:
+                    related_keys = pattern(keys)
+                    if isinstance(related_keys, (list, set)):
+                        all_keys_to_invalidate.update(related_keys)
+                except Exception as e:
+                    self.logger.warning(
+                        "Cascade dependency function failed",
+                        error_message=str(e)
+                    )
+        
+        # Limit cascade expansion
+        if len(all_keys_to_invalidate) > len(keys) * 10:
+            self.logger.warning(
+                "Cascade invalidation limited due to excessive expansion",
+                original_keys=len(keys),
+                expanded_keys=len(all_keys_to_invalidate)
+            )
+            all_keys_to_invalidate = set(list(all_keys_to_invalidate)[:len(keys) * 10])
+        
+        # Execute invalidation
+        final_keys = list(all_keys_to_invalidate)
+        success_count = self.redis_client.delete(*final_keys)
+        
+        # Track cascade invalidations
+        for key in final_keys[:success_count]:
+            self._track_invalidation(key, CacheInvalidationPattern.CASCADE)
+        
+        return {
+            'pattern': CacheInvalidationPattern.CASCADE.value,
+            'original_keys': len(keys),
+            'cascade_keys': len(final_keys),
+            'success_count': success_count,
+            'error_count': len(final_keys) - success_count,
+            'dependency_patterns_count': len(dependency_patterns),
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
+    
+    def _pattern_based_invalidation(self, patterns: List[str], **kwargs) -> Dict[str, Any]:
+        """
+        Pattern-based bulk invalidation using Redis pattern matching.
+        
+        Args:
+            patterns: Cache key patterns to invalidate (e.g., 'user:*', 'session:123:*')
+            **kwargs: Additional parameters including match_limit
+            
+        Returns:
+            Invalidation results
+        """
+        match_limit = kwargs.get('match_limit', 1000)
+        total_deleted = 0
+        patterns_processed = 0
+        errors = []
+        
+        for pattern in patterns:
+            try:
+                # Find keys matching pattern
+                matching_keys = self._find_keys_by_pattern(pattern, limit=match_limit)
+                
+                if matching_keys:
+                    # Delete in batches
+                    batch_size = self.pattern_configs[CacheInvalidationPattern.PATTERN_BASED]['batch_size']
+                    for i in range(0, len(matching_keys), batch_size):
+                        batch_keys = matching_keys[i:i + batch_size]
+                        deleted_count = self.redis_client.delete(*batch_keys)
+                        total_deleted += deleted_count
+                        
+                        # Track pattern-based invalidations
+                        for key in batch_keys[:deleted_count]:
+                            self._track_invalidation(key, CacheInvalidationPattern.PATTERN_BASED)
+                
+                patterns_processed += 1
+                
+            except Exception as e:
+                error_msg = f"Pattern invalidation failed for '{pattern}': {str(e)}"
+                errors.append(error_msg)
+                self.logger.warning(
+                    "Pattern-based invalidation failed",
+                    pattern=pattern,
+                    error_message=str(e)
+                )
+        
+        return {
+            'pattern': CacheInvalidationPattern.PATTERN_BASED.value,
+            'patterns_count': len(patterns),
+            'patterns_processed': patterns_processed,
+            'total_keys_deleted': total_deleted,
+            'errors': errors,
+            'match_limit': match_limit,
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
+    
+    def _find_keys_by_pattern(self, pattern: str, limit: int = 1000) -> List[str]:
+        """
+        Find cache keys matching a pattern using Redis SCAN.
+        
+        Args:
+            pattern: Redis pattern to match
+            limit: Maximum number of keys to return
+            
+        Returns:
+            List of matching cache keys
+        """
+        matching_keys = []
+        cursor = 0
+        
+        try:
+            while len(matching_keys) < limit:
+                cursor, keys = self.redis_client._redis_client.scan(
+                    cursor=cursor,
+                    match=pattern,
+                    count=min(100, limit - len(matching_keys))
+                )
+                
+                matching_keys.extend(keys)
+                
+                if cursor == 0:  # Scan completed
+                    break
+            
+            return matching_keys[:limit]
+            
+        except Exception as e:
+            self.logger.warning(
+                "Pattern key search failed",
+                pattern=pattern,
+                error_message=str(e)
+            )
+            return []
+    
+    def _track_invalidation(self, key: str, pattern: CacheInvalidationPattern, 
+                          metadata: Optional[Dict[str, Any]] = None):
+        """Track invalidation for monitoring and metrics."""
+        self.metrics.record_pattern_usage(f"invalidation_{pattern.value}")
+        
+        if self.monitoring:
+            self.monitoring.record_cache_operation('invalidate', 'redis', 0.001, 'success')
+    
+    def invalidate_by_tags(self, tags: Union[str, List[str]]) -> Dict[str, Any]:
+        """
+        Invalidate cache keys associated with specific tags.
+        
+        Args:
+            tags: Tag or list of tags to invalidate
+            
+        Returns:
+            Invalidation results
+        """
+        if isinstance(tags, str):
+            tags = [tags]
+        
+        all_keys_to_invalidate = set()
+        
+        # Collect keys associated with tags
+        with self._lock:
+            for tag in tags:
+                if tag in self.tag_key_mapping:
+                    all_keys_to_invalidate.update(self.tag_key_mapping[tag])
+        
+        if not all_keys_to_invalidate:
+            return {
+                'pattern': 'tag_based',
+                'tags': tags,
+                'total_keys': 0,
+                'success_count': 0,
+                'error_count': 0,
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            }
+        
+        # Execute invalidation
+        final_keys = list(all_keys_to_invalidate)
+        result = self.execute(final_keys, CacheInvalidationPattern.IMMEDIATE)
+        result['pattern'] = 'tag_based'
+        result['tags'] = tags
+        
+        # Clean up tag mappings for successfully invalidated keys
+        if result['success_count'] > 0:
+            with self._lock:
+                for key in final_keys[:result['success_count']]:
+                    # Remove key from all tag mappings
+                    for tag in self.key_tag_mapping.get(key, set()):
+                        self.tag_key_mapping[tag].discard(key)
+                    self.key_tag_mapping.pop(key, None)
+        
+        return result
+    
+    def register_key_tags(self, key: str, tags: Union[str, List[str]]) -> None:
+        """
+        Register tags for a cache key to enable tag-based invalidation.
+        
+        Args:
+            key: Cache key to associate with tags
+            tags: Tag or list of tags to associate with the key
+        """
+        if isinstance(tags, str):
+            tags = [tags]
+        
+        with self._lock:
+            # Update tag -> keys mapping
+            for tag in tags:
+                self.tag_key_mapping[tag].add(key)
+            
+            # Update key -> tags mapping
+            self.key_tag_mapping[key].update(tags)
+
+
+class TTLManagementStrategy(BaseCacheStrategy):
+    """
+    Intelligent TTL (Time-To-Live) management strategy implementing adaptive
+    expiration policies based on data access patterns and business requirements.
+    
+    Provides sophisticated TTL calculation algorithms including fixed, sliding,
+    adaptive, and business-aware policies per Section 5.2.7 TTL management
+    requirements for cache lifecycle optimization.
+    """
+    
+    def __init__(self, redis_client: Optional[RedisClient] = None, 
+                 monitoring: Optional[CacheMonitoringManager] = None):
+        super().__init__(redis_client, monitoring)
+        
+        # TTL policy configurations
+        self.policy_configs = {
+            TTLPolicy.FIXED: TTLConfiguration(TTLPolicy.FIXED, base_ttl=300),
+            TTLPolicy.SLIDING: TTLConfiguration(TTLPolicy.SLIDING, base_ttl=600, sliding_window=300),
+            TTLPolicy.ADAPTIVE: TTLConfiguration(TTLPolicy.ADAPTIVE, base_ttl=900, hit_rate_threshold=0.8),
+            TTLPolicy.BUSINESS_HOURS: TTLConfiguration(TTLPolicy.BUSINESS_HOURS, base_ttl=1800, business_hours_multiplier=2.0),
+            TTLPolicy.DECAY: TTLConfiguration(TTLPolicy.DECAY, base_ttl=1200, decay_factor=0.5),
+            TTLPolicy.LAST_MODIFIED: TTLConfiguration(TTLPolicy.LAST_MODIFIED, base_ttl=3600),
+            TTLPolicy.ACCESS_FREQUENCY: TTLConfiguration(TTLPolicy.ACCESS_FREQUENCY, base_ttl=1800, access_frequency_weight=0.3),
+            TTLPolicy.COST_AWARE: TTLConfiguration(TTLPolicy.COST_AWARE, base_ttl=7200, cost_computation_factor=1.0)
+        }
+        
+        # Access tracking for adaptive policies
+        self.access_stats = defaultdict(lambda: {
+            'hit_count': 0,
+            'miss_count': 0,
+            'last_access': time.time(),
+            'access_frequency': 0.0,
+            'creation_time': time.time(),
+            'computation_cost': 1.0
+        })
+        
+        # Business hours configuration (default: 9 AM - 5 PM UTC)
+        self.business_hours_start = 9
+        self.business_hours_end = 17
+        self.business_timezone = timezone.utc
+        
+        self.logger.info("TTL management strategy initialized")
+    
+    def execute(self, key: str, policy: TTLPolicy, 
+                value_metadata: Optional[Dict[str, Any]] = None, **kwargs) -> int:
+        """
+        Calculate and apply TTL for a cache key based on the specified policy.
+        
+        Args:
+            key: Cache key to set TTL for
+            policy: TTL policy to apply
+            value_metadata: Metadata about the cached value
+            **kwargs: Policy-specific parameters
             
         Returns:
             Calculated TTL in seconds
         """
-        if self.policy == TTLPolicy.STATIC:
-            return self.base_ttl_seconds
+        start_time = time.perf_counter()
         
-        elif self.policy == TTLPolicy.SLIDING:
-            if last_access_time is None:
-                return self.base_ttl_seconds
-            
-            time_since_access = time.time() - last_access_time
-            remaining_ttl = max(
-                self.min_ttl_seconds,
-                self.base_ttl_seconds - int(time_since_access)
-            )
-            return min(self.max_ttl_seconds, remaining_ttl + self.sliding_window_seconds)
-        
-        elif self.policy == TTLPolicy.ADAPTIVE:
-            # Increase TTL for frequently accessed items
-            access_multiplier = min(2.0, 1.0 + (access_count * 0.1))
-            adaptive_ttl = int(self.base_ttl_seconds * access_multiplier * self.adaptive_factor)
-            return max(self.min_ttl_seconds, min(self.max_ttl_seconds, adaptive_ttl))
-        
-        elif self.policy == TTLPolicy.PERFORMANCE_BASED:
-            # Adjust TTL based on access performance
-            if avg_latency_ms > self.performance_threshold_ms:
-                # Increase TTL for slow operations to reduce cache misses
-                performance_multiplier = min(3.0, avg_latency_ms / self.performance_threshold_ms)
-                performance_ttl = int(self.base_ttl_seconds * performance_multiplier)
-                return max(self.min_ttl_seconds, min(self.max_ttl_seconds, performance_ttl))
-            else:
-                return self.base_ttl_seconds
-        
-        else:  # HIERARCHICAL handled by namespace manager
-            return self.base_ttl_seconds
-
-
-@dataclass
-class CacheEntry:
-    """
-    Cache entry metadata for comprehensive cache lifecycle management.
-    
-    Tracks access patterns, performance metrics, and dependencies for
-    intelligent cache management and optimization strategies.
-    """
-    key: CacheKey
-    created_at: float
-    last_accessed: float
-    access_count: int = 0
-    ttl_seconds: int = 3600
-    size_bytes: int = 0
-    namespace: str = "default"
-    tenant_id: Optional[str] = None
-    dependencies: Set[CacheKey] = field(default_factory=set)
-    tags: Set[str] = field(default_factory=set)
-    warming_priority: CacheWarmingPriority = CacheWarmingPriority.MEDIUM
-    
-    def update_access(self) -> None:
-        """Update access tracking for adaptive TTL calculation."""
-        self.last_accessed = time.time()
-        self.access_count += 1
-    
-    def is_expired(self) -> bool:
-        """Check if cache entry has expired based on TTL."""
-        return time.time() > (self.created_at + self.ttl_seconds)
-    
-    def time_to_expiration(self) -> float:
-        """Get remaining time until expiration in seconds."""
-        return max(0.0, (self.created_at + self.ttl_seconds) - time.time())
-
-
-class CacheInvalidationStrategy(ABC):
-    """
-    Abstract base class for cache invalidation strategies.
-    
-    Provides interface for implementing various cache invalidation
-    patterns including time-based, event-driven, and dependency-based
-    invalidation for data consistency management.
-    """
-    
-    @abstractmethod
-    def should_invalidate(self, entry: CacheEntry, trigger: CacheInvalidationTrigger,
-                         context: Dict[str, Any]) -> bool:
-        """
-        Determine if cache entry should be invalidated based on trigger and context.
-        
-        Args:
-            entry: Cache entry to evaluate for invalidation
-            trigger: Type of invalidation trigger
-            context: Additional context for invalidation decision
-            
-        Returns:
-            True if entry should be invalidated, False otherwise
-        """
-        pass
-    
-    @abstractmethod
-    def get_invalidation_keys(self, trigger: CacheInvalidationTrigger,
-                             context: Dict[str, Any]) -> List[CacheKey]:
-        """
-        Get list of cache keys that should be invalidated for given trigger.
-        
-        Args:
-            trigger: Type of invalidation trigger
-            context: Additional context for key identification
-            
-        Returns:
-            List of cache keys to invalidate
-        """
-        pass
-
-
-class TimeBasedInvalidationStrategy(CacheInvalidationStrategy):
-    """
-    Time-based cache invalidation strategy using TTL policies.
-    
-    Implements TTL-based expiration with support for sliding windows,
-    adaptive TTL adjustment, and performance-based TTL optimization
-    for cache lifecycle management.
-    """
-    
-    def __init__(self, ttl_config: TTLConfiguration):
-        """
-        Initialize time-based invalidation strategy.
-        
-        Args:
-            ttl_config: TTL configuration with policy parameters
-        """
-        self.ttl_config = ttl_config
-        self.logger = structlog.get_logger(__name__)
-    
-    def should_invalidate(self, entry: CacheEntry, trigger: CacheInvalidationTrigger,
-                         context: Dict[str, Any]) -> bool:
-        """Check if entry should be invalidated based on TTL policy."""
-        if trigger != CacheInvalidationTrigger.TTL_EXPIRED:
-            return False
-        
-        # Calculate effective TTL based on policy
-        effective_ttl = self.ttl_config.calculate_ttl(
-            access_count=entry.access_count,
-            avg_latency_ms=context.get('avg_latency_ms', 0.0),
-            last_access_time=entry.last_accessed
-        )
-        
-        # Check if entry has exceeded effective TTL
-        age_seconds = time.time() - entry.created_at
-        should_expire = age_seconds > effective_ttl
-        
-        if should_expire:
-            self.logger.debug(
-                "cache_entry_ttl_expired",
-                key=entry.key,
-                age_seconds=age_seconds,
-                effective_ttl=effective_ttl,
-                ttl_policy=self.ttl_config.policy.value
-            )
-        
-        return should_expire
-    
-    def get_invalidation_keys(self, trigger: CacheInvalidationTrigger,
-                             context: Dict[str, Any]) -> List[CacheKey]:
-        """Get keys for time-based invalidation (handled by cache manager)."""
-        return []  # Time-based invalidation handled by individual entry checks
-
-
-class PatternBasedInvalidationStrategy(CacheInvalidationStrategy):
-    """
-    Pattern-based cache invalidation strategy for bulk operations.
-    
-    Implements pattern matching for bulk invalidation operations,
-    supporting namespace-based, tag-based, and regex-based cache
-    invalidation for efficient cache management.
-    """
-    
-    def __init__(self):
-        """Initialize pattern-based invalidation strategy."""
-        self.logger = structlog.get_logger(__name__)
-        self._compiled_patterns: Dict[str, Pattern] = {}
-    
-    def should_invalidate(self, entry: CacheEntry, trigger: CacheInvalidationTrigger,
-                         context: Dict[str, Any]) -> bool:
-        """Check if entry matches invalidation patterns."""
-        if trigger != CacheInvalidationTrigger.PATTERN_MATCH:
-            return False
-        
-        patterns = context.get('patterns', [])
-        namespace_filter = context.get('namespace')
-        tag_filter = context.get('tags', set())
-        
-        # Namespace filtering
-        if namespace_filter and entry.namespace != namespace_filter:
-            return False
-        
-        # Tag-based filtering
-        if tag_filter and not entry.tags.intersection(tag_filter):
-            return False
-        
-        # Pattern matching on cache key
-        for pattern in patterns:
-            if self._matches_pattern(entry.key, pattern):
-                self.logger.debug(
-                    "cache_entry_pattern_matched",
-                    key=entry.key,
-                    pattern=pattern,
-                    namespace=entry.namespace
+        try:
+            # Get policy configuration
+            config = self.policy_configs.get(policy)
+            if not config:
+                raise CacheError(
+                    f"Unknown TTL policy: {policy}",
+                    error_code="INVALID_TTL_POLICY",
+                    details={'policy': policy.value}
                 )
-                return True
-        
-        return False
-    
-    def get_invalidation_keys(self, trigger: CacheInvalidationTrigger,
-                             context: Dict[str, Any]) -> List[CacheKey]:
-        """Get keys matching invalidation patterns."""
-        if trigger != CacheInvalidationTrigger.PATTERN_MATCH:
-            return []
-        
-        # Pattern-based key collection handled by cache manager
-        # with access to full key registry
-        return []
-    
-    def _matches_pattern(self, key: CacheKey, pattern: str) -> bool:
-        """Check if cache key matches pattern with caching for performance."""
-        if pattern not in self._compiled_patterns:
-            try:
-                # Support both glob-style and regex patterns
-                if '*' in pattern or '?' in pattern:
-                    # Convert glob to regex
-                    regex_pattern = pattern.replace('*', '.*').replace('?', '.')
-                    self._compiled_patterns[pattern] = re.compile(f"^{regex_pattern}$")
-                else:
-                    # Treat as literal prefix
-                    self._compiled_patterns[pattern] = re.compile(f"^{re.escape(pattern)}")
-            except re.error:
-                self.logger.warning("invalid_cache_pattern", pattern=pattern)
-                return False
-        
-        return bool(self._compiled_patterns[pattern].match(key))
-
-
-class DependencyBasedInvalidationStrategy(CacheInvalidationStrategy):
-    """
-    Dependency-based cache invalidation strategy for data consistency.
-    
-    Implements cache invalidation based on dependencies between cache
-    entries, supporting cascade invalidation and dependency graph
-    management for complex cache relationships.
-    """
-    
-    def __init__(self):
-        """Initialize dependency-based invalidation strategy."""
-        self.logger = structlog.get_logger(__name__)
-        self._dependency_graph: Dict[CacheKey, Set[CacheKey]] = {}
-        self._reverse_dependencies: Dict[CacheKey, Set[CacheKey]] = {}
-        self._graph_lock = RLock()
-    
-    def should_invalidate(self, entry: CacheEntry, trigger: CacheInvalidationTrigger,
-                         context: Dict[str, Any]) -> bool:
-        """Check if entry should be invalidated based on dependency changes."""
-        if trigger != CacheInvalidationTrigger.DEPENDENCY_CHANGED:
-            return False
-        
-        changed_keys = context.get('changed_keys', set())
-        return bool(entry.dependencies.intersection(changed_keys))
-    
-    def get_invalidation_keys(self, trigger: CacheInvalidationTrigger,
-                             context: Dict[str, Any]) -> List[CacheKey]:
-        """Get keys that depend on changed dependencies."""
-        if trigger != CacheInvalidationTrigger.DEPENDENCY_CHANGED:
-            return []
-        
-        changed_keys = context.get('changed_keys', set())
-        dependent_keys = set()
-        
-        with self._graph_lock:
-            for changed_key in changed_keys:
-                dependent_keys.update(self._reverse_dependencies.get(changed_key, set()))
-        
-        return list(dependent_keys)
-    
-    def add_dependency(self, dependent_key: CacheKey, dependency_key: CacheKey) -> None:
-        """Add dependency relationship between cache entries."""
-        with self._graph_lock:
-            if dependent_key not in self._dependency_graph:
-                self._dependency_graph[dependent_key] = set()
             
-            if dependency_key not in self._reverse_dependencies:
-                self._reverse_dependencies[dependency_key] = set()
+            # Override config with kwargs
+            if kwargs:
+                config = self._merge_config(config, kwargs)
             
-            self._dependency_graph[dependent_key].add(dependency_key)
-            self._reverse_dependencies[dependency_key].add(dependent_key)
-        
-        self.logger.debug(
-            "cache_dependency_added",
-            dependent_key=dependent_key,
-            dependency_key=dependency_key
-        )
-    
-    def remove_dependency(self, dependent_key: CacheKey, dependency_key: CacheKey) -> None:
-        """Remove dependency relationship between cache entries."""
-        with self._graph_lock:
-            if dependent_key in self._dependency_graph:
-                self._dependency_graph[dependent_key].discard(dependency_key)
-                if not self._dependency_graph[dependent_key]:
-                    del self._dependency_graph[dependent_key]
+            # Calculate TTL based on policy
+            if policy == TTLPolicy.FIXED:
+                ttl = self._calculate_fixed_ttl(key, config, value_metadata)
+            elif policy == TTLPolicy.SLIDING:
+                ttl = self._calculate_sliding_ttl(key, config, value_metadata)
+            elif policy == TTLPolicy.ADAPTIVE:
+                ttl = self._calculate_adaptive_ttl(key, config, value_metadata)
+            elif policy == TTLPolicy.BUSINESS_HOURS:
+                ttl = self._calculate_business_hours_ttl(key, config, value_metadata)
+            elif policy == TTLPolicy.DECAY:
+                ttl = self._calculate_decay_ttl(key, config, value_metadata)
+            elif policy == TTLPolicy.LAST_MODIFIED:
+                ttl = self._calculate_last_modified_ttl(key, config, value_metadata)
+            elif policy == TTLPolicy.ACCESS_FREQUENCY:
+                ttl = self._calculate_access_frequency_ttl(key, config, value_metadata)
+            elif policy == TTLPolicy.COST_AWARE:
+                ttl = self._calculate_cost_aware_ttl(key, config, value_metadata)
+            else:
+                raise CacheError(
+                    f"TTL policy not implemented: {policy}",
+                    error_code="TTL_POLICY_NOT_IMPLEMENTED",
+                    details={'policy': policy.value}
+                )
             
-            if dependency_key in self._reverse_dependencies:
-                self._reverse_dependencies[dependency_key].discard(dependent_key)
-                if not self._reverse_dependencies[dependency_key]:
-                    del self._reverse_dependencies[dependency_key]
-        
-        self.logger.debug(
-            "cache_dependency_removed",
-            dependent_key=dependent_key,
-            dependency_key=dependency_key
-        )
-
-
-class CacheWarmingStrategy(ABC):
-    """
-    Abstract base class for cache warming strategies.
-    
-    Provides interface for implementing proactive cache loading
-    strategies to optimize cache hit rates and reduce latency
-    for critical application data.
-    """
-    
-    @abstractmethod
-    async def warm_cache(self, keys: List[CacheKey], priority: CacheWarmingPriority,
-                        loader_func: Callable[[CacheKey], Any]) -> Dict[CacheKey, Any]:
-        """
-        Warm cache with specified keys using provided loader function.
-        
-        Args:
-            keys: List of cache keys to warm
-            priority: Warming priority level
-            loader_func: Function to load data for cache keys
+            # Ensure TTL is within bounds
+            ttl = max(config.min_ttl, min(config.max_ttl, ttl))
             
-        Returns:
-            Dictionary of successfully loaded key-value pairs
-        """
-        pass
-    
-    @abstractmethod
-    def schedule_warming(self, keys: List[CacheKey], priority: CacheWarmingPriority,
-                        delay_seconds: int = 0) -> None:
-        """
-        Schedule cache warming operation for future execution.
-        
-        Args:
-            keys: List of cache keys to warm
-            priority: Warming priority level
-            delay_seconds: Delay before warming execution
-        """
-        pass
-
-
-class PredictiveWarmingStrategy(CacheWarmingStrategy):
-    """
-    Predictive cache warming strategy based on access patterns.
-    
-    Implements intelligent cache warming using historical access
-    patterns, usage frequency analysis, and predictive algorithms
-    to proactively load frequently accessed data.
-    """
-    
-    def __init__(self, max_concurrent_warming: int = 10):
-        """
-        Initialize predictive warming strategy.
-        
-        Args:
-            max_concurrent_warming: Maximum concurrent warming operations
-        """
-        self.max_concurrent_warming = max_concurrent_warming
-        self.logger = structlog.get_logger(__name__)
-        self._warming_executor = ThreadPoolExecutor(
-            max_workers=max_concurrent_warming,
-            thread_name_prefix="cache_warmer"
-        )
-        self._access_patterns: Dict[CacheKey, List[float]] = {}
-        self._patterns_lock = RLock()
-    
-    async def warm_cache(self, keys: List[CacheKey], priority: CacheWarmingPriority,
-                        loader_func: Callable[[CacheKey], Any]) -> Dict[CacheKey, Any]:
-        """Warm cache with predictive prioritization."""
-        if not keys:
-            return {}
-        
-        # Sort keys by warming priority and predicted access probability
-        prioritized_keys = self._prioritize_warming_keys(keys, priority)
-        
-        warmed_data = {}
-        warming_start_time = time.time()
-        
-        try:
-            # Use ThreadPoolExecutor for concurrent warming operations
-            futures = []
-            for key in prioritized_keys[:self.max_concurrent_warming]:
-                future = self._warming_executor.submit(self._safe_load_data, key, loader_func)
-                futures.append((key, future))
-            
-            # Collect warming results with timeout
-            for key, future in futures:
-                try:
-                    data = future.result(timeout=30.0)  # 30 second timeout per key
-                    if data is not None:
-                        warmed_data[key] = data
-                        cache_monitor.record_cache_hit('redis', 'warming')
-                        
-                        self.logger.debug(
-                            "cache_key_warmed",
-                            key=key,
-                            priority=priority.name,
-                            size_bytes=len(str(data))
-                        )
-                except Exception as e:
+            # Apply TTL to Redis key
+            if ttl > 0:
+                success = self.redis_client.expire(key, ttl)
+                if not success:
                     self.logger.warning(
-                        "cache_warming_failed",
+                        "Failed to set TTL for key",
                         key=key,
-                        error_message=str(e),
-                        priority=priority.name
+                        ttl=ttl,
+                        policy=policy.value
                     )
-                    cache_monitor.record_cache_miss('redis', 'warming')
             
-            warming_duration = time.time() - warming_start_time
-            self.logger.info(
-                "cache_warming_completed",
-                keys_requested=len(keys),
-                keys_warmed=len(warmed_data),
-                priority=priority.name,
-                duration_seconds=warming_duration
-            )
+            # Record metrics
+            calculation_time_ms = (time.perf_counter() - start_time) * 1000
+            self.metrics.record_ttl_calculation(policy, calculation_time_ms)
             
-        except Exception as e:
-            self.logger.error(
-                "cache_warming_error",
-                error_message=str(e),
-                keys_count=len(keys),
-                priority=priority.name
-            )
-        
-        return warmed_data
-    
-    def schedule_warming(self, keys: List[CacheKey], priority: CacheWarmingPriority,
-                        delay_seconds: int = 0) -> None:
-        """Schedule cache warming with delay support."""
-        if delay_seconds > 0:
-            # Schedule delayed warming
-            threading.Timer(
-                delay_seconds,
-                self._execute_delayed_warming,
-                args=(keys, priority)
-            ).start()
-        else:
-            # Execute immediate warming in background
-            threading.Thread(
-                target=self._execute_delayed_warming,
-                args=(keys, priority),
-                daemon=True
-            ).start()
-        
-        self.logger.info(
-            "cache_warming_scheduled",
-            keys_count=len(keys),
-            priority=priority.name,
-            delay_seconds=delay_seconds
-        )
-    
-    def record_access_pattern(self, key: CacheKey) -> None:
-        """Record access pattern for predictive analysis."""
-        current_time = time.time()
-        
-        with self._patterns_lock:
-            if key not in self._access_patterns:
-                self._access_patterns[key] = []
+            # Update access statistics
+            self._update_access_stats(key, 'ttl_set', value_metadata)
             
-            # Keep only recent access times (last 24 hours)
-            recent_cutoff = current_time - 86400
-            self._access_patterns[key] = [
-                t for t in self._access_patterns[key] if t > recent_cutoff
-            ]
-            self._access_patterns[key].append(current_time)
-            
-            # Limit pattern history to prevent memory growth
-            if len(self._access_patterns[key]) > 1000:
-                self._access_patterns[key] = self._access_patterns[key][-500:]
-    
-    def _prioritize_warming_keys(self, keys: List[CacheKey],
-                                priority: CacheWarmingPriority) -> List[CacheKey]:
-        """Prioritize warming keys based on access patterns and priority."""
-        with self._patterns_lock:
-            key_scores = []
-            
-            for key in keys:
-                # Base score from priority level
-                priority_score = 6 - priority.value  # Higher number = higher priority
-                
-                # Access frequency score (accesses in last hour)
-                recent_cutoff = time.time() - 3600
-                access_times = self._access_patterns.get(key, [])
-                recent_accesses = len([t for t in access_times if t > recent_cutoff])
-                frequency_score = min(recent_accesses, 10) * 0.1
-                
-                # Access regularity score (coefficient of variation)
-                regularity_score = 0.0
-                if len(access_times) >= 3:
-                    intervals = [access_times[i] - access_times[i-1] 
-                               for i in range(1, len(access_times))]
-                    if intervals:
-                        avg_interval = sum(intervals) / len(intervals)
-                        if avg_interval > 0:
-                            variance = sum((i - avg_interval) ** 2 for i in intervals) / len(intervals)
-                            cv = (variance ** 0.5) / avg_interval
-                            regularity_score = max(0.0, 1.0 - cv)  # Lower CV = more regular
-                
-                total_score = priority_score + frequency_score + regularity_score
-                key_scores.append((key, total_score))
-        
-        # Sort by score (descending) and return keys
-        key_scores.sort(key=lambda x: x[1], reverse=True)
-        return [key for key, score in key_scores]
-    
-    def _safe_load_data(self, key: CacheKey, loader_func: Callable[[CacheKey], Any]) -> Any:
-        """Safely load data with error handling."""
-        try:
-            return loader_func(key)
-        except Exception as e:
-            self.logger.warning(
-                "cache_data_loading_failed",
+            self.logger.debug(
+                "TTL calculated and applied",
                 key=key,
+                policy=policy.value,
+                ttl=ttl,
+                calculation_time_ms=calculation_time_ms
+            )
+            
+            return ttl
+            
+        except Exception as e:
+            calculation_time_ms = (time.perf_counter() - start_time) * 1000
+            
+            self.logger.error(
+                "TTL calculation failed",
+                key=key,
+                policy=policy.value,
+                calculation_time_ms=calculation_time_ms,
                 error_message=str(e),
                 error_type=type(e).__name__
             )
-            return None
-    
-    def _execute_delayed_warming(self, keys: List[CacheKey],
-                                priority: CacheWarmingPriority) -> None:
-        """Execute delayed warming operation."""
-        # This would need integration with actual cache client
-        # For now, just log the warming attempt
-        self.logger.info(
-            "delayed_cache_warming_executed",
-            keys_count=len(keys),
-            priority=priority.name
-        )
-
-
-class CacheNamespaceManager:
-    """
-    Cache namespace manager for multi-tenant and hierarchical cache organization.
-    
-    Provides namespace isolation, tenant-specific cache partitioning,
-    and hierarchical cache key management for enterprise deployment
-    patterns and cache organization strategies.
-    """
-    
-    def __init__(self):
-        """Initialize cache namespace manager."""
-        self.logger = structlog.get_logger(__name__)
-        self._namespace_configs: Dict[str, TTLConfiguration] = {}
-        self._tenant_namespaces: Dict[TenantId, Set[str]] = {}
-        self._namespace_lock = RLock()
-        
-        # Default namespace configuration
-        self._namespace_configs['default'] = TTLConfiguration(
-            policy=TTLPolicy.STATIC,
-            base_ttl_seconds=3600
-        )
-    
-    def register_namespace(self, namespace: str, ttl_config: TTLConfiguration,
-                          tenant_id: Optional[TenantId] = None) -> None:
-        """
-        Register cache namespace with TTL configuration.
-        
-        Args:
-            namespace: Namespace identifier
-            ttl_config: TTL configuration for namespace
-            tenant_id: Optional tenant identifier for multi-tenant isolation
-        """
-        with self._namespace_lock:
-            self._namespace_configs[namespace] = ttl_config
             
-            if tenant_id:
-                if tenant_id not in self._tenant_namespaces:
-                    self._tenant_namespaces[tenant_id] = set()
-                self._tenant_namespaces[tenant_id].add(namespace)
-        
-        self.logger.info(
-            "cache_namespace_registered",
-            namespace=namespace,
-            tenant_id=tenant_id,
-            ttl_policy=ttl_config.policy.value,
-            base_ttl_seconds=ttl_config.base_ttl_seconds
-        )
+            self._handle_redis_error(e, f"TTL calculation for policy {policy.value}")
     
-    def get_namespace_ttl_config(self, namespace: str) -> TTLConfiguration:
-        """
-        Get TTL configuration for namespace.
-        
-        Args:
-            namespace: Namespace identifier
-            
-        Returns:
-            TTL configuration for namespace
-        """
-        with self._namespace_lock:
-            return self._namespace_configs.get(namespace, self._namespace_configs['default'])
-    
-    def get_tenant_namespaces(self, tenant_id: TenantId) -> Set[str]:
-        """
-        Get all namespaces for specific tenant.
-        
-        Args:
-            tenant_id: Tenant identifier
-            
-        Returns:
-            Set of namespace identifiers for tenant
-        """
-        with self._namespace_lock:
-            return self._tenant_namespaces.get(tenant_id, set())
-    
-    def create_tenant_key(self, tenant_id: TenantId, base_key: CacheKey) -> CacheKey:
-        """
-        Create tenant-isolated cache key.
-        
-        Args:
-            tenant_id: Tenant identifier
-            base_key: Base cache key
-            
-        Returns:
-            Tenant-isolated cache key
-        """
-        return f"tenant:{tenant_id}:{base_key}"
-    
-    def extract_tenant_id(self, key: CacheKey) -> Optional[TenantId]:
-        """
-        Extract tenant ID from cache key.
-        
-        Args:
-            key: Cache key to parse
-            
-        Returns:
-            Tenant ID if present, None otherwise
-        """
-        if key.startswith("tenant:"):
-            parts = key.split(":", 2)
-            if len(parts) >= 2:
-                return parts[1]
-        return None
-    
-    def validate_namespace_access(self, namespace: str, tenant_id: Optional[TenantId]) -> bool:
-        """
-        Validate namespace access for tenant.
-        
-        Args:
-            namespace: Namespace to validate
-            tenant_id: Tenant requesting access
-            
-        Returns:
-            True if access is allowed, False otherwise
-        """
-        if not tenant_id:
-            # Allow access to non-tenant namespaces
-            return namespace not in [ns for namespaces in self._tenant_namespaces.values() 
-                                   for ns in namespaces]
-        
-        with self._namespace_lock:
-            tenant_namespaces = self._tenant_namespaces.get(tenant_id, set())
-            return namespace in tenant_namespaces or namespace == 'default'
-
-
-class CacheStrategiesManager:
-    """
-    Central cache strategies manager coordinating invalidation, warming, and namespace management.
-    
-    Provides comprehensive cache lifecycle management with intelligent invalidation,
-    proactive warming, and multi-tenant namespace coordination for enterprise-grade
-    cache optimization and data consistency.
-    """
-    
-    def __init__(self):
-        """Initialize cache strategies manager with default strategies."""
-        self.logger = structlog.get_logger(__name__)
-        
-        # Initialize strategy components
-        self.invalidation_strategies: Dict[CacheInvalidationTrigger, List[CacheInvalidationStrategy]] = {
-            CacheInvalidationTrigger.TTL_EXPIRED: [],
-            CacheInvalidationTrigger.PATTERN_MATCH: [],
-            CacheInvalidationTrigger.DEPENDENCY_CHANGED: []
+    def _merge_config(self, base_config: TTLConfiguration, overrides: Dict[str, Any]) -> TTLConfiguration:
+        """Merge TTL configuration with override parameters."""
+        config_dict = {
+            'policy': base_config.policy,
+            'base_ttl': overrides.get('base_ttl', base_config.base_ttl),
+            'min_ttl': overrides.get('min_ttl', base_config.min_ttl),
+            'max_ttl': overrides.get('max_ttl', base_config.max_ttl),
+            'sliding_window': overrides.get('sliding_window', base_config.sliding_window),
+            'decay_factor': overrides.get('decay_factor', base_config.decay_factor),
+            'business_hours_multiplier': overrides.get('business_hours_multiplier', base_config.business_hours_multiplier),
+            'hit_rate_threshold': overrides.get('hit_rate_threshold', base_config.hit_rate_threshold),
+            'access_frequency_weight': overrides.get('access_frequency_weight', base_config.access_frequency_weight),
+            'cost_computation_factor': overrides.get('cost_computation_factor', base_config.cost_computation_factor)
         }
         
-        self.warming_strategy = PredictiveWarmingStrategy()
-        self.namespace_manager = CacheNamespaceManager()
-        
-        # Cache entry registry for comprehensive management
-        self._cache_entries: Dict[CacheKey, CacheEntry] = {}
-        self._entries_lock = RLock()
-        
-        # Default strategy registration
-        self._register_default_strategies()
-        
-        self.logger.info(
-            "cache_strategies_manager_initialized",
-            invalidation_strategies=len(self.invalidation_strategies),
-            has_warming_strategy=True,
-            has_namespace_manager=True
-        )
+        return TTLConfiguration(**config_dict)
     
-    def register_invalidation_strategy(self, trigger: CacheInvalidationTrigger,
-                                     strategy: CacheInvalidationStrategy) -> None:
-        """
-        Register cache invalidation strategy for specific trigger.
-        
-        Args:
-            trigger: Invalidation trigger type
-            strategy: Invalidation strategy implementation
-        """
-        if trigger not in self.invalidation_strategies:
-            self.invalidation_strategies[trigger] = []
-        
-        self.invalidation_strategies[trigger].append(strategy)
-        
-        self.logger.info(
-            "invalidation_strategy_registered",
-            trigger=trigger.value,
-            strategy_type=type(strategy).__name__
-        )
+    def _calculate_fixed_ttl(self, key: str, config: TTLConfiguration, 
+                           metadata: Optional[Dict[str, Any]]) -> int:
+        """Calculate fixed TTL for predictable data."""
+        return config.base_ttl
     
-    def register_cache_entry(self, key: CacheKey, value: Any, ttl_seconds: int,
-                           namespace: str = "default", tenant_id: Optional[str] = None,
-                           tags: Optional[Set[str]] = None) -> CacheEntry:
-        """
-        Register cache entry with metadata for lifecycle management.
-        
-        Args:
-            key: Cache key
-            value: Cache value
-            ttl_seconds: TTL in seconds
-            namespace: Cache namespace
-            tenant_id: Optional tenant identifier
-            tags: Optional tags for pattern-based operations
-            
-        Returns:
-            Created cache entry
-        """
+    def _calculate_sliding_ttl(self, key: str, config: TTLConfiguration, 
+                             metadata: Optional[Dict[str, Any]]) -> int:
+        """Calculate sliding TTL based on access patterns."""
+        stats = self.access_stats[key]
         current_time = time.time()
-        entry = CacheEntry(
-            key=key,
-            created_at=current_time,
-            last_accessed=current_time,
-            ttl_seconds=ttl_seconds,
-            size_bytes=len(str(value)) if value is not None else 0,
-            namespace=namespace,
-            tenant_id=tenant_id,
-            tags=tags or set()
-        )
         
-        with self._entries_lock:
-            self._cache_entries[key] = entry
+        # Calculate time since last access
+        time_since_access = current_time - stats['last_access']
         
-        # Record access pattern for warming strategy
-        self.warming_strategy.record_access_pattern(key)
+        # Sliding TTL: extend TTL if recently accessed
+        if time_since_access < config.sliding_window:
+            # Recent access - extend TTL
+            extension_factor = 1.0 + (config.sliding_window - time_since_access) / config.sliding_window
+            ttl = int(config.base_ttl * extension_factor)
+        else:
+            # No recent access - use base TTL
+            ttl = config.base_ttl
         
-        self.logger.debug(
-            "cache_entry_registered",
-            key=key,
-            namespace=namespace,
-            tenant_id=tenant_id,
-            ttl_seconds=ttl_seconds,
-            size_bytes=entry.size_bytes
-        )
-        
-        return entry
+        return ttl
     
-    def update_cache_access(self, key: CacheKey) -> None:
+    def _calculate_adaptive_ttl(self, key: str, config: TTLConfiguration, 
+                              metadata: Optional[Dict[str, Any]]) -> int:
+        """Calculate adaptive TTL based on hit rates."""
+        stats = self.access_stats[key]
+        
+        # Calculate hit rate
+        total_accesses = stats['hit_count'] + stats['miss_count']
+        if total_accesses == 0:
+            hit_rate = 0.0
+        else:
+            hit_rate = stats['hit_count'] / total_accesses
+        
+        # Adaptive TTL based on hit rate
+        if hit_rate >= config.hit_rate_threshold:
+            # High hit rate - extend TTL
+            hit_rate_factor = 1.0 + (hit_rate - config.hit_rate_threshold) / (1.0 - config.hit_rate_threshold)
+            ttl = int(config.base_ttl * hit_rate_factor)
+        else:
+            # Low hit rate - reduce TTL
+            hit_rate_factor = hit_rate / config.hit_rate_threshold
+            ttl = int(config.base_ttl * hit_rate_factor)
+        
+        return ttl
+    
+    def _calculate_business_hours_ttl(self, key: str, config: TTLConfiguration, 
+                                    metadata: Optional[Dict[str, Any]]) -> int:
+        """Calculate business hours-aware TTL."""
+        current_time = datetime.now(self.business_timezone)
+        current_hour = current_time.hour
+        
+        # Check if within business hours
+        if self.business_hours_start <= current_hour < self.business_hours_end:
+            # Business hours - shorter TTL for fresher data
+            ttl = int(config.base_ttl / config.business_hours_multiplier)
+        else:
+            # Outside business hours - longer TTL
+            ttl = int(config.base_ttl * config.business_hours_multiplier)
+        
+        return ttl
+    
+    def _calculate_decay_ttl(self, key: str, config: TTLConfiguration, 
+                           metadata: Optional[Dict[str, Any]]) -> int:
+        """Calculate exponential decay TTL."""
+        stats = self.access_stats[key]
+        current_time = time.time()
+        
+        # Calculate age of the cached item
+        age_seconds = current_time - stats['creation_time']
+        age_hours = age_seconds / 3600
+        
+        # Exponential decay: TTL decreases over time
+        decay_factor = math.exp(-config.decay_factor * age_hours)
+        ttl = int(config.base_ttl * decay_factor)
+        
+        return max(config.min_ttl, ttl)
+    
+    def _calculate_last_modified_ttl(self, key: str, config: TTLConfiguration, 
+                                   metadata: Optional[Dict[str, Any]]) -> int:
+        """Calculate TTL based on data modification time."""
+        if not metadata or 'last_modified' not in metadata:
+            return config.base_ttl
+        
+        last_modified = metadata['last_modified']
+        if isinstance(last_modified, str):
+            try:
+                last_modified = datetime.fromisoformat(last_modified.replace('Z', '+00:00'))
+            except ValueError:
+                return config.base_ttl
+        
+        current_time = datetime.now(timezone.utc)
+        if isinstance(last_modified, datetime):
+            # Ensure timezone awareness
+            if last_modified.tzinfo is None:
+                last_modified = last_modified.replace(tzinfo=timezone.utc)
+            
+            # Calculate time since modification
+            time_since_modification = (current_time - last_modified).total_seconds()
+            
+            # Recent modifications get longer TTL
+            if time_since_modification < 3600:  # Less than 1 hour
+                ttl = config.base_ttl * 2
+            elif time_since_modification < 86400:  # Less than 1 day
+                ttl = config.base_ttl
+            else:
+                # Old modifications get shorter TTL
+                days_old = time_since_modification / 86400
+                ttl = int(config.base_ttl / (1 + math.log(days_old)))
+        else:
+            ttl = config.base_ttl
+        
+        return ttl
+    
+    def _calculate_access_frequency_ttl(self, key: str, config: TTLConfiguration, 
+                                      metadata: Optional[Dict[str, Any]]) -> int:
+        """Calculate TTL based on access frequency."""
+        stats = self.access_stats[key]
+        
+        # Update access frequency (exponential moving average)
+        current_time = time.time()
+        time_since_creation = current_time - stats['creation_time']
+        
+        if time_since_creation > 0:
+            current_frequency = stats['hit_count'] / time_since_creation
+            
+            # Exponential moving average
+            alpha = config.access_frequency_weight
+            stats['access_frequency'] = (alpha * current_frequency + 
+                                       (1 - alpha) * stats['access_frequency'])
+        
+        # TTL based on access frequency
+        if stats['access_frequency'] > 0:
+            # Higher frequency gets longer TTL
+            frequency_factor = 1.0 + math.log(1 + stats['access_frequency'])
+            ttl = int(config.base_ttl * frequency_factor)
+        else:
+            ttl = config.base_ttl
+        
+        return ttl
+    
+    def _calculate_cost_aware_ttl(self, key: str, config: TTLConfiguration, 
+                                metadata: Optional[Dict[str, Any]]) -> int:
+        """Calculate cost-aware TTL based on computation cost."""
+        stats = self.access_stats[key]
+        
+        # Get computation cost from metadata or use default
+        computation_cost = 1.0
+        if metadata and 'computation_cost' in metadata:
+            computation_cost = float(metadata['computation_cost'])
+        
+        # Update stats with computation cost
+        stats['computation_cost'] = computation_cost
+        
+        # Higher computation cost gets longer TTL
+        cost_factor = 1.0 + (computation_cost - 1.0) * config.cost_computation_factor
+        ttl = int(config.base_ttl * cost_factor)
+        
+        return ttl
+    
+    def _update_access_stats(self, key: str, access_type: str, 
+                           metadata: Optional[Dict[str, Any]] = None):
+        """Update access statistics for a cache key."""
+        stats = self.access_stats[key]
+        current_time = time.time()
+        
+        if access_type == 'hit':
+            stats['hit_count'] += 1
+        elif access_type == 'miss':
+            stats['miss_count'] += 1
+        elif access_type == 'ttl_set':
+            # Update creation time if this is a new entry
+            if stats['hit_count'] == 0 and stats['miss_count'] == 0:
+                stats['creation_time'] = current_time
+        
+        stats['last_access'] = current_time
+        
+        # Update computation cost if provided
+        if metadata and 'computation_cost' in metadata:
+            stats['computation_cost'] = float(metadata['computation_cost'])
+    
+    def record_cache_access(self, key: str, access_type: str, 
+                          metadata: Optional[Dict[str, Any]] = None):
         """
-        Update cache entry access tracking.
+        Record cache access for TTL calculation algorithms.
         
         Args:
             key: Cache key that was accessed
+            access_type: Type of access ('hit' or 'miss')
+            metadata: Additional metadata about the access
         """
-        with self._entries_lock:
-            if key in self._cache_entries:
-                self._cache_entries[key].update_access()
-                
-                # Record access pattern for predictive warming
-                self.warming_strategy.record_access_pattern(key)
-                
-                self.logger.debug(
-                    "cache_access_updated",
-                    key=key,
-                    access_count=self._cache_entries[key].access_count
-                )
+        self._update_access_stats(key, access_type, metadata)
     
-    def invalidate_cache(self, trigger: CacheInvalidationTrigger,
-                        context: Dict[str, Any]) -> List[CacheKey]:
+    def get_recommended_ttl(self, key: str, policy: TTLPolicy, 
+                          value_metadata: Optional[Dict[str, Any]] = None) -> int:
         """
-        Execute cache invalidation based on trigger and context.
+        Get recommended TTL without applying it to Redis.
         
         Args:
-            trigger: Type of invalidation trigger
-            context: Invalidation context with trigger-specific data
+            key: Cache key to calculate TTL for
+            policy: TTL policy to use
+            value_metadata: Metadata about the cached value
             
         Returns:
-            List of invalidated cache keys
+            Recommended TTL in seconds
         """
-        invalidated_keys = []
+        config = self.policy_configs.get(policy, self.policy_configs[TTLPolicy.FIXED])
         
-        # Get strategies for trigger type
-        strategies = self.invalidation_strategies.get(trigger, [])
+        if policy == TTLPolicy.FIXED:
+            return self._calculate_fixed_ttl(key, config, value_metadata)
+        elif policy == TTLPolicy.SLIDING:
+            return self._calculate_sliding_ttl(key, config, value_metadata)
+        elif policy == TTLPolicy.ADAPTIVE:
+            return self._calculate_adaptive_ttl(key, config, value_metadata)
+        elif policy == TTLPolicy.BUSINESS_HOURS:
+            return self._calculate_business_hours_ttl(key, config, value_metadata)
+        elif policy == TTLPolicy.DECAY:
+            return self._calculate_decay_ttl(key, config, value_metadata)
+        elif policy == TTLPolicy.LAST_MODIFIED:
+            return self._calculate_last_modified_ttl(key, config, value_metadata)
+        elif policy == TTLPolicy.ACCESS_FREQUENCY:
+            return self._calculate_access_frequency_ttl(key, config, value_metadata)
+        elif policy == TTLPolicy.COST_AWARE:
+            return self._calculate_cost_aware_ttl(key, config, value_metadata)
+        else:
+            return config.base_ttl
+    
+    def configure_policy(self, policy: TTLPolicy, **config_params):
+        """
+        Configure TTL policy parameters.
         
-        for strategy in strategies:
+        Args:
+            policy: TTL policy to configure
+            **config_params: Policy configuration parameters
+        """
+        if policy not in self.policy_configs:
+            raise CacheError(
+                f"Unknown TTL policy: {policy}",
+                error_code="INVALID_TTL_POLICY"
+            )
+        
+        current_config = self.policy_configs[policy]
+        
+        # Create new configuration with updated parameters
+        config_dict = {
+            'policy': policy,
+            'base_ttl': config_params.get('base_ttl', current_config.base_ttl),
+            'min_ttl': config_params.get('min_ttl', current_config.min_ttl),
+            'max_ttl': config_params.get('max_ttl', current_config.max_ttl),
+            'sliding_window': config_params.get('sliding_window', current_config.sliding_window),
+            'decay_factor': config_params.get('decay_factor', current_config.decay_factor),
+            'business_hours_multiplier': config_params.get('business_hours_multiplier', current_config.business_hours_multiplier),
+            'hit_rate_threshold': config_params.get('hit_rate_threshold', current_config.hit_rate_threshold),
+            'access_frequency_weight': config_params.get('access_frequency_weight', current_config.access_frequency_weight),
+            'cost_computation_factor': config_params.get('cost_computation_factor', current_config.cost_computation_factor)
+        }
+        
+        self.policy_configs[policy] = TTLConfiguration(**config_dict)
+        
+        self.logger.info(
+            "TTL policy configuration updated",
+            policy=policy.value,
+            updated_params=list(config_params.keys())
+        )
+
+
+class CacheKeyPatternManager(BaseCacheStrategy):
+    """
+    Cache key pattern organization and namespace management for structured
+    cache operations and multi-tenant cache strategies.
+    
+    Provides enterprise-grade cache key organization with namespace hierarchy,
+    pattern validation, and distributed cache coordination per Section 5.2.7
+    cache key pattern organization requirements.
+    """
+    
+    def __init__(self, redis_client: Optional[RedisClient] = None, 
+                 monitoring: Optional[CacheMonitoringManager] = None):
+        super().__init__(redis_client, monitoring)
+        
+        # Registered cache key patterns
+        self.patterns = {}  # pattern_name -> CacheKeyPattern
+        self.namespace_registry = defaultdict(set)  # namespace -> set of pattern_names
+        
+        # Pattern usage statistics
+        self.pattern_usage_stats = defaultdict(int)
+        self.pattern_generation_times = defaultdict(list)
+        
+        # Default patterns for common use cases
+        self._register_default_patterns()
+        
+        self.logger.info("Cache key pattern manager initialized")
+    
+    def execute(self, pattern_name: str, **kwargs) -> str:
+        """
+        Generate cache key using registered pattern.
+        
+        Args:
+            pattern_name: Name of the registered pattern
+            **kwargs: Parameters for key generation
+            
+        Returns:
+            Generated cache key
+        """
+        start_time = time.perf_counter()
+        
+        try:
+            if pattern_name not in self.patterns:
+                raise CacheKeyError(
+                    f"Unknown cache key pattern: {pattern_name}",
+                    key_pattern=pattern_name,
+                    validation_errors=[f"Pattern '{pattern_name}' not registered"]
+                )
+            
+            pattern = self.patterns[pattern_name]
+            
+            # Generate key using pattern
+            cache_key = pattern.generate_key(**kwargs)
+            
+            # Record usage statistics
+            generation_time_ms = (time.perf_counter() - start_time) * 1000
+            self.pattern_usage_stats[pattern_name] += 1
+            self.pattern_generation_times[pattern_name].append(generation_time_ms)
+            
+            # Limit stored generation times
+            if len(self.pattern_generation_times[pattern_name]) > 1000:
+                self.pattern_generation_times[pattern_name] = \
+                    self.pattern_generation_times[pattern_name][-1000:]
+            
+            # Update monitoring
+            if self.monitoring:
+                self.monitoring.record_cache_operation('key_generation', 'redis', generation_time_ms / 1000, 'success')
+            
+            self.metrics.record_pattern_usage(pattern_name)
+            
+            self.logger.debug(
+                "Cache key generated",
+                pattern_name=pattern_name,
+                cache_key=cache_key,
+                generation_time_ms=generation_time_ms,
+                parameters=list(kwargs.keys())
+            )
+            
+            return cache_key
+            
+        except Exception as e:
+            generation_time_ms = (time.perf_counter() - start_time) * 1000
+            
+            # Update monitoring for failure
+            if self.monitoring:
+                self.monitoring.record_cache_operation('key_generation', 'redis', generation_time_ms / 1000, 'error')
+            
+            self.logger.error(
+                "Cache key generation failed",
+                pattern_name=pattern_name,
+                generation_time_ms=generation_time_ms,
+                error_message=str(e),
+                error_type=type(e).__name__,
+                parameters=list(kwargs.keys())
+            )
+            
+            if isinstance(e, CacheKeyError):
+                raise
+            else:
+                raise CacheKeyError(
+                    f"Key generation failed for pattern '{pattern_name}': {str(e)}",
+                    key_pattern=pattern_name
+                )
+    
+    def register_pattern(self, pattern_name: str, pattern: CacheKeyPattern) -> None:
+        """
+        Register a cache key pattern for organized key generation.
+        
+        Args:
+            pattern_name: Unique name for the pattern
+            pattern: CacheKeyPattern instance defining the pattern
+        """
+        if pattern_name in self.patterns:
+            self.logger.warning(
+                "Overwriting existing cache key pattern",
+                pattern_name=pattern_name,
+                old_namespace=self.patterns[pattern_name].namespace,
+                new_namespace=pattern.namespace
+            )
+        
+        # Register pattern
+        self.patterns[pattern_name] = pattern
+        self.namespace_registry[pattern.namespace].add(pattern_name)
+        
+        self.logger.info(
+            "Cache key pattern registered",
+            pattern_name=pattern_name,
+            namespace=pattern.namespace,
+            pattern=pattern.pattern,
+            ttl_policy=pattern.ttl_policy.value,
+            invalidation_pattern=pattern.invalidation_pattern.value
+        )
+    
+    def _register_default_patterns(self) -> None:
+        """Register default cache key patterns for common use cases."""
+        # User-related patterns
+        self.register_pattern('user_profile', CacheKeyPattern(
+            namespace='user',
+            pattern='user:{user_id}:profile',
+            ttl_policy=TTLPolicy.SLIDING,
+            invalidation_pattern=CacheInvalidationPattern.IMMEDIATE,
+            priority=1,
+            tags={'user', 'profile'}
+        ))
+        
+        self.register_pattern('user_session', CacheKeyPattern(
+            namespace='session',
+            pattern='session:{session_id}:user:{user_id}',
+            ttl_policy=TTLPolicy.SLIDING,
+            invalidation_pattern=CacheInvalidationPattern.TIME_BASED,
+            priority=1,
+            tags={'session', 'user'}
+        ))
+        
+        self.register_pattern('user_permissions', CacheKeyPattern(
+            namespace='auth',
+            pattern='auth:permissions:user:{user_id}',
+            ttl_policy=TTLPolicy.FIXED,
+            invalidation_pattern=CacheInvalidationPattern.EVENT_DRIVEN,
+            priority=1,
+            tags={'auth', 'permissions'}
+        ))
+        
+        # API-related patterns
+        self.register_pattern('api_response', CacheKeyPattern(
+            namespace='api',
+            pattern='api:{endpoint}:params:{params_hash}',
+            ttl_policy=TTLPolicy.BUSINESS_HOURS,
+            invalidation_pattern=CacheInvalidationPattern.TIME_BASED,
+            priority=2,
+            tags={'api', 'response'}
+        ))
+        
+        self.register_pattern('api_rate_limit', CacheKeyPattern(
+            namespace='rate_limit',
+            pattern='rate_limit:{client_id}:{endpoint}:{window}',
+            ttl_policy=TTLPolicy.FIXED,
+            invalidation_pattern=CacheInvalidationPattern.TIME_BASED,
+            priority=1,
+            tags={'rate_limit', 'api'}
+        ))
+        
+        # Database-related patterns
+        self.register_pattern('db_query_result', CacheKeyPattern(
+            namespace='db',
+            pattern='db:query:{query_hash}:params:{params_hash}',
+            ttl_policy=TTLPolicy.COST_AWARE,
+            invalidation_pattern=CacheInvalidationPattern.WRITE_THROUGH,
+            priority=3,
+            tags={'database', 'query'}
+        ))
+        
+        self.register_pattern('db_entity', CacheKeyPattern(
+            namespace='entity',
+            pattern='entity:{entity_type}:{entity_id}',
+            ttl_policy=TTLPolicy.ADAPTIVE,
+            invalidation_pattern=CacheInvalidationPattern.CASCADE,
+            priority=2,
+            tags={'database', 'entity'}
+        ))
+        
+        # Business logic patterns
+        self.register_pattern('business_calculation', CacheKeyPattern(
+            namespace='business',
+            pattern='business:{operation}:input:{input_hash}',
+            ttl_policy=TTLPolicy.COST_AWARE,
+            invalidation_pattern=CacheInvalidationPattern.LAZY,
+            priority=3,
+            tags={'business', 'calculation'}
+        ))
+        
+        # External service patterns
+        self.register_pattern('external_api', CacheKeyPattern(
+            namespace='external',
+            pattern='external:{service}:{endpoint}:params:{params_hash}',
+            ttl_policy=TTLPolicy.DECAY,
+            invalidation_pattern=CacheInvalidationPattern.TIME_BASED,
+            priority=4,
+            tags={'external', 'api'}
+        ))
+        
+        # Temporary data patterns
+        self.register_pattern('temp_data', CacheKeyPattern(
+            namespace='temp',
+            pattern='temp:{operation}:{unique_id}',
+            ttl_policy=TTLPolicy.FIXED,
+            invalidation_pattern=CacheInvalidationPattern.TIME_BASED,
+            priority=5,
+            tags={'temporary'}
+        ))
+    
+    def get_pattern(self, pattern_name: str) -> Optional[CacheKeyPattern]:
+        """
+        Get registered cache key pattern by name.
+        
+        Args:
+            pattern_name: Name of the pattern to retrieve
+            
+        Returns:
+            CacheKeyPattern instance or None if not found
+        """
+        return self.patterns.get(pattern_name)
+    
+    def list_patterns(self, namespace: Optional[str] = None) -> Dict[str, CacheKeyPattern]:
+        """
+        List registered cache key patterns, optionally filtered by namespace.
+        
+        Args:
+            namespace: Optional namespace to filter patterns
+            
+        Returns:
+            Dictionary of pattern_name -> CacheKeyPattern
+        """
+        if namespace:
+            pattern_names = self.namespace_registry.get(namespace, set())
+            return {name: self.patterns[name] for name in pattern_names}
+        else:
+            return self.patterns.copy()
+    
+    def validate_key_against_patterns(self, key: str) -> List[str]:
+        """
+        Validate cache key against registered patterns and return matching patterns.
+        
+        Args:
+            key: Cache key to validate
+            
+        Returns:
+            List of pattern names that match the key
+        """
+        matching_patterns = []
+        
+        for pattern_name, pattern in self.patterns.items():
+            if pattern.matches_key(key):
+                matching_patterns.append(pattern_name)
+        
+        return matching_patterns
+    
+    def generate_pattern_hash(self, **params) -> str:
+        """
+        Generate hash for parameters to use in cache key patterns.
+        
+        Args:
+            **params: Parameters to hash
+            
+        Returns:
+            Hexadecimal hash string
+        """
+        # Sort parameters for consistent hashing
+        sorted_params = sorted(params.items())
+        param_string = json.dumps(sorted_params, sort_keys=True, separators=(',', ':'))
+        
+        # Generate SHA-256 hash
+        hash_obj = hashlib.sha256(param_string.encode('utf-8'))
+        return hash_obj.hexdigest()[:16]  # Use first 16 characters for brevity
+    
+    def create_namespace_hierarchy(self, namespace: str, parent_namespace: Optional[str] = None) -> None:
+        """
+        Create namespace hierarchy for organized cache management.
+        
+        Args:
+            namespace: Namespace to create
+            parent_namespace: Optional parent namespace for hierarchy
+        """
+        if parent_namespace and parent_namespace not in self.namespace_registry:
+            raise CacheKeyError(
+                f"Parent namespace does not exist: {parent_namespace}",
+                validation_errors=[f"Parent namespace '{parent_namespace}' not found"]
+            )
+        
+        if namespace not in self.namespace_registry:
+            self.namespace_registry[namespace] = set()
+        
+        self.logger.info(
+            "Cache namespace created",
+            namespace=namespace,
+            parent_namespace=parent_namespace
+        )
+    
+    def get_keys_by_namespace(self, namespace: str, limit: int = 1000) -> List[str]:
+        """
+        Get cache keys belonging to a specific namespace.
+        
+        Args:
+            namespace: Namespace to search
+            limit: Maximum number of keys to return
+            
+        Returns:
+            List of cache keys in the namespace
+        """
+        pattern = f"{namespace}:*"
+        
+        try:
+            matching_keys = []
+            cursor = 0
+            
+            while len(matching_keys) < limit:
+                cursor, keys = self.redis_client._redis_client.scan(
+                    cursor=cursor,
+                    match=pattern,
+                    count=min(100, limit - len(matching_keys))
+                )
+                
+                matching_keys.extend(keys)
+                
+                if cursor == 0:  # Scan completed
+                    break
+            
+            return matching_keys[:limit]
+            
+        except Exception as e:
+            self.logger.warning(
+                "Failed to get keys by namespace",
+                namespace=namespace,
+                error_message=str(e)
+            )
+            return []
+    
+    def get_usage_statistics(self) -> Dict[str, Any]:
+        """Get cache key pattern usage statistics."""
+        stats = {
+            'total_patterns': len(self.patterns),
+            'namespaces': list(self.namespace_registry.keys()),
+            'pattern_usage': dict(self.pattern_usage_stats),
+            'pattern_performance': {},
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
+        
+        # Calculate performance metrics for each pattern
+        for pattern_name, generation_times in self.pattern_generation_times.items():
+            if generation_times:
+                stats['pattern_performance'][pattern_name] = {
+                    'avg_generation_time_ms': sum(generation_times) / len(generation_times),
+                    'max_generation_time_ms': max(generation_times),
+                    'min_generation_time_ms': min(generation_times),
+                    'total_generations': len(generation_times),
+                    'usage_count': self.pattern_usage_stats[pattern_name]
+                }
+        
+        return stats
+
+
+class CacheWarmingStrategy(BaseCacheStrategy):
+    """
+    Intelligent cache warming strategy for proactive cache population and
+    performance optimization through predictive and scheduled cache operations.
+    
+    Implements sophisticated cache warming patterns including preload, background,
+    predictive, and demand-driven warming strategies per Section 5.2.7 performance
+    optimization requirements for enhanced user experience.
+    """
+    
+    def __init__(self, redis_client: Optional[RedisClient] = None, 
+                 monitoring: Optional[CacheMonitoringManager] = None):
+        super().__init__(redis_client, monitoring)
+        
+        # Warming strategy configurations
+        self.warming_configs = {
+            CacheWarmingStrategy.PRELOAD: {
+                'batch_size': 100,
+                'concurrent_limit': 5,
+                'timeout': 300,
+                'priority': 1
+            },
+            CacheWarmingStrategy.BACKGROUND: {
+                'batch_size': 50,
+                'concurrent_limit': 2,
+                'timeout': 600,
+                'priority': 3
+            },
+            CacheWarmingStrategy.PREDICTIVE: {
+                'batch_size': 20,
+                'concurrent_limit': 3,
+                'timeout': 180,
+                'priority': 2
+            },
+            CacheWarmingStrategy.SCHEDULE_BASED: {
+                'batch_size': 200,
+                'concurrent_limit': 4,
+                'timeout': 900,
+                'priority': 4
+            },
+            CacheWarmingStrategy.DEMAND_DRIVEN: {
+                'batch_size': 10,
+                'concurrent_limit': 1,
+                'timeout': 60,
+                'priority': 1
+            },
+            CacheWarmingStrategy.CASCADING: {
+                'batch_size': 30,
+                'concurrent_limit': 2,
+                'timeout': 240,
+                'priority': 2
+            }
+        }
+        
+        # Warming operation tracking
+        self.warming_queue = defaultdict(deque)
+        self.warming_locks = defaultdict(Lock)
+        self.warming_history = defaultdict(list)
+        
+        # Predictive warming data
+        self.access_patterns = defaultdict(lambda: {
+            'hourly_access_counts': defaultdict(int),
+            'daily_access_patterns': defaultdict(int),
+            'access_sequences': deque(maxlen=1000),
+            'prediction_accuracy': 0.0
+        })
+        
+        self.logger.info("Cache warming strategy initialized")
+    
+    def execute(self, strategy: CacheWarmingStrategy, warming_spec: Dict[str, Any], 
+                **kwargs) -> Dict[str, Any]:
+        """
+        Execute cache warming strategy with specified parameters.
+        
+        Args:
+            strategy: Cache warming strategy to execute
+            warming_spec: Specification for warming operations
+            **kwargs: Additional strategy-specific parameters
+            
+        Returns:
+            Dictionary containing warming results and metrics
+        """
+        start_time = time.perf_counter()
+        
+        try:
+            if strategy == CacheWarmingStrategy.PRELOAD:
+                result = self._preload_warming(warming_spec, **kwargs)
+            elif strategy == CacheWarmingStrategy.BACKGROUND:
+                result = self._background_warming(warming_spec, **kwargs)
+            elif strategy == CacheWarmingStrategy.PREDICTIVE:
+                result = self._predictive_warming(warming_spec, **kwargs)
+            elif strategy == CacheWarmingStrategy.SCHEDULE_BASED:
+                result = self._schedule_based_warming(warming_spec, **kwargs)
+            elif strategy == CacheWarmingStrategy.DEMAND_DRIVEN:
+                result = self._demand_driven_warming(warming_spec, **kwargs)
+            elif strategy == CacheWarmingStrategy.CASCADING:
+                result = self._cascading_warming(warming_spec, **kwargs)
+            else:
+                raise CacheError(
+                    f"Unsupported cache warming strategy: {strategy}",
+                    error_code="UNSUPPORTED_WARMING_STRATEGY",
+                    details={'strategy': strategy.value}
+                )
+            
+            # Record metrics
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            success = result.get('success_count', 0) > 0
+            
+            self.metrics.record_warming_operation(
+                strategy, 
+                success, 
+                result.get('success_count', 0)
+            )
+            
+            # Update monitoring
+            if self.monitoring:
+                self.monitoring.record_cache_operation('warming', 'redis', duration_ms / 1000, 'success' if success else 'error')
+            
+            self.logger.info(
+                "Cache warming completed",
+                strategy=strategy.value,
+                duration_ms=duration_ms,
+                success_count=result.get('success_count', 0),
+                error_count=result.get('error_count', 0),
+                total_operations=result.get('total_operations', 0)
+            )
+            
+            return result
+            
+        except Exception as e:
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            
+            # Update monitoring for failure
+            if self.monitoring:
+                self.monitoring.record_cache_operation('warming', 'redis', duration_ms / 1000, 'error')
+            
+            self.logger.error(
+                "Cache warming failed",
+                strategy=strategy.value,
+                duration_ms=duration_ms,
+                error_message=str(e),
+                error_type=type(e).__name__
+            )
+            
+            self._handle_redis_error(e, f"cache warming with strategy {strategy.value}")
+    
+    def _preload_warming(self, warming_spec: Dict[str, Any], **kwargs) -> Dict[str, Any]:
+        """
+        Preload cache warming during application startup.
+        
+        Args:
+            warming_spec: Warming specification with data sources and keys
+            **kwargs: Additional parameters
+            
+        Returns:
+            Warming results
+        """
+        config = self.warming_configs[CacheWarmingStrategy.PRELOAD]
+        batch_size = kwargs.get('batch_size', config['batch_size'])
+        
+        data_sources = warming_spec.get('data_sources', [])
+        static_keys = warming_spec.get('static_keys', [])
+        
+        total_operations = 0
+        success_count = 0
+        error_count = 0
+        errors = []
+        
+        # Warm static keys first
+        if static_keys:
+            static_result = self._warm_static_keys(static_keys, batch_size)
+            total_operations += static_result['total_operations']
+            success_count += static_result['success_count']
+            error_count += static_result['error_count']
+            errors.extend(static_result['errors'])
+        
+        # Warm data from sources
+        for data_source in data_sources:
             try:
-                # Get keys to invalidate from strategy
-                strategy_keys = strategy.get_invalidation_keys(trigger, context)
-                
-                # Check individual entries against strategy
-                with self._entries_lock:
-                    for key, entry in list(self._cache_entries.items()):
-                        if strategy.should_invalidate(entry, trigger, context):
-                            invalidated_keys.append(key)
-                
-                # Add strategy-specific keys
-                invalidated_keys.extend(strategy_keys)
+                source_result = self._warm_from_data_source(data_source, batch_size)
+                total_operations += source_result['total_operations']
+                success_count += source_result['success_count']
+                error_count += source_result['error_count']
+                errors.extend(source_result['errors'])
                 
             except Exception as e:
-                self.logger.error(
-                    "cache_invalidation_strategy_error",
-                    trigger=trigger.value,
-                    strategy_type=type(strategy).__name__,
+                error_msg = f"Preload warming failed for data source: {str(e)}"
+                errors.append(error_msg)
+                error_count += 1
+        
+        return {
+            'strategy': CacheWarmingStrategy.PRELOAD.value,
+            'total_operations': total_operations,
+            'success_count': success_count,
+            'error_count': error_count,
+            'errors': errors,
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
+    
+    def _background_warming(self, warming_spec: Dict[str, Any], **kwargs) -> Dict[str, Any]:
+        """
+        Background cache warming during normal operation.
+        
+        Args:
+            warming_spec: Warming specification
+            **kwargs: Additional parameters
+            
+        Returns:
+            Warming results
+        """
+        warming_patterns = warming_spec.get('warming_patterns', [])
+        priority_threshold = kwargs.get('priority_threshold', 3)
+        
+        total_operations = 0
+        success_count = 0
+        error_count = 0
+        
+        # Process warming patterns based on priority
+        for pattern in warming_patterns:
+            pattern_priority = pattern.get('priority', 5)
+            
+            if pattern_priority <= priority_threshold:
+                try:
+                    pattern_result = self._warm_pattern(pattern)
+                    total_operations += pattern_result['total_operations']
+                    success_count += pattern_result['success_count']
+                    error_count += pattern_result['error_count']
+                    
+                except Exception as e:
+                    error_count += 1
+                    self.logger.warning(
+                        "Background warming pattern failed",
+                        pattern=pattern.get('name', 'unknown'),
+                        error_message=str(e)
+                    )
+        
+        return {
+            'strategy': CacheWarmingStrategy.BACKGROUND.value,
+            'total_operations': total_operations,
+            'success_count': success_count,
+            'error_count': error_count,
+            'patterns_processed': len(warming_patterns),
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
+    
+    def _predictive_warming(self, warming_spec: Dict[str, Any], **kwargs) -> Dict[str, Any]:
+        """
+        Predictive cache warming based on access patterns.
+        
+        Args:
+            warming_spec: Warming specification with prediction parameters
+            **kwargs: Additional parameters
+            
+        Returns:
+            Warming results
+        """
+        prediction_window = kwargs.get('prediction_window', 3600)  # 1 hour
+        confidence_threshold = kwargs.get('confidence_threshold', 0.7)
+        
+        # Generate predictions based on access patterns
+        predictions = self._generate_access_predictions(prediction_window, confidence_threshold)
+        
+        total_operations = 0
+        success_count = 0
+        error_count = 0
+        
+        # Warm predicted keys
+        for prediction in predictions:
+            key = prediction['key']
+            confidence = prediction['confidence']
+            
+            if confidence >= confidence_threshold:
+                try:
+                    # Generate or retrieve value for predicted key
+                    value_generator = warming_spec.get('value_generator')
+                    if value_generator and callable(value_generator):
+                        value = value_generator(key)
+                        
+                        # Warm cache with predicted value
+                        ttl = prediction.get('predicted_ttl', 3600)
+                        success = self.redis_client.set(key, value, ttl=ttl)
+                        
+                        if success:
+                            success_count += 1
+                        else:
+                            error_count += 1
+                        
+                        total_operations += 1
+                        
+                except Exception as e:
+                    error_count += 1
+                    self.logger.warning(
+                        "Predictive warming failed for key",
+                        key=key,
+                        confidence=confidence,
+                        error_message=str(e)
+                    )
+        
+        return {
+            'strategy': CacheWarmingStrategy.PREDICTIVE.value,
+            'total_operations': total_operations,
+            'success_count': success_count,
+            'error_count': error_count,
+            'predictions_generated': len(predictions),
+            'average_confidence': sum(p['confidence'] for p in predictions) / len(predictions) if predictions else 0,
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
+    
+    def _schedule_based_warming(self, warming_spec: Dict[str, Any], **kwargs) -> Dict[str, Any]:
+        """
+        Schedule-based cache warming with time-based triggers.
+        
+        Args:
+            warming_spec: Warming specification with schedule information
+            **kwargs: Additional parameters
+            
+        Returns:
+            Warming results
+        """
+        schedule_rules = warming_spec.get('schedule_rules', [])
+        current_time = datetime.now(timezone.utc)
+        
+        total_operations = 0
+        success_count = 0
+        error_count = 0
+        executed_rules = 0
+        
+        for rule in schedule_rules:
+            try:
+                # Check if rule should execute
+                if self._should_execute_schedule_rule(rule, current_time):
+                    rule_result = self._execute_warming_rule(rule)
+                    total_operations += rule_result['total_operations']
+                    success_count += rule_result['success_count']
+                    error_count += rule_result['error_count']
+                    executed_rules += 1
+                    
+            except Exception as e:
+                error_count += 1
+                self.logger.warning(
+                    "Schedule-based warming rule failed",
+                    rule_name=rule.get('name', 'unknown'),
                     error_message=str(e)
                 )
         
-        # Remove invalidated entries from registry
-        with self._entries_lock:
-            for key in invalidated_keys:
-                self._cache_entries.pop(key, None)
-        
-        if invalidated_keys:
-            self.logger.info(
-                "cache_invalidation_completed",
-                trigger=trigger.value,
-                invalidated_count=len(invalidated_keys),
-                context_keys=list(context.keys())
-            )
-        
-        return list(set(invalidated_keys))  # Remove duplicates
-    
-    async def warm_cache_async(self, keys: List[CacheKey], priority: CacheWarmingPriority,
-                              loader_func: Callable[[CacheKey], Any]) -> Dict[CacheKey, Any]:
-        """
-        Asynchronously warm cache with specified keys.
-        
-        Args:
-            keys: Cache keys to warm
-            priority: Warming priority level
-            loader_func: Function to load data for keys
-            
-        Returns:
-            Dictionary of warmed key-value pairs
-        """
-        return await self.warming_strategy.warm_cache(keys, priority, loader_func)
-    
-    def schedule_cache_warming(self, keys: List[CacheKey], priority: CacheWarmingPriority,
-                              delay_seconds: int = 0) -> None:
-        """
-        Schedule cache warming for future execution.
-        
-        Args:
-            keys: Cache keys to warm
-            priority: Warming priority level
-            delay_seconds: Delay before execution
-        """
-        self.warming_strategy.schedule_warming(keys, priority, delay_seconds)
-    
-    def get_cache_statistics(self) -> Dict[str, Any]:
-        """
-        Get comprehensive cache statistics and performance metrics.
-        
-        Returns:
-            Dictionary containing cache statistics and performance data
-        """
-        with self._entries_lock:
-            total_entries = len(self._cache_entries)
-            
-            namespace_stats = {}
-            tenant_stats = {}
-            size_total = 0
-            
-            for entry in self._cache_entries.values():
-                # Namespace statistics
-                if entry.namespace not in namespace_stats:
-                    namespace_stats[entry.namespace] = {'count': 0, 'size_bytes': 0}
-                namespace_stats[entry.namespace]['count'] += 1
-                namespace_stats[entry.namespace]['size_bytes'] += entry.size_bytes
-                
-                # Tenant statistics
-                if entry.tenant_id:
-                    if entry.tenant_id not in tenant_stats:
-                        tenant_stats[entry.tenant_id] = {'count': 0, 'size_bytes': 0}
-                    tenant_stats[entry.tenant_id]['count'] += 1
-                    tenant_stats[entry.tenant_id]['size_bytes'] += entry.size_bytes
-                
-                size_total += entry.size_bytes
-        
         return {
-            'total_entries': total_entries,
-            'total_size_bytes': size_total,
-            'namespace_statistics': namespace_stats,
-            'tenant_statistics': tenant_stats,
-            'invalidation_strategies': {
-                trigger.value: len(strategies) 
-                for trigger, strategies in self.invalidation_strategies.items()
-            },
-            'warming_strategy_type': type(self.warming_strategy).__name__
+            'strategy': CacheWarmingStrategy.SCHEDULE_BASED.value,
+            'total_operations': total_operations,
+            'success_count': success_count,
+            'error_count': error_count,
+            'total_rules': len(schedule_rules),
+            'executed_rules': executed_rules,
+            'timestamp': datetime.now(timezone.utc).isoformat()
         }
     
-    def _register_default_strategies(self) -> None:
-        """Register default invalidation strategies."""
-        # Time-based invalidation with static TTL
-        default_ttl_config = TTLConfiguration(
-            policy=TTLPolicy.STATIC,
-            base_ttl_seconds=3600
-        )
-        time_strategy = TimeBasedInvalidationStrategy(default_ttl_config)
-        self.register_invalidation_strategy(CacheInvalidationTrigger.TTL_EXPIRED, time_strategy)
+    def _demand_driven_warming(self, warming_spec: Dict[str, Any], **kwargs) -> Dict[str, Any]:
+        """
+        Demand-driven cache warming triggered by cache misses.
         
-        # Pattern-based invalidation
-        pattern_strategy = PatternBasedInvalidationStrategy()
-        self.register_invalidation_strategy(CacheInvalidationTrigger.PATTERN_MATCH, pattern_strategy)
+        Args:
+            warming_spec: Warming specification with miss handling
+            **kwargs: Additional parameters
+            
+        Returns:
+            Warming results
+        """
+        miss_keys = warming_spec.get('miss_keys', [])
+        related_keys_generator = warming_spec.get('related_keys_generator')
         
-        # Dependency-based invalidation
-        dependency_strategy = DependencyBasedInvalidationStrategy()
-        self.register_invalidation_strategy(CacheInvalidationTrigger.DEPENDENCY_CHANGED, dependency_strategy)
-
-
-# Global cache strategies manager instance
-cache_strategies = CacheStrategiesManager()
-
-
-# Convenience functions for common cache operations
-@monitor_cache_operation('invalidate', 'redis')
-def invalidate_by_pattern(pattern: str, namespace: Optional[str] = None,
-                         tags: Optional[Set[str]] = None) -> List[CacheKey]:
-    """
-    Invalidate cache entries matching pattern.
-    
-    Args:
-        pattern: Pattern to match (supports glob-style wildcards)
-        namespace: Optional namespace filter
-        tags: Optional tag filter
+        total_operations = 0
+        success_count = 0
+        error_count = 0
         
-    Returns:
-        List of invalidated cache keys
-    """
-    context = {
-        'patterns': [pattern],
-        'namespace': namespace,
-        'tags': tags or set()
-    }
-    
-    return cache_strategies.invalidate_cache(
-        CacheInvalidationTrigger.PATTERN_MATCH,
-        context
-    )
-
-
-@monitor_cache_operation('invalidate', 'redis')
-def invalidate_by_dependency(changed_keys: Set[CacheKey]) -> List[CacheKey]:
-    """
-    Invalidate cache entries dependent on changed keys.
-    
-    Args:
-        changed_keys: Set of cache keys that have changed
+        for miss_key in miss_keys:
+            try:
+                # Generate related keys that should be warmed
+                related_keys = []
+                if related_keys_generator and callable(related_keys_generator):
+                    related_keys = related_keys_generator(miss_key)
+                
+                # Warm related keys
+                for related_key in related_keys:
+                    value_generator = warming_spec.get('value_generator')
+                    if value_generator and callable(value_generator):
+                        value = value_generator(related_key)
+                        success = self.redis_client.set(related_key, value, ttl=3600)
+                        
+                        if success:
+                            success_count += 1
+                        else:
+                            error_count += 1
+                        
+                        total_operations += 1
+                        
+            except Exception as e:
+                error_count += 1
+                self.logger.warning(
+                    "Demand-driven warming failed for miss key",
+                    miss_key=miss_key,
+                    error_message=str(e)
+                )
         
-    Returns:
-        List of invalidated dependent cache keys
-    """
-    context = {'changed_keys': changed_keys}
+        return {
+            'strategy': CacheWarmingStrategy.DEMAND_DRIVEN.value,
+            'total_operations': total_operations,
+            'success_count': success_count,
+            'error_count': error_count,
+            'miss_keys_processed': len(miss_keys),
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
     
-    return cache_strategies.invalidate_cache(
-        CacheInvalidationTrigger.DEPENDENCY_CHANGED,
-        context
-    )
-
-
-def create_cache_key(namespace: str, entity_type: str, identifier: str,
-                    tenant_id: Optional[str] = None, version: Optional[str] = None) -> CacheKey:
-    """
-    Create standardized cache key using pattern organization.
-    
-    Args:
-        namespace: Primary namespace
-        entity_type: Type of cached entity
-        identifier: Unique identifier
-        tenant_id: Optional tenant ID for multi-tenant isolation
-        version: Optional version for cache migration
+    def _cascading_warming(self, warming_spec: Dict[str, Any], **kwargs) -> Dict[str, Any]:
+        """
+        Cascading cache warming for related data.
         
-    Returns:
-        Formatted cache key
-    """
-    pattern = CacheKeyPattern(
-        namespace=namespace,
-        entity_type=entity_type,
-        identifier=identifier,
-        tenant_id=tenant_id,
-        version=version
-    )
+        Args:
+            warming_spec: Warming specification with cascade rules
+            **kwargs: Additional parameters
+            
+        Returns:
+            Warming results
+        """
+        root_keys = warming_spec.get('root_keys', [])
+        cascade_rules = warming_spec.get('cascade_rules', [])
+        max_cascade_depth = kwargs.get('max_cascade_depth', 3)
+        
+        total_operations = 0
+        success_count = 0
+        error_count = 0
+        
+        # Process each root key with cascading
+        for root_key in root_keys:
+            try:
+                cascade_result = self._execute_cascade_warming(
+                    root_key, 
+                    cascade_rules, 
+                    max_cascade_depth,
+                    warming_spec.get('value_generator')
+                )
+                total_operations += cascade_result['total_operations']
+                success_count += cascade_result['success_count']
+                error_count += cascade_result['error_count']
+                
+            except Exception as e:
+                error_count += 1
+                self.logger.warning(
+                    "Cascading warming failed for root key",
+                    root_key=root_key,
+                    error_message=str(e)
+                )
+        
+        return {
+            'strategy': CacheWarmingStrategy.CASCADING.value,
+            'total_operations': total_operations,
+            'success_count': success_count,
+            'error_count': error_count,
+            'root_keys_processed': len(root_keys),
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
     
-    return pattern.to_key()
-
-
-def schedule_warming_by_priority(keys: List[CacheKey], priority: CacheWarmingPriority) -> None:
-    """
-    Schedule cache warming based on priority level.
+    def _warm_static_keys(self, static_keys: List[Dict[str, Any]], batch_size: int) -> Dict[str, Any]:
+        """Warm cache with static key-value pairs."""
+        total_operations = len(static_keys)
+        success_count = 0
+        error_count = 0
+        errors = []
+        
+        # Process in batches
+        for i in range(0, len(static_keys), batch_size):
+            batch = static_keys[i:i + batch_size]
+            
+            try:
+                pipeline = self.redis_client.pipeline()
+                
+                for key_spec in batch:
+                    key = key_spec.get('key')
+                    value = key_spec.get('value')
+                    ttl = key_spec.get('ttl', 3600)
+                    
+                    pipeline.set(key, value, ttl=ttl)
+                
+                results = pipeline.execute()
+                success_count += sum(1 for result in results if result)
+                
+            except Exception as e:
+                error_count += len(batch)
+                error_msg = f"Static key warming batch failed: {str(e)}"
+                errors.append(error_msg)
+        
+        return {
+            'total_operations': total_operations,
+            'success_count': success_count,
+            'error_count': error_count,
+            'errors': errors
+        }
     
-    Args:
-        keys: Cache keys to warm
-        priority: Warming priority level
-    """
-    # Schedule immediate warming for critical and high priority
-    if priority in [CacheWarmingPriority.CRITICAL, CacheWarmingPriority.HIGH]:
-        cache_strategies.schedule_cache_warming(keys, priority, delay_seconds=0)
-    # Schedule delayed warming for lower priority
-    else:
-        delay = 60 if priority == CacheWarmingPriority.MEDIUM else 300
-        cache_strategies.schedule_cache_warming(keys, priority, delay_seconds=delay)
+    def _warm_from_data_source(self, data_source: Dict[str, Any], batch_size: int) -> Dict[str, Any]:
+        """Warm cache from external data source."""
+        source_type = data_source.get('type')
+        source_config = data_source.get('config', {})
+        
+        # This would be implemented based on specific data source types
+        # For now, return a placeholder result
+        return {
+            'total_operations': 0,
+            'success_count': 0,
+            'error_count': 0,
+            'errors': []
+        }
+    
+    def _warm_pattern(self, pattern: Dict[str, Any]) -> Dict[str, Any]:
+        """Warm cache based on a specific pattern."""
+        pattern_name = pattern.get('name', 'unknown')
+        key_generator = pattern.get('key_generator')
+        value_generator = pattern.get('value_generator')
+        key_count = pattern.get('key_count', 10)
+        
+        total_operations = 0
+        success_count = 0
+        error_count = 0
+        
+        if key_generator and value_generator and callable(key_generator) and callable(value_generator):
+            try:
+                # Generate keys and values for warming
+                keys = key_generator(key_count)
+                
+                for key in keys:
+                    value = value_generator(key)
+                    success = self.redis_client.set(key, value, ttl=3600)
+                    
+                    if success:
+                        success_count += 1
+                    else:
+                        error_count += 1
+                    
+                    total_operations += 1
+                    
+            except Exception as e:
+                error_count += key_count
+                self.logger.warning(
+                    "Pattern warming failed",
+                    pattern_name=pattern_name,
+                    error_message=str(e)
+                )
+        
+        return {
+            'total_operations': total_operations,
+            'success_count': success_count,
+            'error_count': error_count
+        }
+    
+    def _generate_access_predictions(self, prediction_window: int, confidence_threshold: float) -> List[Dict[str, Any]]:
+        """Generate predictions for cache access patterns."""
+        predictions = []
+        
+        for key, pattern_data in self.access_patterns.items():
+            # Simple prediction based on historical access patterns
+            hourly_counts = pattern_data['hourly_access_counts']
+            
+            if hourly_counts:
+                current_hour = datetime.now(timezone.utc).hour
+                next_hour = (current_hour + 1) % 24
+                
+                # Predict access probability for next hour
+                historical_access = hourly_counts.get(next_hour, 0)
+                total_historical = sum(hourly_counts.values())
+                
+                if total_historical > 0:
+                    access_probability = historical_access / total_historical
+                    
+                    if access_probability >= confidence_threshold:
+                        predictions.append({
+                            'key': key,
+                            'confidence': access_probability,
+                            'predicted_time': next_hour,
+                            'predicted_ttl': max(3600, int(3600 * access_probability))
+                        })
+        
+        # Sort by confidence
+        predictions.sort(key=lambda p: p['confidence'], reverse=True)
+        
+        return predictions[:100]  # Limit predictions
+    
+    def _should_execute_schedule_rule(self, rule: Dict[str, Any], current_time: datetime) -> bool:
+        """Check if a schedule rule should execute at the current time."""
+        schedule_type = rule.get('schedule_type', 'hourly')
+        
+        if schedule_type == 'hourly':
+            return current_time.minute == rule.get('minute', 0)
+        elif schedule_type == 'daily':
+            return (current_time.hour == rule.get('hour', 0) and 
+                   current_time.minute == rule.get('minute', 0))
+        elif schedule_type == 'weekly':
+            return (current_time.weekday() == rule.get('weekday', 0) and
+                   current_time.hour == rule.get('hour', 0) and
+                   current_time.minute == rule.get('minute', 0))
+        
+        return False
+    
+    def _execute_warming_rule(self, rule: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a warming rule with specified parameters."""
+        rule_type = rule.get('type', 'static')
+        
+        if rule_type == 'static':
+            static_keys = rule.get('keys', [])
+            return self._warm_static_keys(static_keys, 50)
+        elif rule_type == 'pattern':
+            return self._warm_pattern(rule)
+        else:
+            return {
+                'total_operations': 0,
+                'success_count': 0,
+                'error_count': 1
+            }
+    
+    def _execute_cascade_warming(self, root_key: str, cascade_rules: List[Dict[str, Any]], 
+                                max_depth: int, value_generator: Optional[Callable]) -> Dict[str, Any]:
+        """Execute cascading warming from a root key."""
+        total_operations = 0
+        success_count = 0
+        error_count = 0
+        
+        # This would implement cascade logic based on rules
+        # For now, return placeholder result
+        
+        return {
+            'total_operations': total_operations,
+            'success_count': success_count,
+            'error_count': error_count
+        }
+    
+    def record_cache_access(self, key: str, access_time: Optional[datetime] = None):
+        """
+        Record cache access for predictive warming algorithms.
+        
+        Args:
+            key: Cache key that was accessed
+            access_time: Time of access (default: current time)
+        """
+        if access_time is None:
+            access_time = datetime.now(timezone.utc)
+        
+        pattern_data = self.access_patterns[key]
+        
+        # Update hourly access counts
+        pattern_data['hourly_access_counts'][access_time.hour] += 1
+        
+        # Update daily patterns (day of week)
+        pattern_data['daily_access_patterns'][access_time.weekday()] += 1
+        
+        # Update access sequence
+        pattern_data['access_sequences'].append(access_time.timestamp())
+        
+        # Limit historical data
+        max_hourly_history = 24 * 7  # One week
+        if sum(pattern_data['hourly_access_counts'].values()) > max_hourly_history:
+            # Remove oldest hour data
+            oldest_hour = min(pattern_data['hourly_access_counts'].keys())
+            pattern_data['hourly_access_counts'][oldest_hour] -= 1
+            if pattern_data['hourly_access_counts'][oldest_hour] <= 0:
+                del pattern_data['hourly_access_counts'][oldest_hour]
 
 
-# Export main components for package integration
+# Export cache strategy components for application integration
 __all__ = [
-    'CacheStrategiesManager',
-    'CacheInvalidationTrigger',
-    'CacheWarmingPriority',
-    'TTLPolicy',
+    'CacheInvalidationPattern',
+    'TTLPolicy', 
+    'CacheWarmingStrategy',
     'CacheKeyPattern',
     'TTLConfiguration',
-    'CacheEntry',
-    'cache_strategies',
-    'invalidate_by_pattern',
-    'invalidate_by_dependency',
-    'create_cache_key',
-    'schedule_warming_by_priority'
+    'CacheStrategyMetrics',
+    'BaseCacheStrategy',
+    'CacheInvalidationStrategy',
+    'TTLManagementStrategy',
+    'CacheKeyPatternManager',
+    'CacheWarmingStrategy'
 ]
