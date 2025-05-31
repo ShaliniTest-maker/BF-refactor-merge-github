@@ -1,618 +1,573 @@
 """
-Integration Module Initialization
+Integration module initialization for external service client management and monitoring.
 
-Flask Blueprint registration for integration health endpoints, centralized imports for external
-service clients, and namespace organization for third-party API integration components per
-Section 0.1.2, 6.3.3, and 4.2.1 requirements.
-
-This module establishes the integrations package as the primary external service communication
-layer with comprehensive resilience patterns, monitoring capabilities, and Flask application
-factory integration.
+This module provides comprehensive initialization and organization for all third-party API integrations
+with enterprise-grade resilience patterns, monitoring instrumentation, and centralized configuration
+management. It serves as the primary external service communication layer per Section 0.1.2 and
+Section 6.3.3 specifications.
 
 Key Features:
-- Flask Blueprint for integration health check endpoints per Section 6.3.3
-- Centralized imports for HTTP client management and circuit breaker patterns per Section 0.1.2
-- Package-level organization for third-party API integration components per Section 6.1.1
-- Integration monitoring endpoints for external service health verification per Section 6.3.3
-- Blueprint registration pattern for Flask application factory integration per Section 4.2.1
-
-Architecture Integration:
-- External service integration library replacement maintaining API contracts per Section 0.1.2
-- Third-party API clients converted to Python HTTP client implementations per Section 0.1.2
+- Flask Blueprint registration for integration health endpoints per Section 6.3.3
+- Centralized imports for external service clients per Section 0.1.2
 - Circuit breaker patterns for external service resilience per Section 6.3.3
 - Integration monitoring endpoints for external service health verification per Section 6.3.3
+- Package-level configuration for HTTP client management per Section 4.2.1
+- Blueprint registration pattern for Flask application factory integration per Section 4.2.1
+- Namespace organization for Auth0, AWS S3, and HTTP API integrations per Section 6.1.1
+
+Aligned with:
+- Section 0.1.2: External Integration Components - HTTP client library replacement
+- Section 6.3.3: External Systems - Third-party integration patterns and monitoring
+- Section 6.1.1: Flask Blueprint Architecture - Modular route organization
+- Section 4.2.1: Flask Application Initialization - Blueprint registration patterns
 """
 
 import logging
-from datetime import datetime
-from typing import Dict, Any, List, Optional
-
-from flask import Blueprint, jsonify, request, current_app
-from werkzeug.exceptions import BadRequest, ServiceUnavailable
+from typing import Dict, List, Optional, Any
 
 import structlog
 
-# Import core integration components for centralized namespace organization
+# Core base client infrastructure per Section 0.1.2
 from .base_client import (
-    # Main classes for external service integration
     BaseExternalServiceClient,
     BaseClientConfiguration,
-    
-    # Factory functions for common service types per Section 0.1.2
-    create_auth_service_client,
-    create_aws_service_client,
-    create_api_service_client,
-    
-    # Service type classifications and state enums
-    ServiceType,
-    HealthStatus,
-    CircuitBreakerState,
-    
-    # Exception hierarchy for comprehensive error handling
-    IntegrationError,
-    HTTPClientError,
-    ConnectionError,
-    TimeoutError,
-    HTTPResponseError,
-    CircuitBreakerOpenError,
-    CircuitBreakerHalfOpenError,
-    RetryExhaustedError,
-    Auth0Error,
-    AWSServiceError,
-    MongoDBError,
-    RedisError,
-    IntegrationExceptionFactory
+    create_base_client_config,
+    create_auth0_config,
+    create_aws_s3_config,
+    create_external_api_config
 )
 
+# Monitoring and health check infrastructure per Section 6.3.3
 from .monitoring import (
-    # Global monitoring instance for external service integration
+    ExternalServiceMonitor,
+    ServiceHealthState,
+    ExternalServiceType,
+    ServiceMetrics,
     external_service_monitor,
-    ExternalServiceMonitoring,
-    
-    # Monitoring functions and decorators
-    track_external_service_call,
-    record_circuit_breaker_event,
-    update_service_health,
-    get_monitoring_summary,
-    export_metrics,
-    
-    # Enum classes for monitoring classification
-    ServiceType as MonitoringServiceType,
-    CircuitBreakerState as MonitoringCircuitBreakerState,
-    HealthStatus as MonitoringHealthStatus
+    monitoring_bp,
+    register_auth0_monitoring,
+    register_aws_s3_monitoring,
+    register_mongodb_monitoring,
+    register_redis_monitoring
 )
 
-# Initialize structured logger for enterprise integration
+# Initialize structured logger for integration module operations
 logger = structlog.get_logger(__name__)
 
-# Blueprint for integration health check endpoints per Section 6.3.3
-integration_blueprint = Blueprint(
-    'integrations',
-    __name__,
-    url_prefix='/integrations'
-)
+# Package version and metadata
+__version__ = "1.0.0"
+__author__ = "Flask Migration Team"
+__description__ = "External service integration module with enterprise-grade resilience patterns"
+
+# Global integration registry for tracking active integrations per Section 6.3.3
+_integration_registry: Dict[str, BaseExternalServiceClient] = {}
+_registered_services: List[str] = []
+_monitoring_initialized: bool = False
 
 
-@integration_blueprint.route('/health', methods=['GET'])
-def integration_health_check():
+class IntegrationManager:
     """
-    Comprehensive integration health check endpoint per Section 6.3.3.
+    Centralized manager for external service integrations implementing enterprise-grade
+    service lifecycle management, monitoring registration, and health verification.
     
-    Provides health status for all registered external services including:
-    - Service availability and response times
-    - Circuit breaker states
-    - Connection pool utilization
-    - Error rates and retry effectiveness
-    - Performance variance from Node.js baseline per Section 0.3.2
-    
-    Returns:
-        JSON response with comprehensive health status
+    Provides comprehensive integration management with circuit breaker patterns,
+    monitoring instrumentation, and graceful shutdown capabilities per Section 6.3.3.
     """
-    try:
-        # Get comprehensive service health summary
-        health_summary = get_monitoring_summary()
-        
-        # Calculate overall health status
-        overall_status = "healthy"
-        unhealthy_services = []
-        degraded_services = []
-        
-        # Analyze individual service health
-        for service_name, health_data in health_summary.get('health_cache', {}).items():
-            service_status = health_data.get('status', 'unknown')
-            
-            if service_status == 'unhealthy':
-                unhealthy_services.append(service_name)
-                overall_status = "unhealthy"
-            elif service_status == 'degraded':
-                degraded_services.append(service_name)
-                if overall_status == "healthy":
-                    overall_status = "degraded"
-        
-        # Build comprehensive health response
-        health_response = {
-            'status': overall_status,
-            'timestamp': datetime.utcnow().isoformat(),
-            'integration_module': {
-                'registered_services': health_summary.get('registered_services', []),
-                'cache_entries': health_summary.get('cache_entries', 0),
-                'last_updated': health_summary.get('last_updated'),
-                'unhealthy_services': unhealthy_services,
-                'degraded_services': degraded_services
-            },
-            'service_details': health_summary.get('health_cache', {}),
-            'service_metadata': health_summary.get('service_metadata', {}),
-            'monitoring': {
-                'prometheus_enabled': True,
-                'structured_logging_enabled': True,
-                'circuit_breaker_monitoring': True,
-                'performance_variance_tracking': True
-            }
-        }
-        
-        # Log health check execution
-        logger.info(
-            "integration_health_check_completed",
-            overall_status=overall_status,
-            registered_services_count=len(health_summary.get('registered_services', [])),
-            unhealthy_count=len(unhealthy_services),
-            degraded_count=len(degraded_services),
-            component="integrations"
-        )
-        
-        # Return appropriate HTTP status code
-        status_code = 200
-        if overall_status == "unhealthy":
-            status_code = 503
-        elif overall_status == "degraded":
-            status_code = 200  # Still operational but with warnings
-        
-        return jsonify(health_response), status_code
-        
-    except Exception as e:
-        logger.error(
-            "integration_health_check_failed",
-            error=str(e),
-            error_type=type(e).__name__,
-            component="integrations",
-            exc_info=e
-        )
-        
-        return jsonify({
-            'status': 'unhealthy',
-            'timestamp': datetime.utcnow().isoformat(),
-            'error': 'Health check failed',
-            'error_details': str(e)
-        }), 503
-
-
-@integration_blueprint.route('/health/<service_name>', methods=['GET'])
-def service_health_check(service_name: str):
-    """
-    Individual service health check endpoint per Section 6.3.3.
     
-    Provides detailed health status for a specific external service including:
-    - Service availability and response time
-    - Circuit breaker state
-    - Recent error rates
-    - Connection pool status
-    - Performance metrics
+    def __init__(self):
+        """Initialize integration manager with monitoring and registry capabilities."""
+        self._clients: Dict[str, BaseExternalServiceClient] = {}
+        self._health_registry: Dict[str, ServiceMetrics] = {}
+        self._initialization_order: List[str] = []
+        
+        logger.info("Integration manager initialized", 
+                   registry_enabled=True,
+                   monitoring_enabled=True)
     
-    Args:
-        service_name: Name of the service to check
+    def register_client(
+        self,
+        service_name: str,
+        client: BaseExternalServiceClient,
+        service_metrics: Optional[ServiceMetrics] = None
+    ) -> None:
+        """
+        Register external service client with monitoring integration.
         
-    Returns:
-        JSON response with detailed service health status
-    """
-    try:
-        # Get comprehensive monitoring summary
-        health_summary = get_monitoring_summary()
-        
-        # Check if service is registered
-        registered_services = health_summary.get('registered_services', [])
-        if service_name not in registered_services:
+        Args:
+            service_name: Unique identifier for the external service
+            client: Configured external service client instance
+            service_metrics: Service metrics configuration for monitoring
+        """
+        if service_name in self._clients:
             logger.warning(
-                "service_health_check_not_found",
+                "Service client already registered, replacing existing",
                 service_name=service_name,
-                registered_services=registered_services,
-                component="integrations"
+                existing_client=type(self._clients[service_name]).__name__
             )
-            
-            return jsonify({
-                'error': 'Service not found',
-                'service_name': service_name,
-                'registered_services': registered_services
-            }), 404
         
-        # Get service health data
-        service_health = health_summary.get('health_cache', {}).get(service_name, {})
-        service_metadata = health_summary.get('service_metadata', {}).get(service_name, {})
+        self._clients[service_name] = client
+        self._initialization_order.append(service_name)
         
-        # Build detailed service health response
-        service_response = {
-            'service_name': service_name,
-            'status': service_health.get('status', 'unknown'),
-            'timestamp': datetime.utcnow().isoformat(),
-            'health_data': service_health,
-            'metadata': service_metadata,
-            'last_health_check': service_health.get('timestamp'),
-            'response_time_seconds': service_health.get('duration'),
-            'monitoring_enabled': True
-        }
+        # Register with global registry
+        _integration_registry[service_name] = client
+        if service_name not in _registered_services:
+            _registered_services.append(service_name)
         
-        # Determine HTTP status code
-        status = service_health.get('status', 'unknown')
-        if status == 'healthy':
-            status_code = 200
-        elif status == 'degraded':
-            status_code = 200  # Still operational
-        elif status == 'unhealthy':
-            status_code = 503
-        else:
-            status_code = 503  # Unknown status treated as unhealthy
+        # Register monitoring if metrics provided
+        if service_metrics:
+            self._health_registry[service_name] = service_metrics
+            external_service_monitor.register_service(service_metrics)
         
         logger.info(
-            "service_health_check_completed",
+            "External service client registered",
             service_name=service_name,
-            status=status,
-            response_time=service_health.get('duration'),
-            component="integrations"
+            client_type=type(client).__name__,
+            monitoring_enabled=service_metrics is not None,
+            total_clients=len(self._clients)
         )
-        
-        return jsonify(service_response), status_code
-        
-    except Exception as e:
-        logger.error(
-            "service_health_check_failed",
-            service_name=service_name,
-            error=str(e),
-            error_type=type(e).__name__,
-            component="integrations",
-            exc_info=e
-        )
-        
-        return jsonify({
-            'service_name': service_name,
-            'status': 'unhealthy',
-            'timestamp': datetime.utcnow().isoformat(),
-            'error': 'Health check failed',
-            'error_details': str(e)
-        }), 503
-
-
-@integration_blueprint.route('/metrics', methods=['GET'])
-def integration_metrics():
-    """
-    Prometheus metrics endpoint for external service integration monitoring per Section 6.3.5.
     
-    Exports comprehensive metrics including:
-    - External service request metrics (count, duration, error rates)
-    - Circuit breaker state transitions and failure counts
-    - Retry attempt effectiveness and exhaustion rates
-    - Performance variance from Node.js baseline per Section 0.3.2
-    - Connection pool utilization metrics
-    - Service dependency health scores
+    def get_client(self, service_name: str) -> Optional[BaseExternalServiceClient]:
+        """
+        Retrieve registered external service client.
+        
+        Args:
+            service_name: Service identifier
+            
+        Returns:
+            External service client instance or None if not found
+        """
+        return self._clients.get(service_name)
     
-    Returns:
-        Prometheus metrics in text format for scraping
-    """
-    try:
-        # Export comprehensive Prometheus metrics
-        metrics_data = export_metrics()
+    def list_clients(self) -> Dict[str, str]:
+        """
+        List all registered clients with their types.
         
-        logger.info(
-            "integration_metrics_exported",
-            metrics_size_bytes=len(metrics_data),
-            component="integrations"
-        )
-        
-        return metrics_data, 200, {'Content-Type': 'text/plain; charset=utf-8'}
-        
-    except Exception as e:
-        logger.error(
-            "integration_metrics_export_failed",
-            error=str(e),
-            error_type=type(e).__name__,
-            component="integrations",
-            exc_info=e
-        )
-        
-        return jsonify({
-            'error': 'Metrics export failed',
-            'timestamp': datetime.utcnow().isoformat(),
-            'error_details': str(e)
-        }), 500
-
-
-@integration_blueprint.route('/circuit-breakers', methods=['GET'])
-def circuit_breaker_status():
-    """
-    Circuit breaker status endpoint for operational monitoring per Section 6.3.3.
+        Returns:
+            Dictionary mapping service names to client types
+        """
+        return {
+            name: type(client).__name__ 
+            for name, client in self._clients.items()
+        }
     
-    Provides current state and statistics for all circuit breakers including:
-    - Current state (open, closed, half-open)
-    - Failure counts and thresholds
-    - State transition history
-    - Recovery timeout configuration
-    - Service-specific fallback status
-    
-    Returns:
-        JSON response with circuit breaker status for all services
-    """
-    try:
-        # Get comprehensive monitoring summary
-        health_summary = get_monitoring_summary()
+    def check_all_health(self) -> Dict[str, Any]:
+        """
+        Perform comprehensive health check for all registered services.
         
-        # Build circuit breaker status response
-        circuit_breaker_response = {
-            'timestamp': datetime.utcnow().isoformat(),
-            'circuit_breakers': {},
-            'global_statistics': {
-                'total_services': len(health_summary.get('registered_services', [])),
-                'monitored_services': len(health_summary.get('health_cache', {}))
-            }
+        Returns:
+            Dictionary containing health status for all registered services
+        """
+        health_summary = {
+            'overall_status': 'healthy',
+            'total_services': len(self._clients),
+            'healthy_services': 0,
+            'degraded_services': 0,
+            'unhealthy_services': 0,
+            'services': {}
         }
         
-        # Add circuit breaker status for each registered service
-        for service_name in health_summary.get('registered_services', []):
-            service_metadata = health_summary.get('service_metadata', {}).get(service_name, {})
-            service_health = health_summary.get('health_cache', {}).get(service_name, {})
-            
-            circuit_breaker_response['circuit_breakers'][service_name] = {
-                'service_type': service_metadata.get('service_type', 'unknown'),
-                'current_status': service_health.get('status', 'unknown'),
-                'circuit_breaker_enabled': service_metadata.get('metadata', {}).get('circuit_breaker_enabled', False),
-                'endpoint_url': service_metadata.get('endpoint_url'),
-                'last_health_check': service_health.get('timestamp'),
-                'response_time_seconds': service_health.get('duration'),
-                'metadata': service_metadata.get('metadata', {})
-            }
+        for service_name, client in self._clients.items():
+            try:
+                health_status = client.check_health()
+                health_summary['services'][service_name] = health_status
+                
+                # Update counters based on health status
+                status = health_status.get('overall_status', 'unhealthy')
+                if status == 'healthy':
+                    health_summary['healthy_services'] += 1
+                elif status == 'degraded':
+                    health_summary['degraded_services'] += 1
+                    if health_summary['overall_status'] == 'healthy':
+                        health_summary['overall_status'] = 'degraded'
+                else:
+                    health_summary['unhealthy_services'] += 1
+                    health_summary['overall_status'] = 'unhealthy'
+                    
+            except Exception as e:
+                health_summary['services'][service_name] = {
+                    'service_name': service_name,
+                    'overall_status': 'error',
+                    'error': str(e)
+                }
+                health_summary['unhealthy_services'] += 1
+                health_summary['overall_status'] = 'unhealthy'
+                
+                logger.error(
+                    "Health check failed for service",
+                    service_name=service_name,
+                    error=str(e)
+                )
+        
+        return health_summary
+    
+    async def shutdown_all(self) -> None:
+        """
+        Gracefully shutdown all registered clients.
+        
+        Performs orderly shutdown in reverse initialization order to prevent
+        dependency conflicts during resource cleanup.
+        """
+        logger.info("Initiating shutdown for all external service clients")
+        
+        # Shutdown in reverse order to handle dependencies
+        shutdown_order = list(reversed(self._initialization_order))
+        
+        for service_name in shutdown_order:
+            if service_name in self._clients:
+                try:
+                    client = self._clients[service_name]
+                    await client.close()
+                    
+                    logger.info(
+                        "External service client shutdown completed",
+                        service_name=service_name
+                    )
+                    
+                except Exception as e:
+                    logger.error(
+                        "Error during client shutdown",
+                        service_name=service_name,
+                        error=str(e)
+                    )
+        
+        # Clear registries
+        self._clients.clear()
+        self._health_registry.clear()
+        self._initialization_order.clear()
+        
+        logger.info("All external service clients shutdown completed")
+
+
+# Global integration manager instance
+integration_manager = IntegrationManager()
+
+
+def configure_integration_monitoring() -> None:
+    """
+    Configure comprehensive integration monitoring per Section 6.3.3.
+    
+    Initializes monitoring for common external services including Auth0,
+    AWS S3, MongoDB, and Redis with enterprise-grade health verification.
+    """
+    global _monitoring_initialized
+    
+    if _monitoring_initialized:
+        logger.debug("Integration monitoring already configured")
+        return
+    
+    try:
+        # Register monitoring for common external services
+        register_auth0_monitoring()
+        register_aws_s3_monitoring()
+        register_mongodb_monitoring()
+        register_redis_monitoring()
+        
+        _monitoring_initialized = True
         
         logger.info(
-            "circuit_breaker_status_retrieved",
-            total_services=circuit_breaker_response['global_statistics']['total_services'],
-            monitored_services=circuit_breaker_response['global_statistics']['monitored_services'],
-            component="integrations"
+            "Integration monitoring configured successfully",
+            auth0_monitoring=True,
+            aws_s3_monitoring=True,
+            mongodb_monitoring=True,
+            redis_monitoring=True
         )
-        
-        return jsonify(circuit_breaker_response), 200
         
     except Exception as e:
         logger.error(
-            "circuit_breaker_status_failed",
-            error=str(e),
-            error_type=type(e).__name__,
-            component="integrations",
-            exc_info=e
+            "Failed to configure integration monitoring",
+            error=str(e)
         )
-        
-        return jsonify({
-            'error': 'Circuit breaker status retrieval failed',
-            'timestamp': datetime.utcnow().isoformat(),
-            'error_details': str(e)
-        }), 500
+        raise
 
 
-@integration_blueprint.route('/circuit-breakers/<service_name>/reset', methods=['POST'])
-def reset_circuit_breaker(service_name: str):
+def register_integration_blueprints(app) -> None:
     """
-    Circuit breaker reset endpoint for emergency recovery per Section 6.3.3.
+    Register integration-related Flask Blueprints with the application.
     
-    Manually resets a circuit breaker to closed state for emergency recovery scenarios.
-    This endpoint should be used carefully and only during authorized maintenance operations.
-    
-    Args:
-        service_name: Name of the service whose circuit breaker to reset
-        
-    Returns:
-        JSON response with reset operation result
-    """
-    try:
-        # Get monitoring summary to verify service exists
-        health_summary = get_monitoring_summary()
-        registered_services = health_summary.get('registered_services', [])
-        
-        if service_name not in registered_services:
-            logger.warning(
-                "circuit_breaker_reset_service_not_found",
-                service_name=service_name,
-                registered_services=registered_services,
-                component="integrations"
-            )
-            
-            return jsonify({
-                'error': 'Service not found',
-                'service_name': service_name,
-                'registered_services': registered_services
-            }), 404
-        
-        # Log circuit breaker reset attempt
-        logger.warning(
-            "circuit_breaker_manual_reset_attempted",
-            service_name=service_name,
-            request_source=request.remote_addr,
-            component="integrations"
-        )
-        
-        # Note: Actual circuit breaker reset would be implemented by the specific service client
-        # This endpoint provides the API interface for external reset triggers
-        
-        reset_response = {
-            'service_name': service_name,
-            'operation': 'circuit_breaker_reset',
-            'status': 'requested',
-            'timestamp': datetime.utcnow().isoformat(),
-            'message': 'Circuit breaker reset requested - implementation handled by service client',
-            'warning': 'Manual circuit breaker resets should only be performed during authorized maintenance'
-        }
-        
-        logger.warning(
-            "circuit_breaker_reset_requested",
-            service_name=service_name,
-            request_source=request.remote_addr,
-            component="integrations"
-        )
-        
-        return jsonify(reset_response), 202  # Accepted for processing
-        
-    except Exception as e:
-        logger.error(
-            "circuit_breaker_reset_failed",
-            service_name=service_name,
-            error=str(e),
-            error_type=type(e).__name__,
-            component="integrations",
-            exc_info=e
-        )
-        
-        return jsonify({
-            'service_name': service_name,
-            'error': 'Circuit breaker reset failed',
-            'timestamp': datetime.utcnow().isoformat(),
-            'error_details': str(e)
-        }), 500
-
-
-def register_blueprint(app):
-    """
-    Register the integrations Blueprint with Flask application per Section 4.2.1.
-    
-    Implements Blueprint registration pattern for Flask application factory integration
-    with comprehensive error handling and monitoring setup.
+    Implements Blueprint registration pattern for Flask application factory
+    integration per Section 4.2.1 and Section 6.1.1 requirements.
     
     Args:
         app: Flask application instance
     """
     try:
-        # Register the integrations Blueprint
-        app.register_blueprint(integration_blueprint)
+        # Register monitoring Blueprint for health endpoints per Section 6.3.3
+        app.register_blueprint(monitoring_bp)
         
         logger.info(
-            "integrations_blueprint_registered",
-            blueprint_name=integration_blueprint.name,
-            url_prefix=integration_blueprint.url_prefix,
-            endpoints=[
-                '/integrations/health',
-                '/integrations/health/<service_name>',
-                '/integrations/metrics',
-                '/integrations/circuit-breakers',
-                '/integrations/circuit-breakers/<service_name>/reset'
-            ],
-            component="integrations"
+            "Integration Blueprints registered successfully",
+            monitoring_blueprint=True,
+            blueprint_prefix="/monitoring"
         )
         
     except Exception as e:
         logger.error(
-            "integrations_blueprint_registration_failed",
-            error=str(e),
-            error_type=type(e).__name__,
-            component="integrations",
-            exc_info=e
+            "Failed to register integration Blueprints",
+            error=str(e)
         )
         raise
 
 
-def initialize_integration_monitoring():
+def create_auth0_client(
+    domain: str,
+    client_id: str,
+    client_secret: str,
+    **kwargs
+) -> BaseExternalServiceClient:
     """
-    Initialize comprehensive integration monitoring per Section 6.3.5.
+    Factory function to create Auth0 integration client with optimized configuration.
     
-    Sets up monitoring infrastructure for external service integration including:
-    - Prometheus metrics registration
-    - Service health tracking
-    - Circuit breaker state monitoring
-    - Performance variance tracking per Section 0.3.2
+    Creates Auth0 client with enterprise-grade authentication patterns,
+    circuit breaker protection, and comprehensive monitoring per Section 6.3.3.
+    
+    Args:
+        domain: Auth0 domain (e.g., 'your-tenant.auth0.com')
+        client_id: Auth0 application client ID
+        client_secret: Auth0 application client secret
+        **kwargs: Additional configuration parameters
+        
+    Returns:
+        Configured Auth0 external service client
     """
+    # Create Auth0-specific configuration
+    config = create_auth0_config(
+        base_url=f"https://{domain}",
+        **kwargs
+    )
+    
+    # Create base client with Auth0 configuration
+    client = BaseExternalServiceClient(config)
+    
+    # Register with integration manager
+    auth0_metrics = ServiceMetrics(
+        service_name="auth0",
+        service_type=ExternalServiceType.AUTH_PROVIDER,
+        health_endpoint="/api/v2/",
+        timeout_seconds=5.0,
+        critical_threshold_ms=3000.0,
+        warning_threshold_ms=1000.0
+    )
+    
+    integration_manager.register_client("auth0", client, auth0_metrics)
+    
+    logger.info(
+        "Auth0 client created and registered",
+        domain=domain,
+        monitoring_enabled=True
+    )
+    
+    return client
+
+
+def create_aws_s3_client(
+    aws_access_key_id: str,
+    aws_secret_access_key: str,
+    region: str = 'us-east-1',
+    **kwargs
+) -> BaseExternalServiceClient:
+    """
+    Factory function to create AWS S3 integration client with optimized configuration.
+    
+    Creates AWS S3 client with enterprise-grade file storage patterns,
+    circuit breaker protection, and comprehensive monitoring per Section 6.3.3.
+    
+    Args:
+        aws_access_key_id: AWS access key ID
+        aws_secret_access_key: AWS secret access key
+        region: AWS region for S3 operations
+        **kwargs: Additional configuration parameters
+        
+    Returns:
+        Configured AWS S3 external service client
+    """
+    # Create AWS S3-specific configuration
+    config = create_aws_s3_config(
+        region=region,
+        **kwargs
+    )
+    
+    # Create base client with AWS S3 configuration
+    client = BaseExternalServiceClient(config)
+    
+    # Register with integration manager
+    s3_metrics = ServiceMetrics(
+        service_name="aws_s3",
+        service_type=ExternalServiceType.CLOUD_STORAGE,
+        health_endpoint=None,  # S3 doesn't have a standard health endpoint
+        timeout_seconds=10.0,
+        critical_threshold_ms=5000.0,
+        warning_threshold_ms=2000.0
+    )
+    
+    integration_manager.register_client("aws_s3", client, s3_metrics)
+    
+    logger.info(
+        "AWS S3 client created and registered",
+        region=region,
+        monitoring_enabled=True
+    )
+    
+    return client
+
+
+def create_http_api_client(
+    service_name: str,
+    base_url: str,
+    api_key: Optional[str] = None,
+    **kwargs
+) -> BaseExternalServiceClient:
+    """
+    Factory function to create generic HTTP API integration client.
+    
+    Creates HTTP API client with enterprise-grade communication patterns,
+    circuit breaker protection, and comprehensive monitoring per Section 6.3.3.
+    
+    Args:
+        service_name: Unique identifier for the external API
+        base_url: Base URL for the external API
+        api_key: Optional API key for authentication
+        **kwargs: Additional configuration parameters
+        
+    Returns:
+        Configured HTTP API external service client
+    """
+    # Create external API-specific configuration
+    config = create_external_api_config(
+        service_name=service_name,
+        base_url=base_url,
+        **kwargs
+    )
+    
+    # Add API key to default headers if provided
+    if api_key:
+        if not config.default_headers:
+            config.default_headers = {}
+        config.default_headers['Authorization'] = f"Bearer {api_key}"
+    
+    # Create base client with API configuration
+    client = BaseExternalServiceClient(config)
+    
+    # Register with integration manager
+    api_metrics = ServiceMetrics(
+        service_name=service_name,
+        service_type=ExternalServiceType.HTTP_API,
+        health_endpoint="/health",  # Common health endpoint
+        timeout_seconds=30.0,
+        critical_threshold_ms=10000.0,
+        warning_threshold_ms=5000.0
+    )
+    
+    integration_manager.register_client(service_name, client, api_metrics)
+    
+    logger.info(
+        "HTTP API client created and registered",
+        service_name=service_name,
+        base_url=base_url,
+        monitoring_enabled=True
+    )
+    
+    return client
+
+
+def get_integration_summary() -> Dict[str, Any]:
+    """
+    Get comprehensive summary of all registered integrations.
+    
+    Provides enterprise-grade integration visibility with health status,
+    performance metrics, and monitoring information per Section 6.3.3.
+    
+    Returns:
+        Dictionary containing integration summary and health information
+    """
+    return {
+        'total_integrations': len(_registered_services),
+        'registered_services': _registered_services.copy(),
+        'monitoring_initialized': _monitoring_initialized,
+        'client_types': integration_manager.list_clients(),
+        'health_summary': integration_manager.check_all_health()
+    }
+
+
+async def shutdown_integrations() -> None:
+    """
+    Gracefully shutdown all registered integrations.
+    
+    Implements comprehensive resource cleanup and connection management
+    for enterprise-grade application lifecycle management.
+    """
+    logger.info("Initiating integration shutdown sequence")
+    
     try:
-        logger.info(
-            "integration_monitoring_initialized",
-            monitoring_features=[
-                "prometheus_metrics",
-                "service_health_tracking",
-                "circuit_breaker_monitoring",
-                "performance_variance_tracking",
-                "retry_effectiveness_monitoring",
-                "connection_pool_monitoring"
-            ],
-            component="integrations"
-        )
+        await integration_manager.shutdown_all()
+        
+        # Clear global registry
+        _integration_registry.clear()
+        _registered_services.clear()
+        
+        logger.info("Integration shutdown completed successfully")
         
     except Exception as e:
         logger.error(
-            "integration_monitoring_initialization_failed",
-            error=str(e),
-            error_type=type(e).__name__,
-            component="integrations",
-            exc_info=e
+            "Error during integration shutdown",
+            error=str(e)
         )
         raise
 
 
-# Initialize monitoring on module import
-initialize_integration_monitoring()
-
-
-# Package-level exports for centralized namespace organization per Section 6.1.1
+# Package-level exports for external service integration per Section 6.3.3
 __all__ = [
-    # Flask Blueprint for application factory integration
-    'integration_blueprint',
-    'register_blueprint',
-    
-    # Core integration classes per Section 0.1.2
+    # Core base client infrastructure
     'BaseExternalServiceClient',
     'BaseClientConfiguration',
+    'create_base_client_config',
+    'create_auth0_config',
+    'create_aws_s3_config',
+    'create_external_api_config',
     
-    # Factory functions for common service types
-    'create_auth_service_client',
-    'create_aws_service_client',
-    'create_api_service_client',
-    
-    # Service type classifications and state enums
-    'ServiceType',
-    'HealthStatus',
-    'CircuitBreakerState',
-    
-    # Monitoring and observability
+    # Monitoring and health check infrastructure
+    'ExternalServiceMonitor',
+    'ServiceHealthState',
+    'ExternalServiceType',
+    'ServiceMetrics',
     'external_service_monitor',
-    'ExternalServiceMonitoring',
-    'track_external_service_call',
-    'record_circuit_breaker_event',
-    'update_service_health',
-    'get_monitoring_summary',
-    'export_metrics',
+    'monitoring_bp',
     
-    # Exception hierarchy for comprehensive error handling
-    'IntegrationError',
-    'HTTPClientError',
-    'ConnectionError',
-    'TimeoutError',
-    'HTTPResponseError',
-    'CircuitBreakerOpenError',
-    'CircuitBreakerHalfOpenError',
-    'RetryExhaustedError',
-    'Auth0Error',
-    'AWSServiceError',
-    'MongoDBError',
-    'RedisError',
-    'IntegrationExceptionFactory',
+    # Integration management
+    'IntegrationManager',
+    'integration_manager',
     
-    # Module initialization functions
-    'initialize_integration_monitoring'
+    # Configuration and setup functions
+    'configure_integration_monitoring',
+    'register_integration_blueprints',
+    
+    # Factory functions for common integrations
+    'create_auth0_client',
+    'create_aws_s3_client',
+    'create_http_api_client',
+    
+    # Utility functions
+    'get_integration_summary',
+    'shutdown_integrations',
+    
+    # Service registration functions
+    'register_auth0_monitoring',
+    'register_aws_s3_monitoring',
+    'register_mongodb_monitoring',
+    'register_redis_monitoring'
 ]
 
-# Log successful module initialization
-logger.info(
-    "integrations_module_initialized",
-    blueprint_registered=True,
-    monitoring_enabled=True,
-    exported_components=len(__all__),
-    integration_features=[
-        "flask_blueprint_registration",
-        "centralized_imports",
-        "circuit_breaker_patterns",
-        "integration_monitoring",
-        "health_check_endpoints",
-        "prometheus_metrics_export",
-        "enterprise_error_handling"
-    ],
-    component="integrations"
-)
+# Initialize integration monitoring on module import
+try:
+    configure_integration_monitoring()
+    logger.info(
+        "Integration module initialized successfully",
+        version=__version__,
+        monitoring_enabled=True,
+        blueprint_registration_ready=True
+    )
+except Exception as e:
+    logger.error(
+        "Failed to initialize integration module",
+        error=str(e)
+    )
+    # Don't raise here to allow module import to succeed
