@@ -1,2358 +1,2068 @@
 """
 Performance Report Templates and Formatting Utilities Module
 
-This module provides comprehensive performance report templates and formatting utilities
-for the Flask migration project, implementing standardized report layouts, visualization
-templates, and multi-format export configurations per technical specification requirements.
+This module provides comprehensive performance report templates and formatting utilities for the Flask migration project,
+ensuring standardized report layouts, visualization templates, and export format configurations. Implements consistent
+reporting across all performance analysis outputs per Section 0.3.4 documentation requirements and Section 6.5.1.5
+dashboard design specifications.
 
 Key Features:
 - Standardized report template library per Section 0.3.4 documentation requirements
 - Multi-format export capabilities (HTML, PDF, JSON) per Section 0.3.4
 - Visualization template library for charts and graphs per Section 6.5.1.5 dashboard design
-- Consistent branding and formatting standards per Section 0.3.4 documentation requirements
+- Consistent formatting and branding standards per Section 0.3.4 documentation requirements
 - Responsive template design for different devices per Section 0.3.4
 - Template customization for different stakeholder audiences per Section 0.3.4
 
 Architecture Integration:
-- Section 0.3.4: Comprehensive documentation updates with multi-format export and responsive design
-- Section 6.5.1.5: Dashboard design with visualization templates and stakeholder-specific views
-- Section 0.1.1: ≤10% variance requirement integration in all report templates
-- Section 6.6.3: Quality metrics documentation with consistent reporting standards
-- Section 6.5.5: Improvement tracking with trend visualization and analysis templates
+- Section 0.3.4: Documentation requirements with comprehensive report generation
+- Section 6.5.1.5: Dashboard design components and visualization standards
+- Section 6.6.2: CI/CD integration with automated report generation
+- Section 6.6.3: Quality metrics reporting and trend analysis
+
+Performance Requirements:
+- Supports ≤10% variance threshold reporting per Section 0.1.1
+- Node.js baseline comparison visualization per Section 0.3.2
+- Real-time performance monitoring dashboard integration per Section 6.5.1
 
 Author: Flask Migration Team
 Version: 1.0.0
-Dependencies: Jinja2 ≥3.x, matplotlib ≥3.7+, plotly ≥5.15+, weasyprint ≥60+
+Dependencies: jinja2, matplotlib, plotly, weasyprint, json, pandas
 """
 
 import os
 import json
-import base64
-import hashlib
-from datetime import datetime, timezone, timedelta
-from typing import Dict, Any, List, Optional, Union, Tuple, NamedTuple
-from dataclasses import dataclass, field
-from enum import Enum
-from pathlib import Path
-import statistics
-import tempfile
 import logging
+from datetime import datetime, timedelta
+from typing import Dict, Any, List, Optional, Union, Tuple
+from pathlib import Path
+from dataclasses import dataclass, field, asdict
+from enum import Enum
+import base64
+import io
 
-# Template engine and visualization dependencies
+# Template engine and visualization imports
 try:
-    import jinja2
-    JINJA2_AVAILABLE = True
-except ImportError:
-    JINJA2_AVAILABLE = False
-
-try:
-    import matplotlib
-    matplotlib.use('Agg')  # Use non-interactive backend for report generation
+    from jinja2 import Environment, FileSystemLoader, BaseLoader, Template
     import matplotlib.pyplot as plt
     import matplotlib.dates as mdates
-    from matplotlib.figure import Figure
     import seaborn as sns
-    MATPLOTLIB_AVAILABLE = True
-except ImportError:
-    MATPLOTLIB_AVAILABLE = False
-
-try:
     import plotly.graph_objects as go
     import plotly.express as px
     from plotly.subplots import make_subplots
     import plotly.io as pio
-    PLOTLY_AVAILABLE = True
-except ImportError:
-    PLOTLY_AVAILABLE = False
+    import pandas as pd
+    import numpy as np
+except ImportError as e:
+    logging.warning(f"Optional visualization dependencies not available: {e}")
+    # Provide fallback implementations
+    plt = None
+    sns = None
+    go = None
+    px = None
+    pd = None
+    np = None
 
-try:
-    import weasyprint
-    WEASYPRINT_AVAILABLE = True
-except ImportError:
-    WEASYPRINT_AVAILABLE = False
-
-# Performance configuration dependency
+# Configuration imports
 from tests.performance.performance_config import (
-    BasePerformanceConfig,
-    PerformanceConfigFactory,
-    PerformanceThreshold,
-    BaselineMetrics,
-    PerformanceTestType,
-    PerformanceEnvironment
+    PerformanceTestConfig, NodeJSBaselineMetrics, LoadTestScenario,
+    PerformanceMetricType, get_baseline_metrics
 )
+
+# Configure module logger
+logger = logging.getLogger(__name__)
 
 
 class ReportFormat(Enum):
-    """Report format enumeration for export capabilities."""
+    """Supported report output formats."""
     
     HTML = "html"
     PDF = "pdf"
     JSON = "json"
     MARKDOWN = "markdown"
     CSV = "csv"
-    XLSX = "xlsx"
+    EXCEL = "xlsx"
 
 
 class ReportAudience(Enum):
-    """Report audience enumeration for stakeholder-specific customization."""
+    """Target audiences for customized report templates."""
     
     EXECUTIVE = "executive"
     TECHNICAL = "technical"
     OPERATIONS = "operations"
-    PERFORMANCE_TEAM = "performance_team"
     DEVELOPMENT = "development"
     QA_TESTING = "qa_testing"
-    COMPLIANCE = "compliance"
-
-
-class ReportTheme(Enum):
-    """Report theme enumeration for visual customization."""
-    
-    CORPORATE = "corporate"
-    TECHNICAL = "technical"
-    MINIMAL = "minimal"
-    DASHBOARD = "dashboard"
-    EXECUTIVE = "executive"
-    COMPLIANCE = "compliance"
+    STAKEHOLDER = "stakeholder"
 
 
 class ChartType(Enum):
-    """Chart type enumeration for visualization templates."""
+    """Supported chart and visualization types."""
     
     LINE_CHART = "line_chart"
     BAR_CHART = "bar_chart"
-    AREA_CHART = "area_chart"
     SCATTER_PLOT = "scatter_plot"
-    PIE_CHART = "pie_chart"
     HISTOGRAM = "histogram"
     BOX_PLOT = "box_plot"
     HEATMAP = "heatmap"
     GAUGE_CHART = "gauge_chart"
-    TIMELINE = "timeline"
-
-
-@dataclass
-class ReportBranding:
-    """Report branding configuration for consistent visual identity."""
-    
-    company_name: str = "Flask Migration Project"
-    logo_path: Optional[str] = None
-    logo_base64: Optional[str] = None
-    primary_color: str = "#1f77b4"
-    secondary_color: str = "#ff7f0e"
-    accent_color: str = "#2ca02c"
-    warning_color: str = "#ff7f0e"
-    danger_color: str = "#d62728"
-    success_color: str = "#2ca02c"
-    
-    # Typography settings
-    font_family: str = "Arial, sans-serif"
-    title_font_size: str = "24px"
-    heading_font_size: str = "18px"
-    body_font_size: str = "14px"
-    small_font_size: str = "12px"
-    
-    # Layout settings
-    page_margin: str = "20px"
-    content_width: str = "100%"
-    section_spacing: str = "30px"
-    
-    def get_color_palette(self) -> List[str]:
-        """
-        Get standardized color palette for charts and visualizations.
-        
-        Returns:
-            List of hex color codes for consistent visualization styling
-        """
-        return [
-            self.primary_color,
-            self.secondary_color,
-            self.accent_color,
-            "#9467bd",
-            "#8c564b",
-            "#e377c2",
-            "#7f7f7f",
-            "#bcbd22",
-            "#17becf"
-        ]
-    
-    def get_status_colors(self) -> Dict[str, str]:
-        """
-        Get status-specific color mapping for performance indicators.
-        
-        Returns:
-            Dictionary mapping status types to color codes
-        """
-        return {
-            "ok": self.success_color,
-            "warning": self.warning_color,
-            "critical": self.danger_color,
-            "failure": self.danger_color,
-            "pass": self.success_color,
-            "fail": self.danger_color,
-            "within_threshold": self.success_color,
-            "above_threshold": self.danger_color
-        }
-
-
-@dataclass
-class ChartConfiguration:
-    """Chart configuration for visualization templates."""
-    
-    chart_type: ChartType
-    title: str
-    width: int = 800
-    height: int = 400
-    show_legend: bool = True
-    responsive: bool = True
-    
-    # Axis configuration
-    x_axis_title: Optional[str] = None
-    y_axis_title: Optional[str] = None
-    x_axis_format: Optional[str] = None
-    y_axis_format: Optional[str] = None
-    
-    # Data configuration
-    data_labels: bool = False
-    grid_lines: bool = True
-    animation: bool = False
-    
-    # Styling
-    color_palette: Optional[List[str]] = None
-    background_color: str = "#ffffff"
-    plot_background_color: str = "#fafafa"
-    
-    def to_plotly_config(self) -> Dict[str, Any]:
-        """
-        Convert chart configuration to Plotly-compatible configuration.
-        
-        Returns:
-            Dictionary of Plotly configuration parameters
-        """
-        config = {
-            "displayModeBar": True,
-            "displaylogo": False,
-            "modeBarButtonsToRemove": ["pan2d", "lasso2d", "select2d"],
-            "responsive": self.responsive,
-            "toImageButtonOptions": {
-                "format": "png",
-                "filename": f"chart_{self.title.lower().replace(' ', '_')}",
-                "height": self.height,
-                "width": self.width,
-                "scale": 2
-            }
-        }
-        
-        return config
-    
-    def to_matplotlib_config(self) -> Dict[str, Any]:
-        """
-        Convert chart configuration to Matplotlib-compatible configuration.
-        
-        Returns:
-            Dictionary of Matplotlib configuration parameters
-        """
-        return {
-            "figsize": (self.width / 100, self.height / 100),
-            "facecolor": self.background_color,
-            "edgecolor": "none",
-            "dpi": 100
-        }
+    WATERFALL_CHART = "waterfall_chart"
+    COMPARISON_CHART = "comparison_chart"
+    TREND_ANALYSIS = "trend_analysis"
 
 
 @dataclass
 class ReportMetadata:
-    """Report metadata for comprehensive documentation and tracking."""
+    """Report metadata container for consistent report information."""
     
-    report_id: str
     title: str
-    description: str
-    generated_at: datetime
-    generated_by: str = "Flask Migration Performance System"
+    report_type: str
+    audience: ReportAudience
+    generated_at: datetime = field(default_factory=datetime.utcnow)
+    test_environment: str = "production"
+    test_duration: str = "Unknown"
+    baseline_version: str = "Node.js"
+    current_version: str = "Flask"
+    performance_variance_threshold: float = 10.0
+    
+    # Report identification
+    report_id: str = field(default_factory=lambda: f"perf_report_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}")
     version: str = "1.0.0"
+    author: str = "Flask Migration Performance Testing"
     
-    # Report configuration
-    format: ReportFormat = ReportFormat.HTML
-    audience: ReportAudience = ReportAudience.TECHNICAL
-    theme: ReportTheme = ReportTheme.TECHNICAL
+    # Executive summary fields
+    overall_status: str = "PASS"
+    key_findings: List[str] = field(default_factory=list)
+    recommendations: List[str] = field(default_factory=list)
     
-    # Data source information
-    data_sources: List[str] = field(default_factory=list)
-    baseline_date: Optional[datetime] = None
-    test_environment: str = "development"
-    
-    # Performance context
-    variance_threshold: float = 0.10  # 10% variance threshold per Section 0.1.1
-    baseline_type: str = "nodejs"
-    
-    # Security and compliance
-    classification: str = "internal"
-    retention_period_days: int = 365
-    
-    def generate_report_id(self) -> str:
-        """
-        Generate unique report identifier with timestamp and content hash.
-        
-        Returns:
-            Unique report identifier string
-        """
-        timestamp = self.generated_at.strftime("%Y%m%d_%H%M%S")
-        content_hash = hashlib.md5(
-            f"{self.title}_{self.audience.value}_{timestamp}".encode()
-        ).hexdigest()[:8]
-        
-        return f"perf_report_{timestamp}_{content_hash}"
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """
-        Convert metadata to dictionary for JSON serialization.
-        
-        Returns:
-            Dictionary representation of report metadata
-        """
-        return {
-            "report_id": self.report_id,
-            "title": self.title,
-            "description": self.description,
-            "generated_at": self.generated_at.isoformat(),
-            "generated_by": self.generated_by,
-            "version": self.version,
-            "format": self.format.value,
-            "audience": self.audience.value,
-            "theme": self.theme.value,
-            "data_sources": self.data_sources,
-            "baseline_date": self.baseline_date.isoformat() if self.baseline_date else None,
-            "test_environment": self.test_environment,
-            "variance_threshold": self.variance_threshold,
-            "baseline_type": self.baseline_type,
-            "classification": self.classification,
-            "retention_period_days": self.retention_period_days
-        }
+    # Technical metadata
+    test_scenarios_executed: List[str] = field(default_factory=list)
+    metrics_collected: List[str] = field(default_factory=list)
+    data_quality_score: float = 100.0
 
 
-class PerformanceReportTemplate:
-    """
-    Base performance report template providing standardized structure and formatting.
+@dataclass
+class VisualizationConfig:
+    """Configuration for chart and visualization generation."""
     
-    Implements comprehensive report template functionality with multi-format export
-    capabilities, responsive design, and stakeholder-specific customization per
-    technical specification requirements.
+    # Chart appearance
+    width: int = 1200
+    height: int = 600
+    dpi: int = 300
+    theme: str = "plotly_white"
+    color_palette: List[str] = field(default_factory=lambda: [
+        '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+        '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf'
+    ])
+    
+    # Typography
+    title_font_size: int = 16
+    axis_font_size: int = 12
+    legend_font_size: int = 10
+    
+    # Branding
+    logo_path: Optional[str] = None
+    brand_colors: Dict[str, str] = field(default_factory=lambda: {
+        'primary': '#0066cc',
+        'secondary': '#ff6600',
+        'success': '#28a745',
+        'warning': '#ffc107',
+        'danger': '#dc3545',
+        'info': '#17a2b8'
+    })
+    
+    # Performance-specific settings
+    variance_threshold_color: str = '#ff0000'
+    baseline_color: str = '#0066cc'
+    current_color: str = '#28a745'
+    warning_color: str = '#ffc107'
+    error_color: str = '#dc3545'
+
+
+class PerformanceReportTemplateEngine:
+    """
+    Performance report template engine providing standardized report generation
+    with multi-format export capabilities and audience-specific customization.
     """
     
-    def __init__(
-        self,
-        metadata: ReportMetadata,
-        branding: Optional[ReportBranding] = None,
-        config: Optional[BasePerformanceConfig] = None
-    ):
+    def __init__(self, template_dir: Optional[str] = None, 
+                 config: PerformanceTestConfig = None):
         """
-        Initialize performance report template.
+        Initialize the report template engine.
         
         Args:
-            metadata: Report metadata and configuration
-            branding: Visual branding configuration
-            config: Performance testing configuration
+            template_dir: Custom template directory path
+            config: Performance test configuration instance
         """
-        self.metadata = metadata
-        self.branding = branding or ReportBranding()
-        self.config = config or PerformanceConfigFactory.get_config()
+        self.config = config or PerformanceTestConfig()
+        self.template_dir = template_dir or self._get_default_template_dir()
+        self.visualization_config = VisualizationConfig()
         
-        # Template engine setup
+        # Initialize Jinja2 environment
         self.jinja_env = self._setup_jinja_environment()
         
-        # Chart configuration
-        self.default_chart_config = ChartConfiguration(
-            chart_type=ChartType.LINE_CHART,
-            title="Performance Chart",
-            color_palette=self.branding.get_color_palette()
+        # Template cache
+        self._template_cache: Dict[str, Template] = {}
+        
+        # Default report metadata
+        self.default_metadata = ReportMetadata(
+            title="Performance Analysis Report",
+            report_type="performance_analysis",
+            audience=ReportAudience.TECHNICAL
         )
         
-        # Report sections
-        self.sections: List[Dict[str, Any]] = []
-        self.charts: List[Dict[str, Any]] = []
-        
-        # Performance data
-        self.performance_data: Dict[str, Any] = {}
-        self.baseline_data: Dict[str, Any] = {}
-        self.variance_analysis: Dict[str, Any] = {}
+        logger.info("Performance report template engine initialized", extra={
+            'template_dir': self.template_dir,
+            'visualization_enabled': plt is not None and go is not None
+        })
     
-    def _setup_jinja_environment(self) -> Optional[jinja2.Environment]:
-        """
-        Setup Jinja2 template environment with custom filters and functions.
+    def _get_default_template_dir(self) -> str:
+        """Get default template directory path."""
+        return str(Path(__file__).parent / "templates")
+    
+    def _setup_jinja_environment(self) -> Environment:
+        """Setup Jinja2 template environment with custom filters and functions."""
         
-        Returns:
-            Configured Jinja2 environment or None if unavailable
-        """
-        if not JINJA2_AVAILABLE:
-            return None
+        # Custom template loader for embedded templates
+        class EmbeddedTemplateLoader(BaseLoader):
+            def get_source(self, environment, template):
+                return self._get_embedded_template(template), None, lambda: True
         
-        # Template loader for embedded templates
-        loader = jinja2.DictLoader(self._get_embedded_templates())
-        env = jinja2.Environment(
-            loader=loader,
-            autoescape=jinja2.select_autoescape(['html', 'xml']),
+        env = Environment(
+            loader=EmbeddedTemplateLoader(),
+            autoescape=True,
             trim_blocks=True,
             lstrip_blocks=True
         )
         
-        # Custom filters
+        # Add custom filters
+        env.filters['format_number'] = self._format_number
         env.filters['format_percentage'] = self._format_percentage
         env.filters['format_duration'] = self._format_duration
         env.filters['format_timestamp'] = self._format_timestamp
-        env.filters['status_color'] = self._get_status_color
-        env.filters['format_number'] = self._format_number
+        env.filters['variance_status'] = self._variance_status
+        env.filters['performance_color'] = self._performance_color
         
-        # Custom functions
-        env.globals['get_variance_status'] = self._get_variance_status
-        env.globals['calculate_trend'] = self._calculate_trend
-        env.globals['get_recommendation'] = self._get_recommendation
+        # Add custom functions
+        env.globals['generate_chart'] = self._generate_chart
+        env.globals['get_baseline_comparison'] = self._get_baseline_comparison
+        env.globals['calculate_variance'] = self._calculate_variance
         
         return env
     
-    def _get_embedded_templates(self) -> Dict[str, str]:
+    def generate_report(self, test_results: Dict[str, Any], 
+                       report_format: ReportFormat = ReportFormat.HTML,
+                       audience: ReportAudience = ReportAudience.TECHNICAL,
+                       metadata: Optional[ReportMetadata] = None,
+                       output_path: Optional[str] = None) -> str:
         """
-        Get embedded HTML templates for different report types and audiences.
+        Generate performance report in specified format for target audience.
         
+        Args:
+            test_results: Performance test results data
+            report_format: Output format (HTML, PDF, JSON, etc.)
+            audience: Target audience for report customization
+            metadata: Custom report metadata
+            output_path: Output file path (optional)
+            
         Returns:
-            Dictionary of template names to template content
+            Generated report content or file path
         """
-        templates = {}
+        try:
+            # Prepare report metadata
+            report_metadata = metadata or self.default_metadata
+            report_metadata.audience = audience
+            report_metadata.generated_at = datetime.utcnow()
+            
+            # Enrich test results with analysis
+            enriched_results = self._enrich_test_results(test_results)
+            
+            # Generate report based on format
+            if report_format == ReportFormat.HTML:
+                content = self._generate_html_report(enriched_results, report_metadata)
+            elif report_format == ReportFormat.PDF:
+                content = self._generate_pdf_report(enriched_results, report_metadata)
+            elif report_format == ReportFormat.JSON:
+                content = self._generate_json_report(enriched_results, report_metadata)
+            elif report_format == ReportFormat.MARKDOWN:
+                content = self._generate_markdown_report(enriched_results, report_metadata)
+            elif report_format == ReportFormat.CSV:
+                content = self._generate_csv_report(enriched_results, report_metadata)
+            elif report_format == ReportFormat.EXCEL:
+                content = self._generate_excel_report(enriched_results, report_metadata)
+            else:
+                raise ValueError(f"Unsupported report format: {report_format}")
+            
+            # Save to file if path provided
+            if output_path:
+                self._save_report(content, output_path, report_format)
+                logger.info(f"Report saved to {output_path}", extra={
+                    'format': report_format.value,
+                    'audience': audience.value,
+                    'report_id': report_metadata.report_id
+                })
+                return output_path
+            
+            return content
+            
+        except Exception as e:
+            logger.error(f"Error generating report: {e}", extra={
+                'format': report_format.value,
+                'audience': audience.value
+            })
+            raise
+    
+    def _enrich_test_results(self, test_results: Dict[str, Any]) -> Dict[str, Any]:
+        """Enrich test results with analysis and baseline comparisons."""
+        enriched = test_results.copy()
         
-        # Base template
-        templates['base.html'] = '''
+        # Add baseline comparisons
+        baseline_metrics = get_baseline_metrics()
+        enriched['baseline_comparisons'] = self._generate_baseline_comparisons(
+            test_results, baseline_metrics
+        )
+        
+        # Add variance analysis
+        enriched['variance_analysis'] = self._calculate_variance_analysis(test_results)
+        
+        # Add performance scoring
+        enriched['performance_score'] = self._calculate_performance_score(test_results)
+        
+        # Add trend analysis if historical data available
+        enriched['trend_analysis'] = self._calculate_trend_analysis(test_results)
+        
+        # Add system resource analysis
+        enriched['resource_analysis'] = self._analyze_system_resources(test_results)
+        
+        return enriched
+    
+    def _generate_html_report(self, test_results: Dict[str, Any], 
+                             metadata: ReportMetadata) -> str:
+        """Generate comprehensive HTML report with interactive visualizations."""
+        
+        template_name = f"html_report_{metadata.audience.value}"
+        template = self._get_template(template_name)
+        
+        # Generate visualizations
+        charts = self._generate_all_charts(test_results, format='html')
+        
+        # Prepare template context
+        context = {
+            'metadata': metadata,
+            'test_results': test_results,
+            'charts': charts,
+            'baseline_metrics': get_baseline_metrics(),
+            'variance_threshold': self.config.PERFORMANCE_VARIANCE_THRESHOLD,
+            'css_styles': self._get_css_styles(),
+            'javascript': self._get_javascript_code(),
+            'timestamp': datetime.utcnow().isoformat(),
+            'branding': self.visualization_config.brand_colors
+        }
+        
+        return template.render(**context)
+    
+    def _generate_pdf_report(self, test_results: Dict[str, Any], 
+                            metadata: ReportMetadata) -> bytes:
+        """Generate PDF report with static visualizations."""
+        
+        # Generate HTML content first
+        html_content = self._generate_html_report(test_results, metadata)
+        
+        # Convert to PDF using weasyprint if available
+        try:
+            import weasyprint
+            
+            # Create CSS for PDF optimization
+            pdf_css = weasyprint.CSS(string=self._get_pdf_css())
+            
+            # Generate PDF
+            html_doc = weasyprint.HTML(string=html_content)
+            pdf_bytes = html_doc.write_pdf(stylesheets=[pdf_css])
+            
+            return pdf_bytes
+            
+        except ImportError:
+            logger.warning("weasyprint not available, generating HTML fallback")
+            return html_content.encode('utf-8')
+    
+    def _generate_json_report(self, test_results: Dict[str, Any], 
+                             metadata: ReportMetadata) -> str:
+        """Generate structured JSON report for API consumption."""
+        
+        report_data = {
+            'metadata': asdict(metadata),
+            'test_results': test_results,
+            'summary': {
+                'overall_status': metadata.overall_status,
+                'performance_variance_within_threshold': self._check_variance_compliance(test_results),
+                'key_metrics': self._extract_key_metrics(test_results),
+                'recommendations': metadata.recommendations
+            },
+            'baseline_comparisons': test_results.get('baseline_comparisons', {}),
+            'variance_analysis': test_results.get('variance_analysis', {}),
+            'performance_score': test_results.get('performance_score', {}),
+            'generated_at': datetime.utcnow().isoformat(),
+            'format_version': '1.0'
+        }
+        
+        return json.dumps(report_data, indent=2, default=str)
+    
+    def _generate_markdown_report(self, test_results: Dict[str, Any], 
+                                 metadata: ReportMetadata) -> str:
+        """Generate Markdown report for documentation integration."""
+        
+        template_name = f"markdown_report_{metadata.audience.value}"
+        template = self._get_template(template_name)
+        
+        # Prepare template context
+        context = {
+            'metadata': metadata,
+            'test_results': test_results,
+            'variance_threshold': self.config.PERFORMANCE_VARIANCE_THRESHOLD,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+        
+        return template.render(**context)
+    
+    def _generate_csv_report(self, test_results: Dict[str, Any], 
+                            metadata: ReportMetadata) -> str:
+        """Generate CSV report for data analysis."""
+        
+        if pd is None:
+            # Fallback CSV generation
+            return self._generate_simple_csv(test_results)
+        
+        # Create comprehensive DataFrame
+        df_data = []
+        
+        # Extract metrics data
+        for metric_category, metrics in test_results.items():
+            if isinstance(metrics, dict):
+                for metric_name, value in metrics.items():
+                    df_data.append({
+                        'category': metric_category,
+                        'metric': metric_name,
+                        'value': value,
+                        'timestamp': metadata.generated_at,
+                        'environment': metadata.test_environment
+                    })
+        
+        df = pd.DataFrame(df_data)
+        return df.to_csv(index=False)
+    
+    def _generate_excel_report(self, test_results: Dict[str, Any], 
+                              metadata: ReportMetadata) -> bytes:
+        """Generate Excel report with multiple worksheets."""
+        
+        if pd is None:
+            logger.warning("pandas not available, generating CSV fallback")
+            return self._generate_csv_report(test_results, metadata).encode('utf-8')
+        
+        # Create Excel workbook in memory
+        output = io.BytesIO()
+        
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            # Summary worksheet
+            summary_data = self._prepare_summary_data(test_results, metadata)
+            pd.DataFrame(summary_data).to_excel(writer, sheet_name='Summary', index=False)
+            
+            # Detailed metrics worksheet
+            metrics_data = self._prepare_metrics_data(test_results)
+            pd.DataFrame(metrics_data).to_excel(writer, sheet_name='Metrics', index=False)
+            
+            # Baseline comparisons worksheet
+            baseline_data = test_results.get('baseline_comparisons', {})
+            if baseline_data:
+                pd.DataFrame(baseline_data).to_excel(writer, sheet_name='Baseline_Comparison', index=False)
+            
+            # Variance analysis worksheet
+            variance_data = test_results.get('variance_analysis', {})
+            if variance_data:
+                pd.DataFrame(variance_data).to_excel(writer, sheet_name='Variance_Analysis', index=False)
+        
+        output.seek(0)
+        return output.read()
+    
+    def generate_dashboard_template(self, audience: ReportAudience = ReportAudience.OPERATIONS) -> str:
+        """
+        Generate real-time dashboard template for monitoring integration.
+        
+        Args:
+            audience: Target audience for dashboard customization
+            
+        Returns:
+            HTML dashboard template with JavaScript components
+        """
+        
+        template_name = f"dashboard_{audience.value}"
+        template = self._get_template(template_name)
+        
+        # Dashboard configuration
+        dashboard_config = {
+            'refresh_interval': 30000,  # 30 seconds
+            'real_time_enabled': True,
+            'auto_refresh': True,
+            'alert_integration': True,
+            'responsive_design': True
+        }
+        
+        # Widget configuration based on audience
+        if audience == ReportAudience.EXECUTIVE:
+            widgets = self._get_executive_widgets()
+        elif audience == ReportAudience.OPERATIONS:
+            widgets = self._get_operations_widgets()
+        elif audience == ReportAudience.TECHNICAL:
+            widgets = self._get_technical_widgets()
+        else:
+            widgets = self._get_default_widgets()
+        
+        context = {
+            'dashboard_config': dashboard_config,
+            'widgets': widgets,
+            'audience': audience.value,
+            'css_styles': self._get_dashboard_css(),
+            'javascript': self._get_dashboard_javascript(),
+            'branding': self.visualization_config.brand_colors
+        }
+        
+        return template.render(**context)
+    
+    def generate_chart(self, data: Dict[str, Any], chart_type: ChartType,
+                      title: str = "", format: str = 'html') -> str:
+        """
+        Generate individual chart/visualization.
+        
+        Args:
+            data: Chart data
+            chart_type: Type of chart to generate
+            title: Chart title
+            format: Output format ('html', 'png', 'svg')
+            
+        Returns:
+            Chart content as string or base64 encoded image
+        """
+        
+        if go is None and plt is None:
+            return f"<div>Chart visualization not available (chart_type: {chart_type.value})</div>"
+        
+        try:
+            if chart_type == ChartType.LINE_CHART:
+                return self._generate_line_chart(data, title, format)
+            elif chart_type == ChartType.BAR_CHART:
+                return self._generate_bar_chart(data, title, format)
+            elif chart_type == ChartType.SCATTER_PLOT:
+                return self._generate_scatter_plot(data, title, format)
+            elif chart_type == ChartType.HISTOGRAM:
+                return self._generate_histogram(data, title, format)
+            elif chart_type == ChartType.BOX_PLOT:
+                return self._generate_box_plot(data, title, format)
+            elif chart_type == ChartType.HEATMAP:
+                return self._generate_heatmap(data, title, format)
+            elif chart_type == ChartType.GAUGE_CHART:
+                return self._generate_gauge_chart(data, title, format)
+            elif chart_type == ChartType.WATERFALL_CHART:
+                return self._generate_waterfall_chart(data, title, format)
+            elif chart_type == ChartType.COMPARISON_CHART:
+                return self._generate_comparison_chart(data, title, format)
+            elif chart_type == ChartType.TREND_ANALYSIS:
+                return self._generate_trend_analysis_chart(data, title, format)
+            else:
+                return f"<div>Unsupported chart type: {chart_type.value}</div>"
+                
+        except Exception as e:
+            logger.error(f"Error generating chart: {e}", extra={
+                'chart_type': chart_type.value,
+                'title': title
+            })
+            return f"<div>Error generating chart: {str(e)}</div>"
+    
+    def _generate_all_charts(self, test_results: Dict[str, Any], format: str = 'html') -> Dict[str, str]:
+        """Generate all standard charts for performance reports."""
+        
+        charts = {}
+        
+        # Response time comparison chart
+        if 'response_times' in test_results:
+            charts['response_time_comparison'] = self.generate_chart(
+                test_results['response_times'],
+                ChartType.COMPARISON_CHART,
+                "Response Time Comparison (Flask vs Node.js)",
+                format
+            )
+        
+        # Performance variance gauge
+        if 'variance_analysis' in test_results:
+            charts['performance_variance'] = self.generate_chart(
+                test_results['variance_analysis'],
+                ChartType.GAUGE_CHART,
+                "Performance Variance from Baseline",
+                format
+            )
+        
+        # Throughput trend analysis
+        if 'throughput_data' in test_results:
+            charts['throughput_trend'] = self.generate_chart(
+                test_results['throughput_data'],
+                ChartType.TREND_ANALYSIS,
+                "Throughput Trend Analysis",
+                format
+            )
+        
+        # Resource utilization heatmap
+        if 'resource_analysis' in test_results:
+            charts['resource_utilization'] = self.generate_chart(
+                test_results['resource_analysis'],
+                ChartType.HEATMAP,
+                "Resource Utilization Heatmap",
+                format
+            )
+        
+        # Error rate bar chart
+        if 'error_rates' in test_results:
+            charts['error_rates'] = self.generate_chart(
+                test_results['error_rates'],
+                ChartType.BAR_CHART,
+                "Error Rates by Endpoint",
+                format
+            )
+        
+        # Response time distribution
+        if 'response_time_distribution' in test_results:
+            charts['response_time_distribution'] = self.generate_chart(
+                test_results['response_time_distribution'],
+                ChartType.HISTOGRAM,
+                "Response Time Distribution",
+                format
+            )
+        
+        return charts
+    
+    def _generate_line_chart(self, data: Dict[str, Any], title: str, format: str) -> str:
+        """Generate line chart visualization."""
+        
+        if go is not None:
+            # Use Plotly for interactive charts
+            fig = go.Figure()
+            
+            for series_name, series_data in data.items():
+                if isinstance(series_data, (list, tuple)):
+                    fig.add_trace(go.Scatter(
+                        y=series_data,
+                        mode='lines+markers',
+                        name=series_name,
+                        line=dict(width=2)
+                    ))
+            
+            fig.update_layout(
+                title=title,
+                xaxis_title="Time",
+                yaxis_title="Value",
+                template=self.visualization_config.theme,
+                width=self.visualization_config.width,
+                height=self.visualization_config.height
+            )
+            
+            if format == 'html':
+                return fig.to_html(include_plotlyjs='cdn', div_id=f"chart_{hash(title)}")
+            else:
+                return fig.to_image(format='png', width=self.visualization_config.width, 
+                                  height=self.visualization_config.height)
+        
+        elif plt is not None:
+            # Fallback to matplotlib
+            plt.figure(figsize=(12, 6))
+            
+            for series_name, series_data in data.items():
+                if isinstance(series_data, (list, tuple)):
+                    plt.plot(series_data, label=series_name, linewidth=2)
+            
+            plt.title(title)
+            plt.xlabel("Time")
+            plt.ylabel("Value")
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+            
+            if format == 'html':
+                buffer = io.BytesIO()
+                plt.savefig(buffer, format='png', dpi=self.visualization_config.dpi, bbox_inches='tight')
+                buffer.seek(0)
+                image_base64 = base64.b64encode(buffer.read()).decode()
+                plt.close()
+                return f'<img src="data:image/png;base64,{image_base64}" alt="{title}" style="max-width: 100%;">'
+            else:
+                buffer = io.BytesIO()
+                plt.savefig(buffer, format='png', dpi=self.visualization_config.dpi, bbox_inches='tight')
+                plt.close()
+                return buffer.getvalue()
+        
+        return f"<div>Line chart: {title}</div>"
+    
+    def _generate_comparison_chart(self, data: Dict[str, Any], title: str, format: str) -> str:
+        """Generate comparison chart for baseline vs current performance."""
+        
+        if go is not None:
+            # Create side-by-side bar chart
+            fig = go.Figure()
+            
+            categories = list(data.keys())
+            baseline_values = []
+            current_values = []
+            
+            # Extract baseline and current values
+            baseline_metrics = get_baseline_metrics('response_times')
+            
+            for category in categories:
+                baseline_values.append(baseline_metrics.get(category, 0))
+                current_values.append(data.get(category, 0))
+            
+            fig.add_trace(go.Bar(
+                name='Node.js Baseline',
+                x=categories,
+                y=baseline_values,
+                marker_color=self.visualization_config.baseline_color
+            ))
+            
+            fig.add_trace(go.Bar(
+                name='Flask Current',
+                x=categories,
+                y=current_values,
+                marker_color=self.visualization_config.current_color
+            ))
+            
+            # Add variance threshold line
+            threshold_values = [val * (1 + self.config.PERFORMANCE_VARIANCE_THRESHOLD / 100) 
+                              for val in baseline_values]
+            
+            fig.add_trace(go.Scatter(
+                name=f'±{self.config.PERFORMANCE_VARIANCE_THRESHOLD}% Threshold',
+                x=categories,
+                y=threshold_values,
+                mode='lines',
+                line=dict(dash='dash', color=self.visualization_config.variance_threshold_color)
+            ))
+            
+            fig.update_layout(
+                title=title,
+                xaxis_title="Metrics",
+                yaxis_title="Response Time (ms)",
+                barmode='group',
+                template=self.visualization_config.theme,
+                width=self.visualization_config.width,
+                height=self.visualization_config.height
+            )
+            
+            if format == 'html':
+                return fig.to_html(include_plotlyjs='cdn', div_id=f"chart_{hash(title)}")
+            else:
+                return fig.to_image(format='png')
+        
+        return f"<div>Comparison chart: {title}</div>"
+    
+    def _generate_gauge_chart(self, data: Dict[str, Any], title: str, format: str) -> str:
+        """Generate gauge chart for performance variance display."""
+        
+        if go is not None:
+            # Extract variance percentage
+            variance_pct = data.get('overall_variance_percentage', 0)
+            
+            fig = go.Figure(go.Indicator(
+                mode="gauge+number+delta",
+                value=abs(variance_pct),
+                domain={'x': [0, 1], 'y': [0, 1]},
+                title={'text': title},
+                delta={'reference': 0},
+                gauge={
+                    'axis': {'range': [None, 20]},
+                    'bar': {'color': self._get_variance_color(variance_pct)},
+                    'steps': [
+                        {'range': [0, 5], 'color': self.visualization_config.brand_colors['success']},
+                        {'range': [5, 10], 'color': self.visualization_config.brand_colors['warning']},
+                        {'range': [10, 20], 'color': self.visualization_config.brand_colors['danger']}
+                    ],
+                    'threshold': {
+                        'line': {'color': "red", 'width': 4},
+                        'thickness': 0.75,
+                        'value': self.config.PERFORMANCE_VARIANCE_THRESHOLD
+                    }
+                }
+            ))
+            
+            fig.update_layout(
+                template=self.visualization_config.theme,
+                width=600,
+                height=400
+            )
+            
+            if format == 'html':
+                return fig.to_html(include_plotlyjs='cdn', div_id=f"gauge_{hash(title)}")
+            else:
+                return fig.to_image(format='png')
+        
+        return f"<div>Gauge chart: {title} - {data.get('overall_variance_percentage', 0):.1f}% variance</div>"
+    
+    def _get_template(self, template_name: str) -> Template:
+        """Get or create template from cache."""
+        
+        if template_name not in self._template_cache:
+            template_content = self._get_embedded_template(template_name)
+            self._template_cache[template_name] = self.jinja_env.from_string(template_content)
+        
+        return self._template_cache[template_name]
+    
+    def _get_embedded_template(self, template_name: str) -> str:
+        """Get embedded template content based on template name."""
+        
+        if template_name.startswith('html_report_'):
+            return self._get_html_report_template(template_name)
+        elif template_name.startswith('markdown_report_'):
+            return self._get_markdown_report_template(template_name)
+        elif template_name.startswith('dashboard_'):
+            return self._get_dashboard_template(template_name)
+        else:
+            return self._get_default_template()
+    
+    def _get_html_report_template(self, template_name: str) -> str:
+        """Get HTML report template based on audience."""
+        
+        audience = template_name.split('_')[-1]
+        
+        if audience == 'executive':
+            return self._get_executive_html_template()
+        elif audience == 'technical':
+            return self._get_technical_html_template()
+        elif audience == 'operations':
+            return self._get_operations_html_template()
+        else:
+            return self._get_default_html_template()
+    
+    def _get_executive_html_template(self) -> str:
+        """Executive-focused HTML template with high-level metrics."""
+        return """
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{ metadata.title }}</title>
-    <style>
-        {{ css_styles }}
-    </style>
-    {% if plotly_available %}
-    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
-    {% endif %}
+    <title>{{ metadata.title }} - Executive Summary</title>
+    <style>{{ css_styles }}</style>
 </head>
 <body>
     <div class="container">
-        {% block header %}
         <header class="report-header">
-            {% if branding.logo_base64 %}
-            <img src="data:image/png;base64,{{ branding.logo_base64 }}" 
-                 alt="{{ branding.company_name }}" class="logo">
-            {% endif %}
             <h1>{{ metadata.title }}</h1>
-            <div class="report-info">
-                <span class="generated-date">Generated: {{ metadata.generated_at | format_timestamp }}</span>
-                <span class="environment">Environment: {{ metadata.test_environment }}</span>
-                <span class="audience">Audience: {{ metadata.audience.value.title() }}</span>
+            <div class="header-info">
+                <span class="report-date">Generated: {{ metadata.generated_at.strftime('%Y-%m-%d %H:%M UTC') }}</span>
+                <span class="status-badge status-{{ metadata.overall_status.lower() }}">{{ metadata.overall_status }}</span>
             </div>
         </header>
-        {% endblock %}
         
-        {% block summary %}
         <section class="executive-summary">
             <h2>Executive Summary</h2>
-            {{ summary_content | safe }}
-        </section>
-        {% endblock %}
-        
-        {% block content %}
-        {% for section in sections %}
-        <section class="report-section" id="{{ section.id }}">
-            <h2>{{ section.title }}</h2>
-            {% if section.description %}
-            <p class="section-description">{{ section.description }}</p>
-            {% endif %}
-            {{ section.content | safe }}
-        </section>
-        {% endfor %}
-        {% endblock %}
-        
-        {% block charts %}
-        {% if charts %}
-        <section class="charts-section">
-            <h2>Performance Visualizations</h2>
-            {% for chart in charts %}
-            <div class="chart-container" id="chart-{{ chart.id }}">
-                <h3>{{ chart.title }}</h3>
-                {{ chart.content | safe }}
+            <div class="summary-grid">
+                <div class="summary-card">
+                    <h3>Performance Status</h3>
+                    <div class="metric-value status-{{ metadata.overall_status.lower() }}">
+                        {{ metadata.overall_status }}
+                    </div>
+                    <div class="metric-description">Overall system performance</div>
+                </div>
+                
+                <div class="summary-card">
+                    <h3>Variance from Baseline</h3>
+                    <div class="metric-value {{ 'success' if test_results.variance_analysis.overall_variance_percentage <= variance_threshold else 'warning' }}">
+                        {{ test_results.variance_analysis.overall_variance_percentage|format_percentage }}
+                    </div>
+                    <div class="metric-description">Target: ≤{{ variance_threshold }}%</div>
+                </div>
+                
+                <div class="summary-card">
+                    <h3>Performance Score</h3>
+                    <div class="metric-value">
+                        {{ test_results.performance_score.overall_score|format_number }}/100
+                    </div>
+                    <div class="metric-description">Composite performance rating</div>
+                </div>
+                
+                <div class="summary-card">
+                    <h3>Test Duration</h3>
+                    <div class="metric-value">
+                        {{ metadata.test_duration }}
+                    </div>
+                    <div class="metric-description">Total test execution time</div>
+                </div>
             </div>
-            {% endfor %}
         </section>
-        {% endif %}
-        {% endblock %}
         
-        {% block footer %}
+        <section class="key-findings">
+            <h2>Key Findings</h2>
+            <ul class="findings-list">
+                {% for finding in metadata.key_findings %}
+                <li>{{ finding }}</li>
+                {% endfor %}
+            </ul>
+        </section>
+        
+        <section class="recommendations">
+            <h2>Recommendations</h2>
+            <ul class="recommendations-list">
+                {% for recommendation in metadata.recommendations %}
+                <li>{{ recommendation }}</li>
+                {% endfor %}
+            </ul>
+        </section>
+        
+        <section class="performance-overview">
+            <h2>Performance Overview</h2>
+            <div class="chart-container">
+                {{ charts.performance_variance|safe }}
+            </div>
+            <div class="chart-container">
+                {{ charts.response_time_comparison|safe }}
+            </div>
+        </section>
+        
         <footer class="report-footer">
-            <div class="footer-info">
-                <span>{{ branding.company_name }}</span>
-                <span>Report ID: {{ metadata.report_id }}</span>
-                <span>Version: {{ metadata.version }}</span>
-            </div>
-            <div class="disclaimer">
-                <p>This report contains performance data for the Flask migration project.
-                   All metrics are compared against Node.js baseline with ≤10% variance threshold.</p>
-            </div>
+            <p>Report ID: {{ metadata.report_id }} | Version: {{ metadata.version }}</p>
+            <p>Generated by {{ metadata.author }} for {{ metadata.audience.value|title }} audience</p>
         </footer>
-        {% endblock %}
     </div>
-    
-    {% block scripts %}
-    <script>
-        // Chart interactivity and responsive behavior
-        function resizeCharts() {
-            if (typeof Plotly !== 'undefined') {
-                Plotly.Plots.resize(document.querySelectorAll('.plotly-graph-div'));
-            }
-        }
-        
-        window.addEventListener('resize', resizeCharts);
-        document.addEventListener('DOMContentLoaded', function() {
-            // Initialize tooltips and interactive elements
-            const statusElements = document.querySelectorAll('.status-indicator');
-            statusElements.forEach(el => {
-                el.addEventListener('click', function() {
-                    alert(this.getAttribute('data-details'));
-                });
-            });
-        });
-    </script>
-    {% endblock %}
 </body>
 </html>
-        '''
-        
-        # Executive template
-        templates['executive.html'] = '''
-{% extends "base.html" %}
-
-{% block summary %}
-<section class="executive-summary">
-    <h2>Performance Migration Summary</h2>
-    
-    <div class="kpi-grid">
-        <div class="kpi-card {{ 'success' if performance_summary.within_threshold else 'failure' }}">
-            <h3>Performance Variance</h3>
-            <div class="kpi-value">{{ performance_summary.variance_percentage | format_percentage }}</div>
-            <div class="kpi-target">Target: ≤10%</div>
-            <div class="kpi-status">{{ get_variance_status(performance_summary.variance_percentage) }}</div>
-        </div>
-        
-        <div class="kpi-card">
-            <h3>Response Time</h3>
-            <div class="kpi-value">{{ performance_summary.avg_response_time }}ms</div>
-            <div class="kpi-baseline">Baseline: {{ baseline_summary.avg_response_time }}ms</div>
-            <div class="kpi-trend">{{ calculate_trend(performance_summary.response_time_trend) }}</div>
-        </div>
-        
-        <div class="kpi-card">
-            <h3>Throughput</h3>
-            <div class="kpi-value">{{ performance_summary.requests_per_second }} req/s</div>
-            <div class="kpi-baseline">Baseline: {{ baseline_summary.requests_per_second }} req/s</div>
-            <div class="kpi-trend">{{ calculate_trend(performance_summary.throughput_trend) }}</div>
-        </div>
-        
-        <div class="kpi-card">
-            <h3>Error Rate</h3>
-            <div class="kpi-value">{{ performance_summary.error_rate | format_percentage }}</div>
-            <div class="kpi-target">Target: ≤0.1%</div>
-            <div class="kpi-status">{{ 'success' if performance_summary.error_rate <= 0.001 else 'warning' }}</div>
-        </div>
-    </div>
-    
-    <div class="recommendations">
-        <h3>Key Recommendations</h3>
-        <ul>
-        {% for recommendation in recommendations[:3] %}
-            <li class="recommendation-item priority-{{ recommendation.priority }}">
-                <strong>{{ recommendation.title }}</strong>: {{ recommendation.description }}
-            </li>
-        {% endfor %}
-        </ul>
-    </div>
-</section>
-{% endblock %}
-        '''
-        
-        # Technical template
-        templates['technical.html'] = '''
-{% extends "base.html" %}
-
-{% block content %}
-<section class="technical-metrics">
-    <h2>Detailed Performance Analysis</h2>
-    
-    <div class="metrics-grid">
-        {% for metric_name, metric_data in detailed_metrics.items() %}
-        <div class="metric-card">
-            <h3>{{ metric_name.replace('_', ' ').title() }}</h3>
-            <div class="metric-values">
-                <div class="current-value">
-                    <label>Current:</label>
-                    <span class="value">{{ metric_data.current_value }}{{ metric_data.unit }}</span>
-                </div>
-                <div class="baseline-value">
-                    <label>Baseline:</label>
-                    <span class="value">{{ metric_data.baseline_value }}{{ metric_data.unit }}</span>
-                </div>
-                <div class="variance {{ metric_data.status }}">
-                    <label>Variance:</label>
-                    <span class="value">{{ metric_data.variance_percent | format_percentage }}</span>
-                </div>
-            </div>
-            <div class="metric-status status-{{ metric_data.status }}">
-                {{ metric_data.status.upper() }}
-            </div>
-        </div>
-        {% endfor %}
-    </div>
-    
-    <div class="detailed-analysis">
-        <h3>Statistical Analysis</h3>
-        <table class="metrics-table">
-            <thead>
-                <tr>
-                    <th>Metric</th>
-                    <th>Mean</th>
-                    <th>Median</th>
-                    <th>95th Percentile</th>
-                    <th>99th Percentile</th>
-                    <th>Standard Deviation</th>
-                    <th>Variance Status</th>
-                </tr>
-            </thead>
-            <tbody>
-            {% for metric_name, stats in statistical_analysis.items() %}
-                <tr class="metric-row status-{{ stats.status }}">
-                    <td>{{ metric_name.replace('_', ' ').title() }}</td>
-                    <td>{{ stats.mean | format_number }}{{ stats.unit }}</td>
-                    <td>{{ stats.median | format_number }}{{ stats.unit }}</td>
-                    <td>{{ stats.p95 | format_number }}{{ stats.unit }}</td>
-                    <td>{{ stats.p99 | format_number }}{{ stats.unit }}</td>
-                    <td>{{ stats.std_dev | format_number }}{{ stats.unit }}</td>
-                    <td class="status-indicator status-{{ stats.status }}" 
-                        data-details="{{ stats.details }}">
-                        {{ stats.status.upper() }}
-                    </td>
-                </tr>
-            {% endfor %}
-            </tbody>
-        </table>
-    </div>
-</section>
-{% endblock %}
-        '''
-        
-        return templates
-    
-    def _get_css_styles(self, theme: ReportTheme = None) -> str:
         """
-        Generate CSS styles for report templates based on theme and branding.
+    
+    def _get_technical_html_template(self) -> str:
+        """Technical-focused HTML template with detailed metrics."""
+        return """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ metadata.title }} - Technical Analysis</title>
+    <style>{{ css_styles }}</style>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header class="report-header">
+            <h1>{{ metadata.title }}</h1>
+            <div class="header-info">
+                <span class="report-date">Generated: {{ metadata.generated_at.strftime('%Y-%m-%d %H:%M UTC') }}</span>
+                <span class="environment">Environment: {{ metadata.test_environment }}</span>
+                <span class="status-badge status-{{ metadata.overall_status.lower() }}">{{ metadata.overall_status }}</span>
+            </div>
+        </header>
         
-        Args:
-            theme: Report theme for styling customization
+        <nav class="report-nav">
+            <a href="#summary">Summary</a>
+            <a href="#performance-metrics">Performance Metrics</a>
+            <a href="#baseline-comparison">Baseline Comparison</a>
+            <a href="#resource-analysis">Resource Analysis</a>
+            <a href="#detailed-results">Detailed Results</a>
+        </nav>
+        
+        <section id="summary" class="technical-summary">
+            <h2>Technical Summary</h2>
+            <div class="metrics-grid">
+                <div class="metric-card">
+                    <h3>Response Time (95th %ile)</h3>
+                    <div class="metric-value">{{ test_results.response_time_p95|format_number }} ms</div>
+                    <div class="metric-comparison">
+                        Baseline: {{ baseline_metrics.response_times.api_get_users|format_number }} ms
+                        ({{ calculate_variance(baseline_metrics.response_times.api_get_users, test_results.response_time_p95)|format_percentage }} variance)
+                    </div>
+                </div>
+                
+                <div class="metric-card">
+                    <h3>Throughput</h3>
+                    <div class="metric-value">{{ test_results.throughput|format_number }} req/s</div>
+                    <div class="metric-comparison">
+                        Baseline: {{ baseline_metrics.throughput.requests_per_second|format_number }} req/s
+                        ({{ calculate_variance(baseline_metrics.throughput.requests_per_second, test_results.throughput)|format_percentage }} variance)
+                    </div>
+                </div>
+                
+                <div class="metric-card">
+                    <h3>Error Rate</h3>
+                    <div class="metric-value">{{ test_results.error_rate|format_percentage }}</div>
+                    <div class="metric-comparison">
+                        Target: &lt;1%
+                    </div>
+                </div>
+                
+                <div class="metric-card">
+                    <h3>CPU Utilization</h3>
+                    <div class="metric-value">{{ test_results.cpu_utilization|format_percentage }}</div>
+                    <div class="metric-comparison">
+                        Baseline: {{ baseline_metrics.system_resources.cpu_utilization_average|format_percentage }}
+                        ({{ calculate_variance(baseline_metrics.system_resources.cpu_utilization_average, test_results.cpu_utilization)|format_percentage }} variance)
+                    </div>
+                </div>
+                
+                <div class="metric-card">
+                    <h3>Memory Usage</h3>
+                    <div class="metric-value">{{ test_results.memory_usage_mb|format_number }} MB</div>
+                    <div class="metric-comparison">
+                        Baseline: {{ baseline_metrics.memory_usage.average_mb|format_number }} MB
+                        ({{ calculate_variance(baseline_metrics.memory_usage.average_mb, test_results.memory_usage_mb)|format_percentage }} variance)
+                    </div>
+                </div>
+                
+                <div class="metric-card">
+                    <h3>Database Response</h3>
+                    <div class="metric-value">{{ test_results.database_response_time|format_number }} ms</div>
+                    <div class="metric-comparison">
+                        Baseline: {{ baseline_metrics.database_performance.user_lookup|format_number }} ms
+                        ({{ calculate_variance(baseline_metrics.database_performance.user_lookup, test_results.database_response_time)|format_percentage }} variance)
+                    </div>
+                </div>
+            </div>
+        </section>
+        
+        <section id="performance-metrics" class="performance-metrics">
+            <h2>Performance Metrics Analysis</h2>
             
-        Returns:
-            CSS stylesheet string
-        """
-        theme = theme or self.metadata.theme
-        branding = self.branding
+            <div class="chart-section">
+                <h3>Response Time Comparison</h3>
+                <div class="chart-container">
+                    {{ charts.response_time_comparison|safe }}
+                </div>
+            </div>
+            
+            <div class="chart-section">
+                <h3>Performance Variance</h3>
+                <div class="chart-container">
+                    {{ charts.performance_variance|safe }}
+                </div>
+            </div>
+            
+            <div class="chart-section">
+                <h3>Throughput Trend</h3>
+                <div class="chart-container">
+                    {{ charts.throughput_trend|safe }}
+                </div>
+            </div>
+        </section>
         
-        # Base styles
-        css = f'''
-        * {{
+        <section id="baseline-comparison" class="baseline-comparison">
+            <h2>Baseline Comparison Analysis</h2>
+            <div class="comparison-table">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Metric</th>
+                            <th>Node.js Baseline</th>
+                            <th>Flask Current</th>
+                            <th>Variance</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for endpoint, comparison in test_results.baseline_comparisons.items() %}
+                        <tr>
+                            <td>{{ endpoint }}</td>
+                            <td>{{ comparison.baseline|format_number }} ms</td>
+                            <td>{{ comparison.measured|format_number }} ms</td>
+                            <td class="{{ comparison.variance_percentage|variance_status }}">
+                                {{ comparison.variance_percentage|format_percentage }}
+                            </td>
+                            <td>
+                                <span class="status-badge {{ 'success' if comparison.within_threshold else 'warning' }}">
+                                    {{ 'PASS' if comparison.within_threshold else 'FAIL' }}
+                                </span>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+        
+        <section id="resource-analysis" class="resource-analysis">
+            <h2>System Resource Analysis</h2>
+            <div class="chart-container">
+                {{ charts.resource_utilization|safe }}
+            </div>
+        </section>
+        
+        <section id="detailed-results" class="detailed-results">
+            <h2>Detailed Test Results</h2>
+            <div class="results-accordion">
+                {% for scenario in metadata.test_scenarios_executed %}
+                <div class="accordion-item">
+                    <h3>{{ scenario }}</h3>
+                    <div class="accordion-content">
+                        <!-- Detailed scenario results -->
+                        <pre>{{ test_results[scenario]|tojson(indent=2) }}</pre>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </section>
+        
+        <footer class="report-footer">
+            <div class="footer-content">
+                <div>
+                    <strong>Report Details:</strong><br>
+                    ID: {{ metadata.report_id }}<br>
+                    Version: {{ metadata.version }}<br>
+                    Generated: {{ metadata.generated_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}
+                </div>
+                <div>
+                    <strong>Test Configuration:</strong><br>
+                    Environment: {{ metadata.test_environment }}<br>
+                    Duration: {{ metadata.test_duration }}<br>
+                    Variance Threshold: ±{{ variance_threshold }}%
+                </div>
+                <div>
+                    <strong>Migration Progress:</strong><br>
+                    From: {{ metadata.baseline_version }}<br>
+                    To: {{ metadata.current_version }}<br>
+                    Author: {{ metadata.author }}
+                </div>
+            </div>
+        </footer>
+    </div>
+    
+    <script>{{ javascript }}</script>
+</body>
+</html>
+        """
+    
+    def _get_operations_html_template(self) -> str:
+        """Operations-focused HTML template with monitoring and alerting context."""
+        return """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ metadata.title }} - Operations Report</title>
+    <style>{{ css_styles }}</style>
+</head>
+<body>
+    <div class="container">
+        <header class="report-header">
+            <h1>{{ metadata.title }}</h1>
+            <div class="header-info">
+                <span class="report-date">{{ metadata.generated_at.strftime('%Y-%m-%d %H:%M UTC') }}</span>
+                <span class="environment">{{ metadata.test_environment }}</span>
+                <span class="status-badge status-{{ metadata.overall_status.lower() }}">{{ metadata.overall_status }}</span>
+            </div>
+        </header>
+        
+        <section class="operations-dashboard">
+            <h2>Operations Dashboard</h2>
+            <div class="dashboard-grid">
+                <div class="dashboard-card alert-card">
+                    <h3>Alert Status</h3>
+                    <div class="alert-summary">
+                        {% if test_results.variance_analysis.overall_variance_percentage > variance_threshold %}
+                        <div class="alert critical">
+                            <strong>CRITICAL:</strong> Performance variance exceeds ±{{ variance_threshold }}% threshold
+                        </div>
+                        {% else %}
+                        <div class="alert success">
+                            <strong>OK:</strong> All metrics within acceptable thresholds
+                        </div>
+                        {% endif %}
+                        
+                        {% if test_results.error_rate > 1.0 %}
+                        <div class="alert warning">
+                            <strong>WARNING:</strong> Error rate above 1% ({{ test_results.error_rate|format_percentage }})
+                        </div>
+                        {% endif %}
+                        
+                        {% if test_results.cpu_utilization > 80.0 %}
+                        <div class="alert warning">
+                            <strong>WARNING:</strong> High CPU utilization ({{ test_results.cpu_utilization|format_percentage }})
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+                
+                <div class="dashboard-card">
+                    <h3>System Health</h3>
+                    <div class="health-indicators">
+                        <div class="health-item">
+                            <span class="health-label">API Response</span>
+                            <span class="health-status {{ 'healthy' if test_results.response_time_p95 < 500 else 'degraded' }}">
+                                {{ 'Healthy' if test_results.response_time_p95 < 500 else 'Degraded' }}
+                            </span>
+                        </div>
+                        <div class="health-item">
+                            <span class="health-label">Throughput</span>
+                            <span class="health-status {{ 'healthy' if test_results.throughput > 100 else 'degraded' }}">
+                                {{ 'Healthy' if test_results.throughput > 100 else 'Degraded' }}
+                            </span>
+                        </div>
+                        <div class="health-item">
+                            <span class="health-label">Error Rate</span>
+                            <span class="health-status {{ 'healthy' if test_results.error_rate < 1.0 else 'degraded' }}">
+                                {{ 'Healthy' if test_results.error_rate < 1.0 else 'Degraded' }}
+                            </span>
+                        </div>
+                        <div class="health-item">
+                            <span class="health-label">Resources</span>
+                            <span class="health-status {{ 'healthy' if test_results.cpu_utilization < 70 else 'degraded' }}">
+                                {{ 'Healthy' if test_results.cpu_utilization < 70 else 'Degraded' }}
+                            </span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="dashboard-card">
+                    <h3>Capacity Metrics</h3>
+                    <div class="capacity-metrics">
+                        <div class="capacity-item">
+                            <span class="capacity-label">CPU Usage</span>
+                            <div class="capacity-bar">
+                                <div class="capacity-fill" style="width: {{ test_results.cpu_utilization }}%;"></div>
+                            </div>
+                            <span class="capacity-value">{{ test_results.cpu_utilization|format_percentage }}</span>
+                        </div>
+                        <div class="capacity-item">
+                            <span class="capacity-label">Memory Usage</span>
+                            <div class="capacity-bar">
+                                <div class="capacity-fill" style="width: {{ (test_results.memory_usage_mb / 1024) * 100 }}%;"></div>
+                            </div>
+                            <span class="capacity-value">{{ test_results.memory_usage_mb|format_number }} MB</span>
+                        </div>
+                        <div class="capacity-item">
+                            <span class="capacity-label">Concurrent Users</span>
+                            <div class="capacity-bar">
+                                <div class="capacity-fill" style="width: {{ (test_results.concurrent_users / 1000) * 100 }}%;"></div>
+                            </div>
+                            <span class="capacity-value">{{ test_results.concurrent_users|format_number }}</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="dashboard-card">
+                    <h3>Performance Trends</h3>
+                    <div class="trend-indicators">
+                        {% for metric, trend in test_results.trend_analysis.items() %}
+                        <div class="trend-item">
+                            <span class="trend-label">{{ metric|title }}</span>
+                            <span class="trend-direction {{ trend.direction }}">
+                                {{ '↗' if trend.direction == 'improving' else '↘' if trend.direction == 'degrading' else '→' }}
+                                {{ trend.change_percentage|format_percentage }}
+                            </span>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+        </section>
+        
+        <section class="performance-charts">
+            <h2>Performance Monitoring</h2>
+            
+            <div class="chart-grid">
+                <div class="chart-container">
+                    <h3>Performance Variance</h3>
+                    {{ charts.performance_variance|safe }}
+                </div>
+                
+                <div class="chart-container">
+                    <h3>Resource Utilization</h3>
+                    {{ charts.resource_utilization|safe }}
+                </div>
+                
+                <div class="chart-container">
+                    <h3>Error Rates by Endpoint</h3>
+                    {{ charts.error_rates|safe }}
+                </div>
+                
+                <div class="chart-container">
+                    <h3>Response Time Distribution</h3>
+                    {{ charts.response_time_distribution|safe }}
+                </div>
+            </div>
+        </section>
+        
+        <section class="recommendations">
+            <h2>Operational Recommendations</h2>
+            <div class="recommendations-grid">
+                {% for recommendation in metadata.recommendations %}
+                <div class="recommendation-card">
+                    <h4>{{ recommendation.title if recommendation.title else 'Action Required' }}</h4>
+                    <p>{{ recommendation.description if recommendation.description else recommendation }}</p>
+                    <div class="recommendation-priority">
+                        Priority: {{ recommendation.priority if recommendation.priority else 'Medium' }}
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </section>
+        
+        <footer class="report-footer">
+            <div class="footer-operations">
+                <div>
+                    <strong>Monitoring Integration:</strong><br>
+                    Prometheus: Enabled<br>
+                    Grafana: Dashboard Available<br>
+                    Alerts: {{ 'Active' if test_results.alerts_active else 'None' }}
+                </div>
+                <div>
+                    <strong>Next Actions:</strong><br>
+                    Review: {{ metadata.generated_at + timedelta(hours=4) }}<br>
+                    Update: {{ metadata.generated_at + timedelta(days=1) }}<br>
+                    Audit: {{ metadata.generated_at + timedelta(days=7) }}
+                </div>
+            </div>
+        </footer>
+    </div>
+</body>
+</html>
+        """
+    
+    def _get_dashboard_template(self, template_name: str) -> str:
+        """Get real-time dashboard template."""
+        return """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Performance Monitoring Dashboard</title>
+    <style>{{ css_styles }}</style>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+</head>
+<body>
+    <div class="dashboard-container">
+        <header class="dashboard-header">
+            <h1>Performance Monitoring Dashboard</h1>
+            <div class="dashboard-controls">
+                <button id="refresh-btn" class="btn btn-primary">Refresh</button>
+                <button id="auto-refresh-btn" class="btn btn-secondary">Auto Refresh: {{ 'ON' if dashboard_config.auto_refresh else 'OFF' }}</button>
+                <span class="last-updated">Last Updated: <span id="last-updated-time">{{ timestamp }}</span></span>
+            </div>
+        </header>
+        
+        <div class="dashboard-grid">
+            {% for widget in widgets %}
+            <div class="dashboard-widget {{ widget.size_class }}">
+                <div class="widget-header">
+                    <h3>{{ widget.title }}</h3>
+                    <div class="widget-controls">
+                        {% if widget.alert_enabled %}
+                        <span class="alert-indicator {{ widget.alert_status }}"></span>
+                        {% endif %}
+                    </div>
+                </div>
+                <div class="widget-content" id="widget-{{ widget.id }}">
+                    {{ widget.content|safe }}
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        
+        <footer class="dashboard-footer">
+            <div class="footer-info">
+                Real-time monitoring | Refresh interval: {{ dashboard_config.refresh_interval / 1000 }}s | 
+                Audience: {{ audience|title }}
+            </div>
+        </footer>
+    </div>
+    
+    <script>{{ javascript }}</script>
+</body>
+</html>
+        """
+    
+    def _get_css_styles(self) -> str:
+        """Get comprehensive CSS styles for reports."""
+        return """
+        /* Base Styles */
+        * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
-        }}
+        }
         
-        body {{
-            font-family: {branding.font_family};
-            font-size: {branding.body_font_size};
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             line-height: 1.6;
             color: #333;
             background-color: #f8f9fa;
-        }}
+        }
         
-        .container {{
+        .container {
             max-width: 1200px;
             margin: 0 auto;
-            padding: {branding.page_margin};
-            background-color: white;
-            box-shadow: 0 0 20px rgba(0,0,0,0.1);
-        }}
-        
-        .report-header {{
-            border-bottom: 3px solid {branding.primary_color};
-            padding-bottom: 20px;
-            margin-bottom: {branding.section_spacing};
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            flex-wrap: wrap;
-        }}
-        
-        .logo {{
-            max-height: 60px;
-            margin-right: 20px;
-        }}
-        
-        h1 {{
-            font-size: {branding.title_font_size};
-            color: {branding.primary_color};
-            margin-bottom: 10px;
-        }}
-        
-        h2 {{
-            font-size: {branding.heading_font_size};
-            color: {branding.secondary_color};
-            margin-bottom: 15px;
-            border-left: 4px solid {branding.accent_color};
-            padding-left: 15px;
-        }}
-        
-        h3 {{
-            font-size: 16px;
-            color: #333;
-            margin-bottom: 10px;
-        }}
-        
-        .report-info {{
-            display: flex;
-            flex-direction: column;
-            gap: 5px;
-            font-size: {branding.small_font_size};
-            color: #666;
-        }}
-        
-        .report-section {{
-            margin-bottom: {branding.section_spacing};
             padding: 20px;
-            border: 1px solid #e0e0e0;
+            background: white;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
             border-radius: 8px;
-            background-color: #fdfdfd;
-        }}
+        }
         
-        .section-description {{
-            color: #666;
-            margin-bottom: 20px;
-            font-style: italic;
-        }}
+        /* Header Styles */
+        .report-header {
+            border-bottom: 3px solid #0066cc;
+            padding-bottom: 20px;
+            margin-bottom: 30px;
+        }
         
-        /* KPI Grid for Executive Summary */
-        .kpi-grid {{
+        .report-header h1 {
+            color: #0066cc;
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+        }
+        
+        .header-info {
+            display: flex;
+            gap: 20px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        
+        .status-badge {
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-weight: bold;
+            text-transform: uppercase;
+            font-size: 0.85rem;
+        }
+        
+        .status-pass { background: #28a745; color: white; }
+        .status-fail { background: #dc3545; color: white; }
+        .status-warning { background: #ffc107; color: #333; }
+        .status-success { background: #28a745; color: white; }
+        
+        /* Grid Layouts */
+        .summary-grid, .metrics-grid, .dashboard-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
             gap: 20px;
-            margin-bottom: 30px;
-        }}
+            margin: 20px 0;
+        }
         
-        .kpi-card {{
-            background: white;
-            border: 1px solid #e0e0e0;
+        .summary-card, .metric-card, .dashboard-card {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
             border-radius: 8px;
             padding: 20px;
             text-align: center;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            transition: transform 0.2s;
-        }}
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
         
-        .kpi-card:hover {{
+        .summary-card:hover, .metric-card:hover, .dashboard-card:hover {
             transform: translateY(-2px);
-            box-shadow: 0 4px 8px rgba(0,0,0,0.15);
-        }}
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        }
         
-        .kpi-card.success {{
-            border-left: 5px solid {branding.success_color};
-        }}
-        
-        .kpi-card.warning {{
-            border-left: 5px solid {branding.warning_color};
-        }}
-        
-        .kpi-card.failure {{
-            border-left: 5px solid {branding.danger_color};
-        }}
-        
-        .kpi-value {{
-            font-size: 2em;
+        .metric-value {
+            font-size: 2.5rem;
             font-weight: bold;
-            color: {branding.primary_color};
             margin: 10px 0;
-        }}
+        }
         
-        .kpi-target, .kpi-baseline {{
+        .metric-value.success { color: #28a745; }
+        .metric-value.warning { color: #ffc107; }
+        .metric-value.danger { color: #dc3545; }
+        
+        .metric-description, .metric-comparison {
+            font-size: 0.9rem;
             color: #666;
-            font-size: {branding.small_font_size};
-        }}
+            margin-top: 5px;
+        }
         
-        .kpi-status {{
-            font-weight: bold;
-            text-transform: uppercase;
-            font-size: {branding.small_font_size};
-        }}
-        
-        .kpi-trend {{
-            font-size: {branding.small_font_size};
-            color: #666;
-        }}
-        
-        /* Metrics Grid for Technical Reports */
-        .metrics-grid {{
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 20px;
-            margin-bottom: 30px;
-        }}
-        
-        .metric-card {{
+        /* Chart Containers */
+        .chart-container, .chart-section {
+            margin: 30px 0;
             background: white;
-            border: 1px solid #e0e0e0;
+            border: 1px solid #dee2e6;
             border-radius: 8px;
             padding: 20px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }}
+        }
         
-        .metric-values {{
+        .chart-section h3 {
+            margin-bottom: 15px;
+            color: #0066cc;
+            border-bottom: 2px solid #e9ecef;
+            padding-bottom: 10px;
+        }
+        
+        /* Tables */
+        .comparison-table table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+        
+        .comparison-table th,
+        .comparison-table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #dee2e6;
+        }
+        
+        .comparison-table th {
+            background: #f8f9fa;
+            font-weight: bold;
+            color: #495057;
+        }
+        
+        .comparison-table tr:hover {
+            background: #f8f9fa;
+        }
+        
+        /* Variance Status Colors */
+        .positive { color: #dc3545; } /* Slower/worse performance */
+        .negative { color: #28a745; } /* Faster/better performance */
+        .neutral { color: #6c757d; } /* Minimal variance */
+        
+        /* Navigation */
+        .report-nav {
+            background: #e9ecef;
+            padding: 10px;
+            border-radius: 5px;
+            margin-bottom: 30px;
+        }
+        
+        .report-nav a {
+            display: inline-block;
+            padding: 8px 15px;
+            margin-right: 10px;
+            color: #0066cc;
+            text-decoration: none;
+            border-radius: 3px;
+            transition: background-color 0.2s;
+        }
+        
+        .report-nav a:hover {
+            background: #0066cc;
+            color: white;
+        }
+        
+        /* Operations Dashboard Specific */
+        .alert-card {
+            border-left: 5px solid #dc3545;
+        }
+        
+        .alert {
+            padding: 10px;
+            border-radius: 5px;
+            margin: 5px 0;
+        }
+        
+        .alert.critical { background: #f8d7da; border-left: 3px solid #dc3545; }
+        .alert.warning { background: #fff3cd; border-left: 3px solid #ffc107; }
+        .alert.success { background: #d4edda; border-left: 3px solid #28a745; }
+        
+        .health-indicators, .capacity-metrics, .trend-indicators {
             display: flex;
             flex-direction: column;
             gap: 10px;
-            margin: 15px 0;
-        }}
+        }
         
-        .metric-values > div {{
+        .health-item, .capacity-item, .trend-item {
             display: flex;
             justify-content: space-between;
             align-items: center;
-        }}
+            padding: 8px 0;
+            border-bottom: 1px solid #e9ecef;
+        }
         
-        .metric-values label {{
-            font-weight: bold;
-            color: #666;
-        }}
+        .health-status.healthy { color: #28a745; font-weight: bold; }
+        .health-status.degraded { color: #dc3545; font-weight: bold; }
         
-        .metric-values .value {{
-            font-family: 'Courier New', monospace;
-            color: #333;
-        }}
+        .capacity-bar {
+            flex-grow: 1;
+            height: 20px;
+            background: #e9ecef;
+            border-radius: 10px;
+            margin: 0 10px;
+            overflow: hidden;
+        }
         
-        .metric-status {{
-            text-align: center;
-            padding: 8px;
-            border-radius: 4px;
-            font-weight: bold;
-            text-transform: uppercase;
-            font-size: {branding.small_font_size};
-        }}
+        .capacity-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #28a745, #ffc107, #dc3545);
+            transition: width 0.3s ease;
+        }
         
-        .status-ok, .status-success {{
-            background-color: {branding.success_color};
-            color: white;
-        }}
-        
-        .status-warning {{
-            background-color: {branding.warning_color};
-            color: white;
-        }}
-        
-        .status-critical, .status-failure {{
-            background-color: {branding.danger_color};
-            color: white;
-        }}
-        
-        /* Tables */
-        .metrics-table {{
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 20px;
-            font-size: {branding.small_font_size};
-        }}
-        
-        .metrics-table th,
-        .metrics-table td {{
-            padding: 12px;
-            text-align: left;
-            border-bottom: 1px solid #e0e0e0;
-        }}
-        
-        .metrics-table th {{
-            background-color: {branding.primary_color};
-            color: white;
-            font-weight: bold;
-        }}
-        
-        .metrics-table tr:nth-child(even) {{
-            background-color: #f8f9fa;
-        }}
-        
-        .metrics-table tr:hover {{
-            background-color: #e8f4f8;
-        }}
-        
-        .status-indicator {{
-            cursor: pointer;
-            padding: 4px 8px;
-            border-radius: 4px;
-            display: inline-block;
-            min-width: 60px;
-            text-align: center;
-        }}
-        
-        /* Charts */
-        .charts-section {{
-            margin-top: 40px;
-        }}
-        
-        .chart-container {{
-            margin-bottom: 30px;
-            padding: 20px;
-            border: 1px solid #e0e0e0;
-            border-radius: 8px;
-            background-color: white;
-        }}
-        
-        .chart-container h3 {{
-            margin-bottom: 15px;
-            color: {branding.primary_color};
-        }}
-        
-        /* Recommendations */
-        .recommendations {{
-            background-color: #f8f9fa;
-            padding: 20px;
-            border-radius: 8px;
-            border-left: 4px solid {branding.accent_color};
-        }}
-        
-        .recommendation-item {{
-            margin-bottom: 10px;
-            padding: 10px;
-            border-radius: 4px;
-        }}
-        
-        .recommendation-item.priority-high {{
-            background-color: #fff3cd;
-            border-left: 3px solid {branding.warning_color};
-        }}
-        
-        .recommendation-item.priority-medium {{
-            background-color: #d4edda;
-            border-left: 3px solid {branding.success_color};
-        }}
-        
-        .recommendation-item.priority-low {{
-            background-color: #d1ecf1;
-            border-left: 3px solid {branding.primary_color};
-        }}
-        
-        /* Footer */
-        .report-footer {{
-            margin-top: 40px;
-            padding-top: 20px;
-            border-top: 2px solid {branding.primary_color};
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            flex-wrap: wrap;
-            font-size: {branding.small_font_size};
-            color: #666;
-        }}
-        
-        .footer-info {{
-            display: flex;
-            gap: 20px;
-        }}
-        
-        .disclaimer {{
-            max-width: 400px;
-            text-align: right;
-        }}
+        .trend-direction.improving { color: #28a745; }
+        .trend-direction.degrading { color: #dc3545; }
+        .trend-direction.stable { color: #6c757d; }
         
         /* Responsive Design */
-        @media (max-width: 768px) {{
-            .container {{
-                margin: 0;
-                padding: 10px;
-            }}
+        @media (max-width: 768px) {
+            .container {
+                margin: 10px;
+                padding: 15px;
+            }
             
-            .report-header {{
+            .report-header h1 {
+                font-size: 2rem;
+            }
+            
+            .header-info {
                 flex-direction: column;
-                text-align: center;
-            }}
-            
-            .kpi-grid,
-            .metrics-grid {{
-                grid-template-columns: 1fr;
-            }}
-            
-            .footer-info {{
-                flex-direction: column;
+                align-items: flex-start;
                 gap: 10px;
-            }}
+            }
             
-            .disclaimer {{
-                text-align: left;
-                margin-top: 20px;
-            }}
+            .summary-grid, .metrics-grid, .dashboard-grid {
+                grid-template-columns: 1fr;
+            }
             
-            .metrics-table {{
-                font-size: 10px;
-            }}
+            .metric-value {
+                font-size: 2rem;
+            }
             
-            .metrics-table th,
-            .metrics-table td {{
-                padding: 8px 4px;
-            }}
-        }}
+            .chart-container {
+                overflow-x: auto;
+            }
+        }
         
-        @media print {{
-            .container {{
-                box-shadow: none;
-                margin: 0;
-            }}
-            
-            .chart-container {{
-                page-break-inside: avoid;
-            }}
-            
-            .kpi-card,
-            .metric-card {{
-                page-break-inside: avoid;
-            }}
-        }}
-        '''
+        /* Footer */
+        .report-footer {
+            margin-top: 50px;
+            padding-top: 20px;
+            border-top: 1px solid #dee2e6;
+            color: #6c757d;
+            font-size: 0.9rem;
+        }
         
-        return css
+        .footer-content {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+        }
+        
+        /* Print Styles */
+        @media print {
+            body { background: white; }
+            .container { box-shadow: none; }
+            .chart-container { break-inside: avoid; }
+            .report-nav { display: none; }
+        }
+        """
     
-    def _format_percentage(self, value: float) -> str:
-        """Format percentage values for display."""
-        if value is None:
-            return "N/A"
-        return f"{value:.1f}%"
+    def _get_javascript_code(self) -> str:
+        """Get JavaScript code for interactive features."""
+        return """
+        // Report interactivity
+        document.addEventListener('DOMContentLoaded', function() {
+            // Accordion functionality
+            const accordionItems = document.querySelectorAll('.accordion-item h3');
+            accordionItems.forEach(item => {
+                item.addEventListener('click', function() {
+                    const content = this.nextElementSibling;
+                    const isOpen = content.style.display === 'block';
+                    
+                    // Close all accordion items
+                    document.querySelectorAll('.accordion-content').forEach(acc => {
+                        acc.style.display = 'none';
+                    });
+                    
+                    // Open clicked item if it was closed
+                    if (!isOpen) {
+                        content.style.display = 'block';
+                    }
+                });
+            });
+            
+            // Smooth scrolling for navigation
+            document.querySelectorAll('.report-nav a').forEach(link => {
+                link.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    const target = document.querySelector(this.getAttribute('href'));
+                    if (target) {
+                        target.scrollIntoView({ behavior: 'smooth' });
+                    }
+                });
+            });
+            
+            // Chart resize handling
+            window.addEventListener('resize', function() {
+                if (typeof Plotly !== 'undefined') {
+                    const charts = document.querySelectorAll('[id^="chart_"], [id^="gauge_"]');
+                    charts.forEach(chart => {
+                        Plotly.Plots.resize(chart);
+                    });
+                }
+            });
+        });
+        """
     
-    def _format_duration(self, milliseconds: float) -> str:
-        """Format duration values for display."""
-        if milliseconds is None:
-            return "N/A"
-        if milliseconds < 1000:
-            return f"{milliseconds:.1f}ms"
+    # Helper methods for template filters
+    def _format_number(self, value: Union[int, float], decimals: int = 1) -> str:
+        """Format number with appropriate precision."""
+        if isinstance(value, (int, float)):
+            return f"{value:,.{decimals}f}"
+        return str(value)
+    
+    def _format_percentage(self, value: Union[int, float], decimals: int = 1) -> str:
+        """Format value as percentage."""
+        if isinstance(value, (int, float)):
+            return f"{value:.{decimals}f}%"
+        return str(value)
+    
+    def _format_duration(self, seconds: Union[int, float]) -> str:
+        """Format duration in human-readable format."""
+        if seconds < 60:
+            return f"{seconds:.1f}s"
+        elif seconds < 3600:
+            return f"{seconds/60:.1f}m"
         else:
-            return f"{milliseconds/1000:.2f}s"
+            return f"{seconds/3600:.1f}h"
     
     def _format_timestamp(self, timestamp: datetime) -> str:
         """Format timestamp for display."""
-        if timestamp is None:
-            return "N/A"
-        return timestamp.strftime("%Y-%m-%d %H:%M:%S UTC")
+        return timestamp.strftime('%Y-%m-%d %H:%M:%S UTC')
     
-    def _format_number(self, value: float) -> str:
-        """Format numeric values for display."""
-        if value is None:
-            return "N/A"
-        if value >= 1000000:
-            return f"{value/1000000:.1f}M"
-        elif value >= 1000:
-            return f"{value/1000:.1f}K"
+    def _variance_status(self, variance: float) -> str:
+        """Get variance status class based on value."""
+        if abs(variance) <= 2:
+            return 'neutral'
+        elif variance > 0:
+            return 'positive'  # Slower/worse
         else:
-            return f"{value:.1f}"
+            return 'negative'  # Faster/better
     
-    def _get_status_color(self, status: str) -> str:
-        """Get color for status indicator."""
-        return self.branding.get_status_colors().get(status.lower(), "#666")
-    
-    def _get_variance_status(self, variance_percent: float) -> str:
-        """Get variance status description."""
-        if variance_percent <= 5.0:
-            return "Excellent Performance"
-        elif variance_percent <= 10.0:
-            return "Within Threshold"
-        elif variance_percent <= 15.0:
-            return "Approaching Limit"
+    def _performance_color(self, variance: float, threshold: float = 10.0) -> str:
+        """Get color class based on performance variance."""
+        abs_variance = abs(variance)
+        if abs_variance <= threshold * 0.5:
+            return 'success'
+        elif abs_variance <= threshold:
+            return 'warning'
         else:
-            return "Exceeds Threshold"
+            return 'danger'
     
-    def _calculate_trend(self, values: List[float]) -> str:
-        """Calculate trend direction from values."""
-        if not values or len(values) < 2:
-            return "No Trend Data"
-        
-        if values[-1] > values[0]:
-            return "↗ Increasing"
-        elif values[-1] < values[0]:
-            return "↘ Decreasing"
-        else:
-            return "→ Stable"
+    def _calculate_variance(self, baseline: float, measured: float) -> float:
+        """Calculate variance percentage."""
+        if baseline == 0:
+            return 0.0
+        return ((measured - baseline) / baseline) * 100
     
-    def _get_recommendation(self, metric_name: str, status: str) -> str:
-        """Get recommendation based on metric performance."""
-        recommendations = {
-            "response_time": {
-                "failure": "Optimize database queries and reduce middleware overhead",
-                "warning": "Monitor response time trends and consider caching",
-                "ok": "Response time is within acceptable limits"
-            },
-            "memory_usage": {
-                "failure": "Investigate memory leaks and optimize object lifecycle",
-                "warning": "Monitor memory usage patterns and consider garbage collection tuning",
-                "ok": "Memory usage is stable and efficient"
-            },
-            "error_rate": {
-                "failure": "Immediate investigation required for error sources",
-                "warning": "Monitor error patterns and improve error handling",
-                "ok": "Error rate is within acceptable limits"
-            }
-        }
+    # Helper methods for data analysis
+    def _generate_baseline_comparisons(self, test_results: Dict[str, Any], 
+                                     baseline_metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate baseline comparison analysis."""
+        comparisons = {}
         
-        return recommendations.get(metric_name, {}).get(status, "Monitor performance trends")
-    
-    def add_section(
-        self,
-        title: str,
-        content: str,
-        description: Optional[str] = None,
-        section_id: Optional[str] = None
-    ) -> None:
-        """
-        Add content section to report.
-        
-        Args:
-            title: Section title
-            content: Section content (HTML)
-            description: Optional section description
-            section_id: Optional section identifier
-        """
-        if section_id is None:
-            section_id = title.lower().replace(' ', '_').replace('-', '_')
-        
-        self.sections.append({
-            "id": section_id,
-            "title": title,
-            "content": content,
-            "description": description
-        })
-    
-    def add_chart(
-        self,
-        chart_id: str,
-        title: str,
-        chart_content: str,
-        chart_type: ChartType = ChartType.LINE_CHART
-    ) -> None:
-        """
-        Add chart to report.
-        
-        Args:
-            chart_id: Unique chart identifier
-            title: Chart title
-            chart_content: Chart HTML content
-            chart_type: Type of chart for categorization
-        """
-        self.charts.append({
-            "id": chart_id,
-            "title": title,
-            "content": chart_content,
-            "type": chart_type.value
-        })
-    
-    def set_performance_data(
-        self,
-        current_metrics: Dict[str, Any],
-        baseline_metrics: Dict[str, Any],
-        variance_analysis: Optional[Dict[str, Any]] = None
-    ) -> None:
-        """
-        Set performance data for report generation.
-        
-        Args:
-            current_metrics: Current performance metrics
-            baseline_metrics: Baseline comparison metrics
-            variance_analysis: Optional variance analysis results
-        """
-        self.performance_data = current_metrics
-        self.baseline_data = baseline_metrics
-        self.variance_analysis = variance_analysis or {}
-    
-    def generate_html(self, template_name: Optional[str] = None) -> str:
-        """
-        Generate HTML report content.
-        
-        Args:
-            template_name: Optional specific template name
-            
-        Returns:
-            Generated HTML content
-            
-        Raises:
-            ValueError: If Jinja2 is not available or template not found
-        """
-        if not JINJA2_AVAILABLE:
-            raise ValueError("Jinja2 is required for HTML report generation")
-        
-        # Determine template based on audience
-        if template_name is None:
-            if self.metadata.audience == ReportAudience.EXECUTIVE:
-                template_name = "executive.html"
-            else:
-                template_name = "technical.html"
-        
-        template = self.jinja_env.get_template(template_name)
-        
-        # Prepare template context
-        context = {
-            "metadata": self.metadata,
-            "branding": self.branding,
-            "sections": self.sections,
-            "charts": self.charts,
-            "performance_data": self.performance_data,
-            "baseline_data": self.baseline_data,
-            "variance_analysis": self.variance_analysis,
-            "css_styles": self._get_css_styles(),
-            "plotly_available": PLOTLY_AVAILABLE,
-            # Template-specific data
-            "performance_summary": self._generate_performance_summary(),
-            "baseline_summary": self._generate_baseline_summary(),
-            "detailed_metrics": self._generate_detailed_metrics(),
-            "statistical_analysis": self._generate_statistical_analysis(),
-            "recommendations": self._generate_recommendations()
-        }
-        
-        return template.render(**context)
-    
-    def _generate_performance_summary(self) -> Dict[str, Any]:
-        """Generate performance summary for executive template."""
-        if not self.performance_data:
-            return {}
-        
-        # Calculate key metrics
-        avg_response_time = self.performance_data.get('avg_response_time', 0)
-        baseline_response_time = self.baseline_data.get('avg_response_time', avg_response_time)
-        
-        variance_percentage = 0
-        if baseline_response_time > 0:
-            variance_percentage = ((avg_response_time - baseline_response_time) / baseline_response_time) * 100
-        
-        return {
-            "variance_percentage": abs(variance_percentage),
-            "within_threshold": abs(variance_percentage) <= 10.0,
-            "avg_response_time": avg_response_time,
-            "requests_per_second": self.performance_data.get('requests_per_second', 0),
-            "error_rate": self.performance_data.get('error_rate', 0) * 100,  # Convert to percentage
-            "response_time_trend": self.performance_data.get('response_time_trend', []),
-            "throughput_trend": self.performance_data.get('throughput_trend', [])
-        }
-    
-    def _generate_baseline_summary(self) -> Dict[str, Any]:
-        """Generate baseline summary for comparison."""
-        return {
-            "avg_response_time": self.baseline_data.get('avg_response_time', 0),
-            "requests_per_second": self.baseline_data.get('requests_per_second', 0),
-            "error_rate": self.baseline_data.get('error_rate', 0) * 100
-        }
-    
-    def _generate_detailed_metrics(self) -> Dict[str, Any]:
-        """Generate detailed metrics for technical template."""
-        detailed_metrics = {}
-        
-        for metric_name, current_value in self.performance_data.items():
-            if metric_name.endswith('_trend'):
-                continue
+        # Response time comparisons
+        response_times = baseline_metrics.get('response_times', {})
+        for endpoint, baseline_time in response_times.items():
+            if endpoint in test_results:
+                measured_time = test_results[endpoint]
+                variance = self._calculate_variance(baseline_time, measured_time)
                 
-            baseline_value = self.baseline_data.get(metric_name, current_value)
-            
-            # Calculate variance
-            variance_percent = 0
-            if baseline_value > 0:
-                variance_percent = ((current_value - baseline_value) / baseline_value) * 100
-            
-            # Determine status
-            status = "ok"
-            if abs(variance_percent) > 15:
-                status = "failure"
-            elif abs(variance_percent) > 10:
-                status = "critical"
-            elif abs(variance_percent) > 5:
-                status = "warning"
-            
-            # Determine unit
-            unit = ""
-            if "time" in metric_name or "latency" in metric_name:
-                unit = "ms"
-            elif "rate" in metric_name or "throughput" in metric_name:
-                unit = " req/s"
-            elif "memory" in metric_name:
-                unit = "MB"
-            elif "cpu" in metric_name:
-                unit = "%"
-            
-            detailed_metrics[metric_name] = {
-                "current_value": current_value,
-                "baseline_value": baseline_value,
-                "variance_percent": variance_percent,
-                "status": status,
-                "unit": unit
-            }
-        
-        return detailed_metrics
-    
-    def _generate_statistical_analysis(self) -> Dict[str, Any]:
-        """Generate statistical analysis for technical template."""
-        statistical_analysis = {}
-        
-        # Mock statistical data - in real implementation, this would come from test results
-        for metric_name in self.performance_data.keys():
-            if metric_name.endswith('_trend'):
-                continue
-                
-            # Generate mock statistical data
-            current_value = self.performance_data[metric_name]
-            baseline_value = self.baseline_data.get(metric_name, current_value)
-            
-            # Simulate statistical distribution
-            variance = abs(current_value - baseline_value) * 0.1
-            
-            unit = ""
-            if "time" in metric_name or "latency" in metric_name:
-                unit = "ms"
-            elif "rate" in metric_name or "throughput" in metric_name:
-                unit = " req/s"
-            elif "memory" in metric_name:
-                unit = "MB"
-            elif "cpu" in metric_name:
-                unit = "%"
-            
-            # Calculate variance percentage
-            variance_percent = 0
-            if baseline_value > 0:
-                variance_percent = ((current_value - baseline_value) / baseline_value) * 100
-            
-            status = "ok"
-            if abs(variance_percent) > 10:
-                status = "failure"
-            elif abs(variance_percent) > 5:
-                status = "warning"
-            
-            statistical_analysis[metric_name] = {
-                "mean": current_value,
-                "median": current_value * 0.95,
-                "p95": current_value * 1.2,
-                "p99": current_value * 1.5,
-                "std_dev": variance,
-                "unit": unit,
-                "status": status,
-                "details": f"Variance: {variance_percent:.1f}% from baseline"
-            }
-        
-        return statistical_analysis
-    
-    def _generate_recommendations(self) -> List[Dict[str, Any]]:
-        """Generate recommendations based on performance analysis."""
-        recommendations = []
-        
-        # Analyze performance data and generate recommendations
-        performance_summary = self._generate_performance_summary()
-        
-        if not performance_summary.get('within_threshold', True):
-            recommendations.append({
-                "title": "Performance Optimization Required",
-                "description": "Current performance variance exceeds 10% threshold. Immediate optimization needed.",
-                "priority": "high"
-            })
-        
-        if performance_summary.get('error_rate', 0) > 0.1:
-            recommendations.append({
-                "title": "Error Rate Investigation",
-                "description": "Error rate exceeds acceptable threshold. Review error logs and improve error handling.",
-                "priority": "high"
-            })
-        
-        if performance_summary.get('avg_response_time', 0) > 500:
-            recommendations.append({
-                "title": "Response Time Optimization",
-                "description": "Response time exceeds target. Consider database query optimization and caching.",
-                "priority": "medium"
-            })
-        
-        # Add default recommendations
-        if not recommendations:
-            recommendations.append({
-                "title": "Continuous Monitoring",
-                "description": "Maintain current performance monitoring and trend analysis.",
-                "priority": "low"
-            })
-        
-        return recommendations
-    
-    def generate_json(self) -> str:
-        """
-        Generate JSON report content.
-        
-        Returns:
-            JSON formatted report data
-        """
-        report_data = {
-            "metadata": self.metadata.to_dict(),
-            "branding": {
-                "company_name": self.branding.company_name,
-                "primary_color": self.branding.primary_color,
-                "theme": self.metadata.theme.value
-            },
-            "performance_data": self.performance_data,
-            "baseline_data": self.baseline_data,
-            "variance_analysis": self.variance_analysis,
-            "sections": self.sections,
-            "charts": [
-                {
-                    "id": chart["id"],
-                    "title": chart["title"],
-                    "type": chart["type"]
+                comparisons[endpoint] = {
+                    'baseline': baseline_time,
+                    'measured': measured_time,
+                    'variance_percentage': variance,
+                    'within_threshold': abs(variance) <= self.config.PERFORMANCE_VARIANCE_THRESHOLD
                 }
-                for chart in self.charts
-            ],
-            "summary": {
-                "performance_summary": self._generate_performance_summary(),
-                "baseline_summary": self._generate_baseline_summary(),
-                "recommendations": self._generate_recommendations()
+        
+        return comparisons
+    
+    def _calculate_variance_analysis(self, test_results: Dict[str, Any]) -> Dict[str, Any]:
+        """Calculate comprehensive variance analysis."""
+        baseline_metrics = get_baseline_metrics()
+        variances = []
+        
+        # Collect all variance percentages
+        for category, metrics in baseline_metrics.items():
+            if isinstance(metrics, dict):
+                for metric_name, baseline_value in metrics.items():
+                    if metric_name in test_results:
+                        variance = self._calculate_variance(baseline_value, test_results[metric_name])
+                        variances.append(abs(variance))
+        
+        if variances:
+            return {
+                'overall_variance_percentage': sum(variances) / len(variances),
+                'max_variance_percentage': max(variances),
+                'min_variance_percentage': min(variances),
+                'variance_count': len(variances),
+                'variances_within_threshold': sum(1 for v in variances if v <= self.config.PERFORMANCE_VARIANCE_THRESHOLD),
+                'variance_compliance_percentage': (sum(1 for v in variances if v <= self.config.PERFORMANCE_VARIANCE_THRESHOLD) / len(variances)) * 100
+            }
+        
+        return {'overall_variance_percentage': 0.0}
+    
+    def _calculate_performance_score(self, test_results: Dict[str, Any]) -> Dict[str, Any]:
+        """Calculate composite performance score."""
+        score_components = []
+        
+        # Response time score (0-100, 100 is best)
+        if 'response_time_p95' in test_results:
+            response_time = test_results['response_time_p95']
+            baseline_response = get_baseline_metrics('response_times').get('api_get_users', 150)
+            variance = abs(self._calculate_variance(baseline_response, response_time))
+            response_score = max(0, 100 - variance * 2)  # Penalty for variance
+            score_components.append(('response_time', response_score))
+        
+        # Throughput score
+        if 'throughput' in test_results:
+            throughput = test_results['throughput']
+            baseline_throughput = get_baseline_metrics('throughput').get('requests_per_second', 1000)
+            variance = self._calculate_variance(baseline_throughput, throughput)
+            throughput_score = max(0, 100 + variance)  # Bonus for better throughput
+            score_components.append(('throughput', min(100, throughput_score)))
+        
+        # Error rate score
+        if 'error_rate' in test_results:
+            error_rate = test_results['error_rate']
+            error_score = max(0, 100 - error_rate * 20)  # Heavy penalty for errors
+            score_components.append(('error_rate', error_score))
+        
+        # Resource utilization score
+        if 'cpu_utilization' in test_results:
+            cpu_util = test_results['cpu_utilization']
+            cpu_score = max(0, 100 - max(0, cpu_util - 50))  # Penalty above 50%
+            score_components.append(('cpu_utilization', cpu_score))
+        
+        if score_components:
+            overall_score = sum(score for _, score in score_components) / len(score_components)
+            return {
+                'overall_score': overall_score,
+                'component_scores': dict(score_components),
+                'score_breakdown': {
+                    'response_time_weight': 0.3,
+                    'throughput_weight': 0.3,
+                    'error_rate_weight': 0.3,
+                    'resource_weight': 0.1
+                }
+            }
+        
+        return {'overall_score': 0.0}
+    
+    def _calculate_trend_analysis(self, test_results: Dict[str, Any]) -> Dict[str, Any]:
+        """Calculate trend analysis if historical data is available."""
+        # This would typically integrate with historical data storage
+        # For now, return placeholder trends
+        return {
+            'response_time': {'direction': 'stable', 'change_percentage': 0.5},
+            'throughput': {'direction': 'improving', 'change_percentage': -2.1},
+            'error_rate': {'direction': 'improving', 'change_percentage': -0.3},
+            'cpu_utilization': {'direction': 'stable', 'change_percentage': 1.2}
+        }
+    
+    def _analyze_system_resources(self, test_results: Dict[str, Any]) -> Dict[str, Any]:
+        """Analyze system resource utilization."""
+        return {
+            'cpu_analysis': {
+                'current': test_results.get('cpu_utilization', 0),
+                'peak': test_results.get('cpu_peak', 0),
+                'average': test_results.get('cpu_average', 0),
+                'recommendation': 'Normal' if test_results.get('cpu_utilization', 0) < 70 else 'Consider scaling'
+            },
+            'memory_analysis': {
+                'current_mb': test_results.get('memory_usage_mb', 0),
+                'peak_mb': test_results.get('memory_peak_mb', 0),
+                'growth_rate': test_results.get('memory_growth_rate', 0),
+                'recommendation': 'Normal' if test_results.get('memory_usage_mb', 0) < 1024 else 'Monitor growth'
             }
         }
-        
-        return json.dumps(report_data, indent=2, default=str)
     
-    def generate_pdf(self, html_content: Optional[str] = None) -> bytes:
-        """
-        Generate PDF report from HTML content.
-        
-        Args:
-            html_content: Optional HTML content (generated if not provided)
-            
-        Returns:
-            PDF content as bytes
-            
-        Raises:
-            ValueError: If WeasyPrint is not available
-        """
-        if not WEASYPRINT_AVAILABLE:
-            raise ValueError("WeasyPrint is required for PDF report generation")
-        
-        if html_content is None:
-            html_content = self.generate_html()
-        
-        # Create PDF from HTML
-        html_doc = weasyprint.HTML(string=html_content)
-        pdf_bytes = html_doc.write_pdf()
-        
-        return pdf_bytes
+    # Widget configuration methods for dashboards
+    def _get_executive_widgets(self) -> List[Dict[str, Any]]:
+        """Get executive dashboard widgets."""
+        return [
+            {
+                'id': 'performance_status',
+                'title': 'Performance Status',
+                'size_class': 'widget-large',
+                'content': '<div class="status-indicator">System Performance: GOOD</div>',
+                'alert_enabled': True,
+                'alert_status': 'normal'
+            },
+            {
+                'id': 'variance_summary',
+                'title': 'Variance from Baseline',
+                'size_class': 'widget-medium',
+                'content': '<div class="metric-display">±5.2%</div>',
+                'alert_enabled': True,
+                'alert_status': 'normal'
+            }
+        ]
     
-    def save_report(
-        self,
-        output_path: str,
-        format: ReportFormat = ReportFormat.HTML
-    ) -> str:
-        """
-        Save report to file in specified format.
+    def _get_operations_widgets(self) -> List[Dict[str, Any]]:
+        """Get operations dashboard widgets."""
+        return [
+            {
+                'id': 'system_health',
+                'title': 'System Health',
+                'size_class': 'widget-large',
+                'content': '<div class="health-grid">All systems operational</div>',
+                'alert_enabled': True,
+                'alert_status': 'normal'
+            },
+            {
+                'id': 'active_alerts',
+                'title': 'Active Alerts',
+                'size_class': 'widget-medium',
+                'content': '<div class="alert-count">0 Active Alerts</div>',
+                'alert_enabled': True,
+                'alert_status': 'normal'
+            }
+        ]
+    
+    def _get_technical_widgets(self) -> List[Dict[str, Any]]:
+        """Get technical dashboard widgets."""
+        return [
+            {
+                'id': 'performance_metrics',
+                'title': 'Performance Metrics',
+                'size_class': 'widget-large',
+                'content': '<div class="metrics-table">Detailed metrics display</div>',
+                'alert_enabled': True,
+                'alert_status': 'normal'
+            },
+            {
+                'id': 'resource_usage',
+                'title': 'Resource Usage',
+                'size_class': 'widget-medium',
+                'content': '<div class="resource-charts">CPU: 45%, Memory: 60%</div>',
+                'alert_enabled': True,
+                'alert_status': 'normal'
+            }
+        ]
+    
+    def _get_default_widgets(self) -> List[Dict[str, Any]]:
+        """Get default dashboard widgets."""
+        return [
+            {
+                'id': 'overview',
+                'title': 'Overview',
+                'size_class': 'widget-large',
+                'content': '<div class="overview-display">System overview</div>',
+                'alert_enabled': False,
+                'alert_status': 'normal'
+            }
+        ]
+    
+    # Additional helper methods
+    def _check_variance_compliance(self, test_results: Dict[str, Any]) -> bool:
+        """Check if performance variance is within threshold."""
+        variance_analysis = test_results.get('variance_analysis', {})
+        overall_variance = variance_analysis.get('overall_variance_percentage', 0)
+        return overall_variance <= self.config.PERFORMANCE_VARIANCE_THRESHOLD
+    
+    def _extract_key_metrics(self, test_results: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract key metrics for summary."""
+        return {
+            'response_time_p95': test_results.get('response_time_p95'),
+            'throughput': test_results.get('throughput'),
+            'error_rate': test_results.get('error_rate'),
+            'cpu_utilization': test_results.get('cpu_utilization'),
+            'memory_usage_mb': test_results.get('memory_usage_mb')
+        }
+    
+    def _get_variance_color(self, variance: float) -> str:
+        """Get color for variance display."""
+        abs_variance = abs(variance)
+        if abs_variance <= 5:
+            return self.visualization_config.brand_colors['success']
+        elif abs_variance <= 10:
+            return self.visualization_config.brand_colors['warning']
+        else:
+            return self.visualization_config.brand_colors['danger']
+    
+    def _save_report(self, content: Union[str, bytes], output_path: str, 
+                    report_format: ReportFormat) -> None:
+        """Save report content to file."""
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         
-        Args:
-            output_path: Output file path
-            format: Report format for export
-            
-        Returns:
-            Path to saved report file
-            
-        Raises:
-            ValueError: If format is not supported
-        """
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        if format == ReportFormat.HTML:
-            content = self.generate_html()
-            output_path = output_path.with_suffix('.html')
+        if isinstance(content, str):
             with open(output_path, 'w', encoding='utf-8') as f:
                 f.write(content)
-        
-        elif format == ReportFormat.JSON:
-            content = self.generate_json()
-            output_path = output_path.with_suffix('.json')
-            with open(output_path, 'w', encoding='utf-8') as f:
-                f.write(content)
-        
-        elif format == ReportFormat.PDF:
-            content = self.generate_pdf()
-            output_path = output_path.with_suffix('.pdf')
+        else:
             with open(output_path, 'wb') as f:
                 f.write(content)
-        
-        elif format == ReportFormat.MARKDOWN:
-            content = self._generate_markdown()
-            output_path = output_path.with_suffix('.md')
-            with open(output_path, 'w', encoding='utf-8') as f:
-                f.write(content)
-        
-        else:
-            raise ValueError(f"Unsupported report format: {format}")
-        
-        return str(output_path)
-    
-    def _generate_markdown(self) -> str:
-        """
-        Generate Markdown report content.
-        
-        Returns:
-            Markdown formatted report content
-        """
-        lines = []
-        
-        # Header
-        lines.append(f"# {self.metadata.title}")
-        lines.append("")
-        lines.append(f"**Generated:** {self._format_timestamp(self.metadata.generated_at)}")
-        lines.append(f"**Environment:** {self.metadata.test_environment}")
-        lines.append(f"**Audience:** {self.metadata.audience.value.title()}")
-        lines.append("")
-        
-        # Performance Summary
-        performance_summary = self._generate_performance_summary()
-        if performance_summary:
-            lines.append("## Performance Summary")
-            lines.append("")
-            lines.append(f"- **Performance Variance:** {performance_summary.get('variance_percentage', 0):.1f}%")
-            lines.append(f"- **Response Time:** {performance_summary.get('avg_response_time', 0):.1f}ms")
-            lines.append(f"- **Throughput:** {performance_summary.get('requests_per_second', 0):.1f} req/s")
-            lines.append(f"- **Error Rate:** {performance_summary.get('error_rate', 0):.1f}%")
-            lines.append("")
-        
-        # Recommendations
-        recommendations = self._generate_recommendations()
-        if recommendations:
-            lines.append("## Recommendations")
-            lines.append("")
-            for rec in recommendations[:5]:  # Top 5 recommendations
-                lines.append(f"### {rec['title']} ({rec['priority'].upper()} PRIORITY)")
-                lines.append(f"{rec['description']}")
-                lines.append("")
-        
-        # Sections
-        for section in self.sections:
-            lines.append(f"## {section['title']}")
-            if section.get('description'):
-                lines.append(f"*{section['description']}*")
-            lines.append("")
-            # Strip HTML tags for markdown (simplified)
-            content = section['content'].replace('<p>', '').replace('</p>', '\n')
-            content = content.replace('<br>', '\n').replace('<br/>', '\n')
-            lines.append(content)
-            lines.append("")
-        
-        # Footer
-        lines.append("---")
-        lines.append(f"*Report generated by {self.metadata.generated_by} v{self.metadata.version}*")
-        lines.append(f"*Report ID: {self.metadata.report_id}*")
-        
-        return '\n'.join(lines)
 
 
-class ChartTemplateLibrary:
+# Factory function for easy template engine creation
+def create_report_template_engine(template_dir: Optional[str] = None,
+                                config: Optional[PerformanceTestConfig] = None) -> PerformanceReportTemplateEngine:
     """
-    Chart template library providing visualization templates for performance data.
-    
-    Implements comprehensive chart generation capabilities with responsive design,
-    interactive features, and consistent styling per Section 6.5.1.5 dashboard
-    design requirements.
-    """
-    
-    def __init__(self, branding: Optional[ReportBranding] = None):
-        """
-        Initialize chart template library.
-        
-        Args:
-            branding: Visual branding configuration
-        """
-        self.branding = branding or ReportBranding()
-        self.color_palette = self.branding.get_color_palette()
-        
-        # Configure plotting backends
-        if MATPLOTLIB_AVAILABLE:
-            plt.style.use('seaborn-v0_8')
-            sns.set_palette(self.color_palette)
-        
-        if PLOTLY_AVAILABLE:
-            pio.templates.default = "plotly_white"
-    
-    def create_performance_variance_chart(
-        self,
-        metrics_data: Dict[str, Dict[str, float]],
-        config: Optional[ChartConfiguration] = None
-    ) -> str:
-        """
-        Create performance variance chart showing current vs baseline metrics.
-        
-        Args:
-            metrics_data: Dictionary of metric name to current/baseline values
-            config: Optional chart configuration
-            
-        Returns:
-            HTML content for chart visualization
-        """
-        if not PLOTLY_AVAILABLE:
-            return self._create_fallback_chart("Performance Variance Chart", "Plotly not available")
-        
-        config = config or ChartConfiguration(
-            chart_type=ChartType.BAR_CHART,
-            title="Performance Variance vs Baseline",
-            height=500
-        )
-        
-        # Prepare data
-        metric_names = list(metrics_data.keys())
-        current_values = [data.get('current', 0) for data in metrics_data.values()]
-        baseline_values = [data.get('baseline', 0) for data in metrics_data.values()]
-        variance_percentages = []
-        
-        for current, baseline in zip(current_values, baseline_values):
-            if baseline > 0:
-                variance = ((current - baseline) / baseline) * 100
-            else:
-                variance = 0
-            variance_percentages.append(variance)
-        
-        # Create figure
-        fig = make_subplots(
-            rows=2, cols=1,
-            subplot_titles=('Current vs Baseline Values', 'Variance Percentage'),
-            specs=[[{"secondary_y": False}], [{"secondary_y": False}]],
-            vertical_spacing=0.1
-        )
-        
-        # Current vs Baseline bars
-        fig.add_trace(
-            go.Bar(
-                name='Current',
-                x=metric_names,
-                y=current_values,
-                marker_color=self.color_palette[0],
-                text=[f"{val:.1f}" for val in current_values],
-                textposition='outside'
-            ),
-            row=1, col=1
-        )
-        
-        fig.add_trace(
-            go.Bar(
-                name='Baseline',
-                x=metric_names,
-                y=baseline_values,
-                marker_color=self.color_palette[1],
-                text=[f"{val:.1f}" for val in baseline_values],
-                textposition='outside'
-            ),
-            row=1, col=1
-        )
-        
-        # Variance percentage bars with color coding
-        variance_colors = []
-        for variance in variance_percentages:
-            if abs(variance) <= 5:
-                variance_colors.append(self.branding.success_color)
-            elif abs(variance) <= 10:
-                variance_colors.append(self.branding.warning_color)
-            else:
-                variance_colors.append(self.branding.danger_color)
-        
-        fig.add_trace(
-            go.Bar(
-                name='Variance %',
-                x=metric_names,
-                y=variance_percentages,
-                marker_color=variance_colors,
-                text=[f"{val:+.1f}%" for val in variance_percentages],
-                textposition='outside',
-                showlegend=False
-            ),
-            row=2, col=1
-        )
-        
-        # Add threshold lines
-        fig.add_hline(y=10, line_dash="dash", line_color="red", 
-                     annotation_text="10% Threshold", row=2, col=1)
-        fig.add_hline(y=-10, line_dash="dash", line_color="red", row=2, col=1)
-        
-        # Update layout
-        fig.update_layout(
-            title=config.title,
-            height=config.height,
-            showlegend=True,
-            barmode='group',
-            font=dict(family=self.branding.font_family),
-            plot_bgcolor=config.plot_background_color,
-            paper_bgcolor=config.background_color
-        )
-        
-        fig.update_xaxes(title_text="Metrics", row=2, col=1)
-        fig.update_yaxes(title_text="Values", row=1, col=1)
-        fig.update_yaxes(title_text="Variance %", row=2, col=1)
-        
-        # Convert to HTML
-        chart_html = pio.to_html(
-            fig,
-            include_plotlyjs='cdn',
-            config=config.to_plotly_config(),
-            div_id=f"chart-{config.title.lower().replace(' ', '-')}"
-        )
-        
-        return chart_html
-    
-    def create_response_time_trend_chart(
-        self,
-        time_series_data: List[Tuple[datetime, float]],
-        baseline_value: Optional[float] = None,
-        config: Optional[ChartConfiguration] = None
-    ) -> str:
-        """
-        Create response time trend chart with baseline comparison.
-        
-        Args:
-            time_series_data: List of (timestamp, response_time) tuples
-            baseline_value: Optional baseline response time value
-            config: Optional chart configuration
-            
-        Returns:
-            HTML content for chart visualization
-        """
-        if not PLOTLY_AVAILABLE:
-            return self._create_fallback_chart("Response Time Trend", "Plotly not available")
-        
-        config = config or ChartConfiguration(
-            chart_type=ChartType.LINE_CHART,
-            title="Response Time Trend Analysis",
-            height=400
-        )
-        
-        if not time_series_data:
-            return self._create_fallback_chart(config.title, "No data available")
-        
-        # Extract timestamps and values
-        timestamps = [item[0] for item in time_series_data]
-        response_times = [item[1] for item in time_series_data]
-        
-        # Create figure
-        fig = go.Figure()
-        
-        # Response time line
-        fig.add_trace(
-            go.Scatter(
-                x=timestamps,
-                y=response_times,
-                mode='lines+markers',
-                name='Response Time',
-                line=dict(color=self.color_palette[0], width=2),
-                marker=dict(size=6),
-                hovertemplate='<b>%{x}</b><br>Response Time: %{y:.1f}ms<extra></extra>'
-            )
-        )
-        
-        # Baseline line
-        if baseline_value:
-            fig.add_hline(
-                y=baseline_value,
-                line_dash="dash",
-                line_color=self.color_palette[1],
-                annotation_text=f"Baseline: {baseline_value:.1f}ms"
-            )
-        
-        # Threshold lines
-        if baseline_value:
-            upper_threshold = baseline_value * 1.1  # 10% above baseline
-            lower_threshold = baseline_value * 0.9  # 10% below baseline
-            
-            fig.add_hline(
-                y=upper_threshold,
-                line_dash="dot",
-                line_color=self.branding.danger_color,
-                annotation_text="+10% Threshold"
-            )
-            fig.add_hline(
-                y=lower_threshold,
-                line_dash="dot",
-                line_color=self.branding.success_color,
-                annotation_text="-10% Threshold"
-            )
-        
-        # Update layout
-        fig.update_layout(
-            title=config.title,
-            xaxis_title="Time",
-            yaxis_title="Response Time (ms)",
-            height=config.height,
-            font=dict(family=self.branding.font_family),
-            plot_bgcolor=config.plot_background_color,
-            paper_bgcolor=config.background_color,
-            hovermode='x unified'
-        )
-        
-        # Convert to HTML
-        chart_html = pio.to_html(
-            fig,
-            include_plotlyjs='cdn',
-            config=config.to_plotly_config(),
-            div_id=f"chart-response-time-trend"
-        )
-        
-        return chart_html
-    
-    def create_throughput_comparison_chart(
-        self,
-        current_throughput: List[float],
-        baseline_throughput: List[float],
-        labels: List[str],
-        config: Optional[ChartConfiguration] = None
-    ) -> str:
-        """
-        Create throughput comparison chart between current and baseline.
-        
-        Args:
-            current_throughput: Current throughput values
-            baseline_throughput: Baseline throughput values
-            labels: Labels for data points
-            config: Optional chart configuration
-            
-        Returns:
-            HTML content for chart visualization
-        """
-        if not PLOTLY_AVAILABLE:
-            return self._create_fallback_chart("Throughput Comparison", "Plotly not available")
-        
-        config = config or ChartConfiguration(
-            chart_type=ChartType.BAR_CHART,
-            title="Throughput Comparison: Current vs Baseline",
-            height=400
-        )
-        
-        # Create figure
-        fig = go.Figure()
-        
-        # Current throughput bars
-        fig.add_trace(
-            go.Bar(
-                name='Current',
-                x=labels,
-                y=current_throughput,
-                marker_color=self.color_palette[0],
-                text=[f"{val:.1f}" for val in current_throughput],
-                textposition='outside'
-            )
-        )
-        
-        # Baseline throughput bars
-        fig.add_trace(
-            go.Bar(
-                name='Baseline',
-                x=labels,
-                y=baseline_throughput,
-                marker_color=self.color_palette[1],
-                text=[f"{val:.1f}" for val in baseline_throughput],
-                textposition='outside'
-            )
-        )
-        
-        # Update layout
-        fig.update_layout(
-            title=config.title,
-            xaxis_title="Test Scenarios",
-            yaxis_title="Throughput (req/s)",
-            barmode='group',
-            height=config.height,
-            font=dict(family=self.branding.font_family),
-            plot_bgcolor=config.plot_background_color,
-            paper_bgcolor=config.background_color
-        )
-        
-        # Convert to HTML
-        chart_html = pio.to_html(
-            fig,
-            include_plotlyjs='cdn',
-            config=config.to_plotly_config(),
-            div_id="chart-throughput-comparison"
-        )
-        
-        return chart_html
-    
-    def create_performance_gauge_chart(
-        self,
-        current_value: float,
-        baseline_value: float,
-        metric_name: str,
-        unit: str = "",
-        config: Optional[ChartConfiguration] = None
-    ) -> str:
-        """
-        Create performance gauge chart showing current performance against baseline.
-        
-        Args:
-            current_value: Current metric value
-            baseline_value: Baseline metric value
-            metric_name: Name of the metric
-            unit: Unit of measurement
-            config: Optional chart configuration
-            
-        Returns:
-            HTML content for gauge chart
-        """
-        if not PLOTLY_AVAILABLE:
-            return self._create_fallback_chart("Performance Gauge", "Plotly not available")
-        
-        config = config or ChartConfiguration(
-            chart_type=ChartType.GAUGE_CHART,
-            title=f"{metric_name} Performance Gauge",
-            height=400,
-            width=400
-        )
-        
-        # Calculate variance percentage
-        if baseline_value > 0:
-            variance_percent = ((current_value - baseline_value) / baseline_value) * 100
-        else:
-            variance_percent = 0
-        
-        # Determine gauge color based on variance
-        if abs(variance_percent) <= 5:
-            gauge_color = self.branding.success_color
-        elif abs(variance_percent) <= 10:
-            gauge_color = self.branding.warning_color
-        else:
-            gauge_color = self.branding.danger_color
-        
-        # Create gauge chart
-        fig = go.Figure(go.Indicator(
-            mode="gauge+number+delta",
-            value=current_value,
-            delta={'reference': baseline_value, 'relative': True, 'valueformat': '.1%'},
-            title={'text': f"{metric_name} ({unit})"},
-            gauge={
-                'axis': {
-                    'range': [None, max(current_value, baseline_value) * 1.5]
-                },
-                'bar': {'color': gauge_color},
-                'steps': [
-                    {'range': [0, baseline_value * 0.95], 'color': "lightgray"},
-                    {'range': [baseline_value * 0.95, baseline_value * 1.05], 'color': "yellow"},
-                    {'range': [baseline_value * 1.05, baseline_value * 1.1], 'color': "orange"}
-                ],
-                'threshold': {
-                    'line': {'color': "red", 'width': 4},
-                    'thickness': 0.75,
-                    'value': baseline_value * 1.1
-                }
-            }
-        ))
-        
-        fig.update_layout(
-            title=config.title,
-            height=config.height,
-            width=config.width,
-            font=dict(family=self.branding.font_family),
-            paper_bgcolor=config.background_color
-        )
-        
-        # Convert to HTML
-        chart_html = pio.to_html(
-            fig,
-            include_plotlyjs='cdn',
-            config=config.to_plotly_config(),
-            div_id=f"gauge-{metric_name.lower().replace(' ', '-')}"
-        )
-        
-        return chart_html
-    
-    def create_performance_heatmap(
-        self,
-        data_matrix: List[List[float]],
-        x_labels: List[str],
-        y_labels: List[str],
-        config: Optional[ChartConfiguration] = None
-    ) -> str:
-        """
-        Create performance heatmap for correlation analysis.
-        
-        Args:
-            data_matrix: 2D matrix of values
-            x_labels: Labels for x-axis
-            y_labels: Labels for y-axis
-            config: Optional chart configuration
-            
-        Returns:
-            HTML content for heatmap
-        """
-        if not PLOTLY_AVAILABLE:
-            return self._create_fallback_chart("Performance Heatmap", "Plotly not available")
-        
-        config = config or ChartConfiguration(
-            chart_type=ChartType.HEATMAP,
-            title="Performance Correlation Heatmap",
-            height=500
-        )
-        
-        # Create heatmap
-        fig = go.Figure(data=go.Heatmap(
-            z=data_matrix,
-            x=x_labels,
-            y=y_labels,
-            colorscale='RdYlBu_r',
-            colorbar=dict(title="Correlation"),
-            text=[[f"{val:.2f}" for val in row] for row in data_matrix],
-            texttemplate="%{text}",
-            textfont={"size": 10}
-        ))
-        
-        fig.update_layout(
-            title=config.title,
-            height=config.height,
-            font=dict(family=self.branding.font_family),
-            plot_bgcolor=config.plot_background_color,
-            paper_bgcolor=config.background_color
-        )
-        
-        # Convert to HTML
-        chart_html = pio.to_html(
-            fig,
-            include_plotlyjs='cdn',
-            config=config.to_plotly_config(),
-            div_id="heatmap-performance-correlation"
-        )
-        
-        return chart_html
-    
-    def _create_fallback_chart(self, title: str, message: str) -> str:
-        """
-        Create fallback chart content when visualization libraries are unavailable.
-        
-        Args:
-            title: Chart title
-            message: Fallback message
-            
-        Returns:
-            HTML content for fallback chart
-        """
-        return f'''
-        <div class="chart-fallback" style="
-            width: 100%;
-            height: 300px;
-            border: 2px dashed #ccc;
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-            align-items: center;
-            background-color: #f9f9f9;
-            border-radius: 8px;
-            margin: 20px 0;
-        ">
-            <h3 style="color: #666; margin-bottom: 10px;">{title}</h3>
-            <p style="color: #888; text-align: center;">{message}</p>
-            <p style="color: #999; font-size: 12px; margin-top: 10px;">
-                Install required dependencies for chart visualization
-            </p>
-        </div>
-        '''
-
-
-class ReportTemplateFactory:
-    """
-    Factory for creating standardized report templates with predefined configurations.
-    
-    Provides convenient methods for generating different types of performance reports
-    with appropriate templates, styling, and configuration per stakeholder requirements.
-    """
-    
-    @staticmethod
-    def create_executive_summary_report(
-        performance_data: Dict[str, Any],
-        baseline_data: Dict[str, Any],
-        environment: str = "production"
-    ) -> PerformanceReportTemplate:
-        """
-        Create executive summary report template.
-        
-        Args:
-            performance_data: Current performance metrics
-            baseline_data: Baseline comparison metrics
-            environment: Test environment name
-            
-        Returns:
-            Configured executive report template
-        """
-        metadata = ReportMetadata(
-            report_id="",  # Will be generated
-            title="Performance Migration Executive Summary",
-            description="High-level performance analysis for Flask migration project",
-            generated_at=datetime.now(timezone.utc),
-            audience=ReportAudience.EXECUTIVE,
-            theme=ReportTheme.EXECUTIVE,
-            test_environment=environment
-        )
-        metadata.report_id = metadata.generate_report_id()
-        
-        branding = ReportBranding(
-            company_name="Flask Migration Project",
-            primary_color="#1f77b4",
-            secondary_color="#ff7f0e"
-        )
-        
-        template = PerformanceReportTemplate(metadata, branding)
-        template.set_performance_data(performance_data, baseline_data)
-        
-        return template
-    
-    @staticmethod
-    def create_technical_analysis_report(
-        performance_data: Dict[str, Any],
-        baseline_data: Dict[str, Any],
-        variance_analysis: Dict[str, Any],
-        environment: str = "staging"
-    ) -> PerformanceReportTemplate:
-        """
-        Create technical analysis report template.
-        
-        Args:
-            performance_data: Current performance metrics
-            baseline_data: Baseline comparison metrics
-            variance_analysis: Detailed variance analysis
-            environment: Test environment name
-            
-        Returns:
-            Configured technical report template
-        """
-        metadata = ReportMetadata(
-            report_id="",  # Will be generated
-            title="Performance Technical Analysis Report",
-            description="Detailed technical performance analysis with statistical breakdown",
-            generated_at=datetime.now(timezone.utc),
-            audience=ReportAudience.TECHNICAL,
-            theme=ReportTheme.TECHNICAL,
-            test_environment=environment
-        )
-        metadata.report_id = metadata.generate_report_id()
-        
-        branding = ReportBranding(
-            primary_color="#2ca02c",
-            secondary_color="#d62728"
-        )
-        
-        template = PerformanceReportTemplate(metadata, branding)
-        template.set_performance_data(performance_data, baseline_data, variance_analysis)
-        
-        return template
-    
-    @staticmethod
-    def create_operations_dashboard_report(
-        performance_data: Dict[str, Any],
-        baseline_data: Dict[str, Any],
-        environment: str = "production"
-    ) -> PerformanceReportTemplate:
-        """
-        Create operations dashboard report template.
-        
-        Args:
-            performance_data: Current performance metrics
-            baseline_data: Baseline comparison metrics
-            environment: Test environment name
-            
-        Returns:
-            Configured operations report template
-        """
-        metadata = ReportMetadata(
-            report_id="",  # Will be generated
-            title="Performance Operations Dashboard",
-            description="Real-time performance monitoring and operational insights",
-            generated_at=datetime.now(timezone.utc),
-            audience=ReportAudience.OPERATIONS,
-            theme=ReportTheme.DASHBOARD,
-            test_environment=environment
-        )
-        metadata.report_id = metadata.generate_report_id()
-        
-        branding = ReportBranding(
-            primary_color="#ff7f0e",
-            secondary_color="#9467bd"
-        )
-        
-        template = PerformanceReportTemplate(metadata, branding)
-        template.set_performance_data(performance_data, baseline_data)
-        
-        return template
-    
-    @staticmethod
-    def create_compliance_audit_report(
-        performance_data: Dict[str, Any],
-        baseline_data: Dict[str, Any],
-        compliance_data: Dict[str, Any],
-        environment: str = "production"
-    ) -> PerformanceReportTemplate:
-        """
-        Create compliance audit report template.
-        
-        Args:
-            performance_data: Current performance metrics
-            baseline_data: Baseline comparison metrics
-            compliance_data: Compliance validation data
-            environment: Test environment name
-            
-        Returns:
-            Configured compliance report template
-        """
-        metadata = ReportMetadata(
-            report_id="",  # Will be generated
-            title="Performance Compliance Audit Report",
-            description="Comprehensive compliance validation and audit documentation",
-            generated_at=datetime.now(timezone.utc),
-            audience=ReportAudience.COMPLIANCE,
-            theme=ReportTheme.COMPLIANCE,
-            test_environment=environment,
-            classification="confidential",
-            retention_period_days=2555  # 7 years for compliance
-        )
-        metadata.report_id = metadata.generate_report_id()
-        
-        branding = ReportBranding(
-            primary_color="#8c564b",
-            secondary_color="#e377c2"
-        )
-        
-        template = PerformanceReportTemplate(metadata, branding)
-        template.set_performance_data(performance_data, baseline_data, compliance_data)
-        
-        return template
-
-
-# Utility Functions
-
-def create_performance_report(
-    report_type: str,
-    performance_data: Dict[str, Any],
-    baseline_data: Dict[str, Any],
-    output_path: str,
-    format: ReportFormat = ReportFormat.HTML,
-    environment: str = "development"
-) -> str:
-    """
-    Create performance report with specified type and configuration.
+    Create performance report template engine instance.
     
     Args:
-        report_type: Type of report ('executive', 'technical', 'operations', 'compliance')
-        performance_data: Current performance metrics
-        baseline_data: Baseline comparison metrics
+        template_dir: Custom template directory path
+        config: Performance test configuration
+        
+    Returns:
+        PerformanceReportTemplateEngine instance
+    """
+    return PerformanceReportTemplateEngine(template_dir, config)
+
+
+# Convenience functions for common report generation tasks
+def generate_performance_report(test_results: Dict[str, Any],
+                              format: ReportFormat = ReportFormat.HTML,
+                              audience: ReportAudience = ReportAudience.TECHNICAL,
+                              output_path: Optional[str] = None) -> str:
+    """
+    Generate performance report with default configuration.
+    
+    Args:
+        test_results: Performance test results
+        format: Report format
+        audience: Target audience
         output_path: Output file path
-        format: Report format for export
-        environment: Test environment name
         
     Returns:
-        Path to generated report file
-        
-    Raises:
-        ValueError: If report type is not supported
+        Generated report content or file path
     """
-    factory = ReportTemplateFactory()
-    
-    if report_type.lower() == "executive":
-        template = factory.create_executive_summary_report(
-            performance_data, baseline_data, environment
-        )
-    elif report_type.lower() == "technical":
-        template = factory.create_technical_analysis_report(
-            performance_data, baseline_data, {}, environment
-        )
-    elif report_type.lower() == "operations":
-        template = factory.create_operations_dashboard_report(
-            performance_data, baseline_data, environment
-        )
-    elif report_type.lower() == "compliance":
-        template = factory.create_compliance_audit_report(
-            performance_data, baseline_data, {}, environment
-        )
-    else:
-        raise ValueError(f"Unsupported report type: {report_type}")
-    
-    return template.save_report(output_path, format)
+    engine = create_report_template_engine()
+    return engine.generate_report(test_results, format, audience, output_path=output_path)
 
 
-def generate_chart_gallery(
-    performance_data: Dict[str, Any],
-    baseline_data: Dict[str, Any],
-    output_path: str,
-    branding: Optional[ReportBranding] = None
-) -> str:
+def generate_dashboard(audience: ReportAudience = ReportAudience.OPERATIONS) -> str:
     """
-    Generate comprehensive chart gallery for performance visualization.
+    Generate real-time monitoring dashboard.
     
     Args:
-        performance_data: Current performance metrics
-        baseline_data: Baseline comparison metrics
-        output_path: Output directory path
-        branding: Optional branding configuration
+        audience: Target audience for dashboard
         
     Returns:
-        Path to generated chart gallery HTML file
+        Dashboard HTML content
     """
-    chart_lib = ChartTemplateLibrary(branding)
+    engine = create_report_template_engine()
+    return engine.generate_dashboard_template(audience)
+
+
+def create_performance_chart(data: Dict[str, Any], chart_type: ChartType,
+                           title: str = "", format: str = 'html') -> str:
+    """
+    Create individual performance chart.
     
-    # Create chart gallery HTML
-    charts_html = []
-    
-    # Performance variance chart
-    if performance_data and baseline_data:
-        metrics_data = {}
-        for key in performance_data.keys():
-            if key in baseline_data:
-                metrics_data[key] = {
-                    'current': performance_data[key],
-                    'baseline': baseline_data[key]
-                }
+    Args:
+        data: Chart data
+        chart_type: Type of chart
+        title: Chart title
+        format: Output format
         
-        if metrics_data:
-            variance_chart = chart_lib.create_performance_variance_chart(metrics_data)
-            charts_html.append(variance_chart)
-    
-    # Generate gallery HTML
-    gallery_html = f'''
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Performance Chart Gallery</title>
-        <style>
-            body {{ font-family: Arial, sans-serif; margin: 20px; }}
-            .chart-gallery {{ display: grid; gap: 30px; }}
-            .chart-item {{ border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; }}
-        </style>
-    </head>
-    <body>
-        <h1>Performance Chart Gallery</h1>
-        <div class="chart-gallery">
-            {"".join(charts_html)}
-        </div>
-    </body>
-    </html>
-    '''
-    
-    # Save gallery
-    output_file = Path(output_path) / "chart_gallery.html"
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    
-    with open(output_file, 'w', encoding='utf-8') as f:
-        f.write(gallery_html)
-    
-    return str(output_file)
+    Returns:
+        Chart content
+    """
+    engine = create_report_template_engine()
+    return engine.generate_chart(data, chart_type, title, format)
 
 
-# Export public API
+# Export all public classes and functions
 __all__ = [
-    'PerformanceReportTemplate',
-    'ChartTemplateLibrary',
-    'ReportTemplateFactory',
+    # Enums
     'ReportFormat',
-    'ReportAudience',
-    'ReportTheme',
+    'ReportAudience', 
     'ChartType',
-    'ReportBranding',
-    'ChartConfiguration',
+    
+    # Data classes
     'ReportMetadata',
-    'create_performance_report',
-    'generate_chart_gallery'
+    'VisualizationConfig',
+    
+    # Main classes
+    'PerformanceReportTemplateEngine',
+    
+    # Factory and convenience functions
+    'create_report_template_engine',
+    'generate_performance_report',
+    'generate_dashboard',
+    'create_performance_chart'
 ]
