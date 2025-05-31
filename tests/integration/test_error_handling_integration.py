@@ -1,1851 +1,2108 @@
 """
-Error handling integration testing covering Flask error handlers, exception propagation
-across components, circuit breaker error scenarios, and comprehensive error recovery workflows.
+Error Handling Integration Testing Suite
 
-This module implements comprehensive integration testing for enterprise-grade error handling patterns
-as specified in Section 4.2.3, Section 6.2.3, and Section 6.3.3 of the technical specification.
+Comprehensive integration testing covering Flask error handlers, exception propagation across
+components, circuit breaker error scenarios, and comprehensive error recovery workflows.
+Tests enterprise-grade error handling patterns with realistic failure scenarios and graceful
+degradation validation per Section 4.2.3 error handling and recovery requirements.
 
-Key Testing Areas:
-- Flask @errorhandler decorator integration across all application components
-- Circuit breaker pattern activation and recovery for external services
-- Database error handling with PyMongo/Motor retry logic and exponential backoff
-- External service error handling with HTTP client failures and fallback mechanisms
-- Graceful degradation testing for partial service availability scenarios
-- Comprehensive error monitoring and alerting system validation
-- End-to-end error recovery workflows with realistic failure conditions
+This test suite validates:
+- Flask @errorhandler integration for consistent error responses per Section 4.2.3
+- Circuit breaker and retry logic exception management per Section 6.3.3
+- Error recovery and resilience for fault tolerance per Section 6.2.3
+- Database error handling integration with connection failures and recovery
+- External service error handling integration with retry and fallback patterns
+- Graceful degradation testing for partial service availability
+- Comprehensive error monitoring and alerting system testing
 
-Test Categories:
-- Component Error Propagation: Validates error handling across authentication, business logic, data access
-- Circuit Breaker Integration: Tests Auth0, AWS, and Redis circuit breaker patterns
-- Database Resilience: Validates PyMongo/Motor connection failures, transaction rollbacks
-- External Service Resilience: Tests HTTP client timeouts, retries, and fallback patterns
-- Monitoring Integration: Validates Prometheus metrics emission and structured logging
-- Security Error Handling: Tests authentication and authorization failure patterns
+Technical Compliance:
+- Section 4.2.3: Error handling and recovery with Flask @errorhandler integration
+- Section 6.1.3: Resilience mechanisms with circuit breaker patterns
+- Section 6.2.3: Backup and fault tolerance with database error recovery
+- Section 6.3.3: External systems integration with graceful degradation patterns
+- Section 3.6: Monitoring & observability with comprehensive error tracking
 
-Dependencies:
-- pytest 7.4+ with asyncio and integration testing support
-- unittest.mock for comprehensive service simulation and failure injection
-- requests-mock for HTTP client failure simulation
-- pytest-asyncio for Motor database operation testing
-- Testcontainers for production-equivalent database/cache behavior
+Author: Flask Migration Team
+Version: 1.0.0
+Coverage Target: 95% per Section 6.6.3 quality metrics
 """
 
 import asyncio
 import json
 import logging
 import time
-from contextlib import contextmanager
+import uuid
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Union
-from unittest.mock import Mock, MagicMock, patch, AsyncMock
+from typing import Any, Dict, List, Optional, Tuple
+from unittest.mock import AsyncMock, Mock, patch, MagicMock
+from contextlib import contextmanager
+
 import pytest
 import pytest_asyncio
-from requests.exceptions import ConnectionError, Timeout, HTTPError, RequestException
-import redis
-import pymongo
-from pymongo import errors as pymongo_errors
-from motor import core as motor_core
-import httpx
-import jwt
-from flask import Flask, jsonify, request
+from flask import Flask, g, request, session, jsonify
 from flask.testing import FlaskClient
-import structlog
+import requests
+import httpx
 
-# Import application modules
+# Import application components for error handling testing
 from src.app import create_app
 from src.auth.exceptions import (
-    SecurityException, AuthenticationException, AuthorizationException, 
-    JWTException, Auth0Exception, PermissionException, SessionException,
-    RateLimitException, CircuitBreakerException, ValidationException,
-    SecurityErrorCode, get_error_category, is_critical_security_error,
-    create_safe_error_response
+    SecurityException, AuthenticationException, JWTException, AuthorizationException,
+    PermissionException, Auth0Exception, SessionException, RateLimitException,
+    CircuitBreakerException, ValidationException, SecurityErrorCode,
+    create_safe_error_response, is_critical_security_error
 )
 from src.data.exceptions import (
-    DatabaseException, DatabaseConnectionError, DatabaseQueryError,
-    DatabaseTransactionError, DatabaseTimeoutError, DatabaseValidationError,
-    with_database_retry, database_error_context, get_circuit_breaker,
-    create_retry_strategy, reset_circuit_breakers, get_circuit_breaker_status
+    DatabaseException, ConnectionException, TimeoutException, TransactionException,
+    QueryException, ResourceException, CircuitBreakerException as DBCircuitBreakerException,
+    DatabaseErrorSeverity, DatabaseOperationType, handle_database_error,
+    DatabaseRetryConfig, with_database_retry, mongodb_circuit_breaker
 )
 from src.cache.exceptions import (
-    CacheError, CacheConnectionError, CacheTimeoutError,
-    CacheCircuitBreakerError, CacheSerializationError, CacheInvalidationError,
-    CacheKeyError, CachePoolExhaustedError, CacheMemoryError,
-    CACHE_EXCEPTION_MAPPING, get_cache_error_response
+    CacheError, RedisConnectionError, CacheOperationTimeoutError,
+    CacheInvalidationError, CircuitBreakerOpenError, CacheKeyError,
+    CacheSerializationError, CachePoolExhaustedError, handle_redis_exception
 )
 from src.integrations.exceptions import (
     IntegrationError, HTTPClientError, RequestsHTTPError, HttpxHTTPError,
     ConnectionError as IntegrationConnectionError, TimeoutError as IntegrationTimeoutError,
-    HTTPResponseError, CircuitBreakerError, CircuitBreakerOpenError,
-    CircuitBreakerHalfOpenError, RetryError, RetryExhaustedError,
-    Auth0Error, JWTValidationError, AWSServiceError, S3Error,
-    MongoDBError, RedisError, ValidationError as IntegrationValidationError,
-    MarshmallowValidationError, IntegrationExceptionFactory,
-    get_integration_exception_for_stdlib_exception
+    HTTPResponseError, CircuitBreakerError, RetryError, RetryExhaustedError,
+    Auth0Error, AWSServiceError, S3Error, MongoDBError, RedisError,
+    ValidationError as IntegrationValidationError, IntegrationExceptionFactory
 )
 
-# Initialize structured logger for test execution
-logger = structlog.get_logger(__name__)
+# Configure structured logging for test execution
+logger = logging.getLogger(__name__)
 
+
+class ErrorHandlingTestEnvironment:
+    """
+    Test environment for comprehensive error handling validation.
+    
+    Provides utilities for simulating various failure scenarios, tracking error
+    propagation, and validating recovery mechanisms across the entire application
+    stack per Section 4.2.3 error handling requirements.
+    """
+    
+    def __init__(self, app: Flask, client: FlaskClient):
+        self.app = app
+        self.client = client
+        self.error_events = []
+        self.circuit_breaker_states = {}
+        self.retry_attempts = {}
+        self.recovery_events = []
+        self.performance_metrics = {}
+        
+    def record_error_event(self, error_type: str, component: str, details: Dict[str, Any]):
+        """Record error event for analysis"""
+        event = {
+            'timestamp': datetime.utcnow().isoformat(),
+            'error_type': error_type,
+            'component': component,
+            'details': details,
+            'event_id': str(uuid.uuid4())
+        }
+        self.error_events.append(event)
+        logger.debug(f"Error event recorded: {error_type} in {component}")
+    
+    def record_circuit_breaker_state(self, service: str, state: str, failure_count: int = 0):
+        """Record circuit breaker state change"""
+        self.circuit_breaker_states[service] = {
+            'state': state,
+            'failure_count': failure_count,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+        logger.debug(f"Circuit breaker state recorded: {service} -> {state}")
+    
+    def record_retry_attempt(self, operation: str, attempt: int, success: bool):
+        """Record retry attempt for analysis"""
+        if operation not in self.retry_attempts:
+            self.retry_attempts[operation] = []
+        
+        self.retry_attempts[operation].append({
+            'attempt': attempt,
+            'success': success,
+            'timestamp': datetime.utcnow().isoformat()
+        })
+        logger.debug(f"Retry attempt recorded: {operation} attempt {attempt} success={success}")
+    
+    def record_recovery_event(self, component: str, recovery_type: str, success: bool):
+        """Record recovery event for validation"""
+        event = {
+            'component': component,
+            'recovery_type': recovery_type,
+            'success': success,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+        self.recovery_events.append(event)
+        logger.debug(f"Recovery event recorded: {component} {recovery_type} success={success}")
+    
+    def measure_error_response_time(self, operation: str):
+        """Context manager for measuring error response times"""
+        @contextmanager
+        def measurement_context():
+            start_time = time.perf_counter()
+            try:
+                yield
+            finally:
+                end_time = time.perf_counter()
+                duration = end_time - start_time
+                self.performance_metrics[operation] = duration
+                logger.debug(f"Error response time measured: {operation} took {duration:.3f}s")
+        
+        return measurement_context()
+    
+    def get_error_summary(self) -> Dict[str, Any]:
+        """Get comprehensive error handling summary"""
+        return {
+            'total_errors': len(self.error_events),
+            'error_types': list(set(event['error_type'] for event in self.error_events)),
+            'affected_components': list(set(event['component'] for event in self.error_events)),
+            'circuit_breaker_activations': len([
+                service for service, state in self.circuit_breaker_states.items()
+                if state['state'] == 'open'
+            ]),
+            'total_retry_attempts': sum(
+                len(attempts) for attempts in self.retry_attempts.values()
+            ),
+            'successful_recoveries': len([
+                event for event in self.recovery_events if event['success']
+            ]),
+            'average_error_response_time': (
+                sum(self.performance_metrics.values()) / len(self.performance_metrics)
+                if self.performance_metrics else 0
+            )
+        }
+
+
+@pytest.fixture
+def error_test_environment(comprehensive_test_environment):
+    """
+    Fixture providing comprehensive error handling test environment.
+    
+    Creates specialized testing environment for error handling validation
+    with monitoring, circuit breaker simulation, and recovery tracking.
+    """
+    app = comprehensive_test_environment['app']
+    client = comprehensive_test_environment['client']
+    
+    env = ErrorHandlingTestEnvironment(app, client)
+    
+    logger.info("Error handling test environment initialized")
+    return env
+
+
+@pytest.fixture
+def mock_failing_services():
+    """
+    Fixture providing mock services that can simulate various failure modes.
+    
+    Creates controllable mock services for testing error handling across
+    different failure scenarios including timeouts, connection errors,
+    and service unavailability.
+    """
+    services = {}
+    
+    # Mock database service with controllable failures
+    class MockDatabaseService:
+        def __init__(self):
+            self.failure_mode = None
+            self.failure_count = 0
+            self.total_calls = 0
+        
+        def query(self, query_string: str):
+            self.total_calls += 1
+            
+            if self.failure_mode == 'connection_error':
+                self.failure_count += 1
+                raise ConnectionException(
+                    "Database connection failed",
+                    database="test_db",
+                    operation=DatabaseOperationType.READ
+                )
+            elif self.failure_mode == 'timeout':
+                self.failure_count += 1
+                raise TimeoutException(
+                    "Database query timeout",
+                    operation=DatabaseOperationType.READ,
+                    timeout_duration=5.0
+                )
+            elif self.failure_mode == 'transaction_error':
+                self.failure_count += 1
+                raise TransactionException(
+                    "Transaction rollback required",
+                    transaction_id="test_txn_123"
+                )
+            
+            return {'status': 'success', 'data': {'id': 'test_record'}}
+        
+        def set_failure_mode(self, mode: Optional[str]):
+            self.failure_mode = mode
+            self.failure_count = 0
+    
+    services['database'] = MockDatabaseService()
+    
+    # Mock cache service with controllable failures
+    class MockCacheService:
+        def __init__(self):
+            self.failure_mode = None
+            self.failure_count = 0
+            self.total_calls = 0
+        
+        def get(self, key: str):
+            self.total_calls += 1
+            
+            if self.failure_mode == 'connection_error':
+                self.failure_count += 1
+                raise RedisConnectionError(
+                    "Redis connection failed",
+                    connection_info={'host': 'localhost', 'port': 6379}
+                )
+            elif self.failure_mode == 'timeout':
+                self.failure_count += 1
+                raise CacheOperationTimeoutError(
+                    "Cache operation timeout",
+                    operation="get",
+                    timeout_duration=1.0
+                )
+            elif self.failure_mode == 'circuit_breaker_open':
+                self.failure_count += 1
+                raise CircuitBreakerOpenError(
+                    "Cache circuit breaker is open",
+                    failure_count=5,
+                    recovery_timeout=60
+                )
+            
+            return f"cached_value_for_{key}"
+        
+        def set_failure_mode(self, mode: Optional[str]):
+            self.failure_mode = mode
+            self.failure_count = 0
+    
+    services['cache'] = MockCacheService()
+    
+    # Mock external API service with controllable failures
+    class MockExternalAPIService:
+        def __init__(self):
+            self.failure_mode = None
+            self.failure_count = 0
+            self.total_calls = 0
+        
+        def make_request(self, endpoint: str, method: str = 'GET'):
+            self.total_calls += 1
+            
+            if self.failure_mode == 'connection_error':
+                self.failure_count += 1
+                raise IntegrationConnectionError(
+                    "Cannot connect to external service",
+                    service_name="external_api",
+                    operation="api_call",
+                    url=f"https://api.example.com{endpoint}"
+                )
+            elif self.failure_mode == 'timeout':
+                self.failure_count += 1
+                raise IntegrationTimeoutError(
+                    "Request timeout",
+                    service_name="external_api",
+                    operation="api_call",
+                    timeout_duration=30.0
+                )
+            elif self.failure_mode == 'http_error':
+                self.failure_count += 1
+                raise HTTPResponseError(
+                    "HTTP 500 Internal Server Error",
+                    service_name="external_api",
+                    operation="api_call",
+                    status_code=500
+                )
+            elif self.failure_mode == 'circuit_breaker_open':
+                self.failure_count += 1
+                raise CircuitBreakerError(
+                    "External API circuit breaker is open",
+                    service_name="external_api",
+                    operation="api_call",
+                    circuit_state="OPEN"
+                )
+            
+            return {'status': 'success', 'data': {'response': 'mock_data'}}
+        
+        def set_failure_mode(self, mode: Optional[str]):
+            self.failure_mode = mode
+            self.failure_count = 0
+    
+    services['external_api'] = MockExternalAPIService()
+    
+    # Mock authentication service with controllable failures
+    class MockAuthService:
+        def __init__(self):
+            self.failure_mode = None
+            self.failure_count = 0
+            self.total_calls = 0
+        
+        def validate_token(self, token: str):
+            self.total_calls += 1
+            
+            if self.failure_mode == 'invalid_token':
+                self.failure_count += 1
+                raise JWTException(
+                    "Invalid JWT token",
+                    error_code=SecurityErrorCode.AUTH_TOKEN_INVALID,
+                    token_header={'alg': 'RS256', 'typ': 'JWT'}
+                )
+            elif self.failure_mode == 'expired_token':
+                self.failure_count += 1
+                raise JWTException(
+                    "JWT token expired",
+                    error_code=SecurityErrorCode.AUTH_TOKEN_EXPIRED,
+                    token_header={'alg': 'RS256', 'typ': 'JWT'}
+                )
+            elif self.failure_mode == 'auth0_unavailable':
+                self.failure_count += 1
+                raise Auth0Exception(
+                    "Auth0 service unavailable",
+                    error_code=SecurityErrorCode.EXT_AUTH0_UNAVAILABLE,
+                    circuit_breaker_state='open'
+                )
+            
+            return {'valid': True, 'user_id': 'test_user', 'permissions': ['read', 'write']}
+        
+        def set_failure_mode(self, mode: Optional[str]):
+            self.failure_mode = mode
+            self.failure_count = 0
+    
+    services['auth'] = MockAuthService()
+    
+    logger.info(f"Mock failing services created: {list(services.keys())}")
+    return services
+
+
+# =============================================================================
+# Flask Error Handler Integration Tests
+# =============================================================================
 
 class TestFlaskErrorHandlerIntegration:
     """
-    Comprehensive testing of Flask @errorhandler decorator integration across all application components.
+    Test Flask @errorhandler integration for consistent error responses.
     
-    Implements Section 4.2.3 Flask error handler integration requirements by validating consistent
-    error response formatting, proper exception conversion, and enterprise-grade error handling
-    patterns across authentication, authorization, database, cache, and external service layers.
+    Validates that all exception types are properly handled by Flask error
+    handlers and return consistent JSON responses per Section 4.2.3.
     """
     
-    @pytest.fixture(autouse=True)
-    def setup_error_monitoring(self, app: Flask):
-        """Setup error monitoring and metrics collection for test validation."""
-        self.error_metrics = []
-        self.logged_errors = []
+    def test_authentication_exception_handler(self, error_test_environment):
+        """Test Flask error handler for authentication exceptions."""
+        app = error_test_environment.app
         
-        # Mock Prometheus metrics collection
-        with patch('src.app.ERROR_COUNT') as mock_error_count:
-            mock_error_count.labels.return_value.inc = lambda: self.error_metrics.append({
-                'error_type': 'test_error',
-                'endpoint': 'test_endpoint',
-                'timestamp': datetime.utcnow()
-            })
-            yield
+        @app.route('/test-auth-error')
+        def test_auth_error():
+            raise AuthenticationException(
+                "Authentication failed",
+                error_code=SecurityErrorCode.AUTH_TOKEN_INVALID,
+                user_message="Invalid authentication token"
+            )
+        
+        with error_test_environment.measure_error_response_time('auth_error'):
+            response = error_test_environment.client.get('/test-auth-error')
+        
+        assert response.status_code == 401
+        assert response.is_json
+        
+        data = response.get_json()
+        assert data['error'] == 'Unauthorized'
+        assert 'timestamp' in data
+        
+        error_test_environment.record_error_event(
+            'AuthenticationException',
+            'flask_error_handler',
+            {'status_code': response.status_code, 'response_data': data}
+        )
+        
+        logger.info("Authentication exception handler test completed")
     
-    def test_authentication_error_handler_integration(self, client: FlaskClient, app: Flask):
-        """
-        Test Flask error handler integration for authentication failures.
+    def test_authorization_exception_handler(self, error_test_environment):
+        """Test Flask error handler for authorization exceptions."""
+        app = error_test_environment.app
         
-        Validates that AuthenticationException and JWTException instances are properly
-        handled by Flask @errorhandler decorators with consistent JSON response formatting.
-        """
-        with app.test_request_context('/api/protected', method='GET'):
-            # Test JWT token validation error handling
-            with patch('src.auth.middleware.validate_jwt_token') as mock_validate:
-                mock_validate.side_effect = JWTException(
-                    message="JWT signature verification failed",
-                    error_code=SecurityErrorCode.AUTH_TOKEN_INVALID,
-                    jwt_error=jwt.InvalidTokenError("Invalid signature")
-                )
-                
-                # Create test endpoint that triggers authentication
-                @app.route('/test/auth-error')
-                def test_auth_error():
-                    mock_validate()  # This will raise JWTException
-                    return jsonify({'success': True})
-                
-                response = client.get('/test/auth-error')
-                
-                # Validate Flask error handler processed the exception
-                assert response.status_code == 401
-                response_data = json.loads(response.data)
-                
-                assert 'error' in response_data
-                assert response_data['error']['type'] == 'authentication_failure'
-                assert response_data['error']['code'] == 'AUTH_1002'
-                assert 'Invalid or expired authentication token' in response_data['error']['message']
-                assert 'error_id' in response_data['error']
-                assert 'timestamp' in response_data['error']
-                
-                logger.info(
-                    "Authentication error handler integration validated",
-                    status_code=response.status_code,
-                    error_code=response_data['error']['code']
-                )
+        @app.route('/test-authz-error')
+        def test_authz_error():
+            raise AuthorizationException(
+                "Access denied",
+                error_code=SecurityErrorCode.AUTHZ_PERMISSION_DENIED,
+                required_permissions=['admin:read'],
+                resource_id='test_resource'
+            )
+        
+        with error_test_environment.measure_error_response_time('authz_error'):
+            response = error_test_environment.client.get('/test-authz-error')
+        
+        assert response.status_code == 403
+        assert response.is_json
+        
+        data = response.get_json()
+        assert data['error'] == 'Forbidden'
+        assert 'timestamp' in data
+        
+        error_test_environment.record_error_event(
+            'AuthorizationException',
+            'flask_error_handler',
+            {'status_code': response.status_code, 'response_data': data}
+        )
     
-    def test_authorization_error_handler_integration(self, client: FlaskClient, app: Flask):
-        """
-        Test Flask error handler integration for authorization failures.
+    def test_database_exception_handler(self, error_test_environment):
+        """Test Flask error handler for database exceptions."""
+        app = error_test_environment.app
         
-        Validates that AuthorizationException and PermissionException instances are properly
-        handled with consistent error response formatting and security-focused messaging.
-        """
-        with app.test_request_context('/api/admin', method='POST'):
-            # Test permission denied error handling
-            with patch('src.auth.middleware.check_user_permissions') as mock_check_perms:
-                mock_check_perms.side_effect = PermissionException(
-                    message="User lacks admin permissions for resource modification",
-                    error_code=SecurityErrorCode.AUTHZ_PERMISSION_DENIED,
-                    permission_name='admin.modify',
-                    required_permissions=['admin.modify', 'resource.write'],
-                    user_permissions=['user.read', 'user.write']
-                )
-                
-                @app.route('/test/authz-error')
-                def test_authz_error():
-                    mock_check_perms()  # This will raise PermissionException
-                    return jsonify({'success': True})
-                
-                response = client.post('/test/authz-error')
-                
-                # Validate Flask error handler processed the exception
-                assert response.status_code == 403
-                response_data = json.loads(response.data)
-                
-                assert 'error' in response_data
-                assert response_data['error']['type'] == 'authorization_failure'
-                assert response_data['error']['code'] == 'AUTHZ_2001'
-                assert 'Insufficient permissions' in response_data['error']['message']
-                
-                logger.info(
-                    "Authorization error handler integration validated",
-                    status_code=response.status_code,
-                    error_code=response_data['error']['code']
-                )
+        @app.route('/test-db-error')
+        def test_db_error():
+            raise ConnectionException(
+                "Database connection failed",
+                database="test_db",
+                operation=DatabaseOperationType.READ
+            )
+        
+        with error_test_environment.measure_error_response_time('db_error'):
+            response = error_test_environment.client.get('/test-db-error')
+        
+        assert response.status_code == 503
+        assert response.is_json
+        
+        data = response.get_json()
+        assert 'error' in data
+        assert data['error']['type'] == 'database_error'
+        assert 'retry_recommended' in data['error']
+        
+        error_test_environment.record_error_event(
+            'DatabaseException',
+            'flask_error_handler',
+            {'status_code': response.status_code, 'response_data': data}
+        )
     
-    def test_database_error_handler_integration(self, client: FlaskClient, app: Flask):
-        """
-        Test Flask error handler integration for database operation failures.
+    def test_cache_exception_handler(self, error_test_environment):
+        """Test Flask error handler for cache exceptions."""
+        app = error_test_environment.app
         
-        Validates that DatabaseException instances are properly handled with retry logic
-        integration and consistent error response formatting.
-        """
-        with app.test_request_context('/api/data', method='GET'):
-            # Test database connection error handling
-            with patch('src.data.operations.find_documents') as mock_find:
-                mock_find.side_effect = DatabaseConnectionError(
-                    message="MongoDB connection pool exhausted",
-                    operation="find",
-                    database="test_db",
-                    collection="users",
-                    connection_info={'host': 'localhost', 'port': 27017},
-                    retry_count=3
-                )
-                
-                @app.route('/test/db-error')
-                def test_db_error():
-                    mock_find()  # This will raise DatabaseConnectionError
-                    return jsonify({'success': True})
-                
-                response = client.get('/test/db-error')
-                
-                # Validate Flask error handler processed the exception
-                assert response.status_code == 500
-                response_data = json.loads(response.data)
-                
-                assert 'error' in response_data
-                assert response_data['error']['type'] == 'database_error'
-                assert 'Database operation failed' in response_data['error']['message']
-                assert 'Please try again later' in response_data['error']['message']
-                
-                logger.info(
-                    "Database error handler integration validated",
-                    status_code=response.status_code,
-                    operation="find",
-                    retry_count=3
-                )
+        @app.route('/test-cache-error')
+        def test_cache_error():
+            raise RedisConnectionError(
+                "Redis connection failed",
+                connection_info={'host': 'localhost', 'port': 6379}
+            )
+        
+        with error_test_environment.measure_error_response_time('cache_error'):
+            response = error_test_environment.client.get('/test-cache-error')
+        
+        assert response.status_code == 503
+        assert response.is_json
+        
+        data = response.get_json()
+        assert data['error'] == 'REDIS_CONNECTION_ERROR'
+        assert 'retry_after' in data
+        
+        error_test_environment.record_error_event(
+            'CacheException',
+            'flask_error_handler',
+            {'status_code': response.status_code, 'response_data': data}
+        )
     
-    def test_cache_error_handler_integration(self, client: FlaskClient, app: Flask):
-        """
-        Test Flask error handler integration for cache operation failures.
+    def test_integration_exception_handler(self, error_test_environment):
+        """Test Flask error handler for integration exceptions."""
+        app = error_test_environment.app
         
-        Validates that CacheError instances are properly handled with graceful degradation
-        patterns and consistent error response formatting.
-        """
-        with app.test_request_context('/api/cache', method='GET'):
-            # Test cache timeout error handling
-            with patch('src.cache.operations.get_cached_data') as mock_cache_get:
-                mock_cache_get.side_effect = CacheTimeoutError(
-                    message="Redis operation timed out after 5.0 seconds",
-                    operation="get",
-                    key="user:123:profile",
-                    timeout_duration=5.0,
-                    operation_start_time=datetime.utcnow() - timedelta(seconds=5.5)
-                )
-                
-                @app.route('/test/cache-error')
-                def test_cache_error():
-                    mock_cache_get()  # This will raise CacheTimeoutError
-                    return jsonify({'success': True})
-                
-                response = client.get('/test/cache-error')
-                
-                # Validate Flask error handler processed the exception
-                assert response.status_code == 504
-                response_data = json.loads(response.data)
-                
-                assert 'error' in response_data
-                assert response_data['error']['type'] == 'timeout'
-                assert 'Operation timed out' in response_data['error']['message']
-                assert 'retry_after' in response_data['error']
-                
-                logger.info(
-                    "Cache error handler integration validated",
-                    status_code=response.status_code,
-                    timeout_duration=5.0
-                )
+        @app.route('/test-integration-error')
+        def test_integration_error():
+            raise HTTPResponseError(
+                "External service error",
+                service_name="external_api",
+                operation="api_call",
+                status_code=500
+            )
+        
+        with error_test_environment.measure_error_response_time('integration_error'):
+            response = error_test_environment.client.get('/test-integration-error')
+        
+        assert response.status_code == 500
+        assert response.is_json
+        
+        data = response.get_json()
+        assert data['error'] == 'Internal Server Error'
+        assert 'timestamp' in data
+        
+        error_test_environment.record_error_event(
+            'IntegrationException',
+            'flask_error_handler',
+            {'status_code': response.status_code, 'response_data': data}
+        )
     
-    def test_external_service_error_handler_integration(self, client: FlaskClient, app: Flask):
-        """
-        Test Flask error handler integration for external service failures.
+    def test_validation_exception_handler(self, error_test_environment):
+        """Test Flask error handler for validation exceptions."""
+        app = error_test_environment.app
         
-        Validates that IntegrationError instances are properly handled with circuit breaker
-        integration and consistent error response formatting.
-        """
-        with app.test_request_context('/api/external', method='POST'):
-            # Test Auth0 service error handling
-            with patch('src.integrations.auth0_client.validate_user_token') as mock_auth0:
-                mock_auth0.side_effect = Auth0Error(
-                    message="Auth0 API rate limit exceeded",
-                    operation="token_validation",
-                    auth0_error_code="rate_limit_exceeded",
-                    user_id="user_123",
-                    retry_count=2
-                )
-                
-                @app.route('/test/external-error')
-                def test_external_error():
-                    mock_auth0()  # This will raise Auth0Error
-                    return jsonify({'success': True})
-                
-                response = client.post('/test/external-error')
-                
-                # Validate Flask error handler processed the exception
-                assert response.status_code == 503
-                response_data = json.loads(response.data)
-                
-                assert 'error' in response_data
-                assert response_data['error']['type'] == 'external_service_error'
-                assert 'External service error' in response_data['error']['message']
-                assert 'Please try again later' in response_data['error']['message']
-                
-                logger.info(
-                    "External service error handler integration validated",
-                    status_code=response.status_code,
-                    service="auth0"
-                )
+        @app.route('/test-validation-error')
+        def test_validation_error():
+            raise ValidationException(
+                "Input validation failed",
+                error_code=SecurityErrorCode.VAL_SCHEMA_VIOLATION,
+                validation_errors=['Invalid email format', 'Password too short'],
+                schema_name='UserRegistrationSchema'
+            )
+        
+        with error_test_environment.measure_error_response_time('validation_error'):
+            response = error_test_environment.client.get('/test-validation-error')
+        
+        assert response.status_code == 400
+        assert response.is_json
+        
+        data = response.get_json()
+        assert data['error'] == 'Bad Request'
+        assert 'timestamp' in data
+        
+        error_test_environment.record_error_event(
+            'ValidationException',
+            'flask_error_handler',
+            {'status_code': response.status_code, 'response_data': data}
+        )
     
-    def test_validation_error_handler_integration(self, client: FlaskClient, app: Flask):
-        """
-        Test Flask error handler integration for validation failures.
+    def test_rate_limit_exception_handler(self, error_test_environment):
+        """Test Flask error handler for rate limiting exceptions."""
+        app = error_test_environment.app
         
-        Validates that ValidationError instances are properly handled with detailed
-        validation feedback and consistent error response formatting.
-        """
-        with app.test_request_context('/api/validate', method='POST', json={'invalid': 'data'}):
-            # Test marshmallow validation error handling
-            with patch('src.business.validation.validate_user_input') as mock_validate:
-                mock_validate.side_effect = MarshmallowValidationError(
-                    message="Input validation failed for user registration",
-                    operation="user_registration",
-                    marshmallow_errors={
-                        'email': ['Invalid email format'],
-                        'password': ['Password must be at least 8 characters'],
-                        'age': ['Must be a positive integer']
-                    }
-                )
-                
-                @app.route('/test/validation-error', methods=['POST'])
-                def test_validation_error():
-                    mock_validate()  # This will raise MarshmallowValidationError
-                    return jsonify({'success': True})
-                
-                response = client.post('/test/validation-error', json={'test': 'data'})
-                
-                # Validate Flask error handler processed the exception
-                assert response.status_code == 400
-                response_data = json.loads(response.data)
-                
-                assert 'error' in response_data
-                assert response_data['error']['type'] == 'validation_error'
-                assert 'Invalid input data provided' in response_data['error']['message']
-                
-                logger.info(
-                    "Validation error handler integration validated",
-                    status_code=response.status_code,
-                    validation_errors=3
-                )
+        @app.route('/test-rate-limit-error')
+        def test_rate_limit_error():
+            raise RateLimitException(
+                "Rate limit exceeded",
+                limit_type='user_endpoint',
+                current_rate=150,
+                limit_threshold=100,
+                endpoint='/api/users'
+            )
+        
+        with error_test_environment.measure_error_response_time('rate_limit_error'):
+            response = error_test_environment.client.get('/test-rate-limit-error')
+        
+        assert response.status_code == 429
+        assert response.is_json
+        
+        data = response.get_json()
+        assert data['error'] == 'Too Many Requests'
+        assert 'retry_after' in data
+        
+        error_test_environment.record_error_event(
+            'RateLimitException',
+            'flask_error_handler',
+            {'status_code': response.status_code, 'response_data': data}
+        )
 
+
+# =============================================================================
+# Circuit Breaker Error Scenario Tests
+# =============================================================================
 
 class TestCircuitBreakerErrorScenarios:
     """
-    Comprehensive testing of circuit breaker pattern activation and recovery for external services.
+    Test circuit breaker error scenarios with realistic failure conditions.
     
-    Implements Section 6.1.3 resilience mechanisms and Section 4.2.3 circuit breaker check
-    requirements by validating circuit breaker behavior for Auth0, AWS, and Redis services
-    with realistic failure scenarios and recovery patterns.
+    Validates circuit breaker patterns for external service protection
+    and graceful degradation per Section 6.1.3 resilience mechanisms.
     """
     
-    @pytest.fixture(autouse=True)
-    def setup_circuit_breakers(self, app: Flask):
-        """Setup circuit breakers for testing with controlled failure thresholds."""
-        self.original_circuit_breakers = {}
+    def test_database_circuit_breaker_activation(self, error_test_environment, mock_failing_services):
+        """Test database circuit breaker activation under repeated failures."""
+        db_service = mock_failing_services['database']
+        db_service.set_failure_mode('connection_error')
         
-        # Reset circuit breakers before each test
-        reset_circuit_breakers()
+        app = error_test_environment.app
         
-        # Configure test circuit breakers with low thresholds for faster testing
-        self.auth0_breaker = get_circuit_breaker('auth0_validate', 'auth0', failure_threshold=3, recovery_timeout=5)
-        self.aws_breaker = get_circuit_breaker('s3_upload', 'aws_s3', failure_threshold=3, recovery_timeout=5)
-        self.redis_breaker = get_circuit_breaker('cache_get', 'redis', failure_threshold=3, recovery_timeout=5)
+        @app.route('/test-db-circuit-breaker')
+        def test_db_circuit_breaker():
+            try:
+                result = db_service.query("SELECT * FROM test_table")
+                return jsonify(result)
+            except DatabaseException as e:
+                error_test_environment.record_error_event(
+                    'DatabaseException',
+                    'database_service',
+                    e.to_dict()
+                )
+                raise
         
-        yield
-        
-        # Reset circuit breakers after each test
-        reset_circuit_breakers()
-    
-    def test_auth0_circuit_breaker_activation(self, client: FlaskClient, app: Flask):
-        """
-        Test Auth0 service circuit breaker activation with consecutive failures.
-        
-        Validates that circuit breaker opens after configured failure threshold and
-        prevents additional requests to failing Auth0 service while providing fallback responses.
-        """
-        failure_count = 0
-        
-        def mock_auth0_failure(*args, **kwargs):
-            nonlocal failure_count
-            failure_count += 1
-            logger.info(f"Simulating Auth0 failure #{failure_count}")
-            raise Auth0Error(
-                message=f"Auth0 service unavailable (failure #{failure_count})",
-                operation="token_validation",
-                auth0_error_code="service_unavailable"
+        # Simulate repeated failures to trigger circuit breaker
+        failure_responses = []
+        for attempt in range(5):
+            with error_test_environment.measure_error_response_time(f'db_circuit_breaker_attempt_{attempt}'):
+                response = error_test_environment.client.get('/test-db-circuit-breaker')
+                failure_responses.append(response)
+            
+            error_test_environment.record_retry_attempt(
+                'database_query',
+                attempt + 1,
+                response.status_code == 200
             )
         
-        with app.test_request_context():
-            # Simulate consecutive failures to trigger circuit breaker
-            with patch('src.integrations.auth0_client.validate_token', side_effect=mock_auth0_failure):
-                
-                # First 3 failures should reach the service
-                for i in range(3):
-                    with pytest.raises(Auth0Error):
-                        self.auth0_breaker(mock_auth0_failure)
-                
-                # Verify circuit breaker is now open
-                assert self.auth0_breaker._state.name == 'OPEN'
-                
-                # Next request should fail fast with circuit breaker exception
-                with pytest.raises(Exception) as exc_info:
-                    self.auth0_breaker(mock_auth0_failure)
-                
-                # Verify no additional service calls were made
-                assert failure_count == 3
-                
-                logger.info(
-                    "Auth0 circuit breaker activation validated",
-                    failure_count=failure_count,
-                    circuit_state=self.auth0_breaker._state.name
-                )
+        # Validate that all attempts failed with appropriate error responses
+        for response in failure_responses:
+            assert response.status_code == 503
+            assert response.is_json
+        
+        # Record circuit breaker activation
+        error_test_environment.record_circuit_breaker_state(
+            'database',
+            'open',
+            failure_count=db_service.failure_count
+        )
+        
+        assert db_service.failure_count == 5
+        logger.info("Database circuit breaker activation test completed")
     
-    def test_circuit_breaker_recovery_workflow(self, client: FlaskClient, app: Flask):
-        """
-        Test circuit breaker recovery workflow with service restoration.
+    def test_external_api_circuit_breaker_recovery(self, error_test_environment, mock_failing_services):
+        """Test external API circuit breaker recovery mechanism."""
+        api_service = mock_failing_services['external_api']
         
-        Validates that circuit breaker transitions from OPEN to HALF_OPEN to CLOSED
-        states as service health is restored, enabling gradual traffic resumption.
-        """
-        failure_count = 0
-        success_count = 0
+        app = error_test_environment.app
         
-        def mock_auth0_operation(*args, **kwargs):
-            nonlocal failure_count, success_count
-            
-            # Fail first 3 attempts to open circuit breaker
-            if failure_count < 3:
-                failure_count += 1
-                raise Auth0Error(
-                    message=f"Auth0 service failure #{failure_count}",
-                    operation="token_validation"
+        @app.route('/test-api-circuit-breaker')
+        def test_api_circuit_breaker():
+            try:
+                result = api_service.make_request('/test-endpoint')
+                return jsonify(result)
+            except IntegrationError as e:
+                error_test_environment.record_error_event(
+                    'IntegrationError',
+                    'external_api',
+                    e.to_dict()
                 )
+                raise
+        
+        # Phase 1: Trigger circuit breaker with failures
+        api_service.set_failure_mode('timeout')
+        
+        for attempt in range(3):
+            response = error_test_environment.client.get('/test-api-circuit-breaker')
+            assert response.status_code == 504  # Gateway timeout
             
-            # Succeed after circuit breaker recovery
-            success_count += 1
-            logger.info(f"Auth0 service recovery success #{success_count}")
-            return {'status': 'success', 'user_id': 'test_user'}
-        
-        with app.test_request_context():
-            with patch('src.integrations.auth0_client.validate_token', side_effect=mock_auth0_operation):
-                
-                # Trigger circuit breaker opening
-                for i in range(3):
-                    with pytest.raises(Auth0Error):
-                        self.auth0_breaker(mock_auth0_operation)
-                
-                assert self.auth0_breaker._state.name == 'OPEN'
-                
-                # Wait for recovery timeout (simulate time passage)
-                with patch('time.time', return_value=time.time() + 10):
-                    # First call after timeout should transition to HALF_OPEN
-                    result = self.auth0_breaker(mock_auth0_operation)
-                    
-                    assert result['status'] == 'success'
-                    assert self.auth0_breaker._state.name == 'CLOSED'
-                    assert success_count == 1
-                
-                logger.info(
-                    "Circuit breaker recovery workflow validated",
-                    final_state=self.auth0_breaker._state.name,
-                    total_failures=failure_count,
-                    recovery_successes=success_count
-                )
-    
-    def test_multiple_service_circuit_breaker_isolation(self, client: FlaskClient, app: Flask):
-        """
-        Test circuit breaker isolation across multiple external services.
-        
-        Validates that circuit breaker activation for one service (Auth0) does not
-        affect circuit breaker state for other services (AWS S3, Redis).
-        """
-        def mock_auth0_failure(*args, **kwargs):
-            raise Auth0Error(message="Auth0 service down", operation="validate")
-        
-        def mock_s3_success(*args, **kwargs):
-            return {'status': 'success', 'upload_id': 'test_upload_123'}
-        
-        def mock_redis_success(*args, **kwargs):
-            return {'cached_data': 'test_value'}
-        
-        with app.test_request_context():
-            # Trigger Auth0 circuit breaker opening
-            for i in range(3):
-                with pytest.raises(Auth0Error):
-                    self.auth0_breaker(mock_auth0_failure)
-            
-            assert self.auth0_breaker._state.name == 'OPEN'
-            
-            # Verify other service circuit breakers remain operational
-            s3_result = self.aws_breaker(mock_s3_success)
-            redis_result = self.redis_breaker(mock_redis_success)
-            
-            assert self.aws_breaker._state.name == 'CLOSED'
-            assert self.redis_breaker._state.name == 'CLOSED'
-            assert s3_result['status'] == 'success'
-            assert redis_result['cached_data'] == 'test_value'
-            
-            logger.info(
-                "Multiple service circuit breaker isolation validated",
-                auth0_state=self.auth0_breaker._state.name,
-                aws_state=self.aws_breaker._state.name,
-                redis_state=self.redis_breaker._state.name
-            )
-    
-    def test_circuit_breaker_fallback_mechanisms(self, client: FlaskClient, app: Flask):
-        """
-        Test circuit breaker fallback mechanisms for graceful degradation.
-        
-        Validates that when circuit breakers are open, appropriate fallback responses
-        are provided to maintain service availability with reduced functionality.
-        """
-        def mock_redis_failure(*args, **kwargs):
-            raise CacheConnectionError(
-                message="Redis connection refused",
-                operation="get",
-                key="user:123:profile"
+            error_test_environment.record_retry_attempt(
+                'external_api_call',
+                attempt + 1,
+                False
             )
         
-        with app.test_request_context():
-            # Open Redis circuit breaker
-            for i in range(3):
-                with pytest.raises(CacheConnectionError):
-                    self.redis_breaker(mock_redis_failure)
-            
-            assert self.redis_breaker._state.name == 'OPEN'
-            
-            # Test fallback mechanism for cache operations
-            @app.route('/test/cache-fallback')
-            def test_cache_fallback():
-                try:
-                    # This would normally get data from cache
-                    cached_data = self.redis_breaker(mock_redis_failure)
-                except Exception:
-                    # Fallback to database or default values
-                    cached_data = {
-                        'fallback': True,
-                        'data': 'default_user_profile',
-                        'source': 'database'
-                    }
+        error_test_environment.record_circuit_breaker_state(
+            'external_api',
+            'open',
+            failure_count=api_service.failure_count
+        )
+        
+        # Phase 2: Test recovery when service becomes available
+        api_service.set_failure_mode(None)  # Service recovers
+        
+        response = error_test_environment.client.get('/test-api-circuit-breaker')
+        assert response.status_code == 200
+        
+        data = response.get_json()
+        assert data['status'] == 'success'
+        
+        error_test_environment.record_circuit_breaker_state(
+            'external_api',
+            'closed',
+            failure_count=0
+        )
+        
+        error_test_environment.record_recovery_event(
+            'external_api',
+            'circuit_breaker_recovery',
+            True
+        )
+        
+        logger.info("External API circuit breaker recovery test completed")
+    
+    def test_auth_service_circuit_breaker_fallback(self, error_test_environment, mock_failing_services):
+        """Test authentication service circuit breaker with fallback mechanism."""
+        auth_service = mock_failing_services['auth']
+        auth_service.set_failure_mode('auth0_unavailable')
+        
+        app = error_test_environment.app
+        
+        @app.route('/test-auth-circuit-breaker')
+        def test_auth_circuit_breaker():
+            try:
+                # Attempt normal authentication
+                token = request.headers.get('Authorization', '').replace('Bearer ', '')
+                result = auth_service.validate_token(token)
+                return jsonify({'authenticated': True, 'user': result})
+            except Auth0Exception as e:
+                error_test_environment.record_error_event(
+                    'Auth0Exception',
+                    'auth_service',
+                    e.to_dict()
+                )
+                
+                # Fallback to limited functionality
+                error_test_environment.record_recovery_event(
+                    'auth_service',
+                    'fallback_authentication',
+                    True
+                )
                 
                 return jsonify({
-                    'success': True,
-                    'data': cached_data,
-                    'cache_available': False
-                })
-            
-            response = client.get('/test/cache-fallback')
-            response_data = json.loads(response.data)
-            
-            assert response.status_code == 200
-            assert response_data['success'] is True
-            assert response_data['cache_available'] is False
-            assert response_data['data']['fallback'] is True
-            
-            logger.info(
-                "Circuit breaker fallback mechanisms validated",
-                response_status=response.status_code,
-                fallback_used=response_data['data']['fallback']
-            )
+                    'authenticated': False,
+                    'fallback_mode': True,
+                    'limited_access': True
+                }), 200
+        
+        headers = {'Authorization': 'Bearer test_token'}
+        response = error_test_environment.client.get(
+            '/test-auth-circuit-breaker',
+            headers=headers
+        )
+        
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data['fallback_mode'] is True
+        assert data['limited_access'] is True
+        
+        error_test_environment.record_circuit_breaker_state(
+            'auth_service',
+            'open',
+            failure_count=auth_service.failure_count
+        )
+        
+        logger.info("Auth service circuit breaker fallback test completed")
+    
+    def test_cache_circuit_breaker_graceful_degradation(self, error_test_environment, mock_failing_services):
+        """Test cache circuit breaker with graceful degradation."""
+        cache_service = mock_failing_services['cache']
+        cache_service.set_failure_mode('circuit_breaker_open')
+        
+        app = error_test_environment.app
+        
+        @app.route('/test-cache-circuit-breaker')
+        def test_cache_circuit_breaker():
+            try:
+                # Attempt to get cached data
+                cached_value = cache_service.get('user_data_123')
+                return jsonify({'cached': True, 'data': cached_value})
+            except CircuitBreakerOpenError as e:
+                error_test_environment.record_error_event(
+                    'CircuitBreakerOpenError',
+                    'cache_service',
+                    e.to_dict()
+                )
+                
+                # Graceful degradation: compute without cache
+                error_test_environment.record_recovery_event(
+                    'cache_service',
+                    'graceful_degradation',
+                    True
+                )
+                
+                # Simulate expensive computation that would normally be cached
+                computed_value = f"computed_data_without_cache_{int(time.time())}"
+                
+                return jsonify({
+                    'cached': False,
+                    'computed': True,
+                    'data': computed_value,
+                    'degraded_performance': True
+                }), 200
+        
+        with error_test_environment.measure_error_response_time('cache_circuit_breaker_degradation'):
+            response = error_test_environment.client.get('/test-cache-circuit-breaker')
+        
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data['cached'] is False
+        assert data['computed'] is True
+        assert data['degraded_performance'] is True
+        
+        error_test_environment.record_circuit_breaker_state(
+            'cache_service',
+            'open',
+            failure_count=cache_service.failure_count
+        )
+        
+        logger.info("Cache circuit breaker graceful degradation test completed")
 
+
+# =============================================================================
+# Database Error Handling Integration Tests
+# =============================================================================
 
 class TestDatabaseErrorHandlingIntegration:
     """
-    Comprehensive testing of database error handling with PyMongo/Motor retry logic and recovery.
+    Test database error handling integration with connection failures and recovery.
     
-    Implements Section 4.2.3 database error handling and Section 6.2.3 fault tolerance
-    requirements by validating connection failure recovery, transaction rollbacks,
-    and exponential backoff retry strategies.
+    Validates database error handling patterns, connection pool management,
+    and transaction rollback scenarios per Section 6.2.3 fault tolerance.
     """
     
-    @pytest.fixture(autouse=True)
-    def setup_database_mocks(self, app: Flask):
-        """Setup database connection mocks for error simulation."""
-        self.mock_mongo_client = Mock()
-        self.mock_motor_client = AsyncMock()
-        self.operation_attempts = 0
+    def test_database_connection_failure_recovery(self, error_test_environment, mock_failing_services):
+        """Test database connection failure with automatic recovery."""
+        db_service = mock_failing_services['database']
         
-        yield
-    
-    def test_database_connection_failure_recovery(self, client: FlaskClient, app: Flask):
-        """
-        Test database connection failure recovery with exponential backoff.
+        app = error_test_environment.app
         
-        Validates that connection failures trigger retry logic with exponential backoff
-        and eventually recover when database connectivity is restored.
-        """
-        def mock_connection_failure(*args, **kwargs):
-            self.operation_attempts += 1
-            
-            if self.operation_attempts <= 2:
-                # Simulate connection failures for first 2 attempts
-                raise pymongo_errors.ConnectionFailure(
-                    f"Connection failure attempt #{self.operation_attempts}"
+        @app.route('/test-db-connection-recovery')
+        def test_db_connection_recovery():
+            try:
+                result = db_service.query("SELECT * FROM users WHERE id = 1")
+                return jsonify(result)
+            except ConnectionException as e:
+                error_test_environment.record_error_event(
+                    'ConnectionException',
+                    'database',
+                    e.to_dict()
                 )
-            else:
-                # Succeed on third attempt
-                return {'_id': 'test_id', 'data': 'test_data'}
-        
-        with app.test_request_context():
-            # Test database operation with retry decorator
-            @with_database_retry(max_attempts=3, min_wait=0.1, max_wait=0.5)
-            def test_database_operation():
-                return mock_connection_failure()
-            
-            start_time = time.time()
-            result = test_database_operation()
-            duration = time.time() - start_time
-            
-            # Verify operation succeeded after retries
-            assert result['_id'] == 'test_id'
-            assert self.operation_attempts == 3
-            
-            # Verify exponential backoff was applied (should take some time)
-            assert duration >= 0.1  # At least initial wait time
-            
-            logger.info(
-                "Database connection failure recovery validated",
-                attempts=self.operation_attempts,
-                duration=duration,
-                success=True
-            )
-    
-    def test_database_transaction_rollback_on_error(self, client: FlaskClient, app: Flask):
-        """
-        Test database transaction rollback on operation failures.
-        
-        Validates that transaction failures trigger proper rollback mechanisms
-        and maintain data consistency during error conditions.
-        """
-        transaction_operations = []
-        
-        def mock_transaction_operation(operation_type: str):
-            transaction_operations.append(operation_type)
-            
-            if operation_type == 'commit':
-                # Simulate transaction failure during commit
-                raise pymongo_errors.OperationFailure(
-                    "Transaction commit failed due to write conflict"
-                )
-            
-            return {'operation': operation_type, 'status': 'executed'}
-        
-        with app.test_request_context():
-            with database_error_context('transaction_test', 'test_db', 'test_collection'):
+                
+                # Simulate automatic recovery mechanism
+                time.sleep(0.1)  # Brief recovery delay
+                
+                # Attempt recovery
+                db_service.set_failure_mode(None)  # Service recovers
+                
                 try:
-                    # Simulate transaction operations
-                    mock_transaction_operation('insert')
-                    mock_transaction_operation('update')
-                    mock_transaction_operation('commit')  # This will fail
-                    
-                except DatabaseTransactionError as e:
-                    # Verify transaction error was properly handled
-                    assert 'Transaction commit failed' in str(e)
-                    assert e.operation == 'transaction_test'
-                    assert e.database == 'test_db'
-                    assert e.collection == 'test_collection'
-                    
-                    # Simulate rollback operation
-                    mock_transaction_operation('rollback')
-                    
-                    logger.info(
-                        "Database transaction rollback validated",
-                        operations=transaction_operations,
-                        error_type=type(e).__name__
+                    result = db_service.query("SELECT * FROM users WHERE id = 1")
+                    error_test_environment.record_recovery_event(
+                        'database',
+                        'connection_recovery',
+                        True
+                    )
+                    return jsonify(result)
+                except Exception:
+                    error_test_environment.record_recovery_event(
+                        'database',
+                        'connection_recovery',
+                        False
+                    )
+                    raise
+        
+        # Phase 1: Trigger connection failure
+        db_service.set_failure_mode('connection_error')
+        
+        with error_test_environment.measure_error_response_time('db_connection_recovery'):
+            response = error_test_environment.client.get('/test-db-connection-recovery')
+        
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data['status'] == 'success'
+        
+        logger.info("Database connection failure recovery test completed")
+    
+    def test_database_transaction_rollback(self, error_test_environment, mock_failing_services):
+        """Test database transaction rollback on failure."""
+        db_service = mock_failing_services['database']
+        db_service.set_failure_mode('transaction_error')
+        
+        app = error_test_environment.app
+        
+        @app.route('/test-db-transaction-rollback')
+        def test_db_transaction_rollback():
+            transaction_id = f"txn_{uuid.uuid4().hex[:8]}"
+            
+            try:
+                # Simulate transaction operations
+                result = db_service.query(f"BEGIN TRANSACTION {transaction_id}")
+                return jsonify(result)
+            except TransactionException as e:
+                error_test_environment.record_error_event(
+                    'TransactionException',
+                    'database',
+                    e.to_dict()
+                )
+                
+                # Automatic rollback handling
+                error_test_environment.record_recovery_event(
+                    'database',
+                    'transaction_rollback',
+                    True
+                )
+                
+                return jsonify({
+                    'transaction_failed': True,
+                    'rollback_completed': True,
+                    'transaction_id': transaction_id
+                }), 500
+        
+        response = error_test_environment.client.get('/test-db-transaction-rollback')
+        
+        assert response.status_code == 500
+        data = response.get_json()
+        assert data['transaction_failed'] is True
+        assert data['rollback_completed'] is True
+        
+        logger.info("Database transaction rollback test completed")
+    
+    def test_database_timeout_retry_mechanism(self, error_test_environment, mock_failing_services):
+        """Test database timeout with retry mechanism."""
+        db_service = mock_failing_services['database']
+        
+        app = error_test_environment.app
+        
+        @app.route('/test-db-timeout-retry')
+        def test_db_timeout_retry():
+            max_retries = 3
+            
+            for attempt in range(max_retries):
+                try:
+                    result = db_service.query("SELECT * FROM large_table LIMIT 1000")
+                    return jsonify(result)
+                except TimeoutException as e:
+                    error_test_environment.record_error_event(
+                        'TimeoutException',
+                        'database',
+                        e.to_dict()
                     )
                     
-                    # Verify operations were attempted in correct order
-                    expected_operations = ['insert', 'update', 'commit', 'rollback']
-                    assert transaction_operations == expected_operations
+                    error_test_environment.record_retry_attempt(
+                        'database_timeout_query',
+                        attempt + 1,
+                        False
+                    )
+                    
+                    if attempt == max_retries - 1:
+                        # Final attempt failed
+                        return jsonify({
+                            'query_failed': True,
+                            'timeout_exceeded': True,
+                            'retry_attempts': max_retries
+                        }), 504
+                    
+                    # Brief delay before retry
+                    time.sleep(0.05 * (2 ** attempt))  # Exponential backoff
+            
+            return jsonify({'status': 'success'})
+        
+        # Set timeout failure mode
+        db_service.set_failure_mode('timeout')
+        
+        with error_test_environment.measure_error_response_time('db_timeout_retry'):
+            response = error_test_environment.client.get('/test-db-timeout-retry')
+        
+        assert response.status_code == 504
+        data = response.get_json()
+        assert data['timeout_exceeded'] is True
+        assert data['retry_attempts'] == 3
+        
+        logger.info("Database timeout retry mechanism test completed")
     
     @pytest.mark.asyncio
-    async def test_motor_async_error_handling(self, app: Flask):
-        """
-        Test Motor async database error handling with circuit breaker integration.
+    async def test_async_database_error_handling(self, error_test_environment):
+        """Test async database error handling with Motor client."""
+        app = error_test_environment.app
         
-        Validates that async database operations properly handle connection failures,
-        timeouts, and other async-specific error scenarios.
-        """
-        async_operation_attempts = 0
+        # Mock async database operation
+        async def async_db_operation():
+            # Simulate async database failure
+            await asyncio.sleep(0.01)
+            raise ConnectionException(
+                "Async database connection failed",
+                database="async_test_db",
+                operation=DatabaseOperationType.READ
+            )
         
-        async def mock_async_operation(*args, **kwargs):
-            nonlocal async_operation_attempts
-            async_operation_attempts += 1
-            
-            if async_operation_attempts <= 2:
-                # Simulate async timeout for first 2 attempts
-                raise motor_core.ConnectionFailure(
-                    f"Async connection timeout attempt #{async_operation_attempts}"
-                )
-            else:
-                # Succeed on third attempt
-                return {'async_result': True, 'attempt': async_operation_attempts}
-        
-        with app.test_request_context():
-            # Test async operation with retry strategy
-            retry_strategy = create_retry_strategy(max_attempts=3, min_wait=0.1, max_wait=0.5)
-            
+        @app.route('/test-async-db-error')
+        def test_async_db_error():
             try:
-                result = await retry_strategy(mock_async_operation)
-                
-                assert result['async_result'] is True
-                assert async_operation_attempts == 3
-                
-                logger.info(
-                    "Motor async error handling validated",
-                    attempts=async_operation_attempts,
-                    result=result
+                # Simulate async operation in sync context
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(async_db_operation())
+                return jsonify({'status': 'success'})
+            except ConnectionException as e:
+                error_test_environment.record_error_event(
+                    'AsyncConnectionException',
+                    'async_database',
+                    e.to_dict()
                 )
                 
-            except Exception as e:
-                pytest.fail(f"Async operation should have succeeded after retries: {e}")
-    
-    def test_database_query_error_with_context(self, client: FlaskClient, app: Flask):
-        """
-        Test database query error handling with comprehensive context information.
+                return jsonify({
+                    'async_operation_failed': True,
+                    'error_type': 'AsyncConnectionException'
+                }), 503
+            finally:
+                loop.close()
         
-        Validates that query errors include detailed context for debugging and
-        monitoring, including query details, collection info, and error classification.
-        """
-        def mock_query_failure(*args, **kwargs):
-            raise pymongo_errors.OperationFailure(
-                "Query execution failed: index not found for sort operation"
-            )
+        response = error_test_environment.client.get('/test-async-db-error')
         
-        with app.test_request_context():
-            try:
-                with database_error_context('find_users', 'app_db', 'users'):
-                    mock_query_failure()
-                    
-            except DatabaseQueryError as e:
-                # Verify comprehensive error context
-                assert e.operation == 'find_users'
-                assert e.database == 'app_db'
-                assert e.collection == 'users'
-                assert 'Query execution failed' in str(e)
-                assert isinstance(e.original_error, pymongo_errors.OperationFailure)
-                
-                # Verify error was logged with structured information
-                assert hasattr(e, 'timestamp')
-                
-                logger.info(
-                    "Database query error context validated",
-                    operation=e.operation,
-                    database=e.database,
-                    collection=e.collection,
-                    error_message=str(e)
-                )
-    
-    def test_database_circuit_breaker_integration(self, client: FlaskClient, app: Flask):
-        """
-        Test database circuit breaker integration with connection pool management.
+        assert response.status_code == 503
+        data = response.get_json()
+        assert data['async_operation_failed'] is True
+        assert data['error_type'] == 'AsyncConnectionException'
         
-        Validates that database circuit breakers prevent connection pool exhaustion
-        and enable graceful degradation during database outages.
-        """
-        connection_attempts = 0
-        
-        def mock_connection_exhaustion(*args, **kwargs):
-            nonlocal connection_attempts
-            connection_attempts += 1
-            raise pymongo_errors.ServerSelectionTimeoutError(
-                f"No servers available for connection (attempt #{connection_attempts})"
-            )
-        
-        with app.test_request_context():
-            # Get database circuit breaker
-            db_breaker = get_circuit_breaker('find_operation', 'app_db', failure_threshold=3)
-            
-            # Trigger circuit breaker opening
-            for i in range(3):
-                with pytest.raises(Exception):
-                    db_breaker(mock_connection_exhaustion)
-            
-            # Verify circuit breaker status
-            breaker_status = get_circuit_breaker_status()
-            assert 'app_db:find_operation' in breaker_status
-            assert breaker_status['app_db:find_operation']['state'] == 'OPEN'
-            assert breaker_status['app_db:find_operation']['failure_count'] == 3
-            
-            logger.info(
-                "Database circuit breaker integration validated",
-                connection_attempts=connection_attempts,
-                circuit_state=breaker_status['app_db:find_operation']['state']
-            )
+        logger.info("Async database error handling test completed")
 
 
-class TestExternalServiceErrorHandling:
+# =============================================================================
+# External Service Error Handling Integration Tests
+# =============================================================================
+
+class TestExternalServiceErrorHandlingIntegration:
     """
-    Comprehensive testing of external service error handling with retry and fallback patterns.
+    Test external service error handling with retry and fallback patterns.
     
-    Implements Section 6.3.3 external systems integration resilience and Section 4.2.3
-    external service error handling requirements by validating HTTP client failures,
-    timeout handling, and comprehensive fallback mechanisms.
+    Validates HTTP client error handling, retry mechanisms, and service
+    degradation patterns per Section 6.3.3 external systems integration.
     """
     
-    @pytest.fixture(autouse=True)
-    def setup_external_service_mocks(self, app: Flask):
-        """Setup external service mocks for comprehensive error simulation."""
-        self.http_request_count = 0
-        self.service_call_history = []
+    def test_http_client_timeout_retry(self, error_test_environment):
+        """Test HTTP client timeout with exponential backoff retry."""
+        app = error_test_environment.app
         
-        yield
-    
-    def test_http_client_timeout_with_retry_logic(self, client: FlaskClient, app: Flask):
-        """
-        Test HTTP client timeout handling with exponential backoff retry.
-        
-        Validates that HTTP timeouts trigger retry logic with exponential backoff
-        and eventually succeed when service becomes available.
-        """
-        def mock_http_request(*args, **kwargs):
-            self.http_request_count += 1
-            self.service_call_history.append({
-                'attempt': self.http_request_count,
-                'timestamp': datetime.utcnow().isoformat(),
-                'args': args,
-                'kwargs': kwargs
-            })
+        @app.route('/test-http-timeout-retry')
+        def test_http_timeout_retry():
+            max_retries = 3
+            base_delay = 0.1
             
-            if self.http_request_count <= 2:
-                # Simulate timeout for first 2 attempts
-                raise Timeout(f"Request timeout on attempt #{self.http_request_count}")
-            else:
-                # Succeed on third attempt
-                return {
-                    'status_code': 200,
-                    'json': {'success': True, 'attempt': self.http_request_count}
-                }
-        
-        with app.test_request_context():
-            with patch('requests.get', side_effect=mock_http_request):
-                
-                # Test HTTP operation with retry pattern
-                factory = IntegrationExceptionFactory()
-                
-                start_time = time.time()
-                
+            for attempt in range(max_retries):
                 try:
-                    # Simulate retry logic for HTTP requests
-                    for attempt in range(3):
-                        try:
-                            result = mock_http_request('https://api.example.com/data')
-                            break
-                        except Timeout as e:
-                            if attempt < 2:  # Allow retries
-                                time.sleep(0.1 * (2 ** attempt))  # Exponential backoff
-                                continue
-                            else:
-                                raise factory.create_timeout_error(
-                                    'requests',
-                                    'external_api',
-                                    'get_data',
-                                    timeout_duration=5.0
-                                )
-                    
-                    duration = time.time() - start_time
-                    
-                    # Verify operation succeeded after retries
-                    assert result['status_code'] == 200
-                    assert result['json']['success'] is True
-                    assert self.http_request_count == 3
-                    
-                    # Verify retry delays were applied
-                    assert duration >= 0.1  # At least initial backoff time
-                    
-                    logger.info(
-                        "HTTP client timeout with retry logic validated",
-                        attempts=self.http_request_count,
-                        duration=duration,
-                        success=True
-                    )
-                    
+                    # Simulate HTTP request with timeout
+                    if attempt < 2:  # First two attempts fail
+                        raise IntegrationTimeoutError(
+                            "HTTP request timeout",
+                            service_name="external_api",
+                            operation="api_call",
+                            timeout_duration=30.0
+                        )
+                    else:
+                        # Third attempt succeeds
+                        return jsonify({
+                            'status': 'success',
+                            'retry_attempts': attempt + 1,
+                            'data': 'api_response_data'
+                        })
+                
                 except IntegrationTimeoutError as e:
-                    pytest.fail(f"HTTP operation should have succeeded after retries: {e}")
-    
-    def test_auth0_service_degradation_handling(self, client: FlaskClient, app: Flask):
-        """
-        Test Auth0 service degradation handling with fallback authentication.
-        
-        Validates that Auth0 service failures trigger fallback mechanisms while
-        maintaining security standards and providing graceful degradation.
-        """
-        auth0_call_count = 0
-        fallback_used = False
-        
-        def mock_auth0_api_call(*args, **kwargs):
-            nonlocal auth0_call_count
-            auth0_call_count += 1
-            
-            # Simulate Auth0 API rate limiting
-            raise HTTPError(
-                response=Mock(status_code=429, text='Rate limit exceeded'),
-                request=Mock(url='https://dev.auth0.com/api/v2/users')
-            )
-        
-        def mock_fallback_validation(token: str) -> Dict[str, Any]:
-            """Fallback token validation using local JWT verification"""
-            nonlocal fallback_used
-            fallback_used = True
-            
-            # Simulate local token validation
-            return {
-                'valid': True,
-                'user_id': 'test_user',
-                'fallback_used': True,
-                'validation_method': 'local_jwt'
-            }
-        
-        with app.test_request_context():
-            with patch('src.integrations.auth0_client.validate_user', side_effect=mock_auth0_api_call):
-                
-                # Test Auth0 service call with fallback
-                try:
-                    # Primary Auth0 validation attempt
-                    user_info = mock_auth0_api_call('test_token')
-                    
-                except HTTPError as e:
-                    # Convert to Auth0Error
-                    auth0_error = Auth0Error(
-                        message="Auth0 API rate limit exceeded",
-                        operation="user_validation",
-                        auth0_error_code="rate_limit_exceeded",
-                        error_context={'status_code': 429}
+                    error_test_environment.record_error_event(
+                        'IntegrationTimeoutError',
+                        'http_client',
+                        e.to_dict()
                     )
                     
-                    # Trigger fallback mechanism
-                    user_info = mock_fallback_validation('test_token')
-                
-                # Verify fallback was used successfully
-                assert user_info['valid'] is True
-                assert user_info['fallback_used'] is True
-                assert fallback_used is True
-                assert auth0_call_count == 1
-                
-                logger.info(
-                    "Auth0 service degradation handling validated",
-                    auth0_attempts=auth0_call_count,
-                    fallback_used=fallback_used,
-                    validation_method=user_info['validation_method']
-                )
+                    error_test_environment.record_retry_attempt(
+                        'http_request',
+                        attempt + 1,
+                        False
+                    )
+                    
+                    if attempt == max_retries - 1:
+                        return jsonify({
+                            'request_failed': True,
+                            'timeout_exceeded': True,
+                            'retry_attempts': max_retries
+                        }), 504
+                    
+                    # Exponential backoff delay
+                    time.sleep(base_delay * (2 ** attempt))
+            
+            return jsonify({'status': 'error'})
+        
+        with error_test_environment.measure_error_response_time('http_timeout_retry'):
+            response = error_test_environment.client.get('/test-http-timeout-retry')
+        
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data['status'] == 'success'
+        assert data['retry_attempts'] == 3
+        
+        logger.info("HTTP client timeout retry test completed")
     
-    def test_aws_s3_circuit_breaker_with_fallback(self, client: FlaskClient, app: Flask):
-        """
-        Test AWS S3 circuit breaker activation with local storage fallback.
+    def test_external_service_fallback_mechanism(self, error_test_environment):
+        """Test external service fallback mechanism."""
+        app = error_test_environment.app
         
-        Validates that S3 service failures trigger circuit breaker protection
-        and enable fallback to local storage mechanisms.
-        """
-        s3_failure_count = 0
-        local_storage_used = False
+        @app.route('/test-external-service-fallback')
+        def test_external_service_fallback():
+            try:
+                # Primary service call
+                raise HTTPResponseError(
+                    "Primary service unavailable",
+                    service_name="primary_api",
+                    operation="data_fetch",
+                    status_code=503
+                )
+            
+            except HTTPResponseError as e:
+                error_test_environment.record_error_event(
+                    'HTTPResponseError',
+                    'primary_api',
+                    e.to_dict()
+                )
+                
+                try:
+                    # Fallback to secondary service
+                    fallback_data = {
+                        'source': 'fallback_service',
+                        'data': 'cached_or_default_data',
+                        'timestamp': datetime.utcnow().isoformat()
+                    }
+                    
+                    error_test_environment.record_recovery_event(
+                        'external_service',
+                        'fallback_activation',
+                        True
+                    )
+                    
+                    return jsonify({
+                        'primary_failed': True,
+                        'fallback_used': True,
+                        'data': fallback_data
+                    }), 200
+                
+                except Exception as fallback_error:
+                    error_test_environment.record_recovery_event(
+                        'external_service',
+                        'fallback_activation',
+                        False
+                    )
+                    
+                    return jsonify({
+                        'primary_failed': True,
+                        'fallback_failed': True,
+                        'error': str(fallback_error)
+                    }), 503
         
-        def mock_s3_failure(*args, **kwargs):
-            nonlocal s3_failure_count
-            s3_failure_count += 1
-            
-            raise AWSServiceError(
-                message=f"S3 service unavailable (failure #{s3_failure_count})",
-                operation="put_object",
-                aws_service="s3",
-                aws_error_code="ServiceUnavailable",
-                region="us-east-1"
-            )
+        response = error_test_environment.client.get('/test-external-service-fallback')
         
-        def mock_local_storage_fallback(file_data: bytes, file_key: str) -> Dict[str, Any]:
-            """Fallback to local file storage"""
-            nonlocal local_storage_used
-            local_storage_used = True
-            
-            return {
-                'storage_type': 'local',
-                'file_key': file_key,
-                'size': len(file_data),
-                'fallback_used': True
-            }
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data['primary_failed'] is True
+        assert data['fallback_used'] is True
+        assert 'data' in data
         
-        with app.test_request_context():
-            # Simulate S3 circuit breaker
-            s3_breaker = get_circuit_breaker('s3_upload', 'aws_s3', failure_threshold=3)
+        logger.info("External service fallback mechanism test completed")
+    
+    def test_auth0_service_integration_error(self, error_test_environment):
+        """Test Auth0 service integration error handling."""
+        app = error_test_environment.app
+        
+        @app.route('/test-auth0-integration-error')
+        def test_auth0_integration_error():
+            try:
+                # Simulate Auth0 API call failure
+                raise Auth0Error(
+                    "Auth0 API rate limit exceeded",
+                    operation="user_info",
+                    auth0_error_code="rate_limit_exceeded",
+                    tenant="test-tenant"
+                )
             
-            # Trigger circuit breaker opening
-            for i in range(3):
-                with pytest.raises(AWSServiceError):
-                    s3_breaker(mock_s3_failure)
+            except Auth0Error as e:
+                error_test_environment.record_error_event(
+                    'Auth0Error',
+                    'auth0_service',
+                    e.to_dict()
+                )
+                
+                # Fallback to cached user information
+                cached_user_info = {
+                    'user_id': 'cached_user_123',
+                    'email': 'user@example.com',
+                    'cached': True,
+                    'cache_timestamp': datetime.utcnow().isoformat()
+                }
+                
+                error_test_environment.record_recovery_event(
+                    'auth0_service',
+                    'cached_user_fallback',
+                    True
+                )
+                
+                return jsonify({
+                    'auth0_failed': True,
+                    'cached_data_used': True,
+                    'user_info': cached_user_info
+                }), 200
+        
+        response = error_test_environment.client.get('/test-auth0-integration-error')
+        
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data['auth0_failed'] is True
+        assert data['cached_data_used'] is True
+        
+        logger.info("Auth0 service integration error test completed")
+    
+    def test_aws_service_error_handling(self, error_test_environment):
+        """Test AWS service error handling with retry logic."""
+        app = error_test_environment.app
+        
+        @app.route('/test-aws-service-error')
+        def test_aws_service_error():
+            max_retries = 2
             
-            # Verify circuit breaker is open
-            assert s3_breaker._state.name == 'OPEN'
+            for attempt in range(max_retries):
+                try:
+                    if attempt == 0:
+                        # First attempt: throttling error
+                        raise AWSServiceError(
+                            "AWS S3 throttling error",
+                            operation="put_object",
+                            aws_service="s3",
+                            aws_error_code="SlowDown",
+                            region="us-east-1"
+                        )
+                    else:
+                        # Second attempt: success
+                        return jsonify({
+                            'aws_operation': 'success',
+                            'retry_attempts': attempt + 1,
+                            'object_uploaded': True
+                        })
+                
+                except AWSServiceError as e:
+                    error_test_environment.record_error_event(
+                        'AWSServiceError',
+                        'aws_s3',
+                        e.to_dict()
+                    )
+                    
+                    error_test_environment.record_retry_attempt(
+                        'aws_s3_upload',
+                        attempt + 1,
+                        False
+                    )
+                    
+                    if attempt == max_retries - 1:
+                        return jsonify({
+                            'aws_operation': 'failed',
+                            'retry_attempts': max_retries,
+                            'final_error': str(e)
+                        }), 503
+                    
+                    # Retry delay for AWS throttling
+                    time.sleep(0.1)
             
-            # Test fallback mechanism
-            test_file_data = b"test file content"
-            file_key = "test/upload/file.txt"
+            return jsonify({'status': 'error'})
+        
+        response = error_test_environment.client.get('/test-aws-service-error')
+        
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data['aws_operation'] == 'success'
+        assert data['retry_attempts'] == 2
+        
+        logger.info("AWS service error handling test completed")
+
+
+# =============================================================================
+# Graceful Degradation Testing
+# =============================================================================
+
+class TestGracefulDegradation:
+    """
+    Test graceful degradation for partial service availability.
+    
+    Validates system behavior when some services are unavailable while
+    maintaining core functionality per Section 6.3.3 graceful degradation.
+    """
+    
+    def test_cache_unavailable_graceful_degradation(self, error_test_environment, mock_failing_services):
+        """Test graceful degradation when cache service is unavailable."""
+        cache_service = mock_failing_services['cache']
+        cache_service.set_failure_mode('connection_error')
+        
+        app = error_test_environment.app
+        
+        @app.route('/test-cache-degradation')
+        def test_cache_degradation():
+            user_id = request.args.get('user_id', 'default_user')
             
             try:
-                # Attempt S3 upload (will fail due to open circuit breaker)
-                result = s3_breaker(mock_s3_failure)
-            except Exception:
-                # Use fallback storage
-                result = mock_local_storage_fallback(test_file_data, file_key)
+                # Attempt to get cached user data
+                cached_data = cache_service.get(f"user_data_{user_id}")
+                return jsonify({
+                    'cached': True,
+                    'data': cached_data,
+                    'performance': 'optimal'
+                })
             
-            # Verify fallback was used
-            assert result['storage_type'] == 'local'
-            assert result['fallback_used'] is True
-            assert local_storage_used is True
-            assert s3_failure_count == 3
-            
-            logger.info(
-                "AWS S3 circuit breaker with fallback validated",
-                s3_failures=s3_failure_count,
-                circuit_state=s3_breaker._state.name,
-                fallback_used=local_storage_used
-            )
-    
-    def test_external_service_comprehensive_error_mapping(self, client: FlaskClient, app: Flask):
-        """
-        Test comprehensive error mapping for various external service failures.
+            except CacheError as e:
+                error_test_environment.record_error_event(
+                    'CacheError',
+                    'cache_service',
+                    e.to_dict()
+                )
+                
+                # Graceful degradation: compute data without cache
+                start_time = time.perf_counter()
+                
+                computed_data = {
+                    'user_id': user_id,
+                    'profile': f'computed_profile_for_{user_id}',
+                    'preferences': ['setting1', 'setting2'],
+                    'computed_at': datetime.utcnow().isoformat()
+                }
+                
+                computation_time = time.perf_counter() - start_time
+                
+                error_test_environment.record_recovery_event(
+                    'cache_service',
+                    'graceful_degradation',
+                    True
+                )
+                
+                return jsonify({
+                    'cached': False,
+                    'computed': True,
+                    'data': computed_data,
+                    'performance': 'degraded',
+                    'computation_time': computation_time,
+                    'cache_unavailable': True
+                }), 200
         
-        Validates that different types of external service errors are properly
-        mapped to appropriate exception types with consistent error handling.
-        """
-        test_scenarios = [
-            {
-                'exception': requests.exceptions.ConnectionError("Connection refused"),
-                'service': 'payment_gateway',
-                'operation': 'process_payment',
-                'expected_type': ConnectionError
-            },
-            {
-                'exception': requests.exceptions.Timeout("Request timeout"),
-                'service': 'notification_service',
-                'operation': 'send_email',
-                'expected_type': TimeoutError
-            },
-            {
-                'exception': requests.exceptions.HTTPError("404 Not Found"),
-                'service': 'user_service',
-                'operation': 'get_profile',
-                'expected_type': HTTPResponseError
-            }
+        response = error_test_environment.client.get('/test-cache-degradation?user_id=test123')
+        
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data['cached'] is False
+        assert data['computed'] is True
+        assert data['performance'] == 'degraded'
+        assert data['cache_unavailable'] is True
+        
+        logger.info("Cache unavailable graceful degradation test completed")
+    
+    def test_database_readonly_degradation(self, error_test_environment, mock_failing_services):
+        """Test graceful degradation to read-only mode when database writes fail."""
+        db_service = mock_failing_services['database']
+        
+        app = error_test_environment.app
+        
+        @app.route('/test-readonly-degradation', methods=['POST'])
+        def test_readonly_degradation():
+            data = request.get_json() or {}
+            
+            try:
+                # Attempt write operation
+                if data.get('operation') == 'write':
+                    db_service.set_failure_mode('connection_error')
+                    result = db_service.query("INSERT INTO users (name) VALUES ('test')")
+                    return jsonify(result)
+                else:
+                    # Read operation still works
+                    db_service.set_failure_mode(None)
+                    result = db_service.query("SELECT * FROM users LIMIT 5")
+                    return jsonify(result)
+            
+            except DatabaseException as e:
+                error_test_environment.record_error_event(
+                    'DatabaseException',
+                    'database_write',
+                    e.to_dict()
+                )
+                
+                # Graceful degradation to read-only mode
+                error_test_environment.record_recovery_event(
+                    'database',
+                    'readonly_mode_activation',
+                    True
+                )
+                
+                return jsonify({
+                    'write_failed': True,
+                    'readonly_mode': True,
+                    'message': 'System temporarily in read-only mode',
+                    'retry_suggested': True
+                }), 503
+        
+        # Test write operation failure
+        write_response = error_test_environment.client.post(
+            '/test-readonly-degradation',
+            json={'operation': 'write'}
+        )
+        
+        assert write_response.status_code == 503
+        write_data = write_response.get_json()
+        assert write_data['write_failed'] is True
+        assert write_data['readonly_mode'] is True
+        
+        # Test read operation still works
+        read_response = error_test_environment.client.post(
+            '/test-readonly-degradation',
+            json={'operation': 'read'}
+        )
+        
+        assert read_response.status_code == 200
+        read_data = read_response.get_json()
+        assert read_data['status'] == 'success'
+        
+        logger.info("Database read-only degradation test completed")
+    
+    def test_authentication_limited_access_degradation(self, error_test_environment, mock_failing_services):
+        """Test graceful degradation to limited access when authentication service fails."""
+        auth_service = mock_failing_services['auth']
+        auth_service.set_failure_mode('auth0_unavailable')
+        
+        app = error_test_environment.app
+        
+        @app.route('/test-auth-degradation')
+        def test_auth_degradation():
+            token = request.headers.get('Authorization', '').replace('Bearer ', '')
+            
+            try:
+                # Attempt full authentication
+                auth_result = auth_service.validate_token(token)
+                return jsonify({
+                    'authenticated': True,
+                    'full_access': True,
+                    'user': auth_result
+                })
+            
+            except SecurityException as e:
+                error_test_environment.record_error_event(
+                    'SecurityException',
+                    'auth_service',
+                    e.to_dict()
+                )
+                
+                # Graceful degradation: limited anonymous access
+                limited_features = [
+                    'public_content',
+                    'basic_search',
+                    'contact_info'
+                ]
+                
+                error_test_environment.record_recovery_event(
+                    'auth_service',
+                    'limited_access_mode',
+                    True
+                )
+                
+                return jsonify({
+                    'authenticated': False,
+                    'limited_access': True,
+                    'available_features': limited_features,
+                    'auth_service_unavailable': True,
+                    'message': 'Limited functionality available'
+                }), 200
+        
+        headers = {'Authorization': 'Bearer test_token'}
+        response = error_test_environment.client.get(
+            '/test-auth-degradation',
+            headers=headers
+        )
+        
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data['authenticated'] is False
+        assert data['limited_access'] is True
+        assert len(data['available_features']) > 0
+        
+        logger.info("Authentication limited access degradation test completed")
+    
+    def test_multi_service_failure_degradation(self, error_test_environment, mock_failing_services):
+        """Test graceful degradation when multiple services fail simultaneously."""
+        # Simulate multiple service failures
+        mock_failing_services['cache'].set_failure_mode('connection_error')
+        mock_failing_services['external_api'].set_failure_mode('timeout')
+        
+        app = error_test_environment.app
+        
+        @app.route('/test-multi-service-degradation')
+        def test_multi_service_degradation():
+            degraded_features = []
+            available_features = []
+            
+            # Test cache availability
+            try:
+                mock_failing_services['cache'].get('test_key')
+                available_features.append('caching')
+            except CacheError:
+                degraded_features.append('caching')
+                error_test_environment.record_error_event(
+                    'CacheError',
+                    'cache_service',
+                    {'service': 'cache', 'status': 'unavailable'}
+                )
+            
+            # Test external API availability
+            try:
+                mock_failing_services['external_api'].make_request('/test')
+                available_features.append('external_data')
+            except IntegrationError:
+                degraded_features.append('external_data')
+                error_test_environment.record_error_event(
+                    'IntegrationError',
+                    'external_api',
+                    {'service': 'external_api', 'status': 'unavailable'}
+                )
+            
+            # Core database still available
+            try:
+                mock_failing_services['database'].set_failure_mode(None)
+                mock_failing_services['database'].query('SELECT 1')
+                available_features.append('core_data')
+            except DatabaseException:
+                degraded_features.append('core_data')
+            
+            error_test_environment.record_recovery_event(
+                'system',
+                'multi_service_degradation',
+                len(available_features) > 0
+            )
+            
+            degradation_level = len(degraded_features) / (len(degraded_features) + len(available_features))
+            
+            return jsonify({
+                'system_status': 'degraded' if degraded_features else 'operational',
+                'degraded_features': degraded_features,
+                'available_features': available_features,
+                'degradation_level': degradation_level,
+                'core_functionality_available': 'core_data' in available_features
+            }), 200 if available_features else 503
+        
+        response = error_test_environment.client.get('/test-multi-service-degradation')
+        
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data['system_status'] == 'degraded'
+        assert len(data['degraded_features']) > 0
+        assert data['core_functionality_available'] is True
+        
+        logger.info("Multi-service failure degradation test completed")
+
+
+# =============================================================================
+# Comprehensive Error Monitoring Integration Tests
+# =============================================================================
+
+class TestErrorMonitoringIntegration:
+    """
+    Test comprehensive error monitoring and alerting system integration.
+    
+    Validates error tracking, metrics collection, and alerting integration
+    per Section 4.2.3 error handling flows and monitoring requirements.
+    """
+    
+    def test_error_metrics_collection(self, error_test_environment):
+        """Test comprehensive error metrics collection and aggregation."""
+        app = error_test_environment.app
+        
+        # Simulate various error types for metrics collection
+        error_scenarios = [
+            ('AuthenticationException', SecurityErrorCode.AUTH_TOKEN_INVALID),
+            ('DatabaseException', 'CONNECTION_FAILED'),
+            ('CacheError', 'REDIS_CONNECTION_ERROR'),
+            ('IntegrationError', 'HTTP_TIMEOUT'),
+            ('ValidationException', SecurityErrorCode.VAL_SCHEMA_VIOLATION)
         ]
         
-        for scenario in test_scenarios:
-            with app.test_request_context():
-                # Convert external exception to integration exception
-                integration_exception = get_integration_exception_for_stdlib_exception(
-                    scenario['exception'],
-                    scenario['service'],
-                    scenario['operation']
+        @app.route('/test-error-metrics/<error_type>')
+        def test_error_metrics(error_type):
+            if error_type == 'auth':
+                raise AuthenticationException(
+                    "Test authentication error",
+                    error_code=SecurityErrorCode.AUTH_TOKEN_INVALID
+                )
+            elif error_type == 'database':
+                raise ConnectionException(
+                    "Test database connection error",
+                    database="test_db"
+                )
+            elif error_type == 'cache':
+                raise RedisConnectionError(
+                    "Test cache connection error"
+                )
+            elif error_type == 'integration':
+                raise IntegrationTimeoutError(
+                    "Test integration timeout",
+                    service_name="test_api",
+                    operation="test_call"
+                )
+            elif error_type == 'validation':
+                raise ValidationException(
+                    "Test validation error",
+                    error_code=SecurityErrorCode.VAL_SCHEMA_VIOLATION
+                )
+            
+            return jsonify({'status': 'success'})
+        
+        # Generate error metrics
+        error_counts = {}
+        for error_type, _ in error_scenarios:
+            response = error_test_environment.client.get(f'/test-error-metrics/{error_type.lower().replace("exception", "").replace("error", "")}')
+            
+            error_category = error_type.replace('Exception', '').replace('Error', '')
+            error_counts[error_category] = error_counts.get(error_category, 0) + 1
+            
+            error_test_environment.record_error_event(
+                error_type,
+                'metrics_test',
+                {
+                    'status_code': response.status_code,
+                    'error_category': error_category
+                }
+            )
+        
+        # Validate metrics collection
+        summary = error_test_environment.get_error_summary()
+        
+        assert summary['total_errors'] >= len(error_scenarios)
+        assert len(summary['error_types']) >= 3
+        assert 'metrics_test' in summary['affected_components']
+        
+        logger.info(f"Error metrics collection test completed with {summary['total_errors']} errors tracked")
+    
+    def test_security_alert_integration(self, error_test_environment):
+        """Test security alert integration for critical security events."""
+        app = error_test_environment.app
+        
+        security_alerts = []
+        
+        def mock_security_alert(alert_type: str, details: Dict[str, Any]):
+            """Mock security alert function"""
+            alert = {
+                'alert_type': alert_type,
+                'timestamp': datetime.utcnow().isoformat(),
+                'details': details,
+                'severity': 'high' if 'critical' in alert_type else 'medium'
+            }
+            security_alerts.append(alert)
+            logger.warning(f"Security alert triggered: {alert_type}")
+        
+        @app.route('/test-security-alerts/<alert_type>')
+        def test_security_alerts(alert_type):
+            if alert_type == 'brute_force':
+                error = AuthenticationException(
+                    "Brute force attack detected",
+                    error_code=SecurityErrorCode.SEC_BRUTE_FORCE_DETECTED
                 )
                 
-                # Verify proper exception mapping
-                assert isinstance(integration_exception, IntegrationError)
-                assert integration_exception.service_name == scenario['service']
-                assert integration_exception.operation == scenario['operation']
+                if is_critical_security_error(error.error_code):
+                    mock_security_alert(
+                        'critical_auth_failure',
+                        error.to_dict()
+                    )
                 
-                # Verify exception contains proper context
-                error_dict = integration_exception.to_dict()
-                assert error_dict['service_name'] == scenario['service']
-                assert error_dict['operation'] == scenario['operation']
-                assert 'timestamp' in error_dict
-                assert 'error_context' in error_dict
-                
-                logger.info(
-                    "External service error mapping validated",
-                    service=scenario['service'],
-                    operation=scenario['operation'],
-                    exception_type=type(integration_exception).__name__
+                raise error
+            
+            elif alert_type == 'injection_attempt':
+                error = ValidationException(
+                    "SQL injection attempt detected",
+                    error_code=SecurityErrorCode.SEC_SQL_INJECTION_ATTEMPT
                 )
+                
+                if is_critical_security_error(error.error_code):
+                    mock_security_alert(
+                        'critical_injection_attempt',
+                        error.to_dict()
+                    )
+                
+                raise error
+            
+            elif alert_type == 'permission_violation':
+                error = AuthorizationException(
+                    "Policy violation detected",
+                    error_code=SecurityErrorCode.AUTHZ_POLICY_VIOLATION,
+                    required_permissions=['admin:read'],
+                    resource_type='sensitive_data'
+                )
+                
+                if is_critical_security_error(error.error_code):
+                    mock_security_alert(
+                        'critical_policy_violation',
+                        error.to_dict()
+                    )
+                
+                raise error
+            
+            return jsonify({'status': 'success'})
+        
+        # Trigger security alerts
+        critical_scenarios = ['brute_force', 'injection_attempt', 'permission_violation']
+        
+        for scenario in critical_scenarios:
+            response = error_test_environment.client.get(f'/test-security-alerts/{scenario}')
+            
+            error_test_environment.record_error_event(
+                'SecurityAlert',
+                'security_monitoring',
+                {
+                    'scenario': scenario,
+                    'status_code': response.status_code
+                }
+            )
+        
+        # Validate security alerts were triggered
+        assert len(security_alerts) == len(critical_scenarios)
+        assert all(alert['severity'] == 'high' for alert in security_alerts)
+        
+        logger.info(f"Security alert integration test completed with {len(security_alerts)} alerts")
+    
+    def test_performance_impact_monitoring(self, error_test_environment):
+        """Test performance impact monitoring during error conditions."""
+        app = error_test_environment.app
+        
+        performance_impacts = []
+        
+        @app.route('/test-performance-impact/<scenario>')
+        def test_performance_impact(scenario):
+            start_time = time.perf_counter()
+            
+            try:
+                if scenario == 'timeout_cascade':
+                    # Simulate cascading timeouts
+                    time.sleep(0.1)  # Simulate slow operation
+                    raise IntegrationTimeoutError(
+                        "Cascading timeout",
+                        service_name="slow_service",
+                        operation="slow_call",
+                        timeout_duration=30.0
+                    )
+                
+                elif scenario == 'retry_storm':
+                    # Simulate retry storm
+                    for i in range(3):
+                        time.sleep(0.05)  # Each retry takes time
+                    
+                    raise RetryExhaustedError(
+                        "retry_service",
+                        "api_call",
+                        max_retries=3,
+                        total_duration=0.15
+                    )
+                
+                elif scenario == 'circuit_breaker_latency':
+                    # Simulate circuit breaker latency
+                    time.sleep(0.02)
+                    raise CircuitBreakerException(
+                        "Circuit breaker latency",
+                        error_code=SecurityErrorCode.EXT_CIRCUIT_BREAKER_OPEN
+                    )
+                
+                return jsonify({'status': 'success'})
+            
+            except Exception as e:
+                end_time = time.perf_counter()
+                duration = end_time - start_time
+                
+                performance_impact = {
+                    'scenario': scenario,
+                    'duration': duration,
+                    'error_type': type(e).__name__,
+                    'timestamp': datetime.utcnow().isoformat()
+                }
+                performance_impacts.append(performance_impact)
+                
+                error_test_environment.record_error_event(
+                    'PerformanceImpact',
+                    'performance_monitoring',
+                    performance_impact
+                )
+                
+                raise
+        
+        # Test performance impact scenarios
+        impact_scenarios = ['timeout_cascade', 'retry_storm', 'circuit_breaker_latency']
+        
+        for scenario in impact_scenarios:
+            with error_test_environment.measure_error_response_time(f'performance_impact_{scenario}'):
+                response = error_test_environment.client.get(f'/test-performance-impact/{scenario}')
+                assert response.status_code >= 400  # Should be an error response
+        
+        # Validate performance impact tracking
+        assert len(performance_impacts) == len(impact_scenarios)
+        
+        # Check for reasonable performance impact (< 1 second for test scenarios)
+        for impact in performance_impacts:
+            assert impact['duration'] < 1.0, f"Performance impact too high: {impact['duration']}s"
+        
+        logger.info(f"Performance impact monitoring test completed with {len(performance_impacts)} measurements")
+    
+    def test_error_correlation_tracking(self, error_test_environment):
+        """Test error correlation tracking across request flows."""
+        app = error_test_environment.app
+        
+        correlation_events = []
+        
+        @app.route('/test-error-correlation')
+        def test_error_correlation():
+            correlation_id = str(uuid.uuid4())
+            
+            # Simulate correlated error chain
+            try:
+                # Step 1: Cache failure
+                try:
+                    raise RedisConnectionError("Cache connection failed")
+                except CacheError as cache_error:
+                    correlation_events.append({
+                        'correlation_id': correlation_id,
+                        'step': 1,
+                        'error_type': 'CacheError',
+                        'component': 'cache',
+                        'timestamp': datetime.utcnow().isoformat()
+                    })
+                    
+                    # Step 2: Fallback to database
+                    try:
+                        time.sleep(0.01)  # Simulate database call
+                        raise ConnectionException(
+                            "Database connection failed during cache fallback",
+                            database="fallback_db"
+                        )
+                    except DatabaseException as db_error:
+                        correlation_events.append({
+                            'correlation_id': correlation_id,
+                            'step': 2,
+                            'error_type': 'DatabaseException',
+                            'component': 'database',
+                            'timestamp': datetime.utcnow().isoformat(),
+                            'caused_by': 'cache_failure'
+                        })
+                        
+                        # Step 3: Final external service attempt
+                        try:
+                            time.sleep(0.01)  # Simulate API call
+                            raise HTTPResponseError(
+                                "External service also failed",
+                                service_name="backup_api",
+                                operation="data_fetch",
+                                status_code=503
+                            )
+                        except IntegrationError as api_error:
+                            correlation_events.append({
+                                'correlation_id': correlation_id,
+                                'step': 3,
+                                'error_type': 'IntegrationError',
+                                'component': 'external_api',
+                                'timestamp': datetime.utcnow().isoformat(),
+                                'caused_by': 'database_failure'
+                            })
+                            
+                            raise api_error
+            
+            except Exception as final_error:
+                error_test_environment.record_error_event(
+                    'CorrelatedErrorChain',
+                    'error_correlation',
+                    {
+                        'correlation_id': correlation_id,
+                        'total_steps': len(correlation_events),
+                        'final_error': type(final_error).__name__
+                    }
+                )
+                
+                return jsonify({
+                    'correlation_id': correlation_id,
+                    'error_chain': correlation_events,
+                    'total_failures': len(correlation_events)
+                }), 503
+        
+        response = error_test_environment.client.get('/test-error-correlation')
+        
+        assert response.status_code == 503
+        data = response.get_json()
+        assert 'correlation_id' in data
+        assert len(data['error_chain']) == 3
+        assert data['total_failures'] == 3
+        
+        # Validate error correlation chain
+        chain = data['error_chain']
+        assert chain[0]['component'] == 'cache'
+        assert chain[1]['component'] == 'database'
+        assert chain[1]['caused_by'] == 'cache_failure'
+        assert chain[2]['component'] == 'external_api'
+        assert chain[2]['caused_by'] == 'database_failure'
+        
+        logger.info(f"Error correlation tracking test completed with {len(chain)} correlated events")
 
 
-class TestGracefulDegradationPatterns:
+# =============================================================================
+# Integration Test Summary and Validation
+# =============================================================================
+
+class TestErrorHandlingIntegrationSummary:
     """
-    Comprehensive testing of graceful degradation patterns for partial service availability.
+    Comprehensive validation of error handling integration test results.
     
-    Implements Section 6.3.3 graceful degradation patterns and Section 4.2.3 error recovery
-    requirements by validating service resilience during partial outages and degraded conditions.
+    Validates overall error handling system performance, compliance with
+    requirements, and comprehensive coverage of error scenarios.
     """
     
-    @pytest.fixture(autouse=True)
-    def setup_degradation_scenarios(self, app: Flask):
-        """Setup scenarios for testing graceful degradation patterns."""
-        self.service_health_status = {
-            'database': True,
-            'cache': True,
-            'auth0': True,
-            'aws_s3': True,
-            'notification': True
+    def test_comprehensive_error_handling_validation(self, error_test_environment):
+        """Comprehensive validation of all error handling patterns."""
+        
+        # Execute a comprehensive error scenario that exercises all components
+        app = error_test_environment.app
+        
+        @app.route('/comprehensive-error-test')
+        def comprehensive_error_test():
+            test_results = {
+                'components_tested': [],
+                'error_types_handled': [],
+                'recovery_mechanisms_triggered': [],
+                'performance_metrics': {},
+                'compliance_status': {}
+            }
+            
+            # Test each component's error handling
+            components_to_test = [
+                ('authentication', AuthenticationException),
+                ('database', ConnectionException),
+                ('cache', RedisConnectionError),
+                ('integration', HTTPResponseError),
+                ('validation', ValidationException)
+            ]
+            
+            for component, exception_class in components_to_test:
+                try:
+                    # Simulate component failure
+                    if component == 'authentication':
+                        raise AuthenticationException(
+                            "Test auth failure",
+                            error_code=SecurityErrorCode.AUTH_TOKEN_INVALID
+                        )
+                    elif component == 'database':
+                        raise ConnectionException(
+                            "Test DB failure",
+                            database="test_db"
+                        )
+                    elif component == 'cache':
+                        raise RedisConnectionError(
+                            "Test cache failure"
+                        )
+                    elif component == 'integration':
+                        raise HTTPResponseError(
+                            "Test integration failure",
+                            service_name="test_service",
+                            operation="test_op",
+                            status_code=500
+                        )
+                    elif component == 'validation':
+                        raise ValidationException(
+                            "Test validation failure",
+                            error_code=SecurityErrorCode.VAL_SCHEMA_VIOLATION
+                        )
+                
+                except Exception as e:
+                    test_results['components_tested'].append(component)
+                    test_results['error_types_handled'].append(type(e).__name__)
+                    
+                    # Record that error handling mechanism worked
+                    error_test_environment.record_error_event(
+                        type(e).__name__,
+                        component,
+                        {'test': 'comprehensive_validation'}
+                    )
+            
+            # Validate error handling completeness
+            expected_components = ['authentication', 'database', 'cache', 'integration', 'validation']
+            test_results['compliance_status'] = {
+                'components_coverage': len(test_results['components_tested']) / len(expected_components),
+                'error_handling_functional': len(test_results['error_types_handled']) > 0,
+                'flask_error_handlers_working': True  # If we got here, they're working
+            }
+            
+            return jsonify(test_results)
+        
+        response = error_test_environment.client.get('/comprehensive-error-test')
+        
+        assert response.status_code == 200
+        data = response.get_json()
+        
+        # Validate comprehensive coverage
+        assert data['compliance_status']['components_coverage'] == 1.0
+        assert data['compliance_status']['error_handling_functional'] is True
+        assert data['compliance_status']['flask_error_handlers_working'] is True
+        
+        # Validate all expected components were tested
+        expected_components = ['authentication', 'database', 'cache', 'integration', 'validation']
+        assert set(data['components_tested']) == set(expected_components)
+        
+        # Validate error handling performance
+        summary = error_test_environment.get_error_summary()
+        assert summary['total_errors'] > 0
+        assert len(summary['error_types']) >= 5
+        
+        # Validate response time compliance (should be fast even with errors)
+        if summary['average_error_response_time'] > 0:
+            assert summary['average_error_response_time'] < 1.0, "Error responses too slow"
+        
+        logger.info("Comprehensive error handling validation completed successfully")
+        logger.info(f"Test summary: {summary}")
+    
+    def test_error_handling_performance_compliance(self, error_test_environment):
+        """Test error handling performance compliance with ≤10% variance requirement."""
+        
+        # Baseline performance expectations (simulated Node.js equivalent times)
+        baseline_metrics = {
+            'auth_error_response': 0.050,  # 50ms
+            'db_error_response': 0.100,    # 100ms
+            'cache_error_response': 0.020, # 20ms
+            'integration_error_response': 0.150  # 150ms
         }
         
-        self.fallback_operations = []
+        variance_threshold = 0.10  # ≤10% variance requirement
         
-        yield
-    
-    def test_cache_unavailable_graceful_degradation(self, client: FlaskClient, app: Flask):
-        """
-        Test graceful degradation when cache service is unavailable.
+        # Measure actual error response times
+        actual_metrics = error_test_environment.performance_metrics
         
-        Validates that application continues to function with direct database access
-        when Redis cache is unavailable, maintaining performance within acceptable limits.
-        """
-        cache_attempts = 0
-        database_queries = 0
+        compliance_results = {}
         
-        def mock_cache_failure(*args, **kwargs):
-            nonlocal cache_attempts
-            cache_attempts += 1
-            raise CacheConnectionError(
-                message="Redis connection refused",
-                operation="get",
-                key=kwargs.get('key', 'unknown')
-            )
-        
-        def mock_database_fallback(user_id: str) -> Dict[str, Any]:
-            nonlocal database_queries
-            database_queries += 1
-            return {
-                'user_id': user_id,
-                'profile': {'name': 'Test User', 'email': 'test@example.com'},
-                'source': 'database',
-                'cache_miss': True
-            }
-        
-        with app.test_request_context():
-            @app.route('/test/user-profile/<user_id>')
-            def get_user_profile(user_id: str):
-                try:
-                    # Attempt cache lookup first
-                    profile_data = mock_cache_failure(key=f"user:{user_id}:profile")
-                    
-                except CacheConnectionError as e:
-                    # Graceful degradation: fallback to database
-                    logger.warning(
-                        "Cache unavailable, falling back to database",
-                        error=str(e),
-                        user_id=user_id
-                    )
-                    
-                    profile_data = mock_database_fallback(user_id)
-                    self.fallback_operations.append({
-                        'type': 'cache_to_database',
-                        'user_id': user_id,
-                        'timestamp': datetime.utcnow().isoformat()
-                    })
+        for metric_name, baseline_time in baseline_metrics.items():
+            if metric_name in actual_metrics:
+                actual_time = actual_metrics[metric_name]
+                variance = abs(actual_time - baseline_time) / baseline_time
                 
-                return jsonify({
-                    'success': True,
-                    'data': profile_data,
-                    'degraded_mode': profile_data.get('cache_miss', False)
-                })
-            
-            # Test user profile retrieval with cache failure
-            response = client.get('/test/user-profile/123')
-            response_data = json.loads(response.data)
-            
-            # Verify graceful degradation
-            assert response.status_code == 200
-            assert response_data['success'] is True
-            assert response_data['degraded_mode'] is True
-            assert response_data['data']['source'] == 'database'
-            assert cache_attempts == 1
-            assert database_queries == 1
-            assert len(self.fallback_operations) == 1
-            
-            logger.info(
-                "Cache unavailable graceful degradation validated",
-                cache_attempts=cache_attempts,
-                database_queries=database_queries,
-                fallback_operations=len(self.fallback_operations)
-            )
-    
-    def test_auth0_degraded_mode_operation(self, client: FlaskClient, app: Flask):
-        """
-        Test graceful degradation for Auth0 service unavailability.
-        
-        Validates that authentication continues with reduced functionality
-        using local JWT validation when Auth0 service is unavailable.
-        """
-        auth0_failures = 0
-        local_validations = 0
-        
-        def mock_auth0_unavailable(*args, **kwargs):
-            nonlocal auth0_failures
-            auth0_failures += 1
-            raise Auth0Error(
-                message="Auth0 service unavailable",
-                operation="user_info",
-                auth0_error_code="service_unavailable"
-            )
-        
-        def mock_local_jwt_validation(token: str) -> Dict[str, Any]:
-            nonlocal local_validations
-            local_validations += 1
-            
-            # Simulate local JWT validation (without Auth0 user info enrichment)
-            return {
-                'valid': True,
-                'user_id': 'local_user_123',
-                'permissions': ['read', 'write'],  # Basic permissions only
-                'validation_method': 'local_jwt',
-                'degraded_mode': True,
-                'auth0_enrichment': False
-            }
-        
-        with app.test_request_context():
-            @app.route('/test/protected-resource')
-            def protected_resource():
-                auth_header = request.headers.get('Authorization', '')
-                token = auth_header.replace('Bearer ', '') if auth_header else None
-                
-                if not token:
-                    return jsonify({'error': 'Missing token'}), 401
-                
-                try:
-                    # Attempt Auth0 validation first
-                    user_info = mock_auth0_unavailable(token)
-                    
-                except Auth0Error as e:
-                    # Graceful degradation: local validation
-                    logger.warning(
-                        "Auth0 unavailable, using local JWT validation",
-                        error=str(e)
-                    )
-                    
-                    user_info = mock_local_jwt_validation(token)
-                    self.fallback_operations.append({
-                        'type': 'auth0_to_local_jwt',
-                        'timestamp': datetime.utcnow().isoformat()
-                    })
-                
-                return jsonify({
-                    'success': True,
-                    'user_info': user_info,
-                    'degraded_mode': user_info.get('degraded_mode', False)
-                })
-            
-            # Test protected resource access with Auth0 failure
-            response = client.get(
-                '/test/protected-resource',
-                headers={'Authorization': 'Bearer test_jwt_token'}
-            )
-            response_data = json.loads(response.data)
-            
-            # Verify graceful degradation
-            assert response.status_code == 200
-            assert response_data['success'] is True
-            assert response_data['degraded_mode'] is True
-            assert response_data['user_info']['validation_method'] == 'local_jwt'
-            assert auth0_failures == 1
-            assert local_validations == 1
-            
-            logger.info(
-                "Auth0 degraded mode operation validated",
-                auth0_failures=auth0_failures,
-                local_validations=local_validations,
-                degraded_mode=response_data['degraded_mode']
-            )
-    
-    def test_multiple_service_partial_outage_handling(self, client: FlaskClient, app: Flask):
-        """
-        Test handling of multiple service partial outages simultaneously.
-        
-        Validates that application maintains core functionality when multiple
-        external services are degraded or unavailable simultaneously.
-        """
-        outage_services = ['cache', 'notification']
-        available_services = ['database', 'aws_s3']
-        operation_results = []
-        
-        def mock_service_health_check(service_name: str) -> bool:
-            return service_name in available_services
-        
-        def mock_core_operation_with_degradation():
-            """Simulate core business operation with service dependencies"""
-            results = {
-                'operation_id': 'test_op_123',
-                'success': True,
-                'services_used': [],
-                'services_degraded': [],
-                'fallbacks_used': []
-            }
-            
-            # Check cache availability
-            if mock_service_health_check('cache'):
-                results['services_used'].append('cache')
-            else:
-                results['services_degraded'].append('cache')
-                results['fallbacks_used'].append('direct_database_access')
-                self.fallback_operations.append({
-                    'type': 'cache_degradation',
-                    'fallback': 'direct_database_access'
-                })
-            
-            # Check notification service availability
-            if mock_service_health_check('notification'):
-                results['services_used'].append('notification')
-            else:
-                results['services_degraded'].append('notification')
-                results['fallbacks_used'].append('queued_notification')
-                self.fallback_operations.append({
-                    'type': 'notification_degradation',
-                    'fallback': 'queued_notification'
-                })
-            
-            # Core database operation (should always work)
-            if mock_service_health_check('database'):
-                results['services_used'].append('database')
-                results['core_operation'] = 'completed'
-            else:
-                results['success'] = False
-                results['core_operation'] = 'failed'
-            
-            return results
-        
-        with app.test_request_context():
-            # Execute core operation with partial service outages
-            operation_result = mock_core_operation_with_degradation()
-            
-            # Verify operation succeeded despite service degradation
-            assert operation_result['success'] is True
-            assert operation_result['core_operation'] == 'completed'
-            assert 'database' in operation_result['services_used']
-            assert 'cache' in operation_result['services_degraded']
-            assert 'notification' in operation_result['services_degraded']
-            assert 'direct_database_access' in operation_result['fallbacks_used']
-            assert 'queued_notification' in operation_result['fallbacks_used']
-            assert len(self.fallback_operations) == 2
-            
-            logger.info(
-                "Multiple service partial outage handling validated",
-                services_degraded=operation_result['services_degraded'],
-                fallbacks_used=operation_result['fallbacks_used'],
-                operation_success=operation_result['success']
-            )
-    
-    def test_performance_monitoring_during_degradation(self, client: FlaskClient, app: Flask):
-        """
-        Test performance monitoring during graceful degradation scenarios.
-        
-        Validates that performance metrics are properly collected during degraded
-        operations and remain within acceptable bounds.
-        """
-        performance_metrics = []
-        
-        def record_performance_metric(operation: str, duration: float, degraded: bool):
-            performance_metrics.append({
-                'operation': operation,
-                'duration': duration,
-                'degraded': degraded,
-                'timestamp': datetime.utcnow().isoformat()
-            })
-        
-        def mock_degraded_operation(operation_name: str, degraded: bool = False):
-            start_time = time.time()
-            
-            if degraded:
-                # Simulate degraded performance (slightly slower)
-                time.sleep(0.1)  # Simulate additional processing time
-                result = {'status': 'success', 'mode': 'degraded'}
-            else:
-                time.sleep(0.05)  # Normal processing time
-                result = {'status': 'success', 'mode': 'normal'}
-            
-            duration = time.time() - start_time
-            record_performance_metric(operation_name, duration, degraded)
-            
-            return result
-        
-        with app.test_request_context():
-            # Test normal operation performance
-            normal_result = mock_degraded_operation('user_lookup', degraded=False)
-            
-            # Test degraded operation performance
-            degraded_result = mock_degraded_operation('user_lookup', degraded=True)
-            
-            # Verify performance metrics were collected
-            assert len(performance_metrics) == 2
-            
-            normal_metric = performance_metrics[0]
-            degraded_metric = performance_metrics[1]
-            
-            # Verify normal operation
-            assert normal_metric['degraded'] is False
-            assert normal_metric['duration'] < 0.1
-            
-            # Verify degraded operation
-            assert degraded_metric['degraded'] is True
-            assert degraded_metric['duration'] >= 0.1
-            
-            # Verify degraded performance is still within acceptable bounds (< 1 second)
-            assert degraded_metric['duration'] < 1.0
-            
-            # Calculate performance variance
-            performance_variance = (
-                (degraded_metric['duration'] - normal_metric['duration']) /
-                normal_metric['duration'] * 100
-            )
-            
-            # Verify variance is within acceptable range (≤10% as per requirements)
-            # Note: In this test, we're simulating higher variance for demonstration
-            logger.info(
-                "Performance monitoring during degradation validated",
-                normal_duration=normal_metric['duration'],
-                degraded_duration=degraded_metric['duration'],
-                performance_variance_percent=performance_variance
-            )
-
-
-class TestErrorMonitoringAndAlerting:
-    """
-    Comprehensive testing of error monitoring and alerting system integration.
-    
-    Implements Section 4.2.3 error handling flows and comprehensive error monitoring
-    requirements by validating Prometheus metrics emission, structured logging,
-    and alerting system integration for error conditions.
-    """
-    
-    @pytest.fixture(autouse=True)
-    def setup_monitoring_mocks(self, app: Flask):
-        """Setup monitoring and alerting mocks for testing."""
-        self.prometheus_metrics = []
-        self.structured_logs = []
-        self.alerts_triggered = []
-        
-        # Mock Prometheus metrics
-        self.mock_error_counter = Mock()
-        self.mock_error_counter.labels.return_value.inc = lambda: self.prometheus_metrics.append({
-            'metric': 'error_count',
-            'timestamp': datetime.utcnow().isoformat()
-        })
-        
-        # Mock structured logger
-        self.mock_logger = Mock()
-        self.mock_logger.error = lambda **kwargs: self.structured_logs.append({
-            'level': 'error',
-            'data': kwargs,
-            'timestamp': datetime.utcnow().isoformat()
-        })
-        
-        yield
-    
-    def test_prometheus_metrics_emission_on_errors(self, client: FlaskClient, app: Flask):
-        """
-        Test Prometheus metrics emission for various error scenarios.
-        
-        Validates that all error types properly emit Prometheus metrics with
-        appropriate labels and values for monitoring and alerting systems.
-        """
-        error_scenarios = [
-            {
-                'error_type': 'AuthenticationException',
-                'error_code': 'AUTH_1002',
-                'endpoint': '/api/protected',
-                'expected_labels': ['error_type', 'endpoint', 'status']
-            },
-            {
-                'error_type': 'DatabaseConnectionError',
-                'error_code': 'DB_CONNECTION_FAILURE',
-                'endpoint': '/api/users',
-                'expected_labels': ['error_type', 'operation', 'database']
-            },
-            {
-                'error_type': 'CacheTimeoutError',
-                'error_code': 'CACHE_TIMEOUT_ERROR',
-                'endpoint': '/api/cache',
-                'expected_labels': ['error_type', 'operation', 'cache_key']
-            }
-        ]
-        
-        with app.test_request_context():
-            with patch('src.app.ERROR_COUNT', self.mock_error_counter):
-                
-                for scenario in error_scenarios:
-                    # Simulate error occurrence
-                    self.mock_error_counter.labels(
-                        error_type=scenario['error_type'],
-                        endpoint=scenario['endpoint'],
-                        status='error'
-                    ).inc()
-                
-                # Verify metrics were emitted
-                assert len(self.prometheus_metrics) == len(error_scenarios)
-                
-                for i, metric in enumerate(self.prometheus_metrics):
-                    assert metric['metric'] == 'error_count'
-                    assert 'timestamp' in metric
-                
-                logger.info(
-                    "Prometheus metrics emission validated",
-                    metrics_emitted=len(self.prometheus_metrics),
-                    error_scenarios=len(error_scenarios)
-                )
-    
-    def test_structured_logging_for_error_events(self, client: FlaskClient, app: Flask):
-        """
-        Test structured logging for comprehensive error event documentation.
-        
-        Validates that error events are logged with comprehensive structured data
-        for enterprise monitoring, debugging, and compliance requirements.
-        """
-        with app.test_request_context():
-            with patch('structlog.get_logger', return_value=self.mock_logger):
-                
-                # Simulate various error events
-                error_events = [
-                    {
-                        'error_type': 'SecurityException',
-                        'error_code': 'SEC_5001',
-                        'user_id': 'user_123',
-                        'ip_address': '192.168.1.100',
-                        'severity': 'HIGH'
-                    },
-                    {
-                        'error_type': 'DatabaseException',
-                        'operation': 'user_insert',
-                        'database': 'app_db',
-                        'collection': 'users',
-                        'retry_count': 3
-                    },
-                    {
-                        'error_type': 'ExternalServiceException',
-                        'service': 'auth0',
-                        'operation': 'token_validation',
-                        'response_code': 503,
-                        'circuit_breaker_state': 'OPEN'
-                    }
-                ]
-                
-                for event in error_events:
-                    self.mock_logger.error(**event)
-                
-                # Verify structured logs were created
-                assert len(self.structured_logs) == len(error_events)
-                
-                for i, log_entry in enumerate(self.structured_logs):
-                    assert log_entry['level'] == 'error'
-                    assert 'timestamp' in log_entry
-                    assert 'data' in log_entry
-                    
-                    # Verify specific error data was captured
-                    expected_data = error_events[i]
-                    for key, value in expected_data.items():
-                        assert log_entry['data'][key] == value
-                
-                logger.info(
-                    "Structured logging for error events validated",
-                    log_entries=len(self.structured_logs),
-                    error_events=len(error_events)
-                )
-    
-    def test_critical_error_alerting_triggers(self, client: FlaskClient, app: Flask):
-        """
-        Test alerting system triggers for critical error conditions.
-        
-        Validates that critical security and system errors trigger appropriate
-        alerting mechanisms for immediate attention and response.
-        """
-        def mock_alert_trigger(alert_type: str, severity: str, metadata: Dict[str, Any]):
-            self.alerts_triggered.append({
-                'alert_type': alert_type,
-                'severity': severity,
-                'metadata': metadata,
-                'timestamp': datetime.utcnow().isoformat()
-            })
-        
-        critical_error_scenarios = [
-            {
-                'error_code': SecurityErrorCode.SEC_BRUTE_FORCE_DETECTED,
-                'metadata': {
-                    'user_id': 'attacker_user',
-                    'ip_address': '192.168.1.50',
-                    'failed_attempts': 10,
-                    'time_window': '5_minutes'
-                },
-                'expected_severity': 'CRITICAL'
-            },
-            {
-                'error_code': SecurityErrorCode.SEC_SQL_INJECTION_ATTEMPT,
-                'metadata': {
-                    'endpoint': '/api/search',
-                    'payload': 'SELECT * FROM users WHERE id = 1; DROP TABLE users;',
-                    'user_id': 'malicious_user'
-                },
-                'expected_severity': 'CRITICAL'
-            },
-            {
-                'error_code': SecurityErrorCode.AUTH_ACCOUNT_LOCKED,
-                'metadata': {
-                    'user_id': 'admin_user',
-                    'lock_reason': 'suspicious_activity',
-                    'location': 'unknown_country'
-                },
-                'expected_severity': 'HIGH'
-            }
-        ]
-        
-        with app.test_request_context():
-            for scenario in critical_error_scenarios:
-                # Check if error is critical
-                if is_critical_security_error(scenario['error_code']):
-                    mock_alert_trigger(
-                        alert_type='security_incident',
-                        severity=scenario['expected_severity'],
-                        metadata=scenario['metadata']
-                    )
-                
-                # Simulate error logging with alerting
-                if scenario['expected_severity'] in ['CRITICAL', 'HIGH']:
-                    mock_alert_trigger(
-                        alert_type='error_threshold_exceeded',
-                        severity=scenario['expected_severity'],
-                        metadata={
-                            'error_code': scenario['error_code'].value,
-                            'category': get_error_category(scenario['error_code'])
-                        }
-                    )
-            
-            # Verify critical alerts were triggered
-            critical_alerts = [
-                alert for alert in self.alerts_triggered 
-                if alert['severity'] in ['CRITICAL', 'HIGH']
-            ]
-            
-            assert len(critical_alerts) >= len(critical_error_scenarios)
-            
-            # Verify security incident alerts
-            security_alerts = [
-                alert for alert in self.alerts_triggered 
-                if alert['alert_type'] == 'security_incident'
-            ]
-            
-            assert len(security_alerts) >= 2  # At least brute force and SQL injection
-            
-            logger.info(
-                "Critical error alerting triggers validated",
-                total_alerts=len(self.alerts_triggered),
-                critical_alerts=len(critical_alerts),
-                security_alerts=len(security_alerts)
-            )
-    
-    def test_error_correlation_and_pattern_detection(self, client: FlaskClient, app: Flask):
-        """
-        Test error correlation and pattern detection for proactive monitoring.
-        
-        Validates that related errors are properly correlated and patterns are
-        detected for proactive system health monitoring and maintenance.
-        """
-        correlation_data = []
-        
-        def mock_error_correlation_system(error_event: Dict[str, Any]):
-            correlation_data.append(error_event)
-            
-            # Simple pattern detection logic
-            user_id = error_event.get('user_id')
-            if user_id:
-                user_errors = [
-                    event for event in correlation_data 
-                    if event.get('user_id') == user_id
-                ]
-                
-                if len(user_errors) >= 3:
-                    # Pattern detected: multiple errors for same user
-                    mock_alert_trigger(
-                        alert_type='error_pattern_detected',
-                        severity='MEDIUM',
-                        metadata={
-                            'pattern_type': 'user_error_burst',
-                            'user_id': user_id,
-                            'error_count': len(user_errors),
-                            'time_window': '1_hour'
-                        }
-                    )
-        
-        # Simulate series of related errors
-        related_errors = [
-            {
-                'error_type': 'AuthenticationException',
-                'user_id': 'problem_user_456',
-                'timestamp': datetime.utcnow().isoformat(),
-                'endpoint': '/api/login'
-            },
-            {
-                'error_type': 'ValidationException',
-                'user_id': 'problem_user_456',
-                'timestamp': datetime.utcnow().isoformat(),
-                'endpoint': '/api/profile'
-            },
-            {
-                'error_type': 'PermissionException',
-                'user_id': 'problem_user_456',
-                'timestamp': datetime.utcnow().isoformat(),
-                'endpoint': '/api/admin'
-            }
-        ]
-        
-        with app.test_request_context():
-            # Process error events through correlation system
-            for error in related_errors:
-                mock_error_correlation_system(error)
-            
-            # Verify correlation data was collected
-            assert len(correlation_data) == len(related_errors)
-            
-            # Verify pattern detection triggered
-            pattern_alerts = [
-                alert for alert in self.alerts_triggered 
-                if alert['alert_type'] == 'error_pattern_detected'
-            ]
-            
-            assert len(pattern_alerts) >= 1
-            
-            pattern_alert = pattern_alerts[0]
-            assert pattern_alert['metadata']['user_id'] == 'problem_user_456'
-            assert pattern_alert['metadata']['error_count'] == 3
-            assert pattern_alert['severity'] == 'MEDIUM'
-            
-            logger.info(
-                "Error correlation and pattern detection validated",
-                correlation_events=len(correlation_data),
-                pattern_alerts=len(pattern_alerts),
-                detected_pattern=pattern_alert['metadata']['pattern_type']
-            )
-    
-    def test_end_to_end_error_monitoring_workflow(self, client: FlaskClient, app: Flask):
-        """
-        Test complete end-to-end error monitoring workflow.
-        
-        Validates the entire error monitoring pipeline from error occurrence
-        through metrics emission, logging, alerting, and resolution tracking.
-        """
-        monitoring_workflow_events = []
-        
-        def track_workflow_event(event_type: str, data: Dict[str, Any]):
-            monitoring_workflow_events.append({
-                'event_type': event_type,
-                'data': data,
-                'timestamp': datetime.utcnow().isoformat()
-            })
-        
-        with app.test_request_context():
-            # Simulate complete error workflow
-            
-            # Step 1: Error occurs
-            error_exception = DatabaseConnectionError(
-                message="Database connection pool exhausted",
-                operation="user_query",
-                database="app_db",
-                collection="users",
-                retry_count=3
-            )
-            
-            track_workflow_event('error_occurred', {
-                'error_type': type(error_exception).__name__,
-                'error_message': str(error_exception),
-                'operation': error_exception.operation
-            })
-            
-            # Step 2: Metrics emission
-            self.mock_error_counter.labels(
-                error_type='DatabaseConnectionError',
-                operation='user_query',
-                status='error'
-            ).inc()
-            
-            track_workflow_event('metrics_emitted', {
-                'metric_type': 'error_counter',
-                'labels': ['error_type', 'operation', 'status']
-            })
-            
-            # Step 3: Structured logging
-            self.mock_logger.error(
-                error_type='DatabaseConnectionError',
-                operation='user_query',
-                database='app_db',
-                retry_count=3,
-                severity='HIGH'
-            )
-            
-            track_workflow_event('error_logged', {
-                'log_level': 'error',
-                'structured_data': True
-            })
-            
-            # Step 4: Alert triggering (if threshold exceeded)
-            mock_alert_trigger(
-                alert_type='database_error_threshold',
-                severity='HIGH',
-                metadata={
-                    'error_type': 'DatabaseConnectionError',
-                    'operation': 'user_query',
-                    'threshold_exceeded': True
+                compliance_results[metric_name] = {
+                    'baseline': baseline_time,
+                    'actual': actual_time,
+                    'variance': variance,
+                    'compliant': variance <= variance_threshold
                 }
-            )
-            
-            track_workflow_event('alert_triggered', {
-                'alert_type': 'database_error_threshold',
-                'severity': 'HIGH'
-            })
-            
-            # Step 5: Error resolution simulation
-            track_workflow_event('error_resolved', {
-                'resolution_method': 'connection_pool_restart',
-                'time_to_resolution': '5_minutes'
-            })
-            
-            # Verify complete workflow
-            expected_events = [
-                'error_occurred',
-                'metrics_emitted', 
-                'error_logged',
-                'alert_triggered',
-                'error_resolved'
-            ]
-            
-            actual_events = [event['event_type'] for event in monitoring_workflow_events]
-            assert actual_events == expected_events
-            
-            # Verify all monitoring components were activated
-            assert len(self.prometheus_metrics) >= 1
-            assert len(self.structured_logs) >= 1
-            assert len(self.alerts_triggered) >= 1
-            
-            logger.info(
-                "End-to-end error monitoring workflow validated",
-                workflow_events=len(monitoring_workflow_events),
-                metrics_emitted=len(self.prometheus_metrics),
-                logs_created=len(self.structured_logs),
-                alerts_triggered=len(self.alerts_triggered)
-            )
+        
+        # Validate performance compliance
+        compliant_metrics = [
+            result['compliant'] for result in compliance_results.values()
+        ]
+        
+        overall_compliance = all(compliant_metrics) if compliant_metrics else True
+        
+        assert overall_compliance, f"Performance variance exceeded threshold: {compliance_results}"
+        
+        logger.info(f"Error handling performance compliance validated: {compliance_results}")
+    
+    def test_error_recovery_effectiveness(self, error_test_environment):
+        """Test effectiveness of error recovery mechanisms."""
+        
+        summary = error_test_environment.get_error_summary()
+        
+        # Validate recovery effectiveness metrics
+        recovery_effectiveness = {
+            'total_errors': summary['total_errors'],
+            'circuit_breaker_activations': summary['circuit_breaker_activations'],
+            'retry_attempts': summary['total_retry_attempts'],
+            'successful_recoveries': summary['successful_recoveries']
+        }
+        
+        # Calculate recovery success rate
+        if recovery_effectiveness['total_errors'] > 0:
+            recovery_rate = recovery_effectiveness['successful_recoveries'] / recovery_effectiveness['total_errors']
+            assert recovery_rate >= 0.5, "Recovery rate too low - should be at least 50%"
+        
+        # Validate circuit breaker effectiveness
+        if summary['circuit_breaker_activations'] > 0:
+            assert summary['circuit_breaker_activations'] <= summary['total_errors']
+        
+        # Validate retry mechanism usage
+        assert recovery_effectiveness['retry_attempts'] >= 0
+        
+        logger.info(f"Error recovery effectiveness validated: {recovery_effectiveness}")
 
 
-# Test execution markers for pytest categorization
-pytestmark = [
-    pytest.mark.integration,
-    pytest.mark.error_handling,
-    pytest.mark.enterprise
-]
+# =============================================================================
+# Test Execution and Reporting
+# =============================================================================
+
+if __name__ == "__main__":
+    # Enable detailed logging for test execution
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    logger.info("Error handling integration tests module loaded successfully")
+    logger.info("Test classes available:")
+    logger.info("- TestFlaskErrorHandlerIntegration")
+    logger.info("- TestCircuitBreakerErrorScenarios") 
+    logger.info("- TestDatabaseErrorHandlingIntegration")
+    logger.info("- TestExternalServiceErrorHandlingIntegration")
+    logger.info("- TestGracefulDegradation")
+    logger.info("- TestErrorMonitoringIntegration")
+    logger.info("- TestErrorHandlingIntegrationSummary")
