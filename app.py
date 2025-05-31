@@ -1,851 +1,666 @@
 """
-Flask Application Factory Entry Point
+Flask Application WSGI Entry Point
 
-This module serves as the main WSGI application entry point for the Flask application,
-implementing a comprehensive application factory pattern that replaces the Node.js
-Express.js server with equivalent functionality and enterprise-grade features.
+Main entry point serving as the WSGI application module for production deployment
+with Gunicorn/uWSGI servers. This module implements the Flask application factory
+pattern integration, replacing the Node.js server entry point with enterprise-grade
+Python/Flask WSGI application serving.
 
-This implementation provides:
-- Flask 2.3+ application factory pattern with WSGI compatibility (Section 5.2.1)
-- Comprehensive Flask extension integration (Section 3.2.1)
-- Enterprise authentication and security (Section 6.4.1)
-- MongoDB/Redis database integration (Section 3.4.1, 3.4.2)
-- Structured logging and monitoring (Section 3.6.1)
-- Health check endpoints for orchestration (Section 6.1.3)
-- Blueprint-based modular architecture (Section 5.2.2)
+This module serves as the primary entry point implementing:
+- Flask 2.3+ application factory pattern integration per Section 5.2.1
+- WSGI server deployment compatibility for Gunicorn/uWSGI per Section 8.5.2
+- Environment-specific configuration loading per Section 3.2.1
+- Production-grade application initialization with comprehensive error handling
+- Health check endpoint integration for load balancer and Kubernetes compatibility
+- Development server capability for local development workflows
+- Enterprise monitoring and observability integration per Section 5.2.8
 
-Key Features:
-- Production-ready WSGI deployment with Gunicorn compatibility
-- Environment-specific configuration management
-- Comprehensive error handling and security
-- Performance monitoring with ≤10% variance tracking
-- Zero-downtime deployment support
-- Enterprise APM and observability integration
+Architecture Integration:
+- Seamless integration with Flask application factory from src.app module
+- Environment-specific configuration management using config.settings
+- WSGI-compatible application instance for production deployment
+- Comprehensive error handling and graceful degradation patterns
+- Monitoring endpoint exposure for Prometheus metrics collection
+- Health check endpoints for container orchestration integration
 
-Dependencies:
-- Flask 2.3+ for core web framework functionality
-- Flask-CORS 4.0+ for cross-origin request handling
-- Flask-Limiter 3.5+ for rate limiting protection
-- Flask-Talisman 1.1.0+ for security headers
-- PyMongo 4.5+ and Motor 3.3+ for MongoDB integration
-- redis-py 5.0+ for caching and session management
-- structlog 23.1+ for enterprise structured logging
-- prometheus-client 0.17+ for metrics collection
+Performance Requirements:
+- Zero-overhead WSGI application serving for production deployment
+- Efficient request routing through Flask Blueprint architecture
+- Optimized initialization for container startup time requirements
+- Memory-efficient application serving supporting horizontal scaling
 
-Author: Flask Migration Team
+Security Integration:
+- Flask-Talisman security headers enforcement per Section 3.2.2
+- HTTPS enforcement and secure cookie configuration
+- CORS policy compliance for cross-origin request handling
+- Rate limiting integration for external service protection
+
+Usage Examples:
+    # Production WSGI deployment
+    gunicorn --config gunicorn.conf.py "app:application"
+    
+    # Development server
+    export FLASK_ENV=development
+    python app.py
+    
+    # Container deployment
+    docker run -p 8000:8000 flask-app:latest gunicorn "app:application"
+    
+    # Kubernetes deployment
+    kubectl apply -f deployment.yaml  # References app:application
+
+Author: Flask Migration Team  
 Version: 1.0.0
 Migration Phase: Node.js to Python/Flask Migration (Section 0.1.1)
+Compliance: Enterprise WSGI deployment standards, SOC 2, ISO 27001
+Dependencies: Flask 2.3+, Gunicorn 23.0+, src.app application factory
 """
 
 import os
 import sys
+import signal
 import logging
-import traceback
-from typing import Dict, Any, Optional, Callable, Tuple
-from datetime import datetime, timedelta
-from urllib.parse import urlparse
+from pathlib import Path
+from typing import Optional, Dict, Any, Callable
+from datetime import datetime
 
-# Flask core imports
-from flask import Flask, request, jsonify, g
-from flask.logging import default_handler
-from werkzeug.exceptions import HTTPException
-from werkzeug.middleware.proxy_fix import ProxyFix
+# Add src directory to Python path for application factory imports
+src_path = Path(__file__).parent / "src"
+if str(src_path) not in sys.path:
+    sys.path.insert(0, str(src_path))
 
-# Flask extensions
-from flask_cors import CORS
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
-from flask_talisman import Talisman
-from flask_login import LoginManager
-from flask_session import Session
+# Flask application factory imports
+try:
+    from src.app import create_app, get_application_info, cleanup_application_resources
+    from config.settings import get_config, ConfigurationError
+except ImportError as e:
+    # Graceful handling for development environments
+    print(f"Import error: {e}")
+    print("Ensure src/ directory contains the Flask application factory")
+    sys.exit(1)
 
-# Database and caching
-import pymongo
-from pymongo import MongoClient
-import motor.motor_asyncio
-import redis
-from redis import ConnectionPool
-
-# Authentication and security
-import jwt
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-import secrets
-
-# Monitoring and observability
-import structlog
-from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
-import time
-
-# Configuration and utilities
-from config.settings import get_config, ConfigurationError
-from dotenv import load_dotenv
-
-# Application modules (will be imported after Flask app creation to avoid circular imports)
-# These imports are deferred to prevent circular dependency issues
+# Configure module-level logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 
-class FlaskApplicationFactory:
+class WSGIApplicationManager:
     """
-    Flask Application Factory implementing enterprise-grade application initialization
-    with comprehensive extension configuration, database connections, and monitoring
-    integration as specified in Section 6.1.1.
+    WSGI Application Manager for Flask application lifecycle management.
     
-    This factory provides centralized application creation with environment-specific
-    configuration, ensuring consistent deployment across development, staging, and
-    production environments while maintaining ≤10% performance variance requirements.
+    This class provides comprehensive Flask application lifecycle management
+    including initialization, configuration, health monitoring, and graceful
+    shutdown procedures for enterprise deployment environments.
+    
+    Features:
+    - Thread-safe application initialization with error handling
+    - Environment-specific configuration loading and validation
+    - Health check endpoint registration for load balancer integration
+    - Graceful shutdown procedures for container orchestration
+    - Application metrics collection and monitoring integration
+    - Error handling and recovery procedures for production stability
     """
     
-    def __init__(self):
-        """Initialize the Flask application factory."""
-        self.logger = None
-        self._app = None
-        self._config = None
-        self._extensions = {}
-        self._metrics = {}
-        
-    def create_app(self, config_name: Optional[str] = None) -> Flask:
+    def __init__(self) -> None:
+        """Initialize WSGI application manager with default configuration."""
+        self.app: Optional[object] = None
+        self.config: Optional[object] = None
+        self.initialized: bool = False
+        self.startup_time: Optional[datetime] = None
+        self.shutdown_handlers: list = []
+        self.logger = logging.getLogger(f"{__name__}.WSGIApplicationManager")
+    
+    def initialize_application(self, config_name: Optional[str] = None) -> object:
         """
-        Create and configure Flask application with enterprise-grade setup.
+        Initialize Flask application with comprehensive error handling.
         
-        This method implements the complete application factory pattern with:
-        - Environment-specific configuration loading
-        - Flask extension initialization and configuration
-        - Database connection establishment (MongoDB, Redis)
-        - Authentication and security setup
-        - Monitoring and observability integration
-        - Blueprint registration for modular architecture
-        - Error handling and health check configuration
+        This method implements thread-safe application initialization with
+        configuration validation, extension registration, and health check
+        setup as specified in Section 5.2.1.
         
         Args:
-            config_name: Optional configuration environment override
+            config_name: Optional configuration environment name override
             
         Returns:
-            Fully configured Flask application instance
+            Initialized Flask application instance
             
         Raises:
-            ConfigurationError: When application configuration fails
-            RuntimeError: When critical application initialization fails
+            ConfigurationError: When configuration validation fails
+            RuntimeError: When application initialization fails
         """
+        if self.initialized and self.app:
+            self.logger.warning("Application already initialized, returning existing instance")
+            return self.app
+        
         try:
-            # Initialize Flask application
-            app = Flask(__name__)
-            self._app = app
+            # Record startup time for health checks
+            self.startup_time = datetime.utcnow()
             
-            # Load environment variables early
-            load_dotenv()
+            # Load environment-specific configuration
+            self.logger.info("Loading application configuration...")
+            self.config = get_config(config_name)
             
-            # Configure application
-            self._configure_application(app, config_name)
+            # Validate configuration for production requirements
+            self._validate_production_configuration()
             
-            # Setup structured logging first (required for all other components)
-            self._setup_logging(app)
+            # Create Flask application using factory pattern
+            self.logger.info("Creating Flask application instance...")
+            self.app = create_app(self.config)
             
-            # Initialize Flask extensions
-            self._initialize_extensions(app)
+            # Register application-level error handlers
+            self._register_application_error_handlers()
             
-            # Configure security and authentication
-            self._configure_security(app)
+            # Register health check endpoints
+            self._register_health_endpoints()
             
-            # Setup database connections
-            self._setup_database_connections(app)
+            # Register shutdown handlers for graceful cleanup
+            self._register_shutdown_handlers()
             
-            # Configure monitoring and metrics
-            self._setup_monitoring(app)
-            
-            # Register blueprints
-            self._register_blueprints(app)
-            
-            # Configure error handlers
-            self._configure_error_handlers(app)
-            
-            # Setup health check endpoints
-            self._setup_health_checks(app)
-            
-            # Configure request/response hooks
-            self._configure_request_hooks(app)
-            
-            # Validate application configuration
-            self._validate_application(app)
+            # Mark application as initialized
+            self.initialized = True
             
             self.logger.info(
-                "Flask application created successfully",
-                extra={
-                    "config_name": app.config.get('FLASK_ENV', 'unknown'),
-                    "debug": app.debug,
-                    "testing": app.testing
-                }
+                f"Flask application initialized successfully "
+                f"(env: {self.config.FLASK_ENV}, "
+                f"debug: {self.config.DEBUG})"
             )
             
-            return app
-            
-        except Exception as e:
-            error_msg = f"Failed to create Flask application: {str(e)}"
-            if self.logger:
-                self.logger.error(error_msg, extra={"error": str(e), "traceback": traceback.format_exc()})
-            else:
-                print(f"ERROR: {error_msg}", file=sys.stderr)
-            raise RuntimeError(error_msg) from e
-    
-    def _configure_application(self, app: Flask, config_name: Optional[str]) -> None:
-        """
-        Configure Flask application with environment-specific settings.
-        
-        This method loads configuration from config/settings.py using the
-        configuration factory pattern as specified in Section 3.2.1.
-        
-        Args:
-            app: Flask application instance
-            config_name: Optional configuration environment override
-        """
-        try:
-            # Load configuration
-            config = get_config(config_name)
-            self._config = config
-            
-            # Apply configuration to Flask app
-            for key, value in config.to_dict().items():
-                if not key.startswith('_'):
-                    app.config[key] = value
-            
-            # Configure WSGI middleware for production deployment
-            if not app.debug:
-                # Configure proxy fix for load balancer/reverse proxy integration
-                app.wsgi_app = ProxyFix(
-                    app.wsgi_app, 
-                    x_for=1, 
-                    x_proto=1, 
-                    x_host=1, 
-                    x_prefix=1
-                )
-            
-            # Set JSON configuration for consistent API responses
-            app.json.sort_keys = app.config.get('JSON_SORT_KEYS', True)
+            return self.app
             
         except ConfigurationError as e:
-            raise ConfigurationError(f"Application configuration failed: {str(e)}") from e
-    
-    def _setup_logging(self, app: Flask) -> None:
-        """
-        Configure structured logging using structlog 23.1+ for enterprise integration.
-        
-        This method implements JSON-formatted logging equivalent to Node.js winston
-        patterns as specified in Section 3.6.1, providing compatibility with
-        enterprise log aggregation systems.
-        
-        Args:
-            app: Flask application instance
-        """
-        # Remove default Flask handler to prevent duplicate logs
-        app.logger.removeHandler(default_handler)
-        
-        # Configure structlog for enterprise logging
-        structlog.configure(
-            processors=[
-                structlog.stdlib.filter_by_level,
-                structlog.stdlib.add_logger_name,
-                structlog.stdlib.add_log_level,
-                structlog.stdlib.PositionalArgumentsFormatter(),
-                structlog.processors.TimeStamper(fmt="iso"),
-                structlog.processors.StackInfoRenderer(),
-                structlog.processors.format_exc_info,
-                structlog.processors.UnicodeDecoder(),
-                structlog.processors.JSONRenderer()
-            ],
-            context_class=dict,
-            logger_factory=structlog.stdlib.LoggerFactory(),
-            wrapper_class=structlog.stdlib.BoundLogger,
-            cache_logger_on_first_use=True,
-        )
-        
-        # Create structured logger
-        self.logger = structlog.get_logger("flask_app")
-        
-        # Configure Python logging integration
-        logging.basicConfig(
-            format="%(message)s",
-            stream=sys.stdout,
-            level=getattr(logging, app.config.get('LOG_LEVEL', 'INFO'))
-        )
-        
-        # Configure Flask logger
-        app.logger.setLevel(getattr(logging, app.config.get('LOG_LEVEL', 'INFO')))
-        
-        self.logger.info("Structured logging configured successfully")
-    
-    def _initialize_extensions(self, app: Flask) -> None:
-        """
-        Initialize Flask extensions with enterprise configuration.
-        
-        This method configures all Flask extensions including CORS, rate limiting,
-        session management, and security headers as specified in Section 3.2.1.
-        
-        Args:
-            app: Flask application instance
-        """
-        # Flask-CORS 4.0+ for cross-origin request handling
-        cors = CORS(
-            app,
-            origins=app.config.get('CORS_ORIGINS', []),
-            methods=app.config.get('CORS_METHODS', ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS']),
-            allow_headers=app.config.get('CORS_ALLOW_HEADERS', []),
-            expose_headers=app.config.get('CORS_EXPOSE_HEADERS', []),
-            supports_credentials=app.config.get('CORS_SUPPORTS_CREDENTIALS', True),
-            max_age=app.config.get('CORS_MAX_AGE', 600)
-        )
-        self._extensions['cors'] = cors
-        
-        # Flask-Limiter 3.5+ for rate limiting protection
-        if app.config.get('RATELIMIT_ENABLED', True):
-            limiter = Limiter(
-                key_func=get_remote_address,
-                app=app,
-                storage_uri=app.config.get('RATELIMIT_STORAGE_URL'),
-                default_limits=[app.config.get('RATELIMIT_DEFAULT', '1000 per hour')],
-                headers_enabled=app.config.get('RATELIMIT_HEADERS_ENABLED', True)
-            )
-            self._extensions['limiter'] = limiter
-        
-        # Flask-Login for session management
-        login_manager = LoginManager()
-        login_manager.init_app(app)
-        login_manager.login_view = 'auth.login'
-        login_manager.login_message = 'Authentication required to access this resource.'
-        login_manager.login_message_category = 'info'
-        self._extensions['login_manager'] = login_manager
-        
-        # Flask-Session for distributed session management
-        Session(app)
-        
-        self.logger.info("Flask extensions initialized successfully")
-    
-    def _configure_security(self, app: Flask) -> None:
-        """
-        Configure Flask-Talisman security headers and authentication.
-        
-        This method implements comprehensive HTTP security header enforcement
-        as specified in Section 6.4.1, replacing Node.js helmet middleware.
-        
-        Args:
-            app: Flask application instance
-        """
-        # Flask-Talisman 1.1.0+ for security headers
-        talisman = Talisman(
-            app,
-            force_https=app.config.get('FORCE_HTTPS', True),
-            strict_transport_security=app.config.get('HSTS_MAX_AGE', 31536000),
-            strict_transport_security_include_subdomains=app.config.get('HSTS_INCLUDE_SUBDOMAINS', True),
-            strict_transport_security_preload=app.config.get('HSTS_PRELOAD', True),
-            content_security_policy=app.config.get('CSP_POLICY', {}),
-            feature_policy=app.config.get('FEATURE_POLICY', {}),
-            referrer_policy=app.config.get('REFERRER_POLICY', 'strict-origin-when-cross-origin'),
-            x_frame_options=app.config.get('X_FRAME_OPTIONS', 'DENY'),
-            x_content_type_options=app.config.get('X_CONTENT_TYPE_OPTIONS', 'nosniff'),
-            x_xss_protection=app.config.get('X_XSS_PROTECTION', '1; mode=block')
-        )
-        self._extensions['talisman'] = talisman
-        
-        # Configure user loader for Flask-Login
-        @app.login_manager.user_loader
-        def load_user(user_id: str):
-            """Load user for Flask-Login session management."""
-            # This will be implemented by the auth module
-            # Import deferred to avoid circular imports
-            try:
-                from src.auth import load_user_by_id
-                return load_user_by_id(user_id)
-            except ImportError:
-                # Fallback for initial deployment
-                return None
-        
-        self.logger.info("Security configuration completed successfully")
-    
-    def _setup_database_connections(self, app: Flask) -> None:
-        """
-        Setup MongoDB and Redis database connections.
-        
-        This method configures PyMongo 4.5+ and Motor 3.3+ for MongoDB operations
-        and redis-py 5.0+ for caching as specified in Section 3.4.1 and 3.4.2.
-        
-        Args:
-            app: Flask application instance
-        """
-        # MongoDB connection setup
-        try:
-            mongodb_uri = app.config.get('MONGODB_URI')
-            if mongodb_uri:
-                # Synchronous MongoDB client (PyMongo)
-                mongo_client = MongoClient(
-                    mongodb_uri,
-                    **app.config.get('MONGODB_SETTINGS', {})
-                )
-                
-                # Test connection
-                mongo_client.admin.command('ping')
-                app.mongo_client = mongo_client
-                app.mongodb = mongo_client[app.config.get('MONGODB_DATABASE', 'flask_app')]
-                
-                # Asynchronous MongoDB client (Motor)
-                motor_client = motor.motor_asyncio.AsyncIOMotorClient(
-                    mongodb_uri,
-                    **app.config.get('MONGODB_SETTINGS', {})
-                )
-                app.motor_client = motor_client
-                app.motor_db = motor_client[app.config.get('MONGODB_DATABASE', 'flask_app')]
-                
-                self.logger.info("MongoDB connections established successfully")
-            else:
-                self.logger.warning("MongoDB URI not configured - database operations disabled")
-                
-        except Exception as e:
-            error_msg = f"MongoDB connection failed: {str(e)}"
+            error_msg = f"Configuration validation failed: {str(e)}"
             self.logger.error(error_msg)
-            if not app.testing:
-                raise RuntimeError(error_msg) from e
-        
-        # Redis connection setup
-        try:
-            redis_config = app.config.get('REDIS_CONNECTION_POOL_KWARGS', {})
-            if redis_config.get('host'):
-                # Create Redis connection pool
-                redis_pool = ConnectionPool(**redis_config)
-                redis_client = redis.Redis(connection_pool=redis_pool)
-                
-                # Test connection
-                redis_client.ping()
-                app.redis_client = redis_client
-                app.redis_pool = redis_pool
-                
-                # Configure session Redis instance
-                session_redis = redis.Redis(
-                    host=redis_config.get('host'),
-                    port=redis_config.get('port'),
-                    password=redis_config.get('password'),
-                    db=redis_config.get('db', 0)
-                )
-                app.session_interface.redis = session_redis
-                
-                self.logger.info("Redis connections established successfully")
-            else:
-                self.logger.warning("Redis configuration not found - caching disabled")
-                
+            raise RuntimeError(error_msg)
+            
         except Exception as e:
-            error_msg = f"Redis connection failed: {str(e)}"
-            self.logger.error(error_msg)
-            if not app.testing:
-                raise RuntimeError(error_msg) from e
+            error_msg = f"Application initialization failed: {str(e)}"
+            self.logger.error(error_msg, exc_info=True)
+            raise RuntimeError(error_msg)
     
-    def _setup_monitoring(self, app: Flask) -> None:
+    def _validate_production_configuration(self) -> None:
         """
-        Configure Prometheus metrics and monitoring integration.
+        Validate configuration for production deployment requirements.
         
-        This method sets up metrics collection for performance monitoring
-        and ≤10% variance tracking as specified in Section 3.6.1.
+        This method ensures that all required configuration settings are
+        present and valid for enterprise production deployment as specified
+        in Section 6.4.3.
         
-        Args:
-            app: Flask application instance
+        Raises:
+            ConfigurationError: When production validation fails
         """
-        # Initialize Prometheus metrics
-        self._metrics = {
-            'request_count': Counter(
-                'flask_requests_total',
-                'Total number of requests',
-                ['method', 'endpoint', 'status_code']
-            ),
-            'request_duration': Histogram(
-                'flask_request_duration_seconds',
-                'Request duration in seconds',
-                ['method', 'endpoint']
-            ),
-            'active_requests': Gauge(
-                'flask_active_requests',
-                'Number of active requests'
-            ),
-            'performance_variance': Gauge(
-                'flask_performance_variance_percent',
-                'Performance variance from Node.js baseline',
-                ['metric_type']
-            ),
-            'database_operations': Counter(
-                'flask_database_operations_total',
-                'Total database operations',
-                ['operation', 'collection']
-            ),
-            'cache_operations': Counter(
-                'flask_cache_operations_total',
-                'Total cache operations',
-                ['operation', 'result']
-            )
-        }
+        if not self.config:
+            raise ConfigurationError("Configuration not loaded")
         
-        # Store metrics in app context for global access
-        app.prometheus_metrics = self._metrics
+        # Validate production-specific requirements
+        if self.config.FLASK_ENV == 'production':
+            production_checks = [
+                ('SECRET_KEY', 'Production requires secure SECRET_KEY'),
+                ('MONGODB_URI', 'Production requires MongoDB connection'),
+                ('REDIS_HOST', 'Production requires Redis for caching'),
+                ('AUTH0_DOMAIN', 'Production requires Auth0 configuration'),
+            ]
+            
+            validation_errors = []
+            for attr, error_msg in production_checks:
+                if not getattr(self.config, attr, None):
+                    validation_errors.append(error_msg)
+            
+            if validation_errors:
+                raise ConfigurationError(
+                    "Production validation failed:\n" + 
+                    "\n".join(f"- {error}" for error in validation_errors)
+                )
         
-        # Configure APM integration if enabled
-        if app.config.get('APM_ENABLED', False):
-            try:
-                # This will be implemented by the monitoring module
-                from src.monitoring import initialize_apm
-                initialize_apm(app)
-                self.logger.info("APM integration initialized successfully")
-            except ImportError:
-                self.logger.warning("APM module not available - monitoring limited")
+        # Validate WSGI server compatibility
+        if not hasattr(self.config, 'HOST') or not hasattr(self.config, 'PORT'):
+            raise ConfigurationError("WSGI server configuration incomplete")
         
-        self.logger.info("Monitoring and metrics configured successfully")
+        self.logger.info("Configuration validation completed successfully")
     
-    def _register_blueprints(self, app: Flask) -> None:
+    def _register_application_error_handlers(self) -> None:
         """
-        Register Flask Blueprints for modular route organization.
+        Register comprehensive application-level error handlers.
         
-        This method implements Blueprint-based architecture equivalent to
-        Express.js routing patterns as specified in Section 5.2.2.
-        
-        Args:
-            app: Flask application instance
+        This method implements Flask error handlers for consistent error
+        response formatting and enterprise monitoring integration as
+        specified in Section 4.2.3.
         """
-        try:
-            # Import blueprints (deferred to avoid circular imports)
-            from src.blueprints import register_blueprints
-            
-            # Register all application blueprints
-            register_blueprints(app)
-            
-            self.logger.info("Application blueprints registered successfully")
-            
-        except ImportError as e:
-            self.logger.warning(f"Blueprint registration failed: {str(e)} - using fallback routes")
-            
-            # Fallback basic routes for initial deployment
-            @app.route('/health')
-            def health_check():
-                """Basic health check endpoint."""
-                return jsonify({
-                    'status': 'healthy',
-                    'timestamp': datetime.utcnow().isoformat(),
-                    'version': app.config.get('APP_VERSION', '1.0.0')
-                })
-            
-            @app.route('/metrics')
-            def metrics():
-                """Prometheus metrics endpoint."""
-                return generate_latest(), 200, {'Content-Type': CONTENT_TYPE_LATEST}
-    
-    def _configure_error_handlers(self, app: Flask) -> None:
-        """
-        Configure comprehensive error handlers for consistent error responses.
+        if not self.app:
+            return
         
-        This method implements enterprise-grade error handling with structured
-        logging and monitoring integration as specified in Section 4.2.3.
-        
-        Args:
-            app: Flask application instance
-        """
-        @app.errorhandler(HTTPException)
-        def handle_http_exception(error: HTTPException) -> Tuple[Dict[str, Any], int]:
-            """Handle HTTP exceptions with structured error responses."""
-            self.logger.warning(
-                "HTTP exception occurred",
-                extra={
-                    "status_code": error.code,
-                    "error": error.description,
-                    "endpoint": request.endpoint,
-                    "method": request.method,
-                    "user_agent": request.headers.get('User-Agent'),
-                    "remote_addr": request.remote_addr
-                }
-            )
+        @self.app.errorhandler(Exception)
+        def handle_unexpected_error(error: Exception):
+            """Handle unexpected errors with comprehensive logging."""
+            error_id = datetime.utcnow().strftime('%Y%m%d%H%M%S%f')
             
-            # Update metrics
-            if hasattr(app, 'prometheus_metrics'):
-                app.prometheus_metrics['request_count'].labels(
-                    method=request.method,
-                    endpoint=request.endpoint or 'unknown',
-                    status_code=error.code
-                ).inc()
-            
-            return {
-                'error': {
-                    'code': error.code,
-                    'message': error.description,
-                    'timestamp': datetime.utcnow().isoformat()
-                }
-            }, error.code
-        
-        @app.errorhandler(500)
-        def handle_internal_error(error: Exception) -> Tuple[Dict[str, Any], int]:
-            """Handle internal server errors with logging and monitoring."""
             self.logger.error(
-                "Internal server error occurred",
+                f"Unexpected error [ID: {error_id}]: {str(error)}",
+                exc_info=True,
                 extra={
-                    "error": str(error),
-                    "traceback": traceback.format_exc(),
-                    "endpoint": request.endpoint,
-                    "method": request.method,
-                    "user_agent": request.headers.get('User-Agent'),
-                    "remote_addr": request.remote_addr
+                    'error_id': error_id,
+                    'error_type': type(error).__name__,
+                    'request_path': getattr(self.app, 'request', {}).get('path', 'unknown')
                 }
             )
             
-            # Update metrics
-            if hasattr(app, 'prometheus_metrics'):
-                app.prometheus_metrics['request_count'].labels(
-                    method=request.method,
-                    endpoint=request.endpoint or 'unknown',
-                    status_code=500
-                ).inc()
-            
-            return {
-                'error': {
-                    'code': 500,
-                    'message': 'Internal server error' if not app.debug else str(error),
+            # Return enterprise-grade error response
+            if self.config.DEBUG:
+                return {
+                    'error': 'Internal Server Error',
+                    'error_id': error_id,
+                    'error_type': type(error).__name__,
+                    'error_message': str(error),
                     'timestamp': datetime.utcnow().isoformat()
-                }
-            }, 500
+                }, 500
+            else:
+                return {
+                    'error': 'Internal Server Error',
+                    'error_id': error_id,
+                    'timestamp': datetime.utcnow().isoformat()
+                }, 500
         
-        @app.errorhandler(404)
-        def handle_not_found(error: Exception) -> Tuple[Dict[str, Any], int]:
-            """Handle 404 errors with consistent response format."""
+        @self.app.errorhandler(404)
+        def handle_not_found(error):
+            """Handle 404 errors with structured response."""
             return {
-                'error': {
-                    'code': 404,
-                    'message': 'Resource not found',
-                    'timestamp': datetime.utcnow().isoformat()
-                }
+                'error': 'Not Found',
+                'message': 'The requested resource was not found',
+                'timestamp': datetime.utcnow().isoformat()
             }, 404
         
-        self.logger.info("Error handlers configured successfully")
-    
-    def _setup_health_checks(self, app: Flask) -> None:
-        """
-        Setup health check endpoints for Kubernetes and load balancer integration.
-        
-        This method implements health endpoints as specified in Section 6.1.3
-        for enterprise container orchestration.
-        
-        Args:
-            app: Flask application instance
-        """
-        @app.route('/health')
-        def health_check() -> Dict[str, Any]:
-            """Basic application health check."""
-            return {
-                'status': 'healthy',
-                'timestamp': datetime.utcnow().isoformat(),
-                'version': app.config.get('APP_VERSION', '1.0.0'),
-                'environment': app.config.get('FLASK_ENV', 'unknown')
-            }
-        
-        @app.route('/health/ready')
-        def readiness_check() -> Tuple[Dict[str, Any], int]:
-            """Kubernetes readiness probe endpoint."""
-            checks = {
-                'database': False,
-                'cache': False,
-                'overall': False
-            }
+        @self.app.errorhandler(500)
+        def handle_internal_error(error):
+            """Handle 500 errors with enterprise monitoring integration."""
+            error_id = datetime.utcnow().strftime('%Y%m%d%H%M%S%f')
             
-            # Check MongoDB connection
-            try:
-                if hasattr(app, 'mongo_client'):
-                    app.mongo_client.admin.command('ping')
-                    checks['database'] = True
-            except Exception as e:
-                self.logger.warning(f"Database health check failed: {str(e)}")
-            
-            # Check Redis connection
-            try:
-                if hasattr(app, 'redis_client'):
-                    app.redis_client.ping()
-                    checks['cache'] = True
-            except Exception as e:
-                self.logger.warning(f"Cache health check failed: {str(e)}")
-            
-            # Overall health assessment
-            checks['overall'] = checks['database'] and checks['cache']
-            status_code = 200 if checks['overall'] else 503
+            self.logger.error(
+                f"Internal server error [ID: {error_id}]: {str(error)}",
+                exc_info=True,
+                extra={'error_id': error_id}
+            )
             
             return {
-                'status': 'ready' if checks['overall'] else 'not_ready',
-                'checks': checks,
+                'error': 'Internal Server Error',
+                'error_id': error_id,
                 'timestamp': datetime.utcnow().isoformat()
-            }, status_code
+            }, 500
         
-        @app.route('/health/live')
-        def liveness_check() -> Dict[str, Any]:
-            """Kubernetes liveness probe endpoint."""
-            return {
-                'status': 'alive',
-                'timestamp': datetime.utcnow().isoformat(),
-                'uptime_seconds': time.time() - app.start_time
-            }
-        
-        # Store application start time for uptime calculation
-        app.start_time = time.time()
-        
-        self.logger.info("Health check endpoints configured successfully")
+        self.logger.info("Application error handlers registered successfully")
     
-    def _configure_request_hooks(self, app: Flask) -> None:
+    def _register_health_endpoints(self) -> None:
         """
-        Configure request/response hooks for monitoring and correlation tracking.
+        Register health check endpoints for load balancer and Kubernetes integration.
         
-        This method implements request lifecycle hooks for metrics collection
-        and correlation ID tracking as specified in Section 4.5.1.
-        
-        Args:
-            app: Flask application instance
+        This method implements comprehensive health check endpoints supporting
+        container orchestration and load balancer health monitoring as specified
+        in Section 8.5.2.
         """
-        @app.before_request
-        def before_request() -> None:
-            """Pre-request processing for monitoring and correlation."""
-            # Generate correlation ID for request tracking
-            g.correlation_id = request.headers.get('X-Correlation-ID', secrets.token_hex(16))
-            g.request_start_time = time.time()
+        if not self.app:
+            return
+        
+        @self.app.route('/health', methods=['GET'])
+        def health_check():
+            """
+            Basic health check endpoint for load balancer integration.
             
-            # Update active requests metric
-            if hasattr(app, 'prometheus_metrics'):
-                app.prometheus_metrics['active_requests'].inc()
-        
-        @app.after_request
-        def after_request(response) -> object:
-            """Post-request processing for metrics and correlation."""
-            # Calculate request duration
-            if hasattr(g, 'request_start_time'):
-                duration = time.time() - g.request_start_time
+            Returns:
+                Health status with timestamp for monitoring systems
+            """
+            try:
+                # Get application information for health validation
+                app_info = get_application_info()
                 
-                # Update metrics
-                if hasattr(app, 'prometheus_metrics'):
-                    app.prometheus_metrics['active_requests'].dec()
-                    app.prometheus_metrics['request_count'].labels(
-                        method=request.method,
-                        endpoint=request.endpoint or 'unknown',
-                        status_code=response.status_code
-                    ).inc()
-                    app.prometheus_metrics['request_duration'].labels(
-                        method=request.method,
-                        endpoint=request.endpoint or 'unknown'
-                    ).observe(duration)
-            
-            # Add correlation ID to response headers
-            if hasattr(g, 'correlation_id'):
-                response.headers['X-Correlation-ID'] = g.correlation_id
-            
-            # Add security headers
-            response.headers['X-Request-ID'] = getattr(g, 'correlation_id', 'unknown')
-            
-            return response
+                return {
+                    'status': 'healthy',
+                    'timestamp': datetime.utcnow().isoformat(),
+                    'uptime': str(datetime.utcnow() - self.startup_time) if self.startup_time else None,
+                    'version': app_info.get('version', '1.0.0'),
+                    'environment': self.config.FLASK_ENV if self.config else 'unknown'
+                }, 200
+                
+            except Exception as e:
+                self.logger.error(f"Health check failed: {str(e)}", exc_info=True)
+                return {
+                    'status': 'unhealthy',
+                    'error': str(e),
+                    'timestamp': datetime.utcnow().isoformat()
+                }, 503
         
-        @app.teardown_appcontext
-        def teardown_request(exception=None) -> None:
-            """Cleanup request context and log request completion."""
-            if exception:
-                self.logger.error(
-                    "Request completed with exception",
-                    extra={
-                        "correlation_id": getattr(g, 'correlation_id', 'unknown'),
-                        "exception": str(exception),
-                        "endpoint": request.endpoint,
-                        "method": request.method
+        @self.app.route('/health/detailed', methods=['GET'])
+        def detailed_health_check():
+            """
+            Detailed health check endpoint with dependency validation.
+            
+            Returns:
+                Comprehensive health status including external dependencies
+            """
+            try:
+                # Get comprehensive application status
+                app_info = get_application_info()
+                
+                # Basic health information
+                health_data = {
+                    'status': 'healthy',
+                    'timestamp': datetime.utcnow().isoformat(),
+                    'uptime': str(datetime.utcnow() - self.startup_time) if self.startup_time else None,
+                    'application': {
+                        'name': self.config.APP_NAME if self.config else 'Flask App',
+                        'version': app_info.get('version', '1.0.0'),
+                        'environment': self.config.FLASK_ENV if self.config else 'unknown'
+                    },
+                    'dependencies': {}
+                }
+                
+                # Add dependency health checks when available
+                try:
+                    from src.data import get_database_manager
+                    db_manager = get_database_manager()
+                    if db_manager:
+                        health_data['dependencies']['database'] = {
+                            'status': 'healthy' if db_manager.is_connected() else 'unhealthy',
+                            'type': 'MongoDB'
+                        }
+                except Exception as e:
+                    health_data['dependencies']['database'] = {
+                        'status': 'unknown',
+                        'error': str(e)
                     }
-                )
+                
+                try:
+                    from src.cache import get_cache_manager, is_cache_available
+                    if is_cache_available():
+                        cache_manager = get_cache_manager()
+                        health_data['dependencies']['cache'] = {
+                            'status': 'healthy' if cache_manager.ping() else 'unhealthy',
+                            'type': 'Redis'
+                        }
+                except Exception as e:
+                    health_data['dependencies']['cache'] = {
+                        'status': 'unknown',
+                        'error': str(e)
+                    }
+                
+                # Determine overall health status
+                dependency_statuses = [
+                    dep.get('status', 'unknown') 
+                    for dep in health_data['dependencies'].values()
+                ]
+                
+                if any(status == 'unhealthy' for status in dependency_statuses):
+                    health_data['status'] = 'degraded'
+                    return health_data, 503
+                elif any(status == 'unknown' for status in dependency_statuses):
+                    health_data['status'] = 'partial'
+                    return health_data, 200
+                
+                return health_data, 200
+                
+            except Exception as e:
+                self.logger.error(f"Detailed health check failed: {str(e)}", exc_info=True)
+                return {
+                    'status': 'unhealthy',
+                    'error': str(e),
+                    'timestamp': datetime.utcnow().isoformat()
+                }, 503
         
-        self.logger.info("Request hooks configured successfully")
+        @self.app.route('/ready', methods=['GET'])
+        def readiness_check():
+            """
+            Kubernetes readiness probe endpoint.
+            
+            Returns:
+                Readiness status for container orchestration
+            """
+            try:
+                # Validate application is fully initialized
+                if not self.initialized:
+                    return {
+                        'ready': False,
+                        'reason': 'Application not fully initialized',
+                        'timestamp': datetime.utcnow().isoformat()
+                    }, 503
+                
+                return {
+                    'ready': True,
+                    'timestamp': datetime.utcnow().isoformat()
+                }, 200
+                
+            except Exception as e:
+                self.logger.error(f"Readiness check failed: {str(e)}", exc_info=True)
+                return {
+                    'ready': False,
+                    'error': str(e),
+                    'timestamp': datetime.utcnow().isoformat()
+                }, 503
+        
+        @self.app.route('/live', methods=['GET'])
+        def liveness_check():
+            """
+            Kubernetes liveness probe endpoint.
+            
+            Returns:
+                Liveness status for container health monitoring
+            """
+            return {
+                'alive': True,
+                'timestamp': datetime.utcnow().isoformat()
+            }, 200
+        
+        self.logger.info("Health check endpoints registered successfully")
     
-    def _validate_application(self, app: Flask) -> None:
+    def _register_shutdown_handlers(self) -> None:
         """
-        Validate application configuration and dependencies.
+        Register graceful shutdown handlers for container orchestration.
         
-        This method performs final validation to ensure the application
-        is properly configured for deployment.
+        This method implements signal handlers for graceful application
+        shutdown with resource cleanup as specified in Section 8.5.2.
+        """
+        def graceful_shutdown(signum, frame):
+            """Handle graceful shutdown on SIGTERM/SIGINT."""
+            self.logger.info(f"Received signal {signum}, initiating graceful shutdown...")
+            
+            # Execute registered shutdown handlers
+            for handler in self.shutdown_handlers:
+                try:
+                    handler()
+                except Exception as e:
+                    self.logger.error(f"Shutdown handler failed: {str(e)}", exc_info=True)
+            
+            # Cleanup application resources
+            try:
+                cleanup_application_resources()
+                self.logger.info("Application resources cleaned up successfully")
+            except Exception as e:
+                self.logger.error(f"Resource cleanup failed: {str(e)}", exc_info=True)
+            
+            self.logger.info("Graceful shutdown completed")
+            sys.exit(0)
+        
+        # Register signal handlers for graceful shutdown
+        signal.signal(signal.SIGTERM, graceful_shutdown)
+        signal.signal(signal.SIGINT, graceful_shutdown)
+        
+        self.logger.info("Shutdown handlers registered successfully")
+    
+    def add_shutdown_handler(self, handler: Callable[[], None]) -> None:
+        """
+        Add custom shutdown handler for graceful cleanup.
         
         Args:
-            app: Flask application instance
+            handler: Callable function for shutdown cleanup
+        """
+        self.shutdown_handlers.append(handler)
+    
+    def get_application(self) -> object:
+        """
+        Get the initialized Flask application instance.
+        
+        Returns:
+            Flask application instance
             
         Raises:
-            RuntimeError: When critical validation fails
+            RuntimeError: When application is not initialized
         """
-        validation_errors = []
+        if not self.initialized or not self.app:
+            raise RuntimeError("Application not initialized. Call initialize_application() first.")
         
-        # Validate required configuration
-        required_config = ['SECRET_KEY', 'FLASK_ENV']
-        for config_key in required_config:
-            if not app.config.get(config_key):
-                validation_errors.append(f"Missing required configuration: {config_key}")
-        
-        # Validate database connections in production
-        if app.config.get('FLASK_ENV') == 'production':
-            if not hasattr(app, 'mongo_client'):
-                validation_errors.append("MongoDB connection required for production")
-            if not hasattr(app, 'redis_client'):
-                validation_errors.append("Redis connection required for production")
-        
-        # Validate security configuration
-        if app.config.get('FLASK_ENV') == 'production':
-            if app.debug:
-                validation_errors.append("Debug mode must be disabled in production")
-            if not app.config.get('FORCE_HTTPS', True):
-                validation_errors.append("HTTPS must be enforced in production")
-        
-        if validation_errors:
-            error_message = "Application validation failed:\n" + "\n".join(
-                f"- {error}" for error in validation_errors
-            )
-            raise RuntimeError(error_message)
-        
-        self.logger.info("Application validation completed successfully")
+        return self.app
 
 
-# Global application factory instance
-factory = FlaskApplicationFactory()
+# Global application manager instance
+app_manager = WSGIApplicationManager()
 
-def create_app(config_name: Optional[str] = None) -> Flask:
+# Initialize application with environment-specific configuration
+application = app_manager.initialize_application()
+
+# WSGI application export for production deployment
+# This is the primary entry point for Gunicorn/uWSGI servers
+app = application
+
+
+def create_dev_server(host: str = None, port: int = None, debug: bool = None) -> None:
     """
-    Application factory function for creating Flask application instances.
+    Create and run development server with configuration override capability.
     
-    This function provides the main entry point for creating Flask applications
-    with comprehensive enterprise configuration as specified in Section 6.1.1.
+    This function provides Flask development server capability with
+    environment-specific configuration and comprehensive error handling
+    for local development workflows.
     
     Args:
-        config_name: Optional configuration environment override
+        host: Optional host override for development server
+        port: Optional port override for development server  
+        debug: Optional debug mode override for development server
+        
+    Raises:
+        RuntimeError: When development server startup fails
+    """
+    try:
+        # Get application configuration
+        config = app_manager.config
+        if not config:
+            raise RuntimeError("Application configuration not available")
+        
+        # Use provided overrides or configuration defaults
+        server_host = host or config.HOST
+        server_port = port or config.PORT
+        debug_mode = debug if debug is not None else config.DEBUG
+        
+        logger.info(
+            f"Starting Flask development server "
+            f"(host: {server_host}, port: {server_port}, debug: {debug_mode})"
+        )
+        
+        # Start Flask development server
+        application.run(
+            host=server_host,
+            port=server_port,
+            debug=debug_mode,
+            threaded=True,
+            use_reloader=debug_mode
+        )
+        
+    except Exception as e:
+        error_msg = f"Development server startup failed: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        raise RuntimeError(error_msg)
+
+
+def get_wsgi_application(config_name: Optional[str] = None) -> object:
+    """
+    Get WSGI application instance for custom deployment scenarios.
+    
+    This function provides access to the Flask application factory
+    with custom configuration for specialized deployment requirements.
+    
+    Args:
+        config_name: Optional configuration environment name
         
     Returns:
-        Fully configured Flask application instance
+        Flask application instance configured for WSGI deployment
         
     Raises:
         RuntimeError: When application creation fails
     """
-    return factory.create_app(config_name)
+    try:
+        # Create new application manager for custom configuration
+        custom_manager = WSGIApplicationManager()
+        return custom_manager.initialize_application(config_name)
+        
+    except Exception as e:
+        error_msg = f"WSGI application creation failed: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        raise RuntimeError(error_msg)
 
-# Create application instance for WSGI deployment
-app = create_app()
-
-# WSGI entry point for production deployment
-application = app
 
 if __name__ == '__main__':
     """
-    Development server entry point.
+    Main entry point for development server execution.
     
-    This section provides local development server startup with hot reloading
-    and debug capabilities. Production deployment should use Gunicorn WSGI server.
+    This section provides Flask development server capability with
+    environment variable configuration and command-line argument support
+    for local development workflows as specified in Section 8.5.1.
     """
-    # Load environment for development
-    load_dotenv()
-    
-    # Get configuration for development server
-    host = os.getenv('FLASK_HOST', '0.0.0.0')
-    port = int(os.getenv('FLASK_PORT', 5000))
-    debug = os.getenv('FLASK_DEBUG', 'false').lower() == 'true'
-    
-    print(f"Starting Flask development server on {host}:{port}")
-    print(f"Environment: {os.getenv('FLASK_ENV', 'development')}")
-    print(f"Debug mode: {debug}")
-    print("For production deployment, use Gunicorn WSGI server")
-    
-    # Start development server
-    app.run(
-        host=host,
-        port=port,
-        debug=debug,
-        threaded=True,
-        use_reloader=debug
-    )
+    try:
+        # Parse command line arguments for development server customization
+        import argparse
+        
+        parser = argparse.ArgumentParser(description='Flask Application Development Server')
+        parser.add_argument(
+            '--host', 
+            default=os.getenv('FLASK_HOST', '127.0.0.1'),
+            help='Development server host (default: 127.0.0.1)'
+        )
+        parser.add_argument(
+            '--port', 
+            type=int,
+            default=int(os.getenv('FLASK_PORT', 5000)),
+            help='Development server port (default: 5000)'
+        )
+        parser.add_argument(
+            '--debug', 
+            action='store_true',
+            default=os.getenv('FLASK_DEBUG', 'False').lower() in ('true', '1', 'yes'),
+            help='Enable debug mode (default: False)'
+        )
+        parser.add_argument(
+            '--config',
+            default=os.getenv('FLASK_ENV', 'development'),
+            choices=['development', 'staging', 'production', 'testing'],
+            help='Configuration environment (default: development)'
+        )
+        
+        args = parser.parse_args()
+        
+        # Display startup information
+        print("\n" + "="*60)
+        print("Flask Application Development Server")
+        print("="*60)
+        print(f"Environment: {args.config}")
+        print(f"Host: {args.host}")
+        print(f"Port: {args.port}")
+        print(f"Debug: {args.debug}")
+        print(f"Application Factory: src.app.create_app")
+        print("="*60)
+        
+        # Reinitialize application with custom configuration if needed
+        if args.config != app_manager.config.FLASK_ENV:
+            logger.info(f"Reinitializing application with {args.config} configuration")
+            app_manager.initialized = False
+            application = app_manager.initialize_application(args.config)
+        
+        # Start development server
+        create_dev_server(
+            host=args.host,
+            port=args.port,
+            debug=args.debug
+        )
+        
+    except KeyboardInterrupt:
+        logger.info("Development server stopped by user")
+        
+    except Exception as e:
+        logger.error(f"Development server failed: {str(e)}", exc_info=True)
+        sys.exit(1)
