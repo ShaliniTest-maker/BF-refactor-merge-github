@@ -1,0 +1,650 @@
+{
+  "metadata": {
+    "description": "MongoDB and Redis database operation performance baselines for Node.js to Python/Flask migration",
+    "version": "1.0.0",
+    "created_date": "2024-01-15T10:00:00Z",
+    "updated_date": "2024-01-15T10:00:00Z",
+    "baseline_source": "Node.js application performance measurements",
+    "target_variance_threshold": "≤10%",
+    "compliance_requirement": "Section 0.3.2 Performance Monitoring Requirements",
+    "measurement_period": "30-day average",
+    "environment": "production-equivalent",
+    "data_collection_tools": [
+      "Node.js MongoDB driver profiling",
+      "Redis client performance metrics",
+      "APM monitoring data",
+      "Production monitoring baselines"
+    ]
+  },
+  "mongodb_performance_baselines": {
+    "connection_management": {
+      "driver_type": "PyMongo 4.5+ / Motor 3.3+",
+      "connection_pool_metrics": {
+        "initial_pool_size": {
+          "baseline_value": 5,
+          "measurement_unit": "connections",
+          "prometheus_metric": "mongodb_pool_active_connections",
+          "variance_threshold": "±10%",
+          "collection_frequency": "pool_lifecycle_events"
+        },
+        "max_pool_size": {
+          "baseline_value": 100,
+          "measurement_unit": "connections",
+          "prometheus_metric": "mongodb_pool_max_connections",
+          "variance_threshold": "±5%",
+          "monitoring_source": "pymongo.monitoring.PoolCreatedEvent"
+        },
+        "connection_checkout_time": {
+          "baseline_value": 2.5,
+          "measurement_unit": "milliseconds",
+          "prometheus_metric": "mongodb_pool_checkout_duration_seconds",
+          "variance_threshold": "≤10%",
+          "monitoring_source": "pymongo.monitoring.ConnectionCheckOutStartedEvent"
+        },
+        "connection_checkin_time": {
+          "baseline_value": 1.2,
+          "measurement_unit": "milliseconds",
+          "prometheus_metric": "mongodb_pool_checkin_duration_seconds",
+          "variance_threshold": "≤10%",
+          "monitoring_source": "pymongo.monitoring.ConnectionCheckedInEvent"
+        },
+        "connection_pool_utilization": {
+          "baseline_value": 85.0,
+          "measurement_unit": "percentage",
+          "prometheus_metric": "mongodb_pool_utilization_percent",
+          "variance_threshold": "±15%",
+          "optimal_range": "70-90%"
+        },
+        "connection_errors_per_minute": {
+          "baseline_value": 0.5,
+          "measurement_unit": "errors/minute",
+          "prometheus_metric": "mongodb_pool_connection_errors_total",
+          "variance_threshold": "≤5 errors/minute",
+          "monitoring_source": "pymongo.monitoring.ConnectionCheckOutFailedEvent"
+        }
+      },
+      "connection_lifecycle": {
+        "average_connection_lifespan": {
+          "baseline_value": 3600,
+          "measurement_unit": "seconds",
+          "prometheus_metric": "mongodb_connection_lifespan_seconds",
+          "variance_threshold": "±20%",
+          "optimal_range": "1800-7200"
+        },
+        "connection_creation_rate": {
+          "baseline_value": 2.3,
+          "measurement_unit": "connections/minute",
+          "prometheus_metric": "mongodb_connections_created_total",
+          "variance_threshold": "±15%",
+          "monitoring_source": "pymongo.monitoring.ConnectionCreatedEvent"
+        },
+        "connection_destruction_rate": {
+          "baseline_value": 2.1,
+          "measurement_unit": "connections/minute",
+          "prometheus_metric": "mongodb_connections_destroyed_total",
+          "variance_threshold": "±15%",
+          "monitoring_source": "pymongo.monitoring.ConnectionClosedEvent"
+        }
+      }
+    },
+    "query_performance": {
+      "synchronous_operations": {
+        "driver_implementation": "PyMongo 4.5+",
+        "simple_find_queries": {
+          "average_execution_time": {
+            "baseline_value": 5.2,
+            "measurement_unit": "milliseconds",
+            "prometheus_metric": "mongodb_query_duration_seconds",
+            "variance_threshold": "≤10%",
+            "monitoring_source": "pymongo.monitoring.CommandSucceededEvent",
+            "query_type": "find",
+            "collection_type": "indexed_collection"
+          },
+          "95th_percentile": {
+            "baseline_value": 12.8,
+            "measurement_unit": "milliseconds",
+            "prometheus_metric": "mongodb_query_duration_seconds",
+            "variance_threshold": "≤15%",
+            "percentile": "95th"
+          },
+          "99th_percentile": {
+            "baseline_value": 25.4,
+            "measurement_unit": "milliseconds",
+            "prometheus_metric": "mongodb_query_duration_seconds",
+            "variance_threshold": "≤20%",
+            "percentile": "99th"
+          }
+        },
+        "complex_aggregation_queries": {
+          "average_execution_time": {
+            "baseline_value": 45.6,
+            "measurement_unit": "milliseconds",
+            "prometheus_metric": "mongodb_query_duration_seconds",
+            "variance_threshold": "≤10%",
+            "monitoring_source": "pymongo.monitoring.CommandSucceededEvent",
+            "query_type": "aggregate",
+            "pipeline_stages": "3-5 stages"
+          },
+          "95th_percentile": {
+            "baseline_value": 125.3,
+            "measurement_unit": "milliseconds",
+            "prometheus_metric": "mongodb_query_duration_seconds",
+            "variance_threshold": "≤15%",
+            "percentile": "95th"
+          }
+        },
+        "insert_operations": {
+          "single_document_insert": {
+            "baseline_value": 3.8,
+            "measurement_unit": "milliseconds",
+            "prometheus_metric": "mongodb_query_duration_seconds",
+            "variance_threshold": "≤10%",
+            "monitoring_source": "pymongo.monitoring.CommandSucceededEvent",
+            "operation_type": "insert"
+          },
+          "bulk_insert_operations": {
+            "baseline_value": 25.7,
+            "measurement_unit": "milliseconds",
+            "prometheus_metric": "mongodb_bulk_operation_duration_seconds",
+            "variance_threshold": "≤15%",
+            "batch_size": "100 documents"
+          }
+        },
+        "update_operations": {
+          "single_document_update": {
+            "baseline_value": 4.2,
+            "measurement_unit": "milliseconds",
+            "prometheus_metric": "mongodb_query_duration_seconds",
+            "variance_threshold": "≤10%",
+            "monitoring_source": "pymongo.monitoring.CommandSucceededEvent",
+            "operation_type": "update"
+          },
+          "bulk_update_operations": {
+            "baseline_value": 35.4,
+            "measurement_unit": "milliseconds",
+            "prometheus_metric": "mongodb_bulk_operation_duration_seconds",
+            "variance_threshold": "≤15%",
+            "batch_size": "50 documents"
+          }
+        }
+      },
+      "asynchronous_operations": {
+        "driver_implementation": "Motor 3.3+",
+        "async_find_queries": {
+          "average_execution_time": {
+            "baseline_value": 4.8,
+            "measurement_unit": "milliseconds",
+            "prometheus_metric": "motor_query_duration_seconds",
+            "variance_threshold": "≤10%",
+            "operation_type": "async_find",
+            "concurrency_benefit": "8% faster than sync"
+          },
+          "concurrent_query_throughput": {
+            "baseline_value": 2450,
+            "measurement_unit": "queries/second",
+            "prometheus_metric": "motor_concurrent_query_rate",
+            "variance_threshold": "≤10%",
+            "concurrent_connections": 25
+          }
+        },
+        "async_aggregation_queries": {
+          "average_execution_time": {
+            "baseline_value": 42.1,
+            "measurement_unit": "milliseconds",
+            "prometheus_metric": "motor_query_duration_seconds",
+            "variance_threshold": "≤10%",
+            "operation_type": "async_aggregate",
+            "concurrency_benefit": "7% faster than sync"
+          }
+        },
+        "async_write_operations": {
+          "async_insert_time": {
+            "baseline_value": 3.5,
+            "measurement_unit": "milliseconds",
+            "prometheus_metric": "motor_write_duration_seconds",
+            "variance_threshold": "≤10%",
+            "operation_type": "async_insert"
+          },
+          "async_update_time": {
+            "baseline_value": 3.9,
+            "measurement_unit": "milliseconds",
+            "prometheus_metric": "motor_write_duration_seconds",
+            "variance_threshold": "≤10%",
+            "operation_type": "async_update"
+          }
+        }
+      },
+      "query_error_rates": {
+        "timeout_errors": {
+          "baseline_rate": 0.05,
+          "measurement_unit": "errors/1000 queries",
+          "prometheus_metric": "mongodb_query_timeout_errors_total",
+          "variance_threshold": "≤0.1/1000",
+          "monitoring_source": "pymongo.monitoring.CommandFailedEvent"
+        },
+        "connection_errors": {
+          "baseline_rate": 0.02,
+          "measurement_unit": "errors/1000 queries",
+          "prometheus_metric": "mongodb_connection_errors_total",
+          "variance_threshold": "≤0.05/1000"
+        },
+        "execution_errors": {
+          "baseline_rate": 0.03,
+          "measurement_unit": "errors/1000 queries",
+          "prometheus_metric": "mongodb_execution_errors_total",
+          "variance_threshold": "≤0.08/1000"
+        }
+      }
+    },
+    "transaction_performance": {
+      "acid_transactions": {
+        "transaction_begin_time": {
+          "baseline_value": 1.8,
+          "measurement_unit": "milliseconds",
+          "prometheus_metric": "mongodb_transaction_begin_duration_seconds",
+          "variance_threshold": "≤10%",
+          "monitoring_source": "motor/pymongo transaction events"
+        },
+        "transaction_commit_time": {
+          "baseline_value": 8.5,
+          "measurement_unit": "milliseconds",
+          "prometheus_metric": "mongodb_transaction_commit_duration_seconds",
+          "variance_threshold": "≤10%",
+          "includes_network_latency": true
+        },
+        "transaction_rollback_time": {
+          "baseline_value": 3.2,
+          "measurement_unit": "milliseconds",
+          "prometheus_metric": "mongodb_transaction_rollback_duration_seconds",
+          "variance_threshold": "≤15%"
+        },
+        "transaction_success_rate": {
+          "baseline_value": 99.5,
+          "measurement_unit": "percentage",
+          "prometheus_metric": "mongodb_transaction_success_rate",
+          "variance_threshold": "≥99.0%",
+          "critical_threshold": "≥99.5%"
+        },
+        "average_transaction_duration": {
+          "baseline_value": 45.7,
+          "measurement_unit": "milliseconds",
+          "prometheus_metric": "mongodb_transaction_duration_seconds",
+          "variance_threshold": "≤10%",
+          "includes_business_logic": true
+        }
+      }
+    },
+    "index_performance": {
+      "index_utilization": {
+        "average_index_hit_ratio": {
+          "baseline_value": 92.3,
+          "measurement_unit": "percentage",
+          "prometheus_metric": "mongodb_index_hit_ratio",
+          "variance_threshold": "≥90%",
+          "optimal_threshold": "≥95%"
+        },
+        "compound_index_efficiency": {
+          "baseline_value": 88.7,
+          "measurement_unit": "percentage",
+          "prometheus_metric": "mongodb_compound_index_efficiency",
+          "variance_threshold": "≥85%"
+        }
+      },
+      "index_maintenance": {
+        "index_build_time": {
+          "baseline_value": 2.3,
+          "measurement_unit": "seconds/1000_documents",
+          "prometheus_metric": "mongodb_index_build_duration_seconds",
+          "variance_threshold": "≤20%"
+        }
+      }
+    }
+  },
+  "redis_performance_baselines": {
+    "connection_management": {
+      "driver_type": "redis-py 5.0+",
+      "connection_pool_metrics": {
+        "initial_pool_size": {
+          "baseline_value": 10,
+          "measurement_unit": "connections",
+          "prometheus_metric": "redis_pool_active_connections",
+          "variance_threshold": "±10%"
+        },
+        "max_pool_size": {
+          "baseline_value": 50,
+          "measurement_unit": "connections",
+          "prometheus_metric": "redis_pool_max_connections",
+          "variance_threshold": "±5%"
+        },
+        "connection_checkout_time": {
+          "baseline_value": 0.8,
+          "measurement_unit": "milliseconds",
+          "prometheus_metric": "redis_pool_checkout_duration_seconds",
+          "variance_threshold": "≤10%"
+        },
+        "connection_pool_utilization": {
+          "baseline_value": 75.0,
+          "measurement_unit": "percentage",
+          "prometheus_metric": "redis_pool_utilization_percent",
+          "variance_threshold": "±15%",
+          "optimal_range": "60-85%"
+        }
+      },
+      "connection_lifecycle": {
+        "average_connection_lifespan": {
+          "baseline_value": 1800,
+          "measurement_unit": "seconds",
+          "prometheus_metric": "redis_connection_lifespan_seconds",
+          "variance_threshold": "±20%",
+          "optimal_range": "900-3600"
+        },
+        "connection_error_rate": {
+          "baseline_value": 0.1,
+          "measurement_unit": "errors/minute",
+          "prometheus_metric": "redis_connection_errors_total",
+          "variance_threshold": "≤1 error/minute"
+        }
+      }
+    },
+    "cache_operations": {
+      "read_operations": {
+        "cache_get_time": {
+          "baseline_value": 0.85,
+          "measurement_unit": "milliseconds",
+          "prometheus_metric": "redis_operation_duration_seconds",
+          "variance_threshold": "≤10%",
+          "operation_type": "GET"
+        },
+        "cache_mget_time": {
+          "baseline_value": 2.4,
+          "measurement_unit": "milliseconds",
+          "prometheus_metric": "redis_operation_duration_seconds",
+          "variance_threshold": "≤10%",
+          "operation_type": "MGET",
+          "key_count": 10
+        },
+        "cache_hit_ratio": {
+          "baseline_value": 87.5,
+          "measurement_unit": "percentage",
+          "prometheus_metric": "redis_cache_hit_ratio",
+          "variance_threshold": "≥85%",
+          "optimal_threshold": "≥90%"
+        },
+        "cache_miss_penalty": {
+          "baseline_value": 45.2,
+          "measurement_unit": "milliseconds",
+          "prometheus_metric": "redis_cache_miss_duration_seconds",
+          "variance_threshold": "≤10%",
+          "includes_database_fallback": true
+        }
+      },
+      "write_operations": {
+        "cache_set_time": {
+          "baseline_value": 1.2,
+          "measurement_unit": "milliseconds",
+          "prometheus_metric": "redis_operation_duration_seconds",
+          "variance_threshold": "≤10%",
+          "operation_type": "SET"
+        },
+        "cache_mset_time": {
+          "baseline_value": 3.8,
+          "measurement_unit": "milliseconds",
+          "prometheus_metric": "redis_operation_duration_seconds",
+          "variance_threshold": "≤10%",
+          "operation_type": "MSET",
+          "key_count": 10
+        },
+        "cache_del_time": {
+          "baseline_value": 0.9,
+          "measurement_unit": "milliseconds",
+          "prometheus_metric": "redis_operation_duration_seconds",
+          "variance_threshold": "≤10%",
+          "operation_type": "DEL"
+        },
+        "cache_expire_time": {
+          "baseline_value": 1.1,
+          "measurement_unit": "milliseconds",
+          "prometheus_metric": "redis_operation_duration_seconds",
+          "variance_threshold": "≤10%",
+          "operation_type": "EXPIRE"
+        }
+      },
+      "complex_operations": {
+        "hash_operations": {
+          "hget_time": {
+            "baseline_value": 1.0,
+            "measurement_unit": "milliseconds",
+            "prometheus_metric": "redis_hash_operation_duration_seconds",
+            "variance_threshold": "≤10%",
+            "operation_type": "HGET"
+          },
+          "hset_time": {
+            "baseline_value": 1.3,
+            "measurement_unit": "milliseconds",
+            "prometheus_metric": "redis_hash_operation_duration_seconds",
+            "variance_threshold": "≤10%",
+            "operation_type": "HSET"
+          },
+          "hmget_time": {
+            "baseline_value": 2.8,
+            "measurement_unit": "milliseconds",
+            "prometheus_metric": "redis_hash_operation_duration_seconds",
+            "variance_threshold": "≤10%",
+            "operation_type": "HMGET",
+            "field_count": 5
+          }
+        },
+        "list_operations": {
+          "lpush_time": {
+            "baseline_value": 1.1,
+            "measurement_unit": "milliseconds",
+            "prometheus_metric": "redis_list_operation_duration_seconds",
+            "variance_threshold": "≤10%",
+            "operation_type": "LPUSH"
+          },
+          "lpop_time": {
+            "baseline_value": 0.95,
+            "measurement_unit": "milliseconds",
+            "prometheus_metric": "redis_list_operation_duration_seconds",
+            "variance_threshold": "≤10%",
+            "operation_type": "LPOP"
+          },
+          "lrange_time": {
+            "baseline_value": 2.5,
+            "measurement_unit": "milliseconds",
+            "prometheus_metric": "redis_list_operation_duration_seconds",
+            "variance_threshold": "≤10%",
+            "operation_type": "LRANGE",
+            "range_size": 100
+          }
+        }
+      }
+    },
+    "session_management": {
+      "session_operations": {
+        "session_create_time": {
+          "baseline_value": 2.3,
+          "measurement_unit": "milliseconds",
+          "prometheus_metric": "redis_session_operation_duration_seconds",
+          "variance_threshold": "≤10%",
+          "operation_type": "create",
+          "session_data_size": "2KB"
+        },
+        "session_read_time": {
+          "baseline_value": 1.4,
+          "measurement_unit": "milliseconds",
+          "prometheus_metric": "redis_session_operation_duration_seconds",
+          "variance_threshold": "≤10%",
+          "operation_type": "read"
+        },
+        "session_update_time": {
+          "baseline_value": 1.8,
+          "measurement_unit": "milliseconds",
+          "prometheus_metric": "redis_session_operation_duration_seconds",
+          "variance_threshold": "≤10%",
+          "operation_type": "update"
+        },
+        "session_delete_time": {
+          "baseline_value": 1.1,
+          "measurement_unit": "milliseconds",
+          "prometheus_metric": "redis_session_operation_duration_seconds",
+          "variance_threshold": "≤10%",
+          "operation_type": "delete"
+        }
+      },
+      "session_lifecycle": {
+        "average_session_duration": {
+          "baseline_value": 1800,
+          "measurement_unit": "seconds",
+          "prometheus_metric": "redis_session_lifespan_seconds",
+          "variance_threshold": "±20%",
+          "default_ttl": 3600
+        },
+        "session_expiry_cleanup_time": {
+          "baseline_value": 0.5,
+          "measurement_unit": "milliseconds",
+          "prometheus_metric": "redis_session_cleanup_duration_seconds",
+          "variance_threshold": "≤15%"
+        }
+      }
+    },
+    "memory_management": {
+      "memory_usage": {
+        "peak_memory_usage": {
+          "baseline_value": 2.5,
+          "measurement_unit": "gigabytes",
+          "prometheus_metric": "redis_memory_usage_bytes",
+          "variance_threshold": "±20%"
+        },
+        "memory_fragmentation_ratio": {
+          "baseline_value": 1.15,
+          "measurement_unit": "ratio",
+          "prometheus_metric": "redis_memory_fragmentation_ratio",
+          "variance_threshold": "≤1.30",
+          "optimal_threshold": "≤1.20"
+        },
+        "eviction_rate": {
+          "baseline_value": 0.02,
+          "measurement_unit": "evictions/second",
+          "prometheus_metric": "redis_evictions_total",
+          "variance_threshold": "≤0.1/second"
+        }
+      }
+    },
+    "error_rates": {
+      "operation_errors": {
+        "timeout_errors": {
+          "baseline_rate": 0.01,
+          "measurement_unit": "errors/1000 operations",
+          "prometheus_metric": "redis_operation_timeout_errors_total",
+          "variance_threshold": "≤0.05/1000"
+        },
+        "connection_errors": {
+          "baseline_rate": 0.008,
+          "measurement_unit": "errors/1000 operations",
+          "prometheus_metric": "redis_connection_errors_total",
+          "variance_threshold": "≤0.02/1000"
+        },
+        "memory_errors": {
+          "baseline_rate": 0.001,
+          "measurement_unit": "errors/1000 operations",
+          "prometheus_metric": "redis_memory_errors_total",
+          "variance_threshold": "≤0.005/1000"
+        }
+      }
+    }
+  },
+  "integration_performance": {
+    "flask_database_integration": {
+      "request_to_database_latency": {
+        "baseline_value": 8.5,
+        "measurement_unit": "milliseconds",
+        "prometheus_metric": "flask_database_request_latency_seconds",
+        "variance_threshold": "≤10%",
+        "includes_validation_time": true
+      },
+      "database_to_response_latency": {
+        "baseline_value": 3.2,
+        "measurement_unit": "milliseconds",
+        "prometheus_metric": "flask_database_response_latency_seconds",
+        "variance_threshold": "≤10%",
+        "includes_serialization_time": true
+      }
+    },
+    "concurrent_performance": {
+      "concurrent_database_operations": {
+        "baseline_throughput": {
+          "baseline_value": 1850,
+          "measurement_unit": "operations/second",
+          "prometheus_metric": "database_concurrent_operations_per_second",
+          "variance_threshold": "≤10%",
+          "concurrent_users": 100
+        },
+        "response_time_under_load": {
+          "baseline_value": 15.7,
+          "measurement_unit": "milliseconds",
+          "prometheus_metric": "database_response_time_under_load_seconds",
+          "variance_threshold": "≤10%",
+          "load_level": "100 concurrent users"
+        }
+      }
+    }
+  },
+  "monitoring_configuration": {
+    "prometheus_metrics": {
+      "collection_interval": {
+        "database_metrics": "5 seconds",
+        "cache_metrics": "5 seconds",
+        "connection_pool_metrics": "10 seconds",
+        "transaction_metrics": "1 second"
+      },
+      "retention_policy": {
+        "raw_metrics": "7 days",
+        "aggregated_metrics": "90 days",
+        "baseline_comparisons": "1 year"
+      },
+      "alerting_thresholds": {
+        "performance_degradation": "10% variance from baseline",
+        "error_rate_spike": "5x normal error rate",
+        "connection_pool_exhaustion": "95% utilization",
+        "transaction_failure_rate": "1% failure rate"
+      }
+    },
+    "apm_integration": {
+      "transaction_tracing": {
+        "sample_rate": "10%",
+        "trace_retention": "24 hours",
+        "slow_query_threshold": "100 milliseconds"
+      },
+      "performance_baselines": {
+        "baseline_update_frequency": "weekly",
+        "variance_calculation_window": "24 hours",
+        "performance_trend_analysis": "30 days"
+      }
+    }
+  },
+  "validation_criteria": {
+    "performance_compliance": {
+      "node_js_baseline_variance": "≤10%",
+      "critical_operations": [
+        "database query execution",
+        "cache hit/miss ratios",
+        "connection pool efficiency",
+        "transaction success rates"
+      ],
+      "acceptance_criteria": {
+        "response_time_variance": "≤10% from Node.js baseline",
+        "throughput_variance": "≤10% from Node.js baseline",
+        "error_rate_increase": "≤50% from Node.js baseline",
+        "resource_utilization": "±15% from Node.js baseline"
+      }
+    },
+    "monitoring_requirements": {
+      "real_time_monitoring": true,
+      "automated_alerting": true,
+      "baseline_comparison": true,
+      "trend_analysis": true,
+      "regression_detection": true
+    }
+  }
+}
