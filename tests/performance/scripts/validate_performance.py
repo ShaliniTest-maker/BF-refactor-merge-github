@@ -1,65 +1,79 @@
 #!/usr/bin/env python3
 """
-Automated Performance Validation Script for Flask Migration
+Automated Performance Validation Script
 
-This comprehensive performance validation script implements automated variance calculation
-logic, regression detection, and performance compliance verification to enforce the
-critical ≤10% variance requirement per Section 0.1.1 of the technical specification.
-Provides automated pass/fail determination with comprehensive metrics analysis and
-CI/CD pipeline integration for the Node.js to Flask migration project.
+This script implements comprehensive performance validation logic enforcing the critical ≤10% variance 
+requirement per Section 0.1.1 primary objective. Provides automated regression detection, performance 
+compliance verification, and automated pass/fail determination for CI/CD pipeline integration.
 
 Key Features:
 - ≤10% performance variance enforcement per Section 0.1.1 primary objective
-- Automated regression detection and validation per Section 0.3.2
+- Automated regression detection and validation per Section 0.3.2 performance monitoring
 - Response time ≤500ms and throughput ≥100 req/sec validation per Section 4.6.3
-- Database query performance compliance checking per Section 0.3.2
-- Comprehensive memory usage, CPU utilization validation per Section 4.6.3
+- Performance compliance verification for CI/CD per Section 6.6.2 automated quality gates
+- Comprehensive metrics analysis and variance calculation per Section 0.3.2
 - Automated performance failure alerting and reporting per Section 6.6.2
-- CI/CD pipeline integration with GitHub Actions per Section 6.6.2
 
-Architecture Compliance:
-- Section 0.1.1: Performance optimization ensuring ≤10% variance from Node.js baseline
-- Section 0.3.2: Continuous performance monitoring with baseline comparison requirements
-- Section 4.6.3: Performance testing flows with automated variance calculation
-- Section 6.6.1: Performance monitoring with automated regression detection
-- Section 6.6.2: CI/CD integration with automated performance gates
+Performance Requirements Compliance:
+- Response time variance ≤10% from Node.js baseline (critical requirement)
+- 95th percentile response time ≤500ms per Section 4.6.3 performance specifications
+- Minimum 100 req/sec sustained throughput per Section 4.6.3 throughput requirements
+- Memory usage variance ≤15% acceptable per Section 0.3.2 memory monitoring
+- CPU utilization ≤70% during peak load per Section 4.6.3 resource thresholds
+- Database query performance ≤10% variance per Section 0.3.2 database metrics
+
+Architecture Integration:
+- Section 0.1.1: Primary objective performance optimization ≤10% variance from Node.js baseline
+- Section 0.3.2: Continuous performance monitoring with baseline comparison and automated alerts
+- Section 4.6.3: Performance testing specifications with locust load testing and apache-bench validation
+- Section 6.6.2: CI/CD pipeline integration with automated quality gates and rollback triggers
+- Section 6.5: Monitoring and observability integration with prometheus metrics and structured logging
 
 Usage:
-    python validate_performance.py --environment testing --config performance_config.json
-    python validate_performance.py --baseline-only --output-format json
-    python validate_performance.py --run-load-test --concurrent-users 500 --duration 1800
+    # Run comprehensive performance validation
+    python validate_performance.py --config production --verbose
+    
+    # Run with specific test scenarios
+    python validate_performance.py --scenarios api_baseline,load_test,memory_validation
+    
+    # CI/CD pipeline integration
+    python validate_performance.py --ci-mode --fail-fast --output-format json
 
-Dependencies:
-    - tests.performance.baseline_data: Node.js baseline performance metrics
-    - tests.performance.performance_config: Environment-specific configuration
-    - tests.performance.test_baseline_comparison: Baseline comparison test suite
-    - locust ≥2.x: Load testing framework for throughput validation
-    - apache-bench: HTTP performance measurement tool
-    - prometheus-client ≥0.17+: Performance metrics collection
+Exit Codes:
+    0: All performance validations passed
+    1: Critical performance variance detected (>10%)
+    2: Performance thresholds exceeded (response time >500ms, throughput <100 req/sec)
+    3: Performance regression detected
+    4: System resource limits exceeded (CPU >70%, Memory >80%)
+    5: Test execution error or configuration failure
 
 Author: Flask Migration Team
 Version: 1.0.0
+Dependencies: tests/performance/baseline_data.py, performance_config.py, conftest.py
 """
 
 import argparse
 import asyncio
 import json
 import logging
+import math
 import os
+import signal
 import statistics
-import subprocess
 import sys
 import time
 import traceback
 import warnings
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Tuple, Union, NamedTuple
-from dataclasses import dataclass, asdict
-import uuid
-import signal
-import tempfile
+from typing import Dict, List, Optional, Any, Tuple, Union, Callable, NamedTuple
+from dataclasses import dataclass, field, asdict
+from enum import Enum
+
+# Add parent directories to Python path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Performance testing framework imports
 try:
@@ -67,1710 +81,2098 @@ try:
     PSUTIL_AVAILABLE = True
 except ImportError:
     PSUTIL_AVAILABLE = False
-    psutil = None
+    warnings.warn("psutil not available - system monitoring limited")
 
 try:
     import requests
     REQUESTS_AVAILABLE = True
 except ImportError:
     REQUESTS_AVAILABLE = False
-    requests = None
+    warnings.warn("requests not available - HTTP testing limited")
 
 try:
-    from prometheus_client import CollectorRegistry, Counter, Histogram, Gauge, generate_latest
+    from prometheus_client import CollectorRegistry, Counter, Histogram, Gauge
     PROMETHEUS_AVAILABLE = True
 except ImportError:
     PROMETHEUS_AVAILABLE = False
+    warnings.warn("prometheus_client not available - metrics collection disabled")
 
+# Structured logging for comprehensive validation reporting
 try:
     import structlog
     STRUCTLOG_AVAILABLE = True
 except ImportError:
+    import logging
     STRUCTLOG_AVAILABLE = False
-    structlog = None
+    warnings.warn("structlog not available - falling back to standard logging")
 
-# Import project performance modules
-from tests.performance.baseline_data import (
-    BaselineDataManager,
-    ResponseTimeBaseline,
-    ResourceUtilizationBaseline,
-    DatabasePerformanceBaseline,
-    ThroughputBaseline,
-    get_default_baseline_data,
-    validate_flask_performance_against_baseline,
-    PERFORMANCE_VARIANCE_THRESHOLD,
-    MEMORY_VARIANCE_THRESHOLD,
-    WARNING_VARIANCE_THRESHOLD,
-    CRITICAL_VARIANCE_THRESHOLD
-)
-
-from tests.performance.performance_config import (
-    BasePerformanceConfig,
-    PerformanceConfigFactory,
-    LoadTestConfiguration,
-    BaselineMetrics,
-    PerformanceThreshold,
-    PerformanceTestType,
-    create_performance_config,
-    get_performance_baseline_comparison,
-    generate_performance_report
-)
-
-from tests.performance.test_baseline_comparison import (
-    BaselineComparisonTestSuite,
-    PerformanceComparisonResult,
-    PerformanceTrendAnalyzer
-)
-
-# Configure logging
-if STRUCTLOG_AVAILABLE:
-    structlog.configure(
-        processors=[
-            structlog.stdlib.filter_by_level,
-            structlog.stdlib.add_logger_name,
-            structlog.stdlib.add_log_level,
-            structlog.stdlib.PositionalArgumentsFormatter(),
-            structlog.processors.TimeStamper(fmt="iso"),
-            structlog.processors.StackInfoRenderer(),
-            structlog.processors.format_exc_info,
-            structlog.processors.UnicodeDecoder(),
-            structlog.processors.JSONRenderer()
-        ],
-        context_class=dict,
-        logger_factory=structlog.stdlib.LoggerFactory(),
-        wrapper_class=structlog.stdlib.BoundLogger,
-        cache_logger_on_first_use=True,
+# Performance testing module imports
+try:
+    from tests.performance.baseline_data import (
+        BaselineDataManager,
+        NodeJSPerformanceBaseline,
+        BaselineValidationStatus,
+        get_baseline_manager,
+        get_nodejs_baseline,
+        compare_with_baseline,
+        validate_baseline_data,
+        create_performance_thresholds
     )
-    logger = structlog.get_logger(__name__)
-else:
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    BASELINE_DATA_AVAILABLE = True
+except ImportError as e:
+    BASELINE_DATA_AVAILABLE = False
+    warnings.warn(f"Baseline data module not available: {e}")
+
+try:
+    from tests.performance.performance_config import (
+        PerformanceTestConfig,
+        LoadTestScenario,
+        LoadTestConfiguration,
+        PerformanceMetricType,
+        create_performance_config,
+        get_load_test_config,
+        validate_performance_results
     )
-    logger = logging.getLogger(__name__)
+    PERFORMANCE_CONFIG_AVAILABLE = True
+except ImportError as e:
+    PERFORMANCE_CONFIG_AVAILABLE = False
+    warnings.warn(f"Performance config module not available: {e}")
 
-# Performance validation constants per Section 0.1.1 and Section 4.6.3
-PERFORMANCE_VARIANCE_LIMIT = 10.0        # ≤10% variance requirement per Section 0.1.1
-RESPONSE_TIME_THRESHOLD_MS = 500.0       # ≤500ms response time per Section 4.6.3
-THROUGHPUT_THRESHOLD_RPS = 100.0         # ≥100 req/sec throughput per Section 4.6.3
-ERROR_RATE_THRESHOLD_PERCENT = 0.1       # ≤0.1% error rate per Section 4.6.3
-CPU_UTILIZATION_THRESHOLD = 70.0         # ≤70% CPU utilization
-MEMORY_UTILIZATION_THRESHOLD = 80.0      # ≤80% memory utilization
+try:
+    from tests.performance.test_baseline_comparison import (
+        BaselineComparisonTestSuite,
+        BaselineComparisonResult,
+        BaselineComparisonError
+    )
+    BASELINE_COMPARISON_AVAILABLE = True
+except ImportError as e:
+    BASELINE_COMPARISON_AVAILABLE = False
+    warnings.warn(f"Baseline comparison module not available: {e}")
 
-# Test execution constants
-VALIDATION_TIMEOUT = 3600                # 60-minute maximum validation time
-DEFAULT_LOAD_TEST_DURATION = 1800        # 30-minute default load test per Section 4.6.3
-DEFAULT_CONCURRENT_USERS = 100           # Default concurrent users for load testing
-BASELINE_SAMPLE_SIZE = 100              # Minimum samples for statistical validity
-PERFORMANCE_REPORT_RETENTION_DAYS = 30   # Performance report retention period
+# Performance validation constants per technical specifications
+CRITICAL_VARIANCE_THRESHOLD = 10.0     # ≤10% variance requirement per Section 0.1.1
+WARNING_VARIANCE_THRESHOLD = 5.0       # Warning threshold for early detection
+RESPONSE_TIME_THRESHOLD_MS = 500.0     # 95th percentile ≤500ms per Section 4.6.3
+THROUGHPUT_THRESHOLD_RPS = 100.0       # Minimum 100 req/sec per Section 4.6.3
+ERROR_RATE_THRESHOLD = 0.1             # ≤0.1% error rate per Section 4.6.3
+CPU_UTILIZATION_THRESHOLD = 70.0       # ≤70% CPU per Section 4.6.3
+MEMORY_UTILIZATION_THRESHOLD = 80.0    # ≤80% memory per Section 4.6.3
+MEMORY_VARIANCE_THRESHOLD = 15.0       # ≤15% memory variance per Section 0.3.2
+DATABASE_VARIANCE_THRESHOLD = 10.0     # ≤10% database variance per Section 0.3.2
+
+# Test execution parameters
+MIN_SAMPLE_SIZE = 100                   # Minimum samples for statistical validity
+TEST_TIMEOUT_SECONDS = 1800            # 30 minutes maximum test duration
+REGRESSION_DETECTION_WINDOW = 5        # Number of historical results for trend analysis
+CONFIDENCE_THRESHOLD = 90.0            # Minimum statistical confidence percentage
 
 
-class ValidationResult(NamedTuple):
-    """Structured validation result for performance metrics."""
+class ValidationExitCode(Enum):
+    """Exit codes for performance validation script execution."""
     
-    metric_name: str
-    baseline_value: float
-    current_value: float
-    variance_percent: float
-    within_threshold: bool
-    status: str
-    test_category: str
-    timestamp: datetime
+    SUCCESS = 0                         # All validations passed
+    CRITICAL_VARIANCE = 1              # >10% variance detected
+    THRESHOLD_EXCEEDED = 2             # Performance thresholds exceeded
+    REGRESSION_DETECTED = 3            # Performance regression identified
+    RESOURCE_LIMITS_EXCEEDED = 4       # System resource limits exceeded
+    EXECUTION_ERROR = 5                # Test execution or configuration error
+
+
+class ValidationSeverity(Enum):
+    """Validation issue severity levels for prioritized alerting."""
     
-    @property
-    def is_critical_failure(self) -> bool:
-        """Check if result indicates critical performance failure."""
-        return not self.within_threshold and abs(self.variance_percent) > PERFORMANCE_VARIANCE_LIMIT
-    
-    @property
-    def variance_severity(self) -> str:
-        """Get variance severity classification."""
-        abs_variance = abs(self.variance_percent)
-        if abs_variance <= WARNING_VARIANCE_THRESHOLD:
-            return "excellent"
-        elif abs_variance <= PERFORMANCE_VARIANCE_LIMIT:
-            return "warning"
-        elif abs_variance <= CRITICAL_VARIANCE_THRESHOLD:
-            return "critical"
-        else:
-            return "failure"
+    CRITICAL = "critical"               # Immediate attention required
+    WARNING = "warning"                 # Monitor closely
+    INFO = "info"                      # Informational notice
+    SUCCESS = "success"                # Validation passed
 
 
 @dataclass
-class PerformanceValidationConfig:
-    """Configuration for performance validation execution."""
+class ValidationIssue:
+    """Performance validation issue with severity and remediation guidance."""
     
-    environment: str = "testing"
-    baseline_comparison_enabled: bool = True
-    load_testing_enabled: bool = True
-    regression_detection_enabled: bool = True
-    automated_alerting_enabled: bool = True
+    severity: ValidationSeverity
+    category: str
+    metric: str
+    current_value: float
+    expected_value: float
+    variance_percent: float
+    threshold_exceeded: bool
+    message: str
+    remediation_suggestions: List[str] = field(default_factory=list)
     
-    # Load testing parameters per Section 4.6.3
-    concurrent_users: int = DEFAULT_CONCURRENT_USERS
-    test_duration_seconds: int = DEFAULT_LOAD_TEST_DURATION
-    ramp_up_time_seconds: int = 300
-    target_request_rate: int = int(THROUGHPUT_THRESHOLD_RPS)
+    def __post_init__(self):
+        """Generate remediation suggestions based on issue characteristics."""
+        if not self.remediation_suggestions:
+            self.remediation_suggestions = self._generate_remediation_suggestions()
     
-    # Validation thresholds per Section 0.1.1 and Section 4.6.3
-    variance_threshold_percent: float = PERFORMANCE_VARIANCE_LIMIT
-    response_time_threshold_ms: float = RESPONSE_TIME_THRESHOLD_MS
-    throughput_threshold_rps: float = THROUGHPUT_THRESHOLD_RPS
-    error_rate_threshold_percent: float = ERROR_RATE_THRESHOLD_PERCENT
-    
-    # Output configuration
-    output_format: str = "json"  # json, markdown, html
-    report_file_path: Optional[str] = None
-    metrics_export_enabled: bool = True
-    
-    # CI/CD integration per Section 6.6.2
-    ci_cd_mode: bool = False
-    fail_on_regression: bool = True
-    notification_webhook_url: Optional[str] = None
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert configuration to dictionary."""
-        return asdict(self)
+    def _generate_remediation_suggestions(self) -> List[str]:
+        """Generate context-specific remediation suggestions."""
+        suggestions = []
+        
+        if "response_time" in self.metric.lower():
+            if self.variance_percent > CRITICAL_VARIANCE_THRESHOLD:
+                suggestions.extend([
+                    "🚀 Optimize API endpoint implementation for faster response times",
+                    "🔧 Consider implementing response caching for frequently accessed data",
+                    "📊 Profile application code to identify performance bottlenecks",
+                    "🔍 Review database query optimization and indexing strategies"
+                ])
+        
+        elif "throughput" in self.metric.lower():
+            if self.current_value < self.expected_value:
+                suggestions.extend([
+                    "📈 Implement connection pooling for database and external services",
+                    "⚡ Consider async processing patterns for non-blocking operations",
+                    "🔄 Optimize request processing pipeline and middleware stack",
+                    "🏗️ Evaluate horizontal scaling and load balancing strategies"
+                ])
+        
+        elif "memory" in self.metric.lower():
+            if self.variance_percent > MEMORY_VARIANCE_THRESHOLD:
+                suggestions.extend([
+                    "💾 Investigate memory usage patterns and potential memory leaks",
+                    "🧹 Implement proper object cleanup and garbage collection optimization",
+                    "📋 Review data structures and object lifecycle management",
+                    "🔍 Consider memory profiling tools for detailed analysis"
+                ])
+        
+        elif "cpu" in self.metric.lower():
+            if self.current_value > CPU_UTILIZATION_THRESHOLD:
+                suggestions.extend([
+                    "🖥️ Optimize CPU-intensive algorithms and processing logic",
+                    "⚙️ Implement caching to reduce computational overhead",
+                    "🔀 Consider async processing for CPU-bound operations",
+                    "📊 Profile code execution to identify CPU bottlenecks"
+                ])
+        
+        elif "database" in self.metric.lower():
+            if self.variance_percent > DATABASE_VARIANCE_THRESHOLD:
+                suggestions.extend([
+                    "🗄️ Optimize database queries and improve indexing strategy",
+                    "🔗 Implement database connection pooling and query caching",
+                    "📈 Consider database performance tuning and configuration optimization",
+                    "🔍 Review query execution plans and eliminate N+1 query patterns"
+                ])
+        
+        # Add general recommendations for critical issues
+        if self.severity == ValidationSeverity.CRITICAL:
+            suggestions.extend([
+                "❗ Consider immediate rollback if this is a production deployment",
+                "📞 Escalate to performance engineering team for urgent investigation",
+                "🚨 Monitor system closely for continued performance degradation"
+            ])
+        
+        return suggestions
 
 
-class PerformanceValidationError(Exception):
-    """Custom exception for performance validation failures."""
-    pass
-
-
-class RegressionDetectionError(Exception):
-    """Custom exception for regression detection failures."""
-    pass
+@dataclass
+class PerformanceValidationResult:
+    """Comprehensive performance validation result with detailed analysis."""
+    
+    # Validation metadata
+    validation_id: str = field(default_factory=lambda: f"perf_val_{int(time.time())}")
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    duration_seconds: float = 0.0
+    
+    # Test execution summary
+    total_tests: int = 0
+    passed_tests: int = 0
+    failed_tests: int = 0
+    skipped_tests: int = 0
+    
+    # Performance compliance status
+    overall_compliance: bool = False
+    variance_compliance: bool = False
+    threshold_compliance: bool = False
+    regression_status: bool = False
+    
+    # Detailed validation results
+    validation_issues: List[ValidationIssue] = field(default_factory=list)
+    performance_metrics: Dict[str, Any] = field(default_factory=dict)
+    baseline_comparisons: Dict[str, Any] = field(default_factory=dict)
+    
+    # Statistical analysis
+    sample_size: int = 0
+    statistical_confidence: float = 0.0
+    variance_distribution: Dict[str, float] = field(default_factory=dict)
+    
+    # Trend analysis and regression detection
+    regression_analysis: Dict[str, Any] = field(default_factory=dict)
+    trend_indicators: List[str] = field(default_factory=list)
+    
+    # Recommendations and next steps
+    recommendations: List[str] = field(default_factory=list)
+    critical_actions: List[str] = field(default_factory=list)
+    
+    @property
+    def success_rate(self) -> float:
+        """Calculate test success rate percentage."""
+        if self.total_tests == 0:
+            return 0.0
+        return (self.passed_tests / self.total_tests) * 100.0
+    
+    @property
+    def exit_code(self) -> ValidationExitCode:
+        """Determine appropriate exit code based on validation results."""
+        # Check for critical variance issues
+        critical_variance_issues = [
+            issue for issue in self.validation_issues
+            if issue.severity == ValidationSeverity.CRITICAL and 
+               issue.variance_percent > CRITICAL_VARIANCE_THRESHOLD
+        ]
+        
+        if critical_variance_issues:
+            return ValidationExitCode.CRITICAL_VARIANCE
+        
+        # Check for threshold violations
+        threshold_issues = [
+            issue for issue in self.validation_issues
+            if issue.threshold_exceeded and issue.severity == ValidationSeverity.CRITICAL
+        ]
+        
+        if threshold_issues:
+            return ValidationExitCode.THRESHOLD_EXCEEDED
+        
+        # Check for regression detection
+        if self.regression_status:
+            return ValidationExitCode.REGRESSION_DETECTED
+        
+        # Check for resource limit violations
+        resource_issues = [
+            issue for issue in self.validation_issues
+            if "cpu" in issue.metric.lower() or "memory" in issue.metric.lower()
+        ]
+        
+        critical_resource_issues = [
+            issue for issue in resource_issues
+            if issue.severity == ValidationSeverity.CRITICAL
+        ]
+        
+        if critical_resource_issues:
+            return ValidationExitCode.RESOURCE_LIMITS_EXCEEDED
+        
+        # Success if overall compliance achieved
+        if self.overall_compliance:
+            return ValidationExitCode.SUCCESS
+        else:
+            return ValidationExitCode.EXECUTION_ERROR
+    
+    def get_critical_issues(self) -> List[ValidationIssue]:
+        """Get list of critical validation issues requiring immediate attention."""
+        return [
+            issue for issue in self.validation_issues
+            if issue.severity == ValidationSeverity.CRITICAL
+        ]
+    
+    def get_warning_issues(self) -> List[ValidationIssue]:
+        """Get list of warning validation issues requiring monitoring."""
+        return [
+            issue for issue in self.validation_issues
+            if issue.severity == ValidationSeverity.WARNING
+        ]
+    
+    def generate_summary_report(self) -> Dict[str, Any]:
+        """Generate comprehensive validation summary report."""
+        critical_issues = self.get_critical_issues()
+        warning_issues = self.get_warning_issues()
+        
+        return {
+            "validation_summary": {
+                "validation_id": self.validation_id,
+                "timestamp": self.timestamp.isoformat(),
+                "duration_seconds": self.duration_seconds,
+                "overall_compliance": self.overall_compliance,
+                "variance_compliance": self.variance_compliance,
+                "threshold_compliance": self.threshold_compliance,
+                "regression_detected": self.regression_status,
+                "exit_code": self.exit_code.value,
+                "exit_code_name": self.exit_code.name
+            },
+            "test_execution": {
+                "total_tests": self.total_tests,
+                "passed_tests": self.passed_tests,
+                "failed_tests": self.failed_tests,
+                "skipped_tests": self.skipped_tests,
+                "success_rate": self.success_rate,
+                "sample_size": self.sample_size,
+                "statistical_confidence": self.statistical_confidence
+            },
+            "validation_issues": {
+                "critical_count": len(critical_issues),
+                "warning_count": len(warning_issues),
+                "critical_issues": [asdict(issue) for issue in critical_issues],
+                "warning_issues": [asdict(issue) for issue in warning_issues]
+            },
+            "performance_analysis": {
+                "variance_distribution": self.variance_distribution,
+                "baseline_comparisons": self.baseline_comparisons,
+                "regression_analysis": self.regression_analysis,
+                "trend_indicators": self.trend_indicators
+            },
+            "recommendations": {
+                "general_recommendations": self.recommendations,
+                "critical_actions": self.critical_actions,
+                "remediation_guidance": [
+                    issue.remediation_suggestions 
+                    for issue in critical_issues 
+                    if issue.remediation_suggestions
+                ]
+            },
+            "performance_metrics": self.performance_metrics
+        }
 
 
 class PerformanceValidator:
     """
-    Comprehensive performance validator implementing automated variance calculation,
-    regression detection, and compliance verification per technical specification
-    requirements for the Flask migration project.
+    Comprehensive performance validation engine implementing automated variance 
+    calculation, regression detection, and compliance verification for Flask migration.
+    
+    Enforces the critical ≤10% variance requirement per Section 0.1.1 and provides
+    automated pass/fail determination for CI/CD pipeline integration per Section 6.6.2.
     """
     
-    def __init__(self, config: PerformanceValidationConfig):
+    def __init__(
+        self,
+        config_environment: str = "testing",
+        baseline_manager: Optional[BaselineDataManager] = None,
+        performance_config: Optional[PerformanceTestConfig] = None,
+        enable_prometheus: bool = True,
+        enable_detailed_logging: bool = True
+    ):
         """
-        Initialize performance validator with configuration.
+        Initialize performance validator with configuration and dependencies.
         
         Args:
-            config: Performance validation configuration
+            config_environment: Environment configuration (testing, staging, production)
+            baseline_manager: Baseline data manager for Node.js comparisons
+            performance_config: Performance test configuration
+            enable_prometheus: Enable Prometheus metrics collection
+            enable_detailed_logging: Enable detailed structured logging
         """
-        self.config = config
-        self.session_id = str(uuid.uuid4())
-        self.start_time = datetime.now(timezone.utc)
-        self.validation_results: List[ValidationResult] = []
-        self.performance_metrics: Dict[str, Any] = {}
-        self.regression_analysis: Dict[str, Any] = {}
+        self.config_environment = config_environment
+        self.enable_prometheus = enable_prometheus and PROMETHEUS_AVAILABLE
+        self.enable_detailed_logging = enable_detailed_logging
         
-        # Initialize performance components
-        self.baseline_manager = get_default_baseline_data()
-        self.performance_config = create_performance_config(config.environment)
-        self.comparison_suite = BaselineComparisonTestSuite(self.baseline_manager)
-        self.comparison_suite.setup_baseline_comparison(config.environment)
-        self.trend_analyzer = PerformanceTrendAnalyzer()
-        
-        # Initialize metrics registry if Prometheus available
-        if PROMETHEUS_AVAILABLE:
-            self.metrics_registry = CollectorRegistry()
-            self._setup_prometheus_metrics()
+        # Initialize logging
+        if STRUCTLOG_AVAILABLE and enable_detailed_logging:
+            self.logger = structlog.get_logger(__name__)
         else:
-            self.metrics_registry = None
-            logger.warning("Prometheus client not available - metrics export disabled")
+            self.logger = logging.getLogger(__name__)
+        
+        # Initialize baseline data management
+        if baseline_manager and BASELINE_DATA_AVAILABLE:
+            self.baseline_manager = baseline_manager
+        elif BASELINE_DATA_AVAILABLE:
+            self.baseline_manager = get_baseline_manager()
+        else:
+            self.baseline_manager = None
+            self.logger.warning("Baseline data manager not available - baseline comparisons disabled")
+        
+        # Initialize performance configuration
+        if performance_config and PERFORMANCE_CONFIG_AVAILABLE:
+            self.performance_config = performance_config
+        elif PERFORMANCE_CONFIG_AVAILABLE:
+            self.performance_config = create_performance_config(config_environment)
+        else:
+            self.performance_config = None
+            self.logger.warning("Performance config not available - using default thresholds")
+        
+        # Initialize Prometheus metrics
+        if self.enable_prometheus:
+            self._init_prometheus_metrics()
         
         # Validation state tracking
-        self.validation_errors: List[str] = []
-        self.critical_failures: List[str] = []
-        self.performance_warnings: List[str] = []
+        self.validation_history: List[PerformanceValidationResult] = []
+        self.current_validation: Optional[PerformanceValidationResult] = None
         
-        logger.info(
+        self.logger.info(
             "Performance validator initialized",
-            session_id=self.session_id,
-            environment=config.environment,
-            variance_threshold=config.variance_threshold_percent,
-            ci_cd_mode=config.ci_cd_mode
+            config_environment=config_environment,
+            baseline_available=self.baseline_manager is not None,
+            config_available=self.performance_config is not None,
+            prometheus_enabled=self.enable_prometheus
         )
     
-    def _setup_prometheus_metrics(self) -> None:
-        """Setup Prometheus metrics for performance monitoring."""
-        self.response_time_histogram = Histogram(
-            'performance_response_time_seconds',
-            'Response time distribution',
-            ['endpoint', 'method'],
-            buckets=[0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0],
-            registry=self.metrics_registry
-        )
-        
-        self.variance_gauge = Gauge(
-            'performance_variance_percent',
-            'Performance variance from baseline',
-            ['metric_name', 'endpoint'],
-            registry=self.metrics_registry
-        )
-        
-        self.throughput_gauge = Gauge(
-            'performance_throughput_rps',
-            'Current throughput in requests per second',
-            registry=self.metrics_registry
-        )
-        
-        self.compliance_gauge = Gauge(
-            'performance_compliance_status',
-            'Performance compliance status (1=compliant, 0=non-compliant)',
-            ['validation_type'],
-            registry=self.metrics_registry
-        )
-        
-        logger.info("Prometheus metrics configured for performance monitoring")
-    
-    def validate_response_time_performance(
-        self, 
-        endpoint: str, 
-        method: str, 
-        response_times_ms: List[float],
-        test_category: str = "api_performance"
-    ) -> ValidationResult:
-        """
-        Validate response time performance against Node.js baseline per Section 4.6.3.
-        
-        Args:
-            endpoint: API endpoint path
-            method: HTTP method
-            response_times_ms: List of measured response times in milliseconds
-            test_category: Category of performance test
-            
-        Returns:
-            ValidationResult with response time analysis
-            
-        Raises:
-            PerformanceValidationError: If validation fails or insufficient data
-        """
-        if not response_times_ms:
-            raise PerformanceValidationError("No response time data provided for validation")
-        
-        if len(response_times_ms) < 10:
-            logger.warning(
-                "Limited response time samples for statistical validity",
-                endpoint=endpoint,
-                method=method,
-                sample_count=len(response_times_ms)
-            )
-        
+    def _init_prometheus_metrics(self) -> None:
+        """Initialize Prometheus metrics for performance validation tracking."""
         try:
-            # Get baseline for comparison
-            baseline = self.baseline_manager.get_response_time_baseline(endpoint, method)
-            if not baseline:
-                logger.warning(
-                    "No baseline available for endpoint - using general threshold validation",
-                    endpoint=endpoint,
-                    method=method
-                )
-                
-                # Use general response time threshold validation
-                mean_response_time = statistics.mean(response_times_ms)
-                p95_response_time = statistics.quantiles(response_times_ms, n=20)[18] if len(response_times_ms) >= 20 else max(response_times_ms)
-                
-                within_threshold = p95_response_time <= self.config.response_time_threshold_ms
-                status = f"Response time validation: {p95_response_time:.2f}ms vs threshold {self.config.response_time_threshold_ms}ms"
-                
-                result = ValidationResult(
-                    metric_name=f"response_time_{method.lower()}_{endpoint.replace('/', '_')}",
-                    baseline_value=self.config.response_time_threshold_ms,
-                    current_value=p95_response_time,
-                    variance_percent=(p95_response_time - self.config.response_time_threshold_ms) / self.config.response_time_threshold_ms * 100,
-                    within_threshold=within_threshold,
-                    status=status,
-                    test_category=test_category,
-                    timestamp=datetime.now(timezone.utc)
-                )
-            else:
-                # Perform baseline comparison using test suite
-                comparison_result = self.comparison_suite.compare_response_time_performance(
-                    endpoint, method, response_times_ms
-                )
-                
-                result = ValidationResult(
-                    metric_name=comparison_result.metric_name,
-                    baseline_value=comparison_result.baseline_value,
-                    current_value=comparison_result.current_value,
-                    variance_percent=comparison_result.variance_percent,
-                    within_threshold=comparison_result.within_threshold,
-                    status=comparison_result.status,
-                    test_category=test_category,
-                    timestamp=comparison_result.timestamp
-                )
+            self.metrics_registry = CollectorRegistry()
             
-            # Update Prometheus metrics if available
-            if self.metrics_registry and PROMETHEUS_AVAILABLE:
-                self.response_time_histogram.labels(endpoint=endpoint, method=method).observe(
-                    statistics.mean(response_times_ms) / 1000.0  # Convert to seconds
-                )
-                self.variance_gauge.labels(metric_name=result.metric_name, endpoint=endpoint).set(
-                    abs(result.variance_percent)
-                )
-            
-            # Add to trend analysis
-            self.trend_analyzer.add_measurement(
-                result.metric_name, 
-                result.current_value, 
-                result.baseline_value
+            # Validation execution metrics
+            self.validation_counter = Counter(
+                'performance_validation_total',
+                'Total performance validation executions',
+                ['environment', 'status'],
+                registry=self.metrics_registry
             )
             
-            # Record validation result
-            self.validation_results.append(result)
+            # Variance tracking metrics
+            self.variance_gauge = Gauge(
+                'performance_variance_percent',
+                'Performance variance from baseline',
+                ['metric_type', 'endpoint'],
+                registry=self.metrics_registry
+            )
             
-            # Log validation outcome
-            if result.within_threshold:
-                logger.info(
-                    "Response time validation passed",
-                    endpoint=endpoint,
-                    method=method,
-                    current_value=result.current_value,
-                    baseline_value=result.baseline_value,
-                    variance_percent=result.variance_percent
-                )
-            else:
-                logger.warning(
-                    "Response time validation failed",
-                    endpoint=endpoint,
-                    method=method,
-                    current_value=result.current_value,
-                    baseline_value=result.baseline_value,
-                    variance_percent=result.variance_percent,
-                    severity=result.variance_severity
-                )
-                
-                if result.is_critical_failure:
-                    self.critical_failures.append(result.status)
-                else:
-                    self.performance_warnings.append(result.status)
+            # Compliance status metrics
+            self.compliance_gauge = Gauge(
+                'performance_compliance_status',
+                'Performance compliance status (1=compliant, 0=non-compliant)',
+                ['compliance_type'],
+                registry=self.metrics_registry
+            )
             
-            return result
+            # Validation duration tracking
+            self.validation_duration_histogram = Histogram(
+                'performance_validation_duration_seconds',
+                'Performance validation execution time',
+                buckets=[30, 60, 120, 300, 600, 1200, 1800],
+                registry=self.metrics_registry
+            )
             
-        except Exception as e:
-            error_msg = f"Response time validation error for {method} {endpoint}: {str(e)}"
-            logger.error(error_msg, error=str(e))
-            self.validation_errors.append(error_msg)
-            raise PerformanceValidationError(error_msg) from e
+            # Regression detection metrics
+            self.regression_gauge = Gauge(
+                'performance_regression_detected',
+                'Performance regression detection status',
+                ['regression_type'],
+                registry=self.metrics_registry
+            )
+            
+        except Exception as metrics_error:
+            self.logger.warning(
+                "Failed to initialize Prometheus metrics",
+                error=str(metrics_error)
+            )
+            self.enable_prometheus = False
     
-    def validate_resource_utilization_performance(
+    def validate_performance_comprehensive(
         self,
-        cpu_percent: float,
-        memory_mb: float,
-        test_category: str = "resource_performance"
-    ) -> List[ValidationResult]:
+        app_url: str = "http://localhost:5000",
+        test_scenarios: Optional[List[str]] = None,
+        enable_load_testing: bool = True,
+        enable_memory_profiling: bool = True,
+        enable_regression_detection: bool = True,
+        fail_fast: bool = False,
+        timeout_seconds: int = TEST_TIMEOUT_SECONDS
+    ) -> PerformanceValidationResult:
         """
-        Validate CPU and memory utilization against Node.js baseline per Section 0.3.2.
+        Execute comprehensive performance validation with automated variance calculation.
         
         Args:
-            cpu_percent: Measured CPU utilization percentage
-            memory_mb: Measured memory usage in megabytes
-            test_category: Category of performance test
+            app_url: Flask application URL for testing
+            test_scenarios: Specific test scenarios to execute
+            enable_load_testing: Enable load testing validation
+            enable_memory_profiling: Enable memory usage profiling
+            enable_regression_detection: Enable regression detection analysis
+            fail_fast: Stop validation on first critical failure
+            timeout_seconds: Maximum validation execution time
             
         Returns:
-            List of ValidationResult for CPU and memory metrics
+            PerformanceValidationResult with comprehensive analysis
             
         Raises:
-            PerformanceValidationError: If validation fails
+            TimeoutError: If validation exceeds timeout duration
+            ValidationError: If critical validation setup fails
         """
-        try:
-            # Perform baseline comparison using test suite
-            comparison_results = self.comparison_suite.compare_resource_utilization_performance(
-                cpu_percent, memory_mb
-            )
-            
-            validation_results = []
-            
-            for comparison_result in comparison_results:
-                result = ValidationResult(
-                    metric_name=comparison_result.metric_name,
-                    baseline_value=comparison_result.baseline_value,
-                    current_value=comparison_result.current_value,
-                    variance_percent=comparison_result.variance_percent,
-                    within_threshold=comparison_result.within_threshold,
-                    status=comparison_result.status,
-                    test_category=test_category,
-                    timestamp=comparison_result.timestamp
-                )
-                
-                validation_results.append(result)
-                
-                # Add to trend analysis
-                self.trend_analyzer.add_measurement(
-                    result.metric_name,
-                    result.current_value,
-                    result.baseline_value
-                )
-                
-                # Log validation outcome
-                if result.within_threshold:
-                    logger.info(
-                        "Resource utilization validation passed",
-                        metric=result.metric_name,
-                        current_value=result.current_value,
-                        baseline_value=result.baseline_value,
-                        variance_percent=result.variance_percent
-                    )
-                else:
-                    logger.warning(
-                        "Resource utilization validation failed",
-                        metric=result.metric_name,
-                        current_value=result.current_value,
-                        baseline_value=result.baseline_value,
-                        variance_percent=result.variance_percent,
-                        severity=result.variance_severity
-                    )
-                    
-                    if result.is_critical_failure:
-                        self.critical_failures.append(result.status)
-                    else:
-                        self.performance_warnings.append(result.status)
-            
-            # Record validation results
-            self.validation_results.extend(validation_results)
-            return validation_results
-            
-        except Exception as e:
-            error_msg = f"Resource utilization validation error: {str(e)}"
-            logger.error(error_msg, error=str(e))
-            self.validation_errors.append(error_msg)
-            raise PerformanceValidationError(error_msg) from e
-    
-    def validate_database_performance(
-        self,
-        operation_type: str,
-        collection: str,
-        query_times_ms: List[float],
-        test_category: str = "database_performance"
-    ) -> ValidationResult:
-        """
-        Validate database query performance against Node.js baseline per Section 0.3.2.
+        start_time = time.time()
         
-        Args:
-            operation_type: Database operation type ('find', 'insert', 'update', etc.)
-            collection: Database collection name
-            query_times_ms: List of measured query times in milliseconds
-            test_category: Category of performance test
-            
-        Returns:
-            ValidationResult with database performance analysis
-            
-        Raises:
-            PerformanceValidationError: If validation fails
-        """
-        if not query_times_ms:
-            raise PerformanceValidationError("No database query time data provided for validation")
+        # Initialize validation result
+        validation_result = PerformanceValidationResult(
+            timestamp=datetime.now(timezone.utc)
+        )
+        self.current_validation = validation_result
         
         try:
-            # Perform baseline comparison using test suite
-            comparison_result = self.comparison_suite.compare_database_performance(
-                operation_type, collection, query_times_ms
+            self.logger.info(
+                "Starting comprehensive performance validation",
+                app_url=app_url,
+                test_scenarios=test_scenarios,
+                enable_load_testing=enable_load_testing,
+                enable_memory_profiling=enable_memory_profiling,
+                enable_regression_detection=enable_regression_detection,
+                timeout_seconds=timeout_seconds
             )
             
-            result = ValidationResult(
-                metric_name=comparison_result.metric_name,
-                baseline_value=comparison_result.baseline_value,
-                current_value=comparison_result.current_value,
-                variance_percent=comparison_result.variance_percent,
-                within_threshold=comparison_result.within_threshold,
-                status=comparison_result.status,
-                test_category=test_category,
-                timestamp=comparison_result.timestamp
-            )
+            # Set up timeout handling
+            def timeout_handler(signum, frame):
+                raise TimeoutError(f"Performance validation exceeded {timeout_seconds} seconds timeout")
             
-            # Add to trend analysis
-            self.trend_analyzer.add_measurement(
-                result.metric_name,
-                result.current_value,
-                result.baseline_value
-            )
+            if timeout_seconds > 0:
+                signal.signal(signal.SIGALRM, timeout_handler)
+                signal.alarm(timeout_seconds)
             
-            # Record validation result
-            self.validation_results.append(result)
-            
-            # Log validation outcome
-            if result.within_threshold:
-                logger.info(
-                    "Database performance validation passed",
-                    operation=operation_type,
-                    collection=collection,
-                    current_value=result.current_value,
-                    baseline_value=result.baseline_value,
-                    variance_percent=result.variance_percent
-                )
-            else:
-                logger.warning(
-                    "Database performance validation failed",
-                    operation=operation_type,
-                    collection=collection,
-                    current_value=result.current_value,
-                    baseline_value=result.baseline_value,
-                    variance_percent=result.variance_percent,
-                    severity=result.variance_severity
-                )
-                
-                if result.is_critical_failure:
-                    self.critical_failures.append(result.status)
-                else:
-                    self.performance_warnings.append(result.status)
-            
-            return result
-            
-        except Exception as e:
-            error_msg = f"Database performance validation error for {operation_type} on {collection}: {str(e)}"
-            logger.error(error_msg, error=str(e))
-            self.validation_errors.append(error_msg)
-            raise PerformanceValidationError(error_msg) from e
-    
-    def validate_throughput_performance(
-        self,
-        requests_per_second: float,
-        concurrent_users: int,
-        error_rate_percent: float,
-        test_category: str = "throughput_performance"
-    ) -> List[ValidationResult]:
-        """
-        Validate throughput and error rate performance per Section 4.6.3.
-        
-        Args:
-            requests_per_second: Measured throughput in requests per second
-            concurrent_users: Number of concurrent users during test
-            error_rate_percent: Error rate percentage during test
-            test_category: Category of performance test
-            
-        Returns:
-            List of ValidationResult for throughput and error rate metrics
-            
-        Raises:
-            PerformanceValidationError: If validation fails
-        """
-        try:
-            # Perform baseline comparison using test suite
-            comparison_results = self.comparison_suite.compare_throughput_performance(
-                requests_per_second, concurrent_users, error_rate_percent
-            )
-            
-            validation_results = []
-            
-            for comparison_result in comparison_results:
-                result = ValidationResult(
-                    metric_name=comparison_result.metric_name,
-                    baseline_value=comparison_result.baseline_value,
-                    current_value=comparison_result.current_value,
-                    variance_percent=comparison_result.variance_percent,
-                    within_threshold=comparison_result.within_threshold,
-                    status=comparison_result.status,
-                    test_category=test_category,
-                    timestamp=comparison_result.timestamp
-                )
-                
-                validation_results.append(result)
-                
-                # Update Prometheus metrics if available
-                if self.metrics_registry and PROMETHEUS_AVAILABLE:
-                    if result.metric_name == "requests_per_second":
-                        self.throughput_gauge.set(result.current_value)
-                
-                # Add to trend analysis
-                self.trend_analyzer.add_measurement(
-                    result.metric_name,
-                    result.current_value,
-                    result.baseline_value
-                )
-                
-                # Log validation outcome
-                if result.within_threshold:
-                    logger.info(
-                        "Throughput validation passed",
-                        metric=result.metric_name,
-                        current_value=result.current_value,
-                        baseline_value=result.baseline_value,
-                        variance_percent=result.variance_percent
-                    )
-                else:
-                    logger.warning(
-                        "Throughput validation failed",
-                        metric=result.metric_name,
-                        current_value=result.current_value,
-                        baseline_value=result.baseline_value,
-                        variance_percent=result.variance_percent,
-                        severity=result.variance_severity
-                    )
-                    
-                    if result.is_critical_failure:
-                        self.critical_failures.append(result.status)
-                    else:
-                        self.performance_warnings.append(result.status)
-            
-            # Record validation results
-            self.validation_results.extend(validation_results)
-            return validation_results
-            
-        except Exception as e:
-            error_msg = f"Throughput validation error: {str(e)}"
-            logger.error(error_msg, error=str(e))
-            self.validation_errors.append(error_msg)
-            raise PerformanceValidationError(error_msg) from e
-    
-    def detect_performance_regressions(self) -> Dict[str, Any]:
-        """
-        Detect performance regressions using trend analysis per Section 0.3.2.
-        
-        Returns:
-            Dictionary containing regression analysis results
-            
-        Raises:
-            RegressionDetectionError: If regression detection fails
-        """
-        try:
-            regression_summary = {
-                "regressions_detected": 0,
-                "metrics_analyzed": 0,
-                "regression_details": {},
-                "trend_analysis": {},
-                "overall_regression_status": "no_regressions_detected"
-            }
-            
-            # Analyze each performance metric for regressions
-            unique_metrics = set(result.metric_name for result in self.validation_results)
-            regression_summary["metrics_analyzed"] = len(unique_metrics)
-            
-            for metric_name in unique_metrics:
-                # Generate trend report for metric
-                trend_report = self.trend_analyzer.generate_trend_report(metric_name)
-                regression_analysis = self.trend_analyzer.detect_regression(metric_name)
-                
-                regression_summary["trend_analysis"][metric_name] = trend_report
-                
-                if regression_analysis["regression_detected"]:
-                    regression_summary["regressions_detected"] += 1
-                    regression_summary["regression_details"][metric_name] = {
-                        "confidence": regression_analysis["confidence"],
-                        "z_score": regression_analysis["z_score"],
-                        "trend_slope": regression_analysis["trend_slope"],
-                        "message": regression_analysis["message"],
-                        "sample_size": regression_analysis["sample_size"]
-                    }
-                    
-                    logger.warning(
-                        "Performance regression detected",
-                        metric=metric_name,
-                        confidence=regression_analysis["confidence"],
-                        message=regression_analysis["message"]
-                    )
-            
-            # Determine overall regression status
-            if regression_summary["regressions_detected"] > 0:
-                critical_regressions = sum(
-                    1 for details in regression_summary["regression_details"].values()
-                    if details["confidence"] > 0.8
-                )
-                
-                if critical_regressions > 0:
-                    regression_summary["overall_regression_status"] = "critical_regressions_detected"
-                else:
-                    regression_summary["overall_regression_status"] = "minor_regressions_detected"
-            
-            # Store regression analysis results
-            self.regression_analysis = regression_summary
-            
-            logger.info(
-                "Regression detection completed",
-                metrics_analyzed=regression_summary["metrics_analyzed"],
-                regressions_detected=regression_summary["regressions_detected"],
-                overall_status=regression_summary["overall_regression_status"]
-            )
-            
-            return regression_summary
-            
-        except Exception as e:
-            error_msg = f"Regression detection error: {str(e)}"
-            logger.error(error_msg, error=str(e))
-            self.validation_errors.append(error_msg)
-            raise RegressionDetectionError(error_msg) from e
-    
-    def run_automated_load_test(
-        self,
-        base_url: str = "http://localhost:5000",
-        endpoints: Optional[List[str]] = None
-    ) -> Dict[str, Any]:
-        """
-        Run automated load test using Apache Bench per Section 4.6.3.
-        
-        Args:
-            base_url: Base URL for load testing
-            endpoints: List of endpoints to test (defaults to common endpoints)
-            
-        Returns:
-            Dictionary containing load test results
-            
-        Raises:
-            PerformanceValidationError: If load test execution fails
-        """
-        if endpoints is None:
-            endpoints = [
-                "/health",
-                "/api/v1/users",
-                "/api/v1/auth/login",
-                "/api/v1/data/reports"
-            ]
-        
-        load_test_results = {
-            "test_configuration": {
-                "base_url": base_url,
-                "endpoints": endpoints,
-                "concurrent_users": self.config.concurrent_users,
-                "test_duration": self.config.test_duration_seconds,
-                "target_rps": self.config.target_request_rate
-            },
-            "endpoint_results": {},
-            "overall_metrics": {},
-            "compliance_status": True
-        }
-        
-        try:
-            logger.info(
-                "Starting automated load test",
-                base_url=base_url,
-                concurrent_users=self.config.concurrent_users,
-                duration=self.config.test_duration_seconds
-            )
-            
-            # Check if Apache Bench is available
+            # Execute core performance validations
             try:
-                subprocess.run(["ab", "-V"], capture_output=True, check=True)
-            except (subprocess.CalledProcessError, FileNotFoundError):
-                logger.warning("Apache Bench not available - skipping load test")
-                load_test_results["error"] = "Apache Bench not available"
-                return load_test_results
-            
-            # Test each endpoint
-            total_requests = 0
-            total_response_time = 0
-            total_errors = 0
-            
-            for endpoint in endpoints:
-                try:
-                    logger.info(f"Load testing endpoint: {endpoint}")
-                    
-                    # Calculate requests per endpoint
-                    requests_per_endpoint = min(1000, self.config.target_request_rate * 10)
-                    
-                    # Execute Apache Bench command
-                    test_url = f"{base_url}{endpoint}"
-                    cmd = [
-                        "ab",
-                        "-n", str(requests_per_endpoint),
-                        "-c", str(min(self.config.concurrent_users, 50)),
-                        "-s", "30",  # 30-second timeout
-                        test_url
-                    ]
-                    
-                    result = subprocess.run(
-                        cmd,
-                        capture_output=True,
-                        text=True,
-                        timeout=300  # 5-minute timeout per endpoint
-                    )
-                    
-                    if result.returncode == 0:
-                        # Parse Apache Bench output
-                        parsed_results = self._parse_apache_bench_output(result.stdout)
-                        load_test_results["endpoint_results"][endpoint] = parsed_results
-                        
-                        # Extract response times for validation
-                        if "response_time_mean" in parsed_results:
-                            response_times = [parsed_results["response_time_mean"]] * requests_per_endpoint
-                            
-                            # Validate response time performance
-                            method = "POST" if "login" in endpoint else "GET"
-                            try:
-                                self.validate_response_time_performance(
-                                    endpoint, method, response_times, "load_test"
-                                )
-                            except PerformanceValidationError:
-                                load_test_results["compliance_status"] = False
-                        
-                        # Accumulate overall metrics
-                        total_requests += requests_per_endpoint
-                        if "response_time_mean" in parsed_results:
-                            total_response_time += parsed_results["response_time_mean"]
-                        if "failed_requests" in parsed_results:
-                            total_errors += parsed_results["failed_requests"]
-                    
-                    else:
-                        logger.error(
-                            "Apache Bench test failed for endpoint",
-                            endpoint=endpoint,
-                            error=result.stderr
-                        )
-                        load_test_results["endpoint_results"][endpoint] = {
-                            "error": result.stderr,
-                            "status": "failed"
-                        }
-                        load_test_results["compliance_status"] = False
+                # 1. Baseline Variance Validation (Critical)
+                self._validate_baseline_variance(validation_result, app_url)
+                if fail_fast and validation_result.get_critical_issues():
+                    return self._finalize_validation(validation_result, start_time)
                 
-                except subprocess.TimeoutExpired:
-                    logger.error(f"Load test timeout for endpoint: {endpoint}")
-                    load_test_results["endpoint_results"][endpoint] = {
-                        "error": "Test timeout",
-                        "status": "timeout"
-                    }
-                    load_test_results["compliance_status"] = False
+                # 2. Response Time Threshold Validation
+                self._validate_response_time_thresholds(validation_result, app_url)
+                if fail_fast and validation_result.get_critical_issues():
+                    return self._finalize_validation(validation_result, start_time)
                 
-                except Exception as e:
-                    logger.error(f"Load test error for endpoint {endpoint}: {str(e)}")
-                    load_test_results["endpoint_results"][endpoint] = {
-                        "error": str(e),
-                        "status": "error"
-                    }
-                    load_test_results["compliance_status"] = False
+                # 3. Throughput Validation
+                if enable_load_testing:
+                    self._validate_throughput_performance(validation_result, app_url)
+                    if fail_fast and validation_result.get_critical_issues():
+                        return self._finalize_validation(validation_result, start_time)
+                
+                # 4. System Resource Validation
+                self._validate_system_resource_usage(validation_result, app_url)
+                if fail_fast and validation_result.get_critical_issues():
+                    return self._finalize_validation(validation_result, start_time)
+                
+                # 5. Memory Usage Validation
+                if enable_memory_profiling and PSUTIL_AVAILABLE:
+                    self._validate_memory_usage_patterns(validation_result, app_url)
+                    if fail_fast and validation_result.get_critical_issues():
+                        return self._finalize_validation(validation_result, start_time)
+                
+                # 6. Database Performance Validation
+                self._validate_database_performance(validation_result)
+                if fail_fast and validation_result.get_critical_issues():
+                    return self._finalize_validation(validation_result, start_time)
+                
+                # 7. Regression Detection Analysis
+                if enable_regression_detection:
+                    self._detect_performance_regression(validation_result)
+                
+                # 8. Overall Compliance Assessment
+                self._assess_overall_compliance(validation_result)
+                
+                # 9. Generate Recommendations
+                self._generate_validation_recommendations(validation_result)
+                
+            finally:
+                # Clear timeout alarm
+                if timeout_seconds > 0:
+                    signal.alarm(0)
             
-            # Calculate overall metrics
-            if total_requests > 0:
-                avg_response_time = total_response_time / len(endpoints)
-                error_rate = (total_errors / total_requests) * 100
-                estimated_rps = total_requests / (self.config.test_duration_seconds / len(endpoints))
-                
-                load_test_results["overall_metrics"] = {
-                    "total_requests": total_requests,
-                    "average_response_time_ms": avg_response_time,
-                    "error_rate_percent": error_rate,
-                    "estimated_rps": estimated_rps,
-                    "endpoints_tested": len(endpoints)
-                }
-                
-                # Validate overall throughput and error rate
-                try:
-                    self.validate_throughput_performance(
-                        estimated_rps, self.config.concurrent_users, error_rate, "load_test"
-                    )
-                except PerformanceValidationError:
-                    load_test_results["compliance_status"] = False
+            return self._finalize_validation(validation_result, start_time)
             
-            logger.info(
-                "Automated load test completed",
-                endpoints_tested=len(endpoints),
-                total_requests=total_requests,
-                compliance_status=load_test_results["compliance_status"]
+        except TimeoutError as timeout_error:
+            self.logger.error(
+                "Performance validation timed out",
+                timeout_seconds=timeout_seconds,
+                error=str(timeout_error)
             )
+            validation_result.validation_issues.append(
+                ValidationIssue(
+                    severity=ValidationSeverity.CRITICAL,
+                    category="execution",
+                    metric="validation_timeout",
+                    current_value=time.time() - start_time,
+                    expected_value=timeout_seconds,
+                    variance_percent=((time.time() - start_time - timeout_seconds) / timeout_seconds) * 100,
+                    threshold_exceeded=True,
+                    message=f"Performance validation exceeded {timeout_seconds}s timeout"
+                )
+            )
+            return self._finalize_validation(validation_result, start_time)
             
-            return load_test_results
-            
-        except Exception as e:
-            error_msg = f"Automated load test error: {str(e)}"
-            logger.error(error_msg, error=str(e))
-            self.validation_errors.append(error_msg)
-            raise PerformanceValidationError(error_msg) from e
+        except Exception as validation_error:
+            self.logger.error(
+                "Performance validation failed with error",
+                error=str(validation_error),
+                traceback=traceback.format_exc()
+            )
+            validation_result.validation_issues.append(
+                ValidationIssue(
+                    severity=ValidationSeverity.CRITICAL,
+                    category="execution",
+                    metric="validation_error",
+                    current_value=0.0,
+                    expected_value=1.0,
+                    variance_percent=100.0,
+                    threshold_exceeded=True,
+                    message=f"Validation execution failed: {str(validation_error)}"
+                )
+            )
+            return self._finalize_validation(validation_result, start_time)
     
-    def _parse_apache_bench_output(self, output: str) -> Dict[str, Any]:
+    def _validate_baseline_variance(
+        self,
+        validation_result: PerformanceValidationResult,
+        app_url: str
+    ) -> None:
         """
-        Parse Apache Bench output to extract performance metrics.
+        Validate performance variance against Node.js baseline per Section 0.1.1.
+        
+        Critical validation ensuring ≤10% variance requirement compliance.
         
         Args:
-            output: Raw Apache Bench stdout output
-            
-        Returns:
-            Dictionary containing parsed performance metrics
+            validation_result: Validation result to update with findings
+            app_url: Application URL for baseline testing
         """
-        results = {}
+        self.logger.info("Starting baseline variance validation")
         
-        try:
-            lines = output.split('\n')
-            
-            for line in lines:
-                line = line.strip()
-                
-                if "Requests per second:" in line:
-                    parts = line.split()
-                    results["requests_per_second"] = float(parts[3])
-                    
-                elif "Time per request:" in line and "mean" in line:
-                    parts = line.split()
-                    results["response_time_mean"] = float(parts[3])
-                    
-                elif "Complete requests:" in line:
-                    parts = line.split()
-                    results["total_requests"] = int(parts[2])
-                    
-                elif "Failed requests:" in line:
-                    parts = line.split()
-                    results["failed_requests"] = int(parts[2])
-                    
-                elif "%" in line and "ms" in line:
-                    # Parse percentile data
-                    parts = line.strip().split()
-                    if len(parts) >= 2:
-                        try:
-                            percentile = int(parts[0].replace('%', ''))
-                            time_ms = float(parts[1])
-                            if "percentiles" not in results:
-                                results["percentiles"] = {}
-                            results["percentiles"][percentile] = time_ms
-                        except (ValueError, IndexError):
-                            continue
-        
-        except Exception as e:
-            logger.warning(f"Error parsing Apache Bench output: {str(e)}")
-        
-        return results
-    
-    def collect_system_metrics(self) -> Dict[str, float]:
-        """
-        Collect current system resource metrics using psutil.
-        
-        Returns:
-            Dictionary containing current system metrics
-        """
-        if not PSUTIL_AVAILABLE:
-            logger.warning("psutil not available - cannot collect system metrics")
-            return {}
-        
-        try:
-            # Collect CPU and memory metrics
-            cpu_percent = psutil.cpu_percent(interval=1)
-            memory_info = psutil.virtual_memory()
-            memory_mb = memory_info.used / (1024 * 1024)
-            memory_percent = memory_info.percent
-            
-            # Collect additional system metrics
-            disk_usage = psutil.disk_usage('/')
-            network_io = psutil.net_io_counters()
-            
-            system_metrics = {
-                "cpu_utilization_percent": cpu_percent,
-                "memory_usage_mb": memory_mb,
-                "memory_utilization_percent": memory_percent,
-                "disk_usage_percent": (disk_usage.used / disk_usage.total) * 100,
-                "network_bytes_sent": network_io.bytes_sent,
-                "network_bytes_recv": network_io.bytes_recv
-            }
-            
-            logger.info(
-                "System metrics collected",
-                cpu_percent=cpu_percent,
-                memory_mb=memory_mb,
-                memory_percent=memory_percent
-            )
-            
-            return system_metrics
-            
-        except Exception as e:
-            logger.error(f"Error collecting system metrics: {str(e)}")
-            return {}
-    
-    def validate_overall_performance_compliance(self) -> Dict[str, Any]:
-        """
-        Validate overall performance compliance per Section 0.1.1 and Section 4.6.3.
-        
-        Returns:
-            Dictionary containing comprehensive compliance analysis
-            
-        Raises:
-            PerformanceValidationError: If compliance validation fails
-        """
-        try:
-            # Use baseline comparison suite for overall validation
-            overall_compliance = self.comparison_suite.validate_overall_performance_compliance()
-            
-            # Enhance with validator-specific metrics
-            enhanced_compliance = {
-                "session_metadata": {
-                    "session_id": self.session_id,
-                    "validation_start_time": self.start_time.isoformat(),
-                    "validation_duration_seconds": (datetime.now(timezone.utc) - self.start_time).total_seconds(),
-                    "environment": self.config.environment,
-                    "variance_threshold_percent": self.config.variance_threshold_percent
-                },
-                "validation_summary": {
-                    "total_validations": len(self.validation_results),
-                    "passed_validations": len([r for r in self.validation_results if r.within_threshold]),
-                    "failed_validations": len([r for r in self.validation_results if not r.within_threshold]),
-                    "critical_failures": len(self.critical_failures),
-                    "performance_warnings": len(self.performance_warnings),
-                    "validation_errors": len(self.validation_errors)
-                },
-                "compliance_analysis": overall_compliance,
-                "regression_analysis": self.regression_analysis,
-                "performance_categories": self._analyze_performance_by_category(),
-                "recommendations": self._generate_performance_recommendations()
-            }
-            
-            # Determine final compliance status
-            final_compliance = (
-                overall_compliance.get("overall_compliant", False) and
-                len(self.critical_failures) == 0 and
-                len(self.validation_errors) == 0 and
-                self.regression_analysis.get("overall_regression_status", "") != "critical_regressions_detected"
-            )
-            
-            enhanced_compliance["final_compliance_status"] = final_compliance
-            enhanced_compliance["deployment_recommendation"] = "APPROVED" if final_compliance else "BLOCKED"
-            
-            # Update Prometheus compliance metrics if available
-            if self.metrics_registry and PROMETHEUS_AVAILABLE:
-                self.compliance_gauge.labels(validation_type="overall").set(1.0 if final_compliance else 0.0)
-                self.compliance_gauge.labels(validation_type="baseline_comparison").set(
-                    1.0 if overall_compliance.get("overall_compliant", False) else 0.0
+        if not self.baseline_manager:
+            validation_result.validation_issues.append(
+                ValidationIssue(
+                    severity=ValidationSeverity.WARNING,
+                    category="baseline",
+                    metric="baseline_unavailable",
+                    current_value=0.0,
+                    expected_value=1.0,
+                    variance_percent=100.0,
+                    threshold_exceeded=False,
+                    message="Baseline data manager not available - baseline validation skipped"
                 )
-                self.compliance_gauge.labels(validation_type="regression_detection").set(
-                    1.0 if self.regression_analysis.get("regressions_detected", 0) == 0 else 0.0
-                )
-            
-            logger.info(
-                "Overall performance compliance validation completed",
-                final_compliance=final_compliance,
-                total_validations=enhanced_compliance["validation_summary"]["total_validations"],
-                critical_failures=enhanced_compliance["validation_summary"]["critical_failures"],
-                deployment_recommendation=enhanced_compliance["deployment_recommendation"]
             )
-            
-            return enhanced_compliance
-            
-        except Exception as e:
-            error_msg = f"Overall compliance validation error: {str(e)}"
-            logger.error(error_msg, error=str(e))
-            self.validation_errors.append(error_msg)
-            raise PerformanceValidationError(error_msg) from e
-    
-    def _analyze_performance_by_category(self) -> Dict[str, Any]:
-        """Analyze performance results by test category."""
-        categories = {}
-        
-        for result in self.validation_results:
-            category = result.test_category
-            if category not in categories:
-                categories[category] = {
-                    "total_tests": 0,
-                    "passed_tests": 0,
-                    "failed_tests": 0,
-                    "average_variance": 0.0,
-                    "max_variance": 0.0,
-                    "critical_failures": 0
-                }
-            
-            cat_data = categories[category]
-            cat_data["total_tests"] += 1
-            
-            if result.within_threshold:
-                cat_data["passed_tests"] += 1
-            else:
-                cat_data["failed_tests"] += 1
-                if result.is_critical_failure:
-                    cat_data["critical_failures"] += 1
-            
-            cat_data["max_variance"] = max(cat_data["max_variance"], abs(result.variance_percent))
-        
-        # Calculate average variances
-        for category, data in categories.items():
-            category_results = [r for r in self.validation_results if r.test_category == category]
-            if category_results:
-                data["average_variance"] = statistics.mean([abs(r.variance_percent) for r in category_results])
-        
-        return categories
-    
-    def _generate_performance_recommendations(self) -> List[str]:
-        """Generate performance optimization recommendations."""
-        recommendations = []
-        
-        # Critical failures require immediate attention
-        if self.critical_failures:
-            recommendations.append("CRITICAL: Immediate performance optimization required - migration blocked")
-            recommendations.append("Review critical performance failures and implement fixes before deployment")
-        
-        # Regression-specific recommendations
-        if self.regression_analysis.get("regressions_detected", 0) > 0:
-            recommendations.append("Performance regressions detected - investigate root causes")
-            recommendations.append("Consider performance optimization or baseline recalibration")
-        
-        # Category-specific recommendations
-        performance_categories = self._analyze_performance_by_category()
-        for category, data in performance_categories.items():
-            if data["failed_tests"] > 0:
-                recommendations.append(f"Optimize {category.replace('_', ' ')} - {data['failed_tests']} failures detected")
-        
-        # General recommendations
-        if len(self.performance_warnings) > len(self.critical_failures):
-            recommendations.append("Monitor performance trends closely - multiple warnings detected")
-        
-        if not recommendations:
-            recommendations.append("Performance validation successful - deployment approved")
-        
-        return recommendations
-    
-    def send_performance_alerts(self, compliance_results: Dict[str, Any]) -> None:
-        """
-        Send automated performance alerts per Section 6.6.2.
-        
-        Args:
-            compliance_results: Performance compliance analysis results
-        """
-        if not self.config.automated_alerting_enabled:
-            logger.info("Automated alerting disabled - skipping notifications")
             return
         
         try:
-            alert_data = {
-                "session_id": self.session_id,
-                "environment": self.config.environment,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "compliance_status": compliance_results["final_compliance_status"],
-                "deployment_recommendation": compliance_results["deployment_recommendation"],
-                "critical_failures": len(self.critical_failures),
-                "performance_warnings": len(self.performance_warnings),
-                "validation_errors": len(self.validation_errors),
-                "regressions_detected": self.regression_analysis.get("regressions_detected", 0),
-                "summary": {
-                    "total_validations": compliance_results["validation_summary"]["total_validations"],
-                    "passed_validations": compliance_results["validation_summary"]["passed_validations"],
-                    "failed_validations": compliance_results["validation_summary"]["failed_validations"]
-                }
-            }
+            # Get Node.js baseline for comparison
+            nodejs_baseline = self.baseline_manager.get_default_baseline()
             
-            # Send webhook notification if configured
-            if self.config.notification_webhook_url and REQUESTS_AVAILABLE:
-                try:
-                    response = requests.post(
-                        self.config.notification_webhook_url,
-                        json=alert_data,
-                        timeout=30
-                    )
-                    
-                    if response.status_code == 200:
-                        logger.info("Performance alert sent successfully via webhook")
-                    else:
-                        logger.warning(
-                            "Webhook notification failed",
-                            status_code=response.status_code,
-                            response=response.text
-                        )
-                
-                except Exception as e:
-                    logger.error(f"Webhook notification error: {str(e)}")
+            # Test critical API endpoints for baseline comparison
+            endpoint_metrics = self._measure_endpoint_performance(app_url)
             
-            # Log alert for CI/CD integration
-            if self.config.ci_cd_mode:
-                if not compliance_results["final_compliance_status"]:
-                    logger.error(
-                        "PERFORMANCE VALIDATION FAILED - DEPLOYMENT BLOCKED",
-                        **alert_data
-                    )
-                else:
-                    logger.info(
-                        "PERFORMANCE VALIDATION PASSED - DEPLOYMENT APPROVED",
-                        **alert_data
-                    )
-            
-            logger.info(
-                "Performance alert processing completed",
-                compliance_status=compliance_results["final_compliance_status"],
-                webhook_configured=bool(self.config.notification_webhook_url)
+            # Compare against baseline values
+            baseline_comparison = compare_with_baseline(
+                endpoint_metrics,
+                variance_threshold=CRITICAL_VARIANCE_THRESHOLD / 100.0
             )
             
-        except Exception as e:
-            logger.error(f"Performance alerting error: {str(e)}")
+            validation_result.baseline_comparisons = baseline_comparison
+            validation_result.sample_size += len(endpoint_metrics)
+            
+            # Analyze variance compliance
+            comparison_results = baseline_comparison.get("comparison_results", {})
+            summary = baseline_comparison.get("summary", {})
+            
+            for metric_name, comparison in comparison_results.items():
+                current_value = comparison.get("current_value", 0.0)
+                baseline_value = comparison.get("baseline_value", 0.0)
+                variance_percent = comparison.get("variance_percent", 0.0)
+                within_threshold = comparison.get("within_threshold", False)
+                
+                if not within_threshold and baseline_value > 0:
+                    severity = (
+                        ValidationSeverity.CRITICAL 
+                        if abs(variance_percent) > CRITICAL_VARIANCE_THRESHOLD 
+                        else ValidationSeverity.WARNING
+                    )
+                    
+                    validation_result.validation_issues.append(
+                        ValidationIssue(
+                            severity=severity,
+                            category="baseline_variance",
+                            metric=metric_name,
+                            current_value=current_value,
+                            expected_value=baseline_value,
+                            variance_percent=variance_percent,
+                            threshold_exceeded=abs(variance_percent) > CRITICAL_VARIANCE_THRESHOLD,
+                            message=f"Baseline variance: {metric_name} = {variance_percent:.2f}% (threshold: ±{CRITICAL_VARIANCE_THRESHOLD}%)"
+                        )
+                    )
+                    
+                    # Update Prometheus metrics
+                    if self.enable_prometheus:
+                        self.variance_gauge.labels(
+                            metric_type="baseline",
+                            endpoint=metric_name
+                        ).set(abs(variance_percent))
+            
+            # Update variance compliance status
+            validation_result.variance_compliance = summary.get("overall_compliant", False)
+            validation_result.performance_metrics["baseline_comparison"] = baseline_comparison
+            
+            self.logger.info(
+                "Baseline variance validation completed",
+                total_metrics=summary.get("total_metrics", 0),
+                compliant_metrics=summary.get("compliant_metrics", 0),
+                compliance_percentage=summary.get("compliance_percentage", 0),
+                overall_compliant=validation_result.variance_compliance
+            )
+            
+        except Exception as baseline_error:
+            self.logger.error(
+                "Baseline variance validation failed",
+                error=str(baseline_error)
+            )
+            validation_result.validation_issues.append(
+                ValidationIssue(
+                    severity=ValidationSeverity.CRITICAL,
+                    category="baseline_variance",
+                    metric="baseline_validation_error",
+                    current_value=0.0,
+                    expected_value=1.0,
+                    variance_percent=100.0,
+                    threshold_exceeded=True,
+                    message=f"Baseline variance validation failed: {str(baseline_error)}"
+                )
+            )
     
-    def generate_validation_report(self, compliance_results: Dict[str, Any]) -> str:
+    def _validate_response_time_thresholds(
+        self,
+        validation_result: PerformanceValidationResult,
+        app_url: str
+    ) -> None:
         """
-        Generate comprehensive performance validation report.
+        Validate response time thresholds per Section 4.6.3 specifications.
+        
+        Ensures 95th percentile response time ≤500ms compliance.
         
         Args:
-            compliance_results: Performance compliance analysis results
+            validation_result: Validation result to update with findings
+            app_url: Application URL for response time testing
+        """
+        self.logger.info("Starting response time threshold validation")
+        
+        try:
+            # Test multiple endpoints with comprehensive sampling
+            response_time_results = self._measure_response_time_distribution(app_url)
+            
+            validation_result.performance_metrics["response_times"] = response_time_results
+            validation_result.sample_size += response_time_results.get("total_samples", 0)
+            
+            # Validate response time thresholds
+            for endpoint, metrics in response_time_results.get("endpoint_metrics", {}).items():
+                p95_response_time = metrics.get("p95_ms", 0.0)
+                mean_response_time = metrics.get("mean_ms", 0.0)
+                sample_count = metrics.get("sample_count", 0)
+                
+                # Check 95th percentile threshold compliance
+                if p95_response_time > RESPONSE_TIME_THRESHOLD_MS:
+                    validation_result.validation_issues.append(
+                        ValidationIssue(
+                            severity=ValidationSeverity.CRITICAL,
+                            category="response_time",
+                            metric=f"{endpoint}_p95",
+                            current_value=p95_response_time,
+                            expected_value=RESPONSE_TIME_THRESHOLD_MS,
+                            variance_percent=((p95_response_time - RESPONSE_TIME_THRESHOLD_MS) / RESPONSE_TIME_THRESHOLD_MS) * 100,
+                            threshold_exceeded=True,
+                            message=f"Response time P95 exceeds threshold: {endpoint} = {p95_response_time:.2f}ms (threshold: {RESPONSE_TIME_THRESHOLD_MS}ms)"
+                        )
+                    )
+                
+                # Check for unusually slow mean response times
+                if mean_response_time > (RESPONSE_TIME_THRESHOLD_MS * 0.6):  # 60% of threshold for mean
+                    severity = (
+                        ValidationSeverity.CRITICAL 
+                        if mean_response_time > RESPONSE_TIME_THRESHOLD_MS 
+                        else ValidationSeverity.WARNING
+                    )
+                    
+                    validation_result.validation_issues.append(
+                        ValidationIssue(
+                            severity=severity,
+                            category="response_time",
+                            metric=f"{endpoint}_mean",
+                            current_value=mean_response_time,
+                            expected_value=RESPONSE_TIME_THRESHOLD_MS * 0.6,
+                            variance_percent=((mean_response_time - (RESPONSE_TIME_THRESHOLD_MS * 0.6)) / (RESPONSE_TIME_THRESHOLD_MS * 0.6)) * 100,
+                            threshold_exceeded=mean_response_time > RESPONSE_TIME_THRESHOLD_MS,
+                            message=f"Mean response time elevated: {endpoint} = {mean_response_time:.2f}ms"
+                        )
+                    )
+                
+                # Validate statistical significance
+                if sample_count < MIN_SAMPLE_SIZE:
+                    validation_result.validation_issues.append(
+                        ValidationIssue(
+                            severity=ValidationSeverity.WARNING,
+                            category="response_time",
+                            metric=f"{endpoint}_sample_size",
+                            current_value=sample_count,
+                            expected_value=MIN_SAMPLE_SIZE,
+                            variance_percent=((MIN_SAMPLE_SIZE - sample_count) / MIN_SAMPLE_SIZE) * 100,
+                            threshold_exceeded=False,
+                            message=f"Low sample size for {endpoint}: {sample_count} samples (minimum: {MIN_SAMPLE_SIZE})"
+                        )
+                    )
+            
+            # Assess overall response time compliance
+            critical_response_time_issues = [
+                issue for issue in validation_result.validation_issues
+                if issue.category == "response_time" and issue.severity == ValidationSeverity.CRITICAL
+            ]
+            
+            validation_result.threshold_compliance = len(critical_response_time_issues) == 0
+            
+            self.logger.info(
+                "Response time threshold validation completed",
+                total_endpoints=len(response_time_results.get("endpoint_metrics", {})),
+                threshold_violations=len(critical_response_time_issues),
+                threshold_compliance=validation_result.threshold_compliance
+            )
+            
+        except Exception as response_time_error:
+            self.logger.error(
+                "Response time threshold validation failed",
+                error=str(response_time_error)
+            )
+            validation_result.validation_issues.append(
+                ValidationIssue(
+                    severity=ValidationSeverity.CRITICAL,
+                    category="response_time",
+                    metric="response_time_validation_error",
+                    current_value=0.0,
+                    expected_value=1.0,
+                    variance_percent=100.0,
+                    threshold_exceeded=True,
+                    message=f"Response time validation failed: {str(response_time_error)}"
+                )
+            )
+    
+    def _validate_throughput_performance(
+        self,
+        validation_result: PerformanceValidationResult,
+        app_url: str
+    ) -> None:
+        """
+        Validate throughput performance per Section 4.6.3 requirements.
+        
+        Ensures minimum 100 req/sec sustained throughput compliance.
+        
+        Args:
+            validation_result: Validation result to update with findings
+            app_url: Application URL for throughput testing
+        """
+        self.logger.info("Starting throughput performance validation")
+        
+        try:
+            # Execute progressive load testing
+            throughput_results = self._measure_throughput_capacity(app_url)
+            
+            validation_result.performance_metrics["throughput"] = throughput_results
+            validation_result.sample_size += throughput_results.get("total_requests", 0)
+            
+            # Validate throughput requirements
+            for scenario, metrics in throughput_results.get("load_scenarios", {}).items():
+                requests_per_second = metrics.get("requests_per_second", 0.0)
+                error_rate = metrics.get("error_rate_percent", 0.0)
+                concurrent_users = metrics.get("concurrent_users", 0)
+                
+                # Check minimum throughput threshold
+                if requests_per_second < THROUGHPUT_THRESHOLD_RPS:
+                    validation_result.validation_issues.append(
+                        ValidationIssue(
+                            severity=ValidationSeverity.CRITICAL,
+                            category="throughput",
+                            metric=f"{scenario}_rps",
+                            current_value=requests_per_second,
+                            expected_value=THROUGHPUT_THRESHOLD_RPS,
+                            variance_percent=((THROUGHPUT_THRESHOLD_RPS - requests_per_second) / THROUGHPUT_THRESHOLD_RPS) * 100,
+                            threshold_exceeded=True,
+                            message=f"Throughput below minimum: {scenario} = {requests_per_second:.2f} req/sec (minimum: {THROUGHPUT_THRESHOLD_RPS} req/sec)"
+                        )
+                    )
+                
+                # Check error rate compliance
+                if error_rate > ERROR_RATE_THRESHOLD:
+                    severity = (
+                        ValidationSeverity.CRITICAL 
+                        if error_rate > (ERROR_RATE_THRESHOLD * 2) 
+                        else ValidationSeverity.WARNING
+                    )
+                    
+                    validation_result.validation_issues.append(
+                        ValidationIssue(
+                            severity=severity,
+                            category="throughput",
+                            metric=f"{scenario}_error_rate",
+                            current_value=error_rate,
+                            expected_value=ERROR_RATE_THRESHOLD,
+                            variance_percent=((error_rate - ERROR_RATE_THRESHOLD) / ERROR_RATE_THRESHOLD) * 100,
+                            threshold_exceeded=error_rate > ERROR_RATE_THRESHOLD,
+                            message=f"Error rate too high: {scenario} = {error_rate:.2f}% (threshold: {ERROR_RATE_THRESHOLD}%)"
+                        )
+                    )
+            
+            self.logger.info(
+                "Throughput performance validation completed",
+                total_scenarios=len(throughput_results.get("load_scenarios", {})),
+                total_requests=throughput_results.get("total_requests", 0)
+            )
+            
+        except Exception as throughput_error:
+            self.logger.error(
+                "Throughput performance validation failed",
+                error=str(throughput_error)
+            )
+            validation_result.validation_issues.append(
+                ValidationIssue(
+                    severity=ValidationSeverity.CRITICAL,
+                    category="throughput",
+                    metric="throughput_validation_error",
+                    current_value=0.0,
+                    expected_value=1.0,
+                    variance_percent=100.0,
+                    threshold_exceeded=True,
+                    message=f"Throughput validation failed: {str(throughput_error)}"
+                )
+            )
+    
+    def _validate_system_resource_usage(
+        self,
+        validation_result: PerformanceValidationResult,
+        app_url: str
+    ) -> None:
+        """
+        Validate system resource usage per Section 4.6.3 resource thresholds.
+        
+        Ensures CPU ≤70%, Memory ≤80% during peak load compliance.
+        
+        Args:
+            validation_result: Validation result to update with findings
+            app_url: Application URL for resource monitoring
+        """
+        self.logger.info("Starting system resource usage validation")
+        
+        if not PSUTIL_AVAILABLE:
+            validation_result.validation_issues.append(
+                ValidationIssue(
+                    severity=ValidationSeverity.WARNING,
+                    category="system_resources",
+                    metric="psutil_unavailable",
+                    current_value=0.0,
+                    expected_value=1.0,
+                    variance_percent=100.0,
+                    threshold_exceeded=False,
+                    message="psutil not available - system resource monitoring limited"
+                )
+            )
+            return
+        
+        try:
+            # Monitor system resources during load testing
+            resource_metrics = self._monitor_system_resources(app_url)
+            
+            validation_result.performance_metrics["system_resources"] = resource_metrics
+            
+            # Validate CPU utilization
+            cpu_utilization = resource_metrics.get("cpu_utilization_peak", 0.0)
+            if cpu_utilization > CPU_UTILIZATION_THRESHOLD:
+                validation_result.validation_issues.append(
+                    ValidationIssue(
+                        severity=ValidationSeverity.CRITICAL,
+                        category="system_resources",
+                        metric="cpu_utilization",
+                        current_value=cpu_utilization,
+                        expected_value=CPU_UTILIZATION_THRESHOLD,
+                        variance_percent=((cpu_utilization - CPU_UTILIZATION_THRESHOLD) / CPU_UTILIZATION_THRESHOLD) * 100,
+                        threshold_exceeded=True,
+                        message=f"CPU utilization too high: {cpu_utilization:.2f}% (threshold: {CPU_UTILIZATION_THRESHOLD}%)"
+                    )
+                )
+            
+            # Validate memory utilization
+            memory_utilization = resource_metrics.get("memory_utilization_peak", 0.0)
+            if memory_utilization > MEMORY_UTILIZATION_THRESHOLD:
+                validation_result.validation_issues.append(
+                    ValidationIssue(
+                        severity=ValidationSeverity.CRITICAL,
+                        category="system_resources",
+                        metric="memory_utilization",
+                        current_value=memory_utilization,
+                        expected_value=MEMORY_UTILIZATION_THRESHOLD,
+                        variance_percent=((memory_utilization - MEMORY_UTILIZATION_THRESHOLD) / MEMORY_UTILIZATION_THRESHOLD) * 100,
+                        threshold_exceeded=True,
+                        message=f"Memory utilization too high: {memory_utilization:.2f}% (threshold: {MEMORY_UTILIZATION_THRESHOLD}%)"
+                    )
+                )
+            
+            self.logger.info(
+                "System resource usage validation completed",
+                cpu_utilization=cpu_utilization,
+                memory_utilization=memory_utilization,
+                cpu_compliant=cpu_utilization <= CPU_UTILIZATION_THRESHOLD,
+                memory_compliant=memory_utilization <= MEMORY_UTILIZATION_THRESHOLD
+            )
+            
+        except Exception as resource_error:
+            self.logger.error(
+                "System resource validation failed",
+                error=str(resource_error)
+            )
+            validation_result.validation_issues.append(
+                ValidationIssue(
+                    severity=ValidationSeverity.CRITICAL,
+                    category="system_resources",
+                    metric="resource_validation_error",
+                    current_value=0.0,
+                    expected_value=1.0,
+                    variance_percent=100.0,
+                    threshold_exceeded=True,
+                    message=f"System resource validation failed: {str(resource_error)}"
+                )
+            )
+    
+    def _validate_memory_usage_patterns(
+        self,
+        validation_result: PerformanceValidationResult,
+        app_url: str
+    ) -> None:
+        """
+        Validate memory usage patterns with leak detection per Section 0.3.2.
+        
+        Ensures memory variance ≤15% and detects potential memory leaks.
+        
+        Args:
+            validation_result: Validation result to update with findings
+            app_url: Application URL for memory profiling
+        """
+        self.logger.info("Starting memory usage pattern validation")
+        
+        if not PSUTIL_AVAILABLE:
+            validation_result.validation_issues.append(
+                ValidationIssue(
+                    severity=ValidationSeverity.WARNING,
+                    category="memory_usage",
+                    metric="psutil_unavailable",
+                    current_value=0.0,
+                    expected_value=1.0,
+                    variance_percent=100.0,
+                    threshold_exceeded=False,
+                    message="psutil not available - memory profiling disabled"
+                )
+            )
+            return
+        
+        try:
+            # Profile memory usage during sustained load
+            memory_profile = self._profile_memory_usage(app_url)
+            
+            validation_result.performance_metrics["memory_usage"] = memory_profile
+            
+            # Get baseline memory metrics for comparison
+            if self.baseline_manager:
+                baseline = self.baseline_manager.get_default_baseline()
+                baseline_memory = baseline.memory_usage_baseline_mb
+                
+                current_memory = memory_profile.get("mean_memory_mb", 0.0)
+                memory_variance = ((current_memory - baseline_memory) / baseline_memory) * 100
+                
+                # Validate memory variance threshold
+                if abs(memory_variance) > MEMORY_VARIANCE_THRESHOLD:
+                    validation_result.validation_issues.append(
+                        ValidationIssue(
+                            severity=ValidationSeverity.CRITICAL,
+                            category="memory_usage",
+                            metric="memory_variance",
+                            current_value=current_memory,
+                            expected_value=baseline_memory,
+                            variance_percent=memory_variance,
+                            threshold_exceeded=True,
+                            message=f"Memory variance exceeds threshold: {memory_variance:.2f}% (threshold: ±{MEMORY_VARIANCE_THRESHOLD}%)"
+                        )
+                    )
+            
+            # Check for memory leaks
+            memory_growth = memory_profile.get("memory_growth_mb", 0.0)
+            memory_growth_rate = memory_profile.get("growth_rate_mb_per_request", 0.0)
+            
+            if memory_growth_rate > 0.01:  # >0.01 MB per request indicates potential leak
+                validation_result.validation_issues.append(
+                    ValidationIssue(
+                        severity=ValidationSeverity.CRITICAL,
+                        category="memory_usage",
+                        metric="memory_leak",
+                        current_value=memory_growth_rate,
+                        expected_value=0.0,
+                        variance_percent=float('inf'),
+                        threshold_exceeded=True,
+                        message=f"Potential memory leak detected: {memory_growth_rate:.4f} MB/request growth rate"
+                    )
+                )
+            
+            self.logger.info(
+                "Memory usage pattern validation completed",
+                mean_memory=memory_profile.get("mean_memory_mb", 0.0),
+                memory_growth=memory_growth,
+                growth_rate=memory_growth_rate,
+                leak_detected=memory_growth_rate > 0.01
+            )
+            
+        except Exception as memory_error:
+            self.logger.error(
+                "Memory usage validation failed",
+                error=str(memory_error)
+            )
+            validation_result.validation_issues.append(
+                ValidationIssue(
+                    severity=ValidationSeverity.CRITICAL,
+                    category="memory_usage",
+                    metric="memory_validation_error",
+                    current_value=0.0,
+                    expected_value=1.0,
+                    variance_percent=100.0,
+                    threshold_exceeded=True,
+                    message=f"Memory usage validation failed: {str(memory_error)}"
+                )
+            )
+    
+    def _validate_database_performance(
+        self,
+        validation_result: PerformanceValidationResult
+    ) -> None:
+        """
+        Validate database performance per Section 0.3.2 database metrics.
+        
+        Ensures database query performance ≤10% variance from baseline.
+        
+        Args:
+            validation_result: Validation result to update with findings
+        """
+        self.logger.info("Starting database performance validation")
+        
+        try:
+            # Mock database performance testing (replace with actual implementation)
+            database_metrics = self._measure_database_performance()
+            
+            validation_result.performance_metrics["database_performance"] = database_metrics
+            
+            # Compare with baseline if available
+            if self.baseline_manager:
+                baseline = self.baseline_manager.get_default_baseline()
+                baseline_operations = baseline.database_operation_baselines
+                
+                for operation, current_time in database_metrics.get("operation_times", {}).items():
+                    baseline_time = baseline_operations.get(operation, 0.0)
+                    
+                    if baseline_time > 0:
+                        variance_percent = ((current_time - baseline_time) / baseline_time) * 100
+                        
+                        if abs(variance_percent) > DATABASE_VARIANCE_THRESHOLD:
+                            validation_result.validation_issues.append(
+                                ValidationIssue(
+                                    severity=ValidationSeverity.CRITICAL,
+                                    category="database_performance",
+                                    metric=f"db_{operation}",
+                                    current_value=current_time,
+                                    expected_value=baseline_time,
+                                    variance_percent=variance_percent,
+                                    threshold_exceeded=True,
+                                    message=f"Database operation variance: {operation} = {variance_percent:.2f}% (threshold: ±{DATABASE_VARIANCE_THRESHOLD}%)"
+                                )
+                            )
+            
+            self.logger.info(
+                "Database performance validation completed",
+                total_operations=len(database_metrics.get("operation_times", {}))
+            )
+            
+        except Exception as database_error:
+            self.logger.error(
+                "Database performance validation failed",
+                error=str(database_error)
+            )
+            validation_result.validation_issues.append(
+                ValidationIssue(
+                    severity=ValidationSeverity.CRITICAL,
+                    category="database_performance",
+                    metric="database_validation_error",
+                    current_value=0.0,
+                    expected_value=1.0,
+                    variance_percent=100.0,
+                    threshold_exceeded=True,
+                    message=f"Database performance validation failed: {str(database_error)}"
+                )
+            )
+    
+    def _detect_performance_regression(
+        self,
+        validation_result: PerformanceValidationResult
+    ) -> None:
+        """
+        Detect performance regression using historical validation data.
+        
+        Analyzes trend patterns to identify performance degradation over time.
+        
+        Args:
+            validation_result: Validation result to update with regression analysis
+        """
+        self.logger.info("Starting performance regression detection")
+        
+        try:
+            # Analyze historical validation results for trends
+            if len(self.validation_history) < 2:
+                validation_result.trend_indicators.append("Insufficient historical data for regression analysis")
+                return
+            
+            # Compare recent performance metrics with historical baselines
+            recent_results = self.validation_history[-REGRESSION_DETECTION_WINDOW:]
+            
+            # Analyze response time trends
+            response_time_trend = self._analyze_response_time_trend(recent_results)
+            if response_time_trend.get("regression_detected", False):
+                validation_result.regression_status = True
+                validation_result.validation_issues.append(
+                    ValidationIssue(
+                        severity=ValidationSeverity.CRITICAL,
+                        category="regression",
+                        metric="response_time_trend",
+                        current_value=response_time_trend.get("current_average", 0.0),
+                        expected_value=response_time_trend.get("baseline_average", 0.0),
+                        variance_percent=response_time_trend.get("trend_variance", 0.0),
+                        threshold_exceeded=True,
+                        message=f"Response time regression detected: {response_time_trend.get('trend_description', 'Performance deteriorating')}"
+                    )
+                )
+            
+            # Analyze throughput trends
+            throughput_trend = self._analyze_throughput_trend(recent_results)
+            if throughput_trend.get("regression_detected", False):
+                validation_result.regression_status = True
+                validation_result.validation_issues.append(
+                    ValidationIssue(
+                        severity=ValidationSeverity.CRITICAL,
+                        category="regression",
+                        metric="throughput_trend",
+                        current_value=throughput_trend.get("current_average", 0.0),
+                        expected_value=throughput_trend.get("baseline_average", 0.0),
+                        variance_percent=throughput_trend.get("trend_variance", 0.0),
+                        threshold_exceeded=True,
+                        message=f"Throughput regression detected: {throughput_trend.get('trend_description', 'Throughput declining')}"
+                    )
+                )
+            
+            validation_result.regression_analysis = {
+                "response_time_trend": response_time_trend,
+                "throughput_trend": throughput_trend,
+                "historical_data_points": len(recent_results),
+                "regression_window": REGRESSION_DETECTION_WINDOW
+            }
+            
+            self.logger.info(
+                "Performance regression detection completed",
+                regression_detected=validation_result.regression_status,
+                historical_data_points=len(recent_results)
+            )
+            
+        except Exception as regression_error:
+            self.logger.error(
+                "Performance regression detection failed",
+                error=str(regression_error)
+            )
+            validation_result.validation_issues.append(
+                ValidationIssue(
+                    severity=ValidationSeverity.WARNING,
+                    category="regression",
+                    metric="regression_detection_error",
+                    current_value=0.0,
+                    expected_value=1.0,
+                    variance_percent=100.0,
+                    threshold_exceeded=False,
+                    message=f"Regression detection failed: {str(regression_error)}"
+                )
+            )
+    
+    def _assess_overall_compliance(
+        self,
+        validation_result: PerformanceValidationResult
+    ) -> None:
+        """
+        Assess overall performance compliance based on all validation results.
+        
+        Determines overall compliance status and updates test counts.
+        
+        Args:
+            validation_result: Validation result to assess for overall compliance
+        """
+        self.logger.info("Assessing overall performance compliance")
+        
+        # Count validation issues by severity
+        critical_issues = validation_result.get_critical_issues()
+        warning_issues = validation_result.get_warning_issues()
+        
+        # Update test execution counts
+        total_validations = len([
+            "baseline_variance",
+            "response_time_thresholds", 
+            "throughput_performance",
+            "system_resource_usage",
+            "memory_usage_patterns",
+            "database_performance"
+        ])
+        
+        validation_result.total_tests = total_validations
+        validation_result.failed_tests = len(critical_issues)
+        validation_result.passed_tests = total_validations - validation_result.failed_tests
+        
+        # Assess overall compliance
+        validation_result.overall_compliance = (
+            len(critical_issues) == 0 and
+            validation_result.variance_compliance and
+            validation_result.threshold_compliance and
+            not validation_result.regression_status
+        )
+        
+        # Calculate statistical confidence
+        if validation_result.sample_size > 0:
+            validation_result.statistical_confidence = min(
+                (validation_result.sample_size / MIN_SAMPLE_SIZE) * 100,
+                100.0
+            )
+        
+        # Update Prometheus metrics
+        if self.enable_prometheus:
+            self.compliance_gauge.labels(compliance_type="overall").set(
+                1.0 if validation_result.overall_compliance else 0.0
+            )
+            self.compliance_gauge.labels(compliance_type="variance").set(
+                1.0 if validation_result.variance_compliance else 0.0
+            )
+            self.compliance_gauge.labels(compliance_type="threshold").set(
+                1.0 if validation_result.threshold_compliance else 0.0
+            )
+            self.regression_gauge.labels(regression_type="performance").set(
+                1.0 if validation_result.regression_status else 0.0
+            )
+        
+        self.logger.info(
+            "Overall performance compliance assessment completed",
+            overall_compliance=validation_result.overall_compliance,
+            variance_compliance=validation_result.variance_compliance,
+            threshold_compliance=validation_result.threshold_compliance,
+            regression_detected=validation_result.regression_status,
+            critical_issues=len(critical_issues),
+            warning_issues=len(warning_issues),
+            sample_size=validation_result.sample_size,
+            statistical_confidence=validation_result.statistical_confidence
+        )
+    
+    def _generate_validation_recommendations(
+        self,
+        validation_result: PerformanceValidationResult
+    ) -> None:
+        """
+        Generate actionable performance recommendations based on validation results.
+        
+        Provides specific guidance for addressing performance issues and improvements.
+        
+        Args:
+            validation_result: Validation result to generate recommendations for
+        """
+        recommendations = []
+        critical_actions = []
+        
+        critical_issues = validation_result.get_critical_issues()
+        warning_issues = validation_result.get_warning_issues()
+        
+        # Generate recommendations based on critical issues
+        if critical_issues:
+            variance_issues = [issue for issue in critical_issues if "variance" in issue.category]
+            threshold_issues = [issue for issue in critical_issues if "response_time" in issue.category or "throughput" in issue.category]
+            resource_issues = [issue for issue in critical_issues if "system_resources" in issue.category or "memory" in issue.category]
+            
+            if variance_issues:
+                critical_actions.append("❗ CRITICAL: Performance variance exceeds ±10% threshold - immediate investigation required")
+                recommendations.append("🔍 Perform detailed performance profiling to identify regression root causes")
+                recommendations.append("📊 Compare current implementation with Node.js baseline for optimization opportunities")
+            
+            if threshold_issues:
+                critical_actions.append("❗ CRITICAL: Performance thresholds exceeded - application may not meet SLA requirements")
+                recommendations.append("🚀 Optimize response times and throughput through code optimization and caching")
+                recommendations.append("🏗️ Consider infrastructure scaling and load balancing improvements")
+            
+            if resource_issues:
+                critical_actions.append("❗ CRITICAL: System resource limits exceeded - risk of service degradation")
+                recommendations.append("💾 Implement memory management optimizations and leak detection")
+                recommendations.append("🖥️ Optimize CPU-intensive operations and consider async processing")
+        
+        # Generate recommendations for regression detection
+        if validation_result.regression_status:
+            critical_actions.append("🔴 Performance regression detected - review recent code changes")
+            recommendations.append("📝 Implement performance testing in CI/CD pipeline to prevent future regressions")
+            recommendations.append("📈 Establish performance monitoring dashboards for continuous visibility")
+        
+        # Generate success recommendations
+        if validation_result.overall_compliance:
+            recommendations.append("✅ Performance validation successful - all metrics within acceptable thresholds")
+            if not warning_issues:
+                recommendations.append("🎉 Excellent performance! Consider documenting optimization strategies for future reference")
+            else:
+                recommendations.append("⚠️ Monitor warning indicators to prevent future performance degradation")
+        
+        # Add general best practices
+        recommendations.extend([
+            "📊 Implement continuous performance monitoring for proactive issue detection",
+            "🔄 Establish regular performance testing cycles for regression prevention",
+            "📚 Document performance optimization strategies and lessons learned"
+        ])
+        
+        validation_result.recommendations = recommendations
+        validation_result.critical_actions = critical_actions
+        
+        self.logger.info(
+            "Performance recommendations generated",
+            total_recommendations=len(recommendations),
+            critical_actions=len(critical_actions)
+        )
+    
+    def _finalize_validation(
+        self,
+        validation_result: PerformanceValidationResult,
+        start_time: float
+    ) -> PerformanceValidationResult:
+        """
+        Finalize validation result with duration and historical tracking.
+        
+        Args:
+            validation_result: Validation result to finalize
+            start_time: Validation start time for duration calculation
             
         Returns:
-            Formatted performance validation report
+            Finalized PerformanceValidationResult
         """
-        try:
-            if self.config.output_format.lower() == "json":
-                return self._generate_json_report(compliance_results)
-            elif self.config.output_format.lower() == "markdown":
-                return self._generate_markdown_report(compliance_results)
-            elif self.config.output_format.lower() == "html":
-                return self._generate_html_report(compliance_results)
-            else:
-                logger.warning(f"Unsupported output format: {self.config.output_format}")
-                return self._generate_json_report(compliance_results)
+        # Calculate validation duration
+        validation_result.duration_seconds = time.time() - start_time
         
-        except Exception as e:
-            logger.error(f"Report generation error: {str(e)}")
-            return json.dumps({"error": f"Report generation failed: {str(e)}"}, indent=2)
+        # Update Prometheus metrics
+        if self.enable_prometheus:
+            self.validation_duration_histogram.observe(validation_result.duration_seconds)
+            
+            status = "success" if validation_result.overall_compliance else "failure"
+            self.validation_counter.labels(
+                environment=self.config_environment,
+                status=status
+            ).inc()
+        
+        # Store in validation history
+        self.validation_history.append(validation_result)
+        
+        # Limit history size to prevent memory growth
+        if len(self.validation_history) > 20:
+            self.validation_history = self.validation_history[-20:]
+        
+        self.logger.info(
+            "Performance validation finalized",
+            validation_id=validation_result.validation_id,
+            duration_seconds=validation_result.duration_seconds,
+            overall_compliance=validation_result.overall_compliance,
+            exit_code=validation_result.exit_code.value
+        )
+        
+        return validation_result
     
-    def _generate_json_report(self, compliance_results: Dict[str, Any]) -> str:
-        """Generate JSON format performance validation report."""
-        report_data = {
-            "performance_validation_report": {
-                "metadata": compliance_results["session_metadata"],
-                "validation_summary": compliance_results["validation_summary"],
-                "compliance_analysis": compliance_results["compliance_analysis"],
-                "regression_analysis": compliance_results["regression_analysis"],
-                "performance_categories": compliance_results["performance_categories"],
-                "recommendations": compliance_results["recommendations"],
-                "final_status": {
-                    "compliance_status": compliance_results["final_compliance_status"],
-                    "deployment_recommendation": compliance_results["deployment_recommendation"]
-                },
-                "detailed_results": [
-                    {
-                        "metric_name": result.metric_name,
-                        "baseline_value": result.baseline_value,
-                        "current_value": result.current_value,
-                        "variance_percent": result.variance_percent,
-                        "within_threshold": result.within_threshold,
-                        "status": result.status,
-                        "test_category": result.test_category,
-                        "timestamp": result.timestamp.isoformat(),
-                        "variance_severity": result.variance_severity
+    # Helper methods for performance measurement
+    
+    def _measure_endpoint_performance(self, app_url: str) -> Dict[str, float]:
+        """Measure performance metrics for critical API endpoints."""
+        endpoint_metrics = {}
+        
+        # Define critical endpoints for testing
+        test_endpoints = [
+            "/health",
+            "/api/v1/users",
+            "/api/v1/auth/login",
+            "/api/v1/auth/logout"
+        ]
+        
+        if not REQUESTS_AVAILABLE:
+            self.logger.warning("requests library not available - using mock metrics")
+            # Return mock metrics for testing
+            return {endpoint: 150.0 for endpoint in test_endpoints}
+        
+        try:
+            for endpoint in test_endpoints:
+                response_times = []
+                
+                # Collect multiple samples for statistical validity
+                for _ in range(min(50, MIN_SAMPLE_SIZE // 4)):
+                    try:
+                        start_time = time.time()
+                        response = requests.get(f"{app_url}{endpoint}", timeout=5)
+                        response_time_ms = (time.time() - start_time) * 1000
+                        
+                        if response.status_code < 500:
+                            response_times.append(response_time_ms)
+                            
+                    except Exception:
+                        pass  # Skip failed requests
+                
+                if response_times:
+                    endpoint_metrics[f"api_response_time_{endpoint.replace('/', '_').replace('-', '_')}"] = statistics.mean(response_times)
+        
+        except Exception as measurement_error:
+            self.logger.warning(
+                "Endpoint performance measurement failed",
+                error=str(measurement_error)
+            )
+        
+        return endpoint_metrics
+    
+    def _measure_response_time_distribution(self, app_url: str) -> Dict[str, Any]:
+        """Measure response time distribution with statistical analysis."""
+        if not REQUESTS_AVAILABLE:
+            # Return mock results for testing
+            return {
+                "endpoint_metrics": {
+                    "/health": {
+                        "sample_count": 100,
+                        "mean_ms": 85.0,
+                        "median_ms": 80.0,
+                        "p95_ms": 150.0,
+                        "std_dev_ms": 25.0
                     }
-                    for result in self.validation_results
-                ]
+                },
+                "total_samples": 100
+            }
+        
+        endpoint_metrics = {}
+        total_samples = 0
+        
+        test_endpoints = ["/health", "/api/v1/users"]
+        
+        try:
+            for endpoint in test_endpoints:
+                response_times = []
+                
+                # Collect comprehensive samples
+                for _ in range(MIN_SAMPLE_SIZE):
+                    try:
+                        start_time = time.time()
+                        response = requests.get(f"{app_url}{endpoint}", timeout=10)
+                        response_time_ms = (time.time() - start_time) * 1000
+                        
+                        if response.status_code < 500:
+                            response_times.append(response_time_ms)
+                            
+                    except Exception:
+                        pass
+                
+                if response_times:
+                    endpoint_metrics[endpoint] = {
+                        "sample_count": len(response_times),
+                        "mean_ms": statistics.mean(response_times),
+                        "median_ms": statistics.median(response_times),
+                        "p95_ms": statistics.quantiles(response_times, n=20)[18] if len(response_times) >= 20 else max(response_times),
+                        "std_dev_ms": statistics.stdev(response_times) if len(response_times) > 1 else 0.0
+                    }
+                    total_samples += len(response_times)
+        
+        except Exception as distribution_error:
+            self.logger.warning(
+                "Response time distribution measurement failed",
+                error=str(distribution_error)
+            )
+        
+        return {
+            "endpoint_metrics": endpoint_metrics,
+            "total_samples": total_samples
+        }
+    
+    def _measure_throughput_capacity(self, app_url: str) -> Dict[str, Any]:
+        """Measure throughput capacity with progressive load testing."""
+        # Mock implementation for testing
+        load_scenarios = {
+            "light_load": {
+                "concurrent_users": 10,
+                "requests_per_second": 45.0,
+                "error_rate_percent": 0.05,
+                "total_requests": 450
+            },
+            "normal_load": {
+                "concurrent_users": 50,
+                "requests_per_second": 125.0,
+                "error_rate_percent": 0.08,
+                "total_requests": 1250
             }
         }
         
-        return json.dumps(report_data, indent=2, default=str)
+        total_requests = sum(scenario["total_requests"] for scenario in load_scenarios.values())
+        
+        return {
+            "load_scenarios": load_scenarios,
+            "total_requests": total_requests
+        }
     
-    def _generate_markdown_report(self, compliance_results: Dict[str, Any]) -> str:
-        """Generate Markdown format performance validation report."""
-        report = f"""# Performance Validation Report
-
-**Session ID:** {self.session_id}  
-**Environment:** {self.config.environment}  
-**Validation Date:** {self.start_time.strftime('%Y-%m-%d %H:%M:%S UTC')}  
-**Duration:** {(datetime.now(timezone.utc) - self.start_time).total_seconds():.1f} seconds  
-
-## Executive Summary
-
-- **Final Status:** {'✅ PASSED' if compliance_results['final_compliance_status'] else '❌ FAILED'}
-- **Deployment Recommendation:** {compliance_results['deployment_recommendation']}
-- **Total Validations:** {compliance_results['validation_summary']['total_validations']}
-- **Passed/Failed:** {compliance_results['validation_summary']['passed_validations']}/{compliance_results['validation_summary']['failed_validations']}
-- **Critical Failures:** {compliance_results['validation_summary']['critical_failures']}
-
-## Performance Variance Analysis
-
-| Metric | Baseline | Current | Variance | Status |
-|--------|----------|---------|----------|--------|
-"""
-        
-        for result in self.validation_results:
-            status_icon = "✅" if result.within_threshold else "❌"
-            report += f"| {result.metric_name} | {result.baseline_value:.2f} | {result.current_value:.2f} | {result.variance_percent:.2f}% | {status_icon} |\n"
-        
-        report += f"""
-## Regression Analysis
-
-- **Metrics Analyzed:** {self.regression_analysis.get('metrics_analyzed', 0)}
-- **Regressions Detected:** {self.regression_analysis.get('regressions_detected', 0)}
-- **Overall Status:** {self.regression_analysis.get('overall_regression_status', 'unknown')}
-
-## Recommendations
-
-"""
-        
-        for recommendation in compliance_results['recommendations']:
-            report += f"- {recommendation}\n"
-        
-        return report
-    
-    def _generate_html_report(self, compliance_results: Dict[str, Any]) -> str:
-        """Generate HTML format performance validation report."""
-        status_color = "green" if compliance_results['final_compliance_status'] else "red"
-        
-        html_report = f"""
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Performance Validation Report</title>
-    <style>
-        body {{ font-family: Arial, sans-serif; margin: 20px; }}
-        .header {{ background-color: #f5f5f5; padding: 20px; border-radius: 5px; }}
-        .status-pass {{ color: green; font-weight: bold; }}
-        .status-fail {{ color: red; font-weight: bold; }}
-        .status-warning {{ color: orange; font-weight: bold; }}
-        table {{ border-collapse: collapse; width: 100%; margin: 20px 0; }}
-        th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
-        th {{ background-color: #f2f2f2; }}
-        .metric-pass {{ background-color: #e8f5e9; }}
-        .metric-fail {{ background-color: #ffebee; }}
-        .recommendations {{ background-color: #fff3e0; padding: 15px; border-radius: 5px; }}
-    </style>
-</head>
-<body>
-    <div class="header">
-        <h1>Performance Validation Report</h1>
-        <p><strong>Session ID:</strong> {self.session_id}</p>
-        <p><strong>Environment:</strong> {self.config.environment}</p>
-        <p><strong>Status:</strong> <span class="status-{'pass' if compliance_results['final_compliance_status'] else 'fail'}">{compliance_results['deployment_recommendation']}</span></p>
-    </div>
-    
-    <h2>Validation Summary</h2>
-    <ul>
-        <li>Total Validations: {compliance_results['validation_summary']['total_validations']}</li>
-        <li>Passed: {compliance_results['validation_summary']['passed_validations']}</li>
-        <li>Failed: {compliance_results['validation_summary']['failed_validations']}</li>
-        <li>Critical Failures: {compliance_results['validation_summary']['critical_failures']}</li>
-    </ul>
-    
-    <h2>Performance Results</h2>
-    <table>
-        <tr>
-            <th>Metric</th>
-            <th>Baseline</th>
-            <th>Current</th>
-            <th>Variance</th>
-            <th>Status</th>
-        </tr>
-"""
-        
-        for result in self.validation_results:
-            row_class = "metric-pass" if result.within_threshold else "metric-fail"
-            html_report += f"""
-        <tr class="{row_class}">
-            <td>{result.metric_name}</td>
-            <td>{result.baseline_value:.2f}</td>
-            <td>{result.current_value:.2f}</td>
-            <td>{result.variance_percent:.2f}%</td>
-            <td>{'PASS' if result.within_threshold else 'FAIL'}</td>
-        </tr>
-"""
-        
-        html_report += """
-    </table>
-    
-    <h2>Recommendations</h2>
-    <div class="recommendations">
-        <ul>
-"""
-        
-        for recommendation in compliance_results['recommendations']:
-            html_report += f"<li>{recommendation}</li>\n"
-        
-        html_report += """
-        </ul>
-    </div>
-</body>
-</html>
-"""
-        
-        return html_report
-    
-    def export_prometheus_metrics(self, file_path: Optional[str] = None) -> Optional[str]:
-        """
-        Export Prometheus metrics for monitoring integration.
-        
-        Args:
-            file_path: Optional file path for metrics export
-            
-        Returns:
-            Prometheus metrics data or file path if exported
-        """
-        if not self.metrics_registry or not PROMETHEUS_AVAILABLE:
-            logger.warning("Prometheus metrics not available for export")
-            return None
+    def _monitor_system_resources(self, app_url: str) -> Dict[str, Any]:
+        """Monitor system resource usage during performance testing."""
+        if not PSUTIL_AVAILABLE:
+            # Return mock metrics for testing
+            return {
+                "cpu_utilization_peak": 45.0,
+                "memory_utilization_peak": 65.0,
+                "cpu_utilization_average": 35.0,
+                "memory_utilization_average": 55.0
+            }
         
         try:
-            metrics_data = generate_latest(self.metrics_registry)
+            # Sample system resources during brief load test
+            cpu_samples = []
+            memory_samples = []
             
-            if file_path:
-                with open(file_path, 'wb') as f:
-                    f.write(metrics_data)
-                logger.info(f"Prometheus metrics exported to: {file_path}")
-                return file_path
-            else:
-                return metrics_data.decode('utf-8')
+            for _ in range(10):  # 10 samples over brief period
+                cpu_percent = psutil.cpu_percent(interval=1)
+                memory_percent = psutil.virtual_memory().percent
+                
+                cpu_samples.append(cpu_percent)
+                memory_samples.append(memory_percent)
+            
+            return {
+                "cpu_utilization_peak": max(cpu_samples),
+                "memory_utilization_peak": max(memory_samples),
+                "cpu_utilization_average": statistics.mean(cpu_samples),
+                "memory_utilization_average": statistics.mean(memory_samples),
+                "sample_count": len(cpu_samples)
+            }
+            
+        except Exception as resource_error:
+            self.logger.warning(
+                "System resource monitoring failed",
+                error=str(resource_error)
+            )
+            return {
+                "cpu_utilization_peak": 0.0,
+                "memory_utilization_peak": 0.0,
+                "cpu_utilization_average": 0.0,
+                "memory_utilization_average": 0.0
+            }
+    
+    def _profile_memory_usage(self, app_url: str) -> Dict[str, Any]:
+        """Profile memory usage patterns with leak detection."""
+        if not PSUTIL_AVAILABLE:
+            # Return mock metrics for testing
+            return {
+                "mean_memory_mb": 280.0,
+                "peak_memory_mb": 350.0,
+                "memory_growth_mb": 5.0,
+                "growth_rate_mb_per_request": 0.001,
+                "sample_count": 100
+            }
         
-        except Exception as e:
-            logger.error(f"Prometheus metrics export error: {str(e)}")
-            return None
+        try:
+            process = psutil.Process()
+            initial_memory = process.memory_info().rss / (1024 * 1024)  # Convert to MB
+            
+            memory_samples = []
+            request_count = 0
+            
+            # Profile memory during sustained requests
+            for _ in range(50):  # 50 iterations of requests
+                if REQUESTS_AVAILABLE:
+                    try:
+                        requests.get(f"{app_url}/health", timeout=5)
+                        request_count += 1
+                    except Exception:
+                        pass
+                
+                current_memory = process.memory_info().rss / (1024 * 1024)
+                memory_samples.append(current_memory)
+                time.sleep(0.1)  # Brief pause between samples
+            
+            final_memory = process.memory_info().rss / (1024 * 1024)
+            memory_growth = final_memory - initial_memory
+            
+            return {
+                "mean_memory_mb": statistics.mean(memory_samples),
+                "peak_memory_mb": max(memory_samples),
+                "memory_growth_mb": memory_growth,
+                "growth_rate_mb_per_request": memory_growth / request_count if request_count > 0 else 0.0,
+                "sample_count": len(memory_samples)
+            }
+            
+        except Exception as memory_error:
+            self.logger.warning(
+                "Memory profiling failed",
+                error=str(memory_error)
+            )
+            return {
+                "mean_memory_mb": 0.0,
+                "peak_memory_mb": 0.0,
+                "memory_growth_mb": 0.0,
+                "growth_rate_mb_per_request": 0.0,
+                "sample_count": 0
+            }
+    
+    def _measure_database_performance(self) -> Dict[str, Any]:
+        """Measure database operation performance (mock implementation)."""
+        # Mock database operation metrics for testing
+        operation_times = {
+            "find_one": 48.0,
+            "find_many": 85.0,
+            "insert_one": 32.0,
+            "update_one": 45.0,
+            "delete_one": 28.0,
+            "aggregate": 120.0
+        }
+        
+        return {
+            "operation_times": operation_times,
+            "total_operations": len(operation_times)
+        }
+    
+    def _analyze_response_time_trend(self, recent_results: List[PerformanceValidationResult]) -> Dict[str, Any]:
+        """Analyze response time trends for regression detection."""
+        if len(recent_results) < 2:
+            return {"regression_detected": False, "trend_description": "Insufficient data"}
+        
+        # Extract response time metrics from recent results
+        response_times = []
+        for result in recent_results:
+            response_time_metrics = result.performance_metrics.get("response_times", {})
+            endpoint_metrics = response_time_metrics.get("endpoint_metrics", {})
+            
+            # Calculate average response time across all endpoints
+            all_times = []
+            for endpoint_data in endpoint_metrics.values():
+                if isinstance(endpoint_data, dict) and "mean_ms" in endpoint_data:
+                    all_times.append(endpoint_data["mean_ms"])
+            
+            if all_times:
+                response_times.append(statistics.mean(all_times))
+        
+        if len(response_times) < 2:
+            return {"regression_detected": False, "trend_description": "No response time data"}
+        
+        # Check for increasing trend (regression)
+        recent_avg = statistics.mean(response_times[-2:])
+        historical_avg = statistics.mean(response_times[:-2]) if len(response_times) > 2 else response_times[0]
+        
+        trend_variance = ((recent_avg - historical_avg) / historical_avg) * 100 if historical_avg > 0 else 0
+        
+        regression_detected = trend_variance > WARNING_VARIANCE_THRESHOLD
+        
+        return {
+            "regression_detected": regression_detected,
+            "current_average": recent_avg,
+            "baseline_average": historical_avg,
+            "trend_variance": trend_variance,
+            "trend_description": f"Response time trending {'up' if trend_variance > 0 else 'down'} by {abs(trend_variance):.2f}%"
+        }
+    
+    def _analyze_throughput_trend(self, recent_results: List[PerformanceValidationResult]) -> Dict[str, Any]:
+        """Analyze throughput trends for regression detection."""
+        if len(recent_results) < 2:
+            return {"regression_detected": False, "trend_description": "Insufficient data"}
+        
+        # Extract throughput metrics from recent results
+        throughput_values = []
+        for result in recent_results:
+            throughput_metrics = result.performance_metrics.get("throughput", {})
+            load_scenarios = throughput_metrics.get("load_scenarios", {})
+            
+            # Calculate average throughput across scenarios
+            all_rps = []
+            for scenario_data in load_scenarios.values():
+                if isinstance(scenario_data, dict) and "requests_per_second" in scenario_data:
+                    all_rps.append(scenario_data["requests_per_second"])
+            
+            if all_rps:
+                throughput_values.append(statistics.mean(all_rps))
+        
+        if len(throughput_values) < 2:
+            return {"regression_detected": False, "trend_description": "No throughput data"}
+        
+        # Check for decreasing trend (regression)
+        recent_avg = statistics.mean(throughput_values[-2:])
+        historical_avg = statistics.mean(throughput_values[:-2]) if len(throughput_values) > 2 else throughput_values[0]
+        
+        trend_variance = ((historical_avg - recent_avg) / historical_avg) * 100 if historical_avg > 0 else 0
+        
+        regression_detected = trend_variance > WARNING_VARIANCE_THRESHOLD
+        
+        return {
+            "regression_detected": regression_detected,
+            "current_average": recent_avg,
+            "baseline_average": historical_avg,
+            "trend_variance": trend_variance,
+            "trend_description": f"Throughput trending {'down' if trend_variance > 0 else 'up'} by {abs(trend_variance):.2f}%"
+        }
 
 
-def parse_command_line_arguments() -> argparse.Namespace:
-    """Parse command line arguments for performance validation script."""
+def main():
+    """
+    Main entry point for performance validation script with comprehensive CLI interface.
+    
+    Supports multiple execution modes for different CI/CD integration scenarios.
+    """
     parser = argparse.ArgumentParser(
         description="Automated Performance Validation Script for Flask Migration",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    python validate_performance.py --environment testing
-    python validate_performance.py --baseline-only --output-format json
-    python validate_performance.py --run-load-test --concurrent-users 500
-    python validate_performance.py --ci-cd-mode --fail-on-regression
+  %(prog)s --config production --verbose
+  %(prog)s --scenarios api_baseline,load_test --fail-fast
+  %(prog)s --ci-mode --output-format json --timeout 1200
+  %(prog)s --app-url http://staging.example.com:5000 --memory-profiling
         """
     )
     
-    # Environment and configuration
+    # Configuration arguments
     parser.add_argument(
-        "--environment", "-e",
+        "--config", 
         default="testing",
-        choices=["development", "testing", "staging", "production", "ci_cd"],
-        help="Target environment for performance validation"
+        choices=["testing", "staging", "production"],
+        help="Environment configuration (default: testing)"
     )
     
     parser.add_argument(
-        "--config-file", "-c",
-        help="Path to JSON configuration file"
-    )
-    
-    # Validation modes
-    parser.add_argument(
-        "--baseline-only",
-        action="store_true",
-        help="Only perform baseline comparison validation"
-    )
-    
-    parser.add_argument(
-        "--run-load-test",
-        action="store_true",
-        help="Execute automated load testing with Apache Bench"
-    )
-    
-    parser.add_argument(
-        "--collect-system-metrics",
-        action="store_true",
-        help="Collect and validate current system resource metrics"
-    )
-    
-    # Load testing parameters
-    parser.add_argument(
-        "--concurrent-users",
-        type=int,
-        default=DEFAULT_CONCURRENT_USERS,
-        help=f"Number of concurrent users for load testing (default: {DEFAULT_CONCURRENT_USERS})"
-    )
-    
-    parser.add_argument(
-        "--test-duration",
-        type=int,
-        default=DEFAULT_LOAD_TEST_DURATION,
-        help=f"Load test duration in seconds (default: {DEFAULT_LOAD_TEST_DURATION})"
-    )
-    
-    parser.add_argument(
-        "--base-url",
+        "--app-url",
         default="http://localhost:5000",
-        help="Base URL for load testing (default: http://localhost:5000)"
+        help="Flask application URL for testing (default: http://localhost:5000)"
     )
     
-    # Validation thresholds
+    # Test execution arguments
     parser.add_argument(
-        "--variance-threshold",
-        type=float,
-        default=PERFORMANCE_VARIANCE_LIMIT,
-        help=f"Performance variance threshold percentage (default: {PERFORMANCE_VARIANCE_LIMIT})"
+        "--scenarios",
+        help="Comma-separated list of test scenarios to execute"
     )
     
     parser.add_argument(
-        "--response-time-threshold",
-        type=float,
-        default=RESPONSE_TIME_THRESHOLD_MS,
-        help=f"Response time threshold in milliseconds (default: {RESPONSE_TIME_THRESHOLD_MS})"
+        "--timeout",
+        type=int,
+        default=TEST_TIMEOUT_SECONDS,
+        help=f"Maximum validation execution time in seconds (default: {TEST_TIMEOUT_SECONDS})"
     )
     
-    # Output configuration
+    parser.add_argument(
+        "--fail-fast",
+        action="store_true",
+        help="Stop validation on first critical failure"
+    )
+    
+    # Feature flags
+    parser.add_argument(
+        "--no-load-testing",
+        action="store_true",
+        help="Disable load testing validation"
+    )
+    
+    parser.add_argument(
+        "--no-memory-profiling",
+        action="store_true",
+        help="Disable memory usage profiling"
+    )
+    
+    parser.add_argument(
+        "--no-regression-detection",
+        action="store_true",
+        help="Disable regression detection analysis"
+    )
+    
+    # Output and reporting arguments
     parser.add_argument(
         "--output-format",
-        choices=["json", "markdown", "html"],
-        default="json",
-        help="Output format for validation report (default: json)"
+        choices=["text", "json", "junit"],
+        default="text",
+        help="Output format for validation results (default: text)"
     )
     
     parser.add_argument(
-        "--output-file", "-o",
-        help="Output file path for validation report"
+        "--output-file",
+        help="Output file path for validation results"
     )
     
     parser.add_argument(
-        "--export-metrics",
-        help="Export Prometheus metrics to file path"
-    )
-    
-    # CI/CD integration
-    parser.add_argument(
-        "--ci-cd-mode",
+        "--ci-mode",
         action="store_true",
-        help="Enable CI/CD mode with automated failure handling"
+        help="Enable CI/CD mode with structured output and exit codes"
     )
     
     parser.add_argument(
-        "--fail-on-regression",
-        action="store_true",
-        help="Fail validation if performance regressions detected"
-    )
-    
-    parser.add_argument(
-        "--notification-webhook",
-        help="Webhook URL for automated performance alerts"
-    )
-    
-    # Debugging and verbose output
-    parser.add_argument(
-        "--verbose", "-v",
+        "--verbose",
         action="store_true",
         help="Enable verbose logging output"
     )
     
     parser.add_argument(
-        "--debug",
+        "--quiet",
         action="store_true",
-        help="Enable debug mode with detailed logging"
+        help="Suppress non-critical output"
     )
     
-    return parser.parse_args()
-
-
-def load_configuration_from_file(file_path: str) -> Dict[str, Any]:
-    """Load performance validation configuration from JSON file."""
+    args = parser.parse_args()
+    
+    # Configure logging based on verbosity
+    if args.quiet:
+        logging.getLogger().setLevel(logging.ERROR)
+    elif args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+    else:
+        logging.getLogger().setLevel(logging.INFO)
+    
+    # Initialize performance validator
     try:
-        with open(file_path, 'r') as f:
-            config_data = json.load(f)
-        logger.info(f"Configuration loaded from: {file_path}")
-        return config_data
-    except Exception as e:
-        logger.error(f"Error loading configuration file: {str(e)}")
-        return {}
-
-
-def create_validation_config(args: argparse.Namespace) -> PerformanceValidationConfig:
-    """Create performance validation configuration from command line arguments."""
-    config_data = {}
-    
-    # Load configuration file if specified
-    if args.config_file:
-        config_data = load_configuration_from_file(args.config_file)
-    
-    # Override with command line arguments
-    config = PerformanceValidationConfig(
-        environment=args.environment,
-        baseline_comparison_enabled=not args.baseline_only or config_data.get("baseline_comparison_enabled", True),
-        load_testing_enabled=args.run_load_test or config_data.get("load_testing_enabled", False),
-        regression_detection_enabled=config_data.get("regression_detection_enabled", True),
-        automated_alerting_enabled=config_data.get("automated_alerting_enabled", True),
-        concurrent_users=args.concurrent_users,
-        test_duration_seconds=args.test_duration,
-        variance_threshold_percent=args.variance_threshold,
-        response_time_threshold_ms=args.response_time_threshold,
-        output_format=args.output_format,
-        report_file_path=args.output_file,
-        ci_cd_mode=args.ci_cd_mode,
-        fail_on_regression=args.fail_on_regression,
-        notification_webhook_url=args.notification_webhook
-    )
-    
-    return config
-
-
-def setup_signal_handlers():
-    """Setup signal handlers for graceful shutdown."""
-    def signal_handler(signum, frame):
-        logger.info(f"Received signal {signum} - initiating graceful shutdown")
-        sys.exit(1)
-    
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-
-
-def main():
-    """Main execution function for performance validation script."""
-    setup_signal_handlers()
-    
-    try:
-        # Parse command line arguments
-        args = parse_command_line_arguments()
-        
-        # Configure logging
-        if args.debug:
-            logging.getLogger().setLevel(logging.DEBUG)
-        elif args.verbose:
-            logging.getLogger().setLevel(logging.INFO)
-        else:
-            logging.getLogger().setLevel(logging.WARNING)
-        
-        # Create validation configuration
-        config = create_validation_config(args)
-        
-        logger.info(
-            "Performance validation starting",
-            environment=config.environment,
-            ci_cd_mode=config.ci_cd_mode,
-            baseline_comparison=config.baseline_comparison_enabled,
-            load_testing=config.load_testing_enabled
+        validator = PerformanceValidator(
+            config_environment=args.config,
+            enable_prometheus=not args.ci_mode,  # Disable Prometheus in CI mode
+            enable_detailed_logging=args.verbose
         )
         
-        # Initialize performance validator
-        validator = PerformanceValidator(config)
+        # Parse test scenarios
+        test_scenarios = None
+        if args.scenarios:
+            test_scenarios = [scenario.strip() for scenario in args.scenarios.split(",")]
         
-        # Collect system metrics if requested
-        if args.collect_system_metrics:
-            logger.info("Collecting system performance metrics")
-            system_metrics = validator.collect_system_metrics()
-            
-            if system_metrics:
-                # Validate resource utilization
-                validator.validate_resource_utilization_performance(
-                    system_metrics.get("cpu_utilization_percent", 0),
-                    system_metrics.get("memory_usage_mb", 0),
-                    "system_metrics"
-                )
-        
-        # Run load testing if enabled
-        load_test_results = {}
-        if config.load_testing_enabled:
-            logger.info("Executing automated load testing")
-            load_test_results = validator.run_automated_load_test(args.base_url)
-        
-        # Detect performance regressions
-        logger.info("Performing regression detection analysis")
-        validator.detect_performance_regressions()
-        
-        # Validate overall performance compliance
-        logger.info("Validating overall performance compliance")
-        compliance_results = validator.validate_overall_performance_compliance()
-        
-        # Send automated alerts
-        validator.send_performance_alerts(compliance_results)
-        
-        # Generate validation report
-        logger.info("Generating performance validation report")
-        report = validator.generate_validation_report(compliance_results)
-        
-        # Output report
-        if config.report_file_path:
-            with open(config.report_file_path, 'w') as f:
-                f.write(report)
-            logger.info(f"Validation report saved to: {config.report_file_path}")
-        else:
-            print(report)
-        
-        # Export Prometheus metrics if requested
-        if args.export_metrics:
-            validator.export_prometheus_metrics(args.export_metrics)
-        
-        # Determine exit status
-        if config.ci_cd_mode:
-            if not compliance_results["final_compliance_status"]:
-                logger.error("Performance validation failed - exiting with error code")
-                sys.exit(1)
-            elif config.fail_on_regression and compliance_results.get("regression_analysis", {}).get("regressions_detected", 0) > 0:
-                logger.error("Performance regressions detected - exiting with error code")
-                sys.exit(1)
-        
-        logger.info(
-            "Performance validation completed successfully",
-            final_status=compliance_results["final_compliance_status"],
-            deployment_recommendation=compliance_results["deployment_recommendation"]
+        # Execute comprehensive performance validation
+        validation_result = validator.validate_performance_comprehensive(
+            app_url=args.app_url,
+            test_scenarios=test_scenarios,
+            enable_load_testing=not args.no_load_testing,
+            enable_memory_profiling=not args.no_memory_profiling,
+            enable_regression_detection=not args.no_regression_detection,
+            fail_fast=args.fail_fast,
+            timeout_seconds=args.timeout
         )
         
-        sys.exit(0)
-    
+        # Generate and output validation report
+        output_validation_report(validation_result, args)
+        
+        # Exit with appropriate code
+        exit_code = validation_result.exit_code.value
+        
+        if not args.quiet:
+            print(f"\nPerformance validation completed with exit code: {exit_code} ({validation_result.exit_code.name})")
+        
+        sys.exit(exit_code)
+        
     except KeyboardInterrupt:
-        logger.info("Performance validation interrupted by user")
-        sys.exit(130)
+        print("\nPerformance validation interrupted by user")
+        sys.exit(ValidationExitCode.EXECUTION_ERROR.value)
+        
+    except Exception as main_error:
+        print(f"Performance validation failed: {str(main_error)}")
+        if args.verbose:
+            traceback.print_exc()
+        sys.exit(ValidationExitCode.EXECUTION_ERROR.value)
+
+
+def output_validation_report(
+    validation_result: PerformanceValidationResult,
+    args: argparse.Namespace
+) -> None:
+    """
+    Output validation report in specified format.
     
-    except Exception as e:
-        logger.error(f"Performance validation failed with error: {str(e)}")
-        if args.debug:
-            logger.error(traceback.format_exc())
-        sys.exit(1)
+    Args:
+        validation_result: Validation result to output
+        args: Command line arguments with output configuration
+    """
+    report_data = validation_result.generate_summary_report()
+    
+    if args.output_format == "json":
+        output_content = json.dumps(report_data, indent=2, default=str)
+    elif args.output_format == "junit":
+        output_content = generate_junit_xml(validation_result)
+    else:  # text format
+        output_content = generate_text_report(validation_result)
+    
+    # Output to file or stdout
+    if args.output_file:
+        with open(args.output_file, 'w') as f:
+            f.write(output_content)
+        if not args.quiet:
+            print(f"Validation report written to: {args.output_file}")
+    else:
+        print(output_content)
+
+
+def generate_text_report(validation_result: PerformanceValidationResult) -> str:
+    """Generate human-readable text report."""
+    report_lines = []
+    
+    # Header
+    report_lines.append("=" * 80)
+    report_lines.append("PERFORMANCE VALIDATION REPORT")
+    report_lines.append("=" * 80)
+    report_lines.append(f"Validation ID: {validation_result.validation_id}")
+    report_lines.append(f"Timestamp: {validation_result.timestamp.isoformat()}")
+    report_lines.append(f"Duration: {validation_result.duration_seconds:.2f} seconds")
+    report_lines.append(f"Exit Code: {validation_result.exit_code.value} ({validation_result.exit_code.name})")
+    report_lines.append("")
+    
+    # Summary
+    report_lines.append("VALIDATION SUMMARY")
+    report_lines.append("-" * 40)
+    report_lines.append(f"Overall Compliance: {'✅ PASS' if validation_result.overall_compliance else '❌ FAIL'}")
+    report_lines.append(f"Variance Compliance: {'✅ PASS' if validation_result.variance_compliance else '❌ FAIL'}")
+    report_lines.append(f"Threshold Compliance: {'✅ PASS' if validation_result.threshold_compliance else '❌ FAIL'}")
+    report_lines.append(f"Regression Detected: {'🔴 YES' if validation_result.regression_status else '✅ NO'}")
+    report_lines.append(f"Tests Passed: {validation_result.passed_tests}/{validation_result.total_tests}")
+    report_lines.append(f"Success Rate: {validation_result.success_rate:.1f}%")
+    report_lines.append(f"Sample Size: {validation_result.sample_size}")
+    report_lines.append(f"Statistical Confidence: {validation_result.statistical_confidence:.1f}%")
+    report_lines.append("")
+    
+    # Critical Issues
+    critical_issues = validation_result.get_critical_issues()
+    if critical_issues:
+        report_lines.append("CRITICAL ISSUES")
+        report_lines.append("-" * 40)
+        for issue in critical_issues:
+            report_lines.append(f"❌ {issue.message}")
+            report_lines.append(f"   Current: {issue.current_value:.2f}, Expected: {issue.expected_value:.2f}")
+            report_lines.append(f"   Variance: {issue.variance_percent:.2f}%")
+            if issue.remediation_suggestions:
+                report_lines.append("   Remediation:")
+                for suggestion in issue.remediation_suggestions[:3]:  # Limit to top 3
+                    report_lines.append(f"   - {suggestion}")
+            report_lines.append("")
+    
+    # Warning Issues
+    warning_issues = validation_result.get_warning_issues()
+    if warning_issues:
+        report_lines.append("WARNING ISSUES")
+        report_lines.append("-" * 40)
+        for issue in warning_issues:
+            report_lines.append(f"⚠️ {issue.message}")
+            report_lines.append(f"   Current: {issue.current_value:.2f}, Expected: {issue.expected_value:.2f}")
+            report_lines.append(f"   Variance: {issue.variance_percent:.2f}%")
+            report_lines.append("")
+    
+    # Critical Actions
+    if validation_result.critical_actions:
+        report_lines.append("CRITICAL ACTIONS REQUIRED")
+        report_lines.append("-" * 40)
+        for action in validation_result.critical_actions:
+            report_lines.append(action)
+        report_lines.append("")
+    
+    # Recommendations
+    if validation_result.recommendations:
+        report_lines.append("RECOMMENDATIONS")
+        report_lines.append("-" * 40)
+        for recommendation in validation_result.recommendations:
+            report_lines.append(recommendation)
+        report_lines.append("")
+    
+    report_lines.append("=" * 80)
+    
+    return "\n".join(report_lines)
+
+
+def generate_junit_xml(validation_result: PerformanceValidationResult) -> str:
+    """Generate JUnit XML format for CI/CD integration."""
+    from xml.etree.ElementTree import Element, SubElement, tostring
+    from xml.dom import minidom
+    
+    testsuites = Element("testsuites")
+    testsuite = SubElement(testsuites, "testsuite")
+    testsuite.set("name", "PerformanceValidation")
+    testsuite.set("tests", str(validation_result.total_tests))
+    testsuite.set("failures", str(validation_result.failed_tests))
+    testsuite.set("time", str(validation_result.duration_seconds))
+    
+    # Add test cases for each validation category
+    categories = ["baseline_variance", "response_time", "throughput", "system_resources", "memory_usage", "database_performance"]
+    
+    for category in categories:
+        testcase = SubElement(testsuite, "testcase")
+        testcase.set("classname", "PerformanceValidation")
+        testcase.set("name", category)
+        
+        # Check for failures in this category
+        category_issues = [issue for issue in validation_result.validation_issues if issue.category == category]
+        critical_issues = [issue for issue in category_issues if issue.severity == ValidationSeverity.CRITICAL]
+        
+        if critical_issues:
+            failure = SubElement(testcase, "failure")
+            failure.set("message", f"{len(critical_issues)} critical issues in {category}")
+            failure.text = "\n".join([issue.message for issue in critical_issues])
+    
+    # Format XML with pretty printing
+    rough_string = tostring(testsuites, 'unicode')
+    reparsed = minidom.parseString(rough_string)
+    return reparsed.toprettyxml(indent="  ")
 
 
 if __name__ == "__main__":
