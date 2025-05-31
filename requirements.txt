@@ -1,151 +1,87 @@
-# requirements.txt
-# Python package dependencies for Flask migration project
-# Replaces package.json from Node.js implementation
+# Python package dependencies for Flask application migration from Node.js
+# Replaces package.json from Node.js implementation per Section 0.1.1 Primary Objective
+# All versions pinned for reproducible builds and enterprise deployment
 
-# =============================================================================
-# CORE WEB FRAMEWORK
-# =============================================================================
-
-# Flask core framework replacing Express.js
+# ===================================================================
+# CORE WEB FRAMEWORK - Flask 2.3+ per Section 3.2.1 Core Web Framework
+# ===================================================================
 Flask==2.3.3
 Werkzeug==2.3.7
+Jinja2==3.1.2
+MarkupSafe==2.1.3
+itsdangerous==2.1.2
+click==8.1.7
 
-# Flask extensions for modular architecture
-Flask-CORS==4.0.0
+# ===================================================================
+# FLASK EXTENSIONS - Essential functionality patterns per Section 3.3.3
+# ===================================================================
+Flask-CORS==6.0.0
 Flask-RESTful==0.3.10
 Flask-Limiter==3.5.0
-
-# =============================================================================
-# AUTHENTICATION & SECURITY
-# =============================================================================
-
-# JWT authentication replacing Node.js jsonwebtoken
-PyJWT==2.8.0
-
-# Cryptographic operations and security
-cryptography==41.0.7
-
-# Security headers and session management
+Flask-Caching==2.1.0
+Flask-Session==0.5.0
 Flask-Talisman==1.1.0
 Flask-Login==0.7.0
 
-# Input validation and sanitization
-email-validator==2.1.0
-bleach==6.1.0
+# ===================================================================
+# AUTHENTICATION & SECURITY - PyJWT 2.8+ per Section 3.2.2
+# ===================================================================
+PyJWT==2.8.0
+cryptography==41.0.4
+bcrypt==4.0.1
+passlib==1.7.4
 
-# =============================================================================
-# DATABASE & STORAGE
-# =============================================================================
-
-# MongoDB drivers replacing Node.js MongoDB driver
+# ===================================================================
+# DATABASE DRIVERS - PyMongo 4.5+ and Motor 3.3+ per Section 3.4.1
+# ===================================================================
 pymongo==4.6.0
 motor==3.3.2
 
-# Redis client for caching and session management
-redis==5.0.1
+# ===================================================================
+# REDIS INTEGRATION - redis-py 5.0+ per Section 3.4.2
+# ===================================================================
+redis==5.0.3
 
-# Session management with Redis backend
-Flask-Session==0.5.0
-Flask-Caching==2.1.0
-
-# AWS S3 integration replacing AWS SDK for JavaScript
-boto3==1.34.0
-botocore==1.34.0
-
-# File upload and image processing
-python-multipart==0.0.6
-Pillow==10.1.0
-
-# =============================================================================
-# HTTP CLIENT & INTEGRATION
-# =============================================================================
-
-# HTTP clients replacing axios/node-fetch
+# ===================================================================
+# HTTP CLIENT LIBRARIES - requests 2.31+ per Section 3.2.3
+# ===================================================================
 requests==2.31.0
-httpx==0.25.2
-urllib3==2.1.0
+httpx==0.25.0
+urllib3==2.0.4
+certifi==2023.7.22
+charset-normalizer==3.2.0
+idna==3.4
 
-# =============================================================================
-# DATA VALIDATION & PROCESSING
-# =============================================================================
+# ===================================================================
+# DATA PROCESSING & VALIDATION - marshmallow 3.20+ per Section 3.2.3
+# ===================================================================
+marshmallow==3.21.0
+pydantic==2.11.5
+email-validator==2.1.0
+bleach==6.1.0
+python-dateutil==2.9.0
+jsonschema==4.22.0
 
-# Schema validation and data modeling
-marshmallow==3.20.2
-pydantic==2.5.0
+# ===================================================================
+# INTEGRATION SDKs - boto3 1.28+ per Section 3.4.1
+# ===================================================================
+boto3==1.38.25
+python-multipart==0.0.6
+Pillow==10.3.0
 
-# Date processing replacing moment.js
-python-dateutil==2.8.2
+# ===================================================================
+# MONITORING & OBSERVABILITY - prometheus-client 0.17+ per Section 3.6.1
+# ===================================================================
+prometheus-client==0.20.0
+structlog==23.1.4
+python-json-logger==2.0.7
 
-# JSON schema validation
-jsonschema==4.20.0
+# ===================================================================
+# PRODUCTION WSGI SERVER - Gunicorn 23.0.0 per Section 3.5.2
+# ===================================================================
+gunicorn==23.0.0
 
-# =============================================================================
-# PRODUCTION SERVER & DEPLOYMENT
-# =============================================================================
-
-# WSGI servers for production deployment
-gunicorn==21.2.0
-uWSGI==2.0.23
-
-# =============================================================================
-# ENVIRONMENT & CONFIGURATION
-# =============================================================================
-
-# Environment variable management replacing dotenv
+# ===================================================================
+# ENVIRONMENT & CONFIGURATION - python-dotenv per Section 3.5.1
+# ===================================================================
 python-dotenv==1.0.0
-
-# =============================================================================
-# MONITORING & LOGGING
-# =============================================================================
-
-# Structured logging replacing winston/morgan
-structlog==23.2.0
-python-json-logger==2.0.4
-
-# Metrics collection for Prometheus integration
-prometheus-client==0.19.0
-
-# Flask monitoring and metrics
-Flask-Monitoring-Dashboard==3.1.0
-
-# =============================================================================
-# DEVELOPMENT & TESTING
-# =============================================================================
-
-# Testing framework replacing jest/mocha
-pytest==7.4.3
-pytest-flask==1.3.0
-pytest-mock==3.12.0
-pytest-cov==4.1.0
-
-# Code quality and formatting
-black==23.11.0
-flake8==6.1.0
-isort==5.12.0
-
-# Type checking
-mypy==1.7.1
-
-# =============================================================================
-# BUILD & DEPLOYMENT TOOLS
-# =============================================================================
-
-# Dependency management and packaging
-pip-tools==7.3.0
-setuptools==69.0.2
-wheel==0.42.0
-
-# =============================================================================
-# DEVELOPMENT DEPENDENCIES
-# =============================================================================
-
-# Performance testing
-locust==2.17.0
-
-# Development utilities
-ipython==8.17.2
-ipdb==0.13.13
-
-# Security scanning
-safety==2.3.5
-bandit==1.7.5
