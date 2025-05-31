@@ -1,2225 +1,1939 @@
 """
 Business Rule Validation Engine for Flask Application
 
-This module provides comprehensive business rule validation engine using marshmallow schemas
-for data validation, business rule enforcement, and schema validation patterns. Implements
-enterprise-grade validation logic maintaining equivalent validation patterns from Node.js
-implementation per Section 5.2.4 Business Logic Engine requirements.
+This module provides comprehensive business rule validation using marshmallow 3.20+ schemas
+for enterprise-grade data validation, business rule enforcement, and schema validation patterns.
+Implements equivalent validation patterns from Node.js implementation while maintaining
+comprehensive business logic validation and error handling integration per Section 5.2.4.
 
 The validation engine follows enterprise patterns with:
 - Marshmallow 3.20+ for schema validation and data serialization per Section 5.2.4
 - Business rule validation maintaining existing validation patterns per F-004-RQ-001
 - Comprehensive data validation equivalent to Node.js implementation per F-004-RQ-001
-- Schema validation and data serialization per Section 5.2.4 technologies
 - Validation error handling integration with error response management per F-005
+- Schema validation and data serialization per Section 5.2.4
 - Integration with business logic processing pipeline per Section 5.2.4
 
-Classes:
-    BaseValidator: Base validation class providing common validation patterns
-    BusinessRuleValidator: Business rule validation and enforcement engine
-    DataModelValidator: Data model validation using marshmallow schemas
-    InputValidator: Input data validation and sanitization
-    OutputValidator: Response data validation and serialization
-    ValidationContext: Validation context management and rule coordination
-    
-Functions:
-    validate_business_data: Validate business data against schema and rules
-    validate_request_data: Validate HTTP request data with sanitization
-    validate_response_data: Validate response data for consistency
-    create_validation_schema: Dynamic schema creation for validation
-    format_validation_errors: Format validation errors for client responses
+Validation Categories:
+    Schema Validators:
+        UserValidator: User account and profile validation
+        OrganizationValidator: Organization and business entity validation
+        ProductValidator: Product catalog and inventory validation
+        OrderValidator: Order and transaction validation
+        PaymentValidator: Payment and financial validation
+        
+    API Validators:
+        RequestValidator: API request validation schemas
+        PaginationValidator: Pagination parameter validation
+        SearchValidator: Search and filtering validation
+        FileUploadValidator: File upload validation
+        
+    Business Rule Validators:
+        BusinessRuleEngine: Core business rule enforcement
+        ValidationChain: Chained validation processing
+        ConditionalValidator: Conditional validation rules
+        CrossFieldValidator: Cross-field validation logic
+        DataIntegrityValidator: Data integrity and consistency validation
+        
+    Utility Validators:
+        EmailValidator: Email format and business rule validation
+        PhoneValidator: Phone number format and regional validation
+        AddressValidator: Address format and postal code validation
+        CurrencyValidator: Monetary amount and currency validation
+        DateTimeValidator: Date/time format and business rule validation
 """
 
-import logging
 import re
-from datetime import datetime, date
+import uuid
+from datetime import datetime, timezone, date, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Any, Dict, List, Optional, Union, Type, Callable, Tuple, Set
+from typing import Any, Dict, List, Optional, Union, Callable, Type, Set, Tuple
 from functools import wraps
-from enum import Enum
+import phonenumbers
+from phonenumbers import NumberParseException
 
-# Third-party validation and serialization libraries
-import marshmallow as ma
-from marshmallow import fields, validate, ValidationError, EXCLUDE, INCLUDE
-from marshmallow.decorators import post_load, pre_load, validates, validates_schema
-import structlog
+# Marshmallow 3.20+ imports for comprehensive validation
+from marshmallow import (
+    Schema, fields, validate, validates, validates_schema, 
+    post_load, pre_load, ValidationError as MarshmallowValidationError,
+    EXCLUDE, INCLUDE, RAISE
+)
+from marshmallow.decorators import validates_schema
+from marshmallow.exceptions import ValidationError
+from email_validator import validate_email as email_validate, EmailNotValidError
 
-# Import business exceptions and utilities
+# Import business components for integration
+from .models import (
+    BaseBusinessModel, User, Organization, Product, Order, OrderItem,
+    PaymentTransaction, Address, ContactInfo, MonetaryAmount, DateTimeRange,
+    FileUpload, SystemConfiguration, PaginationParams, SortParams, SearchParams,
+    UserStatus, UserRole, OrderStatus, PaymentStatus, PaymentMethod, ProductStatus,
+    Priority, ContactMethod, BUSINESS_MODEL_REGISTRY
+)
 from .exceptions import (
-    BaseBusinessException,
-    BusinessRuleViolationError,
-    DataValidationError,
-    DataProcessingError,
-    ErrorSeverity,
-    ErrorCategory
+    BaseBusinessException, BusinessRuleViolationError, DataValidationError,
+    DataProcessingError, ErrorSeverity, handle_validation_error
 )
 from .utils import (
-    validate_email,
-    validate_phone,
-    validate_postal_code,
-    sanitize_input,
-    safe_int,
-    safe_float,
-    safe_str,
-    normalize_boolean,
-    parse_date,
-    format_date,
-    parse_json
+    clean_data, validate_email, validate_phone, validate_postal_code,
+    sanitize_input, safe_str, safe_int, safe_float, normalize_boolean,
+    parse_date, format_date, round_currency, validate_currency
 )
 
 # Configure structured logging for validation operations
+import structlog
 logger = structlog.get_logger("business.validators")
 
-# Type aliases for better code readability
-ValidationResult = Tuple[bool, Optional[Dict[str, Any]], Optional[List[Dict[str, Any]]]]
-SchemaType = Type[ma.Schema]
-FieldType = Union[fields.Field, Type[fields.Field]]
 
+# ============================================================================
+# VALIDATION CONFIGURATION AND BASE CLASSES
+# ============================================================================
 
-class ValidationType(Enum):
+class ValidationConfig:
     """
-    Enumeration of validation types for comprehensive business validation.
+    Global validation configuration for business rule engine.
     
-    Provides standardized validation types for different business validation
-    scenarios enabling consistent validation patterns across modules.
+    Provides centralized configuration for validation behavior, error handling,
+    and business rule enforcement patterns across all validation schemas.
     """
-    STRICT = "strict"              # Strict validation with all rules enforced
-    PERMISSIVE = "permissive"      # Relaxed validation allowing some flexibility
-    SANITIZING = "sanitizing"      # Validation with automatic data sanitization
-    BUSINESS_RULES = "business_rules"  # Business rule validation only
-    SCHEMA_ONLY = "schema_only"    # Schema validation without business rules
+    
+    # Error handling configuration
+    UNKNOWN_FIELD_BEHAVIOR = EXCLUDE  # Exclude unknown fields by default
+    STRICT_VALIDATION = True  # Enable strict validation mode
+    VALIDATE_REQUIRED_FIELDS = True  # Validate required field presence
+    
+    # Business rule enforcement settings
+    ENFORCE_BUSINESS_RULES = True  # Enable business rule validation
+    CROSS_FIELD_VALIDATION = True  # Enable cross-field validation
+    CONDITIONAL_VALIDATION = True  # Enable conditional validation rules
+    
+    # Performance optimization settings
+    CACHE_VALIDATION_RESULTS = False  # Disable caching for security
+    VALIDATE_ON_ASSIGNMENT = True  # Validate on field assignment
+    LAZY_VALIDATION = False  # Perform immediate validation
+    
+    # Security settings
+    SANITIZE_INPUT_DATA = True  # Sanitize input before validation
+    FILTER_SENSITIVE_DATA = True  # Filter sensitive data from errors
+    LOG_VALIDATION_FAILURES = True  # Log validation failures for audit
+    
+    # Integration settings
+    BUSINESS_MODEL_INTEGRATION = True  # Integrate with business models
+    EXCEPTION_INTEGRATION = True  # Use business exceptions
+    METRICS_INTEGRATION = True  # Collect validation metrics
 
 
-class ValidationMode(Enum):
+class BaseBusinessValidator(Schema):
     """
-    Enumeration of validation modes for different operational contexts.
+    Base validation schema for all business data validation.
     
-    Provides standardized validation modes for different processing contexts
-    enabling appropriate validation behavior for specific use cases.
-    """
-    CREATE = "create"              # Validation for create operations
-    UPDATE = "update"              # Validation for update operations
-    PATCH = "patch"                # Validation for partial updates
-    QUERY = "query"                # Validation for query parameters
-    RESPONSE = "response"          # Validation for response data
-
-
-class ValidationContext:
-    """
-    Validation context management for coordinating validation rules and settings.
+    Provides common validation functionality, error handling integration,
+    and business rule enforcement foundation for all business validation schemas.
+    Implements enterprise validation patterns per Section 5.2.4 requirements.
     
-    Provides centralized context management for validation operations enabling
-    consistent validation behavior across different business logic modules and
-    maintaining validation state throughout processing pipelines.
+    Features:
+    - Marshmallow 3.20+ integration with enterprise error handling
+    - Business rule validation and enforcement per F-004-RQ-001
+    - Cross-field validation and conditional validation support
+    - Integration with business exceptions per F-005 requirements
+    - Performance optimization and audit trail generation
+    - Security-conscious validation with input sanitization
     
-    This context manager implements:
-    - Validation rule coordination per Section 5.2.4
-    - Context-aware validation behavior per business requirements
-    - Performance optimization for validation operations
-    - Enterprise validation patterns and standards
-    - Integration with business exception handling
-    
-    Attributes:
-        validation_type (ValidationType): Type of validation to perform
-        validation_mode (ValidationMode): Mode of validation for context
-        strict_mode (bool): Whether to enforce strict validation rules
-        user_context (Optional[Dict[str, Any]]): User context for authorization
-        request_context (Optional[Dict[str, Any]]): Request context for validation
-        business_rules (Set[str]): Set of business rules to enforce
-        custom_validators (Dict[str, Callable]): Custom validation functions
-        
     Example:
-        with ValidationContext(
-            validation_type=ValidationType.STRICT,
-            validation_mode=ValidationMode.CREATE,
-            user_context={'user_id': '123', 'role': 'admin'}
-        ) as ctx:
-            result = validate_business_data(data, schema, ctx)
-    """
-    
-    def __init__(
-        self,
-        validation_type: ValidationType = ValidationType.STRICT,
-        validation_mode: ValidationMode = ValidationMode.CREATE,
-        strict_mode: bool = True,
-        user_context: Optional[Dict[str, Any]] = None,
-        request_context: Optional[Dict[str, Any]] = None,
-        business_rules: Optional[Set[str]] = None,
-        custom_validators: Optional[Dict[str, Callable]] = None
-    ) -> None:
-        """
-        Initialize validation context with comprehensive configuration.
-        
-        Args:
-            validation_type: Type of validation to perform
-            validation_mode: Mode of validation for operational context
-            strict_mode: Whether to enforce strict validation rules
-            user_context: User context for authorization and business rules
-            request_context: Request context for validation coordination
-            business_rules: Set of business rules to enforce during validation
-            custom_validators: Custom validation functions for specific rules
-        """
-        self.validation_type = validation_type
-        self.validation_mode = validation_mode
-        self.strict_mode = strict_mode
-        self.user_context = user_context or {}
-        self.request_context = request_context or {}
-        self.business_rules = business_rules or set()
-        self.custom_validators = custom_validators or {}
-        
-        # Internal state management
-        self._validation_errors = []
-        self._validation_warnings = []
-        self._performance_metrics = {}
-        self._validation_start_time = None
-        
-        logger.debug("Validation context initialized",
-                    validation_type=validation_type.value,
-                    validation_mode=validation_mode.value,
-                    strict_mode=strict_mode,
-                    business_rules_count=len(self.business_rules))
-    
-    def __enter__(self) -> 'ValidationContext':
-        """Enter validation context and start performance monitoring."""
-        self._validation_start_time = datetime.now()
-        logger.debug("Entering validation context")
-        return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        """Exit validation context and log performance metrics."""
-        if self._validation_start_time:
-            duration = (datetime.now() - self._validation_start_time).total_seconds()
-            self._performance_metrics['total_duration'] = duration
+        class CustomValidator(BaseBusinessValidator):
+            name = fields.Str(required=True, validate=validate.Length(min=1, max=100))
+            email = fields.Email(required=True)
             
-            logger.debug("Exiting validation context",
-                        duration_seconds=duration,
-                        error_count=len(self._validation_errors),
-                        warning_count=len(self._validation_warnings))
-    
-    def add_error(self, error: Dict[str, Any]) -> None:
-        """Add validation error to context tracking."""
-        self._validation_errors.append(error)
-    
-    def add_warning(self, warning: Dict[str, Any]) -> None:
-        """Add validation warning to context tracking."""
-        self._validation_warnings.append(warning)
-    
-    def get_errors(self) -> List[Dict[str, Any]]:
-        """Get all validation errors from context."""
-        return self._validation_errors.copy()
-    
-    def get_warnings(self) -> List[Dict[str, Any]]:
-        """Get all validation warnings from context."""
-        return self._validation_warnings.copy()
-    
-    def has_errors(self) -> bool:
-        """Check if validation context has any errors."""
-        return len(self._validation_errors) > 0
-    
-    def clear_errors(self) -> None:
-        """Clear all validation errors from context."""
-        self._validation_errors.clear()
-    
-    def should_enforce_rule(self, rule_name: str) -> bool:
-        """
-        Check if a specific business rule should be enforced in this context.
-        
-        Args:
-            rule_name: Name of the business rule to check
-            
-        Returns:
-            True if rule should be enforced, False otherwise
-        """
-        if not self.strict_mode:
-            return False
-        
-        if self.business_rules and rule_name not in self.business_rules:
-            return False
-        
-        return True
-    
-    def get_custom_validator(self, validator_name: str) -> Optional[Callable]:
-        """
-        Get custom validator function by name.
-        
-        Args:
-            validator_name: Name of the custom validator
-            
-        Returns:
-            Custom validator function or None if not found
-        """
-        return self.custom_validators.get(validator_name)
-
-
-class BaseValidator(ma.Schema):
-    """
-    Base validation class providing common validation patterns and enterprise features.
-    
-    Provides foundational validation capabilities using marshmallow 3.20+ with
-    comprehensive error handling, business rule integration, and performance
-    optimization. Implements common validation patterns per Section 5.2.4
-    business logic engine requirements.
-    
-    This base validator implements:
-    - Marshmallow schema integration per Section 5.2.4 technologies
-    - Common validation patterns and field definitions
-    - Error handling integration with business exceptions per F-005
-    - Performance optimization for validation operations
-    - Enterprise validation standards and compliance
-    
-    Class Meta Options:
-        unknown: How to handle unknown fields (EXCLUDE by default)
-        ordered: Whether to preserve field order in output
-        load_only: Fields that are only used during deserialization
-        dump_only: Fields that are only used during serialization
+            @validates('name')
+            def validate_name(self, value):
+                return self.validate_business_rule('name_format', value)
+                
+            @validates_schema
+            def validate_business_rules(self, data, **kwargs):
+                self.enforce_business_rules(data)
     """
     
     class Meta:
-        """Marshmallow schema meta configuration for enterprise validation."""
-        unknown = EXCLUDE  # Exclude unknown fields for security
-        ordered = True     # Preserve field order for consistency
-        strict = True      # Enable strict validation mode
+        """Marshmallow schema configuration for business validation."""
+        unknown = ValidationConfig.UNKNOWN_FIELD_BEHAVIOR
+        strict = ValidationConfig.STRICT_VALIDATION
+        ordered = True  # Maintain field order for consistent responses
+        load_only = ()  # Fields only used during loading
+        dump_only = ()  # Fields only used during dumping
     
     def __init__(self, *args, **kwargs):
         """
-        Initialize base validator with context and performance monitoring.
+        Initialize business validator with enterprise configuration.
         
         Args:
-            *args: Positional arguments for marshmallow Schema
-            **kwargs: Keyword arguments including validation context
+            *args: Positional arguments passed to marshmallow Schema
+            **kwargs: Keyword arguments passed to marshmallow Schema
         """
-        # Extract validation context if provided
-        self.validation_context = kwargs.pop('validation_context', None)
-        self.performance_tracking = kwargs.pop('performance_tracking', True)
+        # Extract business validation options
+        self.enforce_business_rules = kwargs.pop('enforce_business_rules', 
+                                                ValidationConfig.ENFORCE_BUSINESS_RULES)
+        self.strict_mode = kwargs.pop('strict_mode', ValidationConfig.STRICT_VALIDATION)
+        self.sanitize_input = kwargs.pop('sanitize_input', ValidationConfig.SANITIZE_INPUT_DATA)
         
+        # Initialize validation context
+        self.validation_context = kwargs.pop('validation_context', {})
+        self.business_rules = kwargs.pop('business_rules', {})
+        self.conditional_rules = kwargs.pop('conditional_rules', {})
+        
+        # Call parent constructor
         super().__init__(*args, **kwargs)
         
-        # Initialize performance metrics
-        self._validation_metrics = {
-            'validation_count': 0,
-            'error_count': 0,
-            'warning_count': 0,
-            'total_duration': 0.0
-        }
-        
-        logger.debug("Base validator initialized",
-                    validator_class=self.__class__.__name__,
-                    has_context=self.validation_context is not None)
-    
-    def handle_error(self, error: ValidationError, data: Any, **kwargs) -> None:
-        """
-        Handle validation errors with business exception integration.
-        
-        Converts marshmallow ValidationError to business exceptions for
-        consistent error handling across the application per F-005 requirements.
-        
-        Args:
-            error: Marshmallow validation error
-            data: Original data being validated
-            **kwargs: Additional error handling context
-        """
-        try:
-            logger.warning("Validation error occurred",
-                          error_messages=error.messages,
-                          data_type=type(data).__name__,
-                          validator_class=self.__class__.__name__)
-            
-            # Update performance metrics
-            self._validation_metrics['error_count'] += 1
-            
-            # Add to validation context if available
-            if self.validation_context:
-                self.validation_context.add_error({
-                    'validator': self.__class__.__name__,
-                    'messages': error.messages,
-                    'timestamp': datetime.now().isoformat()
-                })
-            
-            # Convert to business exception for consistent handling
-            validation_errors = self._format_marshmallow_errors(error.messages)
-            
-            raise DataValidationError(
-                message="Data validation failed",
-                error_code="SCHEMA_VALIDATION_FAILED",
-                validation_errors=validation_errors,
-                field_errors=error.messages,
-                context={
-                    'validator_class': self.__class__.__name__,
-                    'error_count': len(validation_errors)
-                },
-                cause=error,
-                severity=ErrorSeverity.MEDIUM
-            )
-            
-        except Exception as handle_error:
-            logger.error("Failed to handle validation error",
-                        original_error=str(error),
-                        handle_error=str(handle_error))
-            # Re-raise original error if handling fails
-            raise error
-    
-    def _format_marshmallow_errors(self, error_messages: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """
-        Format marshmallow error messages for business exception integration.
-        
-        Args:
-            error_messages: Marshmallow error messages dictionary
-            
-        Returns:
-            Formatted validation errors for business exception
-        """
-        formatted_errors = []
-        
-        def flatten_errors(errors: Union[Dict, List, str], field_path: str = "") -> None:
-            """Recursively flatten nested error messages."""
-            if isinstance(errors, dict):
-                for field, error_list in errors.items():
-                    current_path = f"{field_path}.{field}" if field_path else field
-                    flatten_errors(error_list, current_path)
-            elif isinstance(errors, list):
-                for error in errors:
-                    formatted_errors.append({
-                        'field': field_path,
-                        'message': str(error),
-                        'code': 'VALIDATION_ERROR'
-                    })
-            else:
-                formatted_errors.append({
-                    'field': field_path,
-                    'message': str(errors),
-                    'code': 'VALIDATION_ERROR'
-                })
-        
-        flatten_errors(error_messages)
-        return formatted_errors
-    
-    @validates_schema
-    def validate_schema_context(self, data: Dict[str, Any], **kwargs) -> None:
-        """
-        Validate schema in context of business rules and user permissions.
-        
-        Provides context-aware validation that considers user permissions,
-        business rules, and operational context for comprehensive validation.
-        
-        Args:
-            data: Validated data dictionary
-            **kwargs: Additional validation context
-        """
-        if not self.validation_context:
-            return
-        
-        # Check business rule enforcement
-        for rule_name in self.validation_context.business_rules:
-            if not self.validation_context.should_enforce_rule(rule_name):
-                continue
-            
-            # Apply custom business rule validation
-            custom_validator = self.validation_context.get_custom_validator(rule_name)
-            if custom_validator:
-                try:
-                    custom_validator(data, self.validation_context)
-                except Exception as rule_error:
-                    raise BusinessRuleViolationError(
-                        message=f"Business rule validation failed: {rule_name}",
-                        error_code=f"BUSINESS_RULE_{rule_name.upper()}",
-                        rule_name=rule_name,
-                        context={'data_fields': list(data.keys())},
-                        cause=rule_error,
-                        severity=ErrorSeverity.HIGH
-                    )
-    
-    def load_with_context(
-        self,
-        json_data: Union[Dict[str, Any], str],
-        validation_context: Optional[ValidationContext] = None,
-        **kwargs
-    ) -> Dict[str, Any]:
-        """
-        Load and validate data with validation context support.
-        
-        Provides enhanced data loading with validation context integration,
-        performance monitoring, and comprehensive error handling.
-        
-        Args:
-            json_data: JSON data to validate (dict or string)
-            validation_context: Optional validation context for rules
-            **kwargs: Additional marshmallow load arguments
-            
-        Returns:
-            Validated and deserialized data dictionary
-            
-        Raises:
-            DataValidationError: If validation fails with detailed error information
-        """
-        start_time = datetime.now()
-        
-        try:
-            # Set validation context
-            if validation_context:
-                self.validation_context = validation_context
-            
-            # Parse JSON string if needed
-            if isinstance(json_data, str):
-                json_data = parse_json(json_data)
-            
-            logger.debug("Starting data validation",
-                        data_fields=list(json_data.keys()) if isinstance(json_data, dict) else [],
-                        validator_class=self.__class__.__name__)
-            
-            # Perform marshmallow validation
-            validated_data = self.load(json_data, **kwargs)
-            
-            # Update performance metrics
-            duration = (datetime.now() - start_time).total_seconds()
-            self._validation_metrics['validation_count'] += 1
-            self._validation_metrics['total_duration'] += duration
-            
-            logger.debug("Data validation completed successfully",
-                        validated_fields=list(validated_data.keys()),
-                        duration_seconds=duration)
-            
-            return validated_data
-            
-        except ValidationError as validation_error:
-            # Handle marshmallow validation errors
-            duration = (datetime.now() - start_time).total_seconds()
-            self._validation_metrics['error_count'] += 1
-            self._validation_metrics['total_duration'] += duration
-            
-            self.handle_error(validation_error, json_data)
-            
-        except Exception as unexpected_error:
-            # Handle unexpected errors during validation
-            duration = (datetime.now() - start_time).total_seconds()
-            self._validation_metrics['error_count'] += 1
-            self._validation_metrics['total_duration'] += duration
-            
-            raise DataValidationError(
-                message="Validation failed due to unexpected error",
-                error_code="VALIDATION_UNEXPECTED_ERROR",
-                context={
-                    'validator_class': self.__class__.__name__,
-                    'duration_seconds': duration
-                },
-                cause=unexpected_error,
-                severity=ErrorSeverity.HIGH
-            )
-    
-    def dump_with_validation(
-        self,
-        data: Dict[str, Any],
-        validate_output: bool = True,
-        **kwargs
-    ) -> Dict[str, Any]:
-        """
-        Serialize data with optional output validation.
-        
-        Provides data serialization with optional output validation to ensure
-        consistent response format and data integrity per F-004-RQ-004.
-        
-        Args:
-            data: Data dictionary to serialize
-            validate_output: Whether to validate serialized output
-            **kwargs: Additional marshmallow dump arguments
-            
-        Returns:
-            Serialized data dictionary
-            
-        Raises:
-            DataValidationError: If output validation fails
-        """
-        start_time = datetime.now()
-        
-        try:
-            logger.debug("Starting data serialization",
-                        data_fields=list(data.keys()) if isinstance(data, dict) else [],
-                        validate_output=validate_output)
-            
-            # Perform marshmallow serialization
-            serialized_data = self.dump(data, **kwargs)
-            
-            # Optional output validation
-            if validate_output and serialized_data:
-                self._validate_output_format(serialized_data)
-            
-            # Update performance metrics
-            duration = (datetime.now() - start_time).total_seconds()
-            self._validation_metrics['validation_count'] += 1
-            self._validation_metrics['total_duration'] += duration
-            
-            logger.debug("Data serialization completed successfully",
-                        serialized_fields=list(serialized_data.keys()) if isinstance(serialized_data, dict) else [],
-                        duration_seconds=duration)
-            
-            return serialized_data
-            
-        except Exception as serialization_error:
-            duration = (datetime.now() - start_time).total_seconds()
-            self._validation_metrics['error_count'] += 1
-            
-            raise DataValidationError(
-                message="Data serialization failed",
-                error_code="SERIALIZATION_FAILED",
-                context={
-                    'validator_class': self.__class__.__name__,
-                    'duration_seconds': duration
-                },
-                cause=serialization_error,
-                severity=ErrorSeverity.MEDIUM
-            )
-    
-    def _validate_output_format(self, serialized_data: Dict[str, Any]) -> None:
-        """
-        Validate output format for consistency and completeness.
-        
-        Args:
-            serialized_data: Serialized data to validate
-            
-        Raises:
-            DataValidationError: If output format is invalid
-        """
-        if not isinstance(serialized_data, dict):
-            raise DataValidationError(
-                message="Serialized output must be a dictionary",
-                error_code="INVALID_OUTPUT_FORMAT",
-                context={'output_type': type(serialized_data).__name__},
-                severity=ErrorSeverity.MEDIUM
-            )
-        
-        # Check for required fields based on validation mode
-        if self.validation_context:
-            if self.validation_context.validation_mode == ValidationMode.RESPONSE:
-                # Validate response format requirements
-                self._validate_response_format(serialized_data)
-    
-    def _validate_response_format(self, response_data: Dict[str, Any]) -> None:
-        """
-        Validate response format for API consistency.
-        
-        Args:
-            response_data: Response data to validate
-            
-        Raises:
-            DataValidationError: If response format is invalid
-        """
-        # Check for consistent response structure
-        if 'data' not in response_data and 'error' not in response_data:
-            logger.warning("Response missing standard structure",
-                          response_fields=list(response_data.keys()))
-    
-    def get_validation_metrics(self) -> Dict[str, Any]:
-        """
-        Get validation performance metrics for monitoring.
-        
-        Returns:
-            Dictionary containing validation performance metrics
-        """
-        metrics = self._validation_metrics.copy()
-        
-        # Calculate average duration
-        if metrics['validation_count'] > 0:
-            metrics['average_duration'] = metrics['total_duration'] / metrics['validation_count']
-        else:
-            metrics['average_duration'] = 0.0
-        
-        # Calculate error rate
-        if metrics['validation_count'] > 0:
-            metrics['error_rate'] = metrics['error_count'] / metrics['validation_count']
-        else:
-            metrics['error_rate'] = 0.0
-        
-        return metrics
-
-
-class BusinessRuleValidator(BaseValidator):
-    """
-    Business rule validation and enforcement engine for comprehensive business logic validation.
-    
-    Provides specialized validation for business rules, policy enforcement, and
-    domain-specific validation requirements. Implements business rule validation
-    maintaining existing validation patterns per F-004-RQ-001 requirements.
-    
-    This validator implements:
-    - Business rule validation and enforcement per Section 5.2.4
-    - Policy compliance checking and validation
-    - Domain-specific validation rules and constraints
-    - Integration with user context and permissions
-    - Comprehensive business logic validation patterns
-    
-    Business Rules Supported:
-        - Data integrity and consistency rules
-        - Business constraint validation
-        - Policy compliance checking
-        - User permission and authorization rules
-        - Workflow validation and state management
-    
-    Example:
-        class CustomerValidator(BusinessRuleValidator):
-            email = fields.Email(required=True)
-            age = fields.Integer(validate=validate.Range(min=18, max=120))
-            
-            @validates('email')
-            def validate_unique_email(self, value):
-                if self.is_email_duplicate(value):
-                    raise ValidationError('Email already exists')
-    """
-    
-    # Business rule registry for dynamic rule management
-    _business_rules = {}
-    
-    @classmethod
-    def register_business_rule(
-        cls,
-        rule_name: str,
-        rule_function: Callable[[Any, ValidationContext], None],
-        description: str = ""
-    ) -> None:
-        """
-        Register a business rule for validation enforcement.
-        
-        Args:
-            rule_name: Unique name for the business rule
-            rule_function: Function that validates the business rule
-            description: Description of the business rule
-        """
-        cls._business_rules[rule_name] = {
-            'function': rule_function,
-            'description': description,
-            'registered_at': datetime.now()
-        }
-        
-        logger.debug("Business rule registered",
-                    rule_name=rule_name,
-                    description=description)
-    
-    @classmethod
-    def get_registered_rules(cls) -> Dict[str, Dict[str, Any]]:
-        """Get all registered business rules."""
-        return cls._business_rules.copy()
-    
-    def validate_business_rules(
-        self,
-        data: Dict[str, Any],
-        rules_to_check: Optional[Set[str]] = None
-    ) -> List[Dict[str, Any]]:
-        """
-        Validate data against registered business rules.
-        
-        Args:
-            data: Data to validate against business rules
-            rules_to_check: Optional set of specific rules to check
-            
-        Returns:
-            List of business rule violations
-        """
-        violations = []
-        rules_to_validate = rules_to_check or set(self._business_rules.keys())
-        
-        for rule_name in rules_to_validate:
-            if rule_name not in self._business_rules:
-                continue
-            
-            if self.validation_context and not self.validation_context.should_enforce_rule(rule_name):
-                continue
-            
-            try:
-                rule_info = self._business_rules[rule_name]
-                rule_function = rule_info['function']
-                
-                # Execute business rule validation
-                rule_function(data, self.validation_context)
-                
-                logger.debug("Business rule validation passed",
-                           rule_name=rule_name)
-                
-            except BusinessRuleViolationError as rule_violation:
-                violations.append({
-                    'rule_name': rule_name,
-                    'error_code': rule_violation.error_code,
-                    'message': rule_violation.message,
-                    'context': rule_violation.context
-                })
-                
-                logger.warning("Business rule violation detected",
-                             rule_name=rule_name,
-                             error_code=rule_violation.error_code)
-                
-            except Exception as unexpected_error:
-                violations.append({
-                    'rule_name': rule_name,
-                    'error_code': 'BUSINESS_RULE_ERROR',
-                    'message': f"Business rule validation failed: {str(unexpected_error)}",
-                    'context': {'unexpected_error': True}
-                })
-                
-                logger.error("Business rule validation failed unexpectedly",
-                           rule_name=rule_name,
-                           error=str(unexpected_error))
-        
-        return violations
-    
-    @validates_schema
-    def validate_business_constraints(self, data: Dict[str, Any], **kwargs) -> None:
-        """
-        Validate data against business constraints and rules.
-        
-        Args:
-            data: Validated data dictionary
-            **kwargs: Additional validation context
-            
-        Raises:
-            BusinessRuleViolationError: If business rules are violated
-        """
-        # Call parent validation first
-        super().validate_schema_context(data, **kwargs)
-        
-        # Validate against registered business rules
-        violations = self.validate_business_rules(data)
-        
-        if violations:
-            # Create comprehensive business rule violation error
-            violation_messages = [v['message'] for v in violations]
-            
-            raise BusinessRuleViolationError(
-                message=f"Business rule validation failed ({len(violations)} violations)",
-                error_code="MULTIPLE_BUSINESS_RULE_VIOLATIONS",
-                context={
-                    'violations': violations,
-                    'violation_count': len(violations)
-                },
-                severity=ErrorSeverity.HIGH
-            )
-
-
-class DataModelValidator(BaseValidator):
-    """
-    Data model validation using marshmallow schemas for business data structures.
-    
-    Provides comprehensive data model validation with type checking, field validation,
-    and business data integrity enforcement. Implements data validation maintaining
-    existing patterns per F-004-RQ-001 requirements using marshmallow 3.20+.
-    
-    This validator implements:
-    - Comprehensive data model validation per Section 5.2.4
-    - Type checking and field validation with marshmallow
-    - Business data integrity and consistency checking
-    - Custom field validation and transformation
-    - Integration with business rule validation engine
-    
-    Common Field Types:
-        - String fields with length and pattern validation
-        - Numeric fields with range and precision validation
-        - Date/time fields with format and timezone handling
-        - Email and URL fields with format validation
-        - Custom business fields with domain-specific rules
-    
-    Example:
-        class UserDataValidator(DataModelValidator):
-            id = fields.String(required=True, validate=validate.Length(min=1))
-            email = fields.Email(required=True)
-            name = fields.String(required=True, validate=validate.Length(min=2, max=100))
-            age = fields.Integer(validate=validate.Range(min=0, max=150))
-            created_at = fields.DateTime(dump_only=True)
-    """
-    
-    def __init__(self, *args, **kwargs):
-        """
-        Initialize data model validator with enhanced field validation.
-        
-        Args:
-            *args: Positional arguments for BaseValidator
-            **kwargs: Keyword arguments including model configuration
-        """
-        super().__init__(*args, **kwargs)
-        
-        # Data model configuration
-        self.model_name = kwargs.pop('model_name', self.__class__.__name__)
-        self.allow_partial = kwargs.pop('allow_partial', False)
-        self.validate_required = kwargs.pop('validate_required', True)
-        
-        logger.debug("Data model validator initialized",
-                    model_name=self.model_name,
-                    allow_partial=self.allow_partial)
+        # Initialize validation metrics
+        self.validation_start_time = None
+        self.validation_errors_count = 0
+        self.business_rules_applied = 0
     
     @pre_load
-    def preprocess_data(self, data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
+    def sanitize_input_data(self, data, **kwargs):
         """
-        Preprocess input data before validation.
+        Sanitize and clean input data before validation.
         
-        Provides data preprocessing including sanitization, type conversion,
-        and data normalization before field validation.
-        
-        Args:
-            data: Input data to preprocess
-            **kwargs: Additional preprocessing context
-            
-        Returns:
-            Preprocessed data ready for field validation
-        """
-        if not isinstance(data, dict):
-            raise DataValidationError(
-                message="Input data must be a dictionary",
-                error_code="INVALID_INPUT_TYPE",
-                context={'input_type': type(data).__name__},
-                severity=ErrorSeverity.MEDIUM
-            )
-        
-        processed_data = {}
-        
-        for field_name, field_value in data.items():
-            try:
-                # Basic data sanitization and type conversion
-                if isinstance(field_value, str):
-                    # Sanitize string inputs
-                    processed_value = sanitize_input(field_value.strip())
-                    
-                    # Apply field-specific preprocessing
-                    if field_name.endswith('_email'):
-                        processed_value = processed_value.lower()
-                    elif field_name.endswith('_phone'):
-                        processed_value = re.sub(r'[^\d+()-.\s]', '', processed_value)
-                    elif field_name.endswith('_id') and processed_value == '':
-                        processed_value = None
-                    
-                    processed_data[field_name] = processed_value
-                    
-                elif isinstance(field_value, (int, float, bool)):
-                    processed_data[field_name] = field_value
-                    
-                elif field_value is None:
-                    processed_data[field_name] = None
-                    
-                else:
-                    # Handle complex data types (lists, dicts)
-                    processed_data[field_name] = field_value
-                    
-            except Exception as preprocessing_error:
-                logger.warning("Data preprocessing failed for field",
-                             field_name=field_name,
-                             field_value=str(field_value)[:100],
-                             error=str(preprocessing_error))
-                
-                # Include original value if preprocessing fails
-                processed_data[field_name] = field_value
-        
-        logger.debug("Data preprocessing completed",
-                    original_fields=len(data),
-                    processed_fields=len(processed_data))
-        
-        return processed_data
-    
-    @post_load
-    def postprocess_data(self, data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
-        """
-        Postprocess validated data after field validation.
-        
-        Provides data postprocessing including final transformations,
-        computed fields, and business logic integration.
-        
-        Args:
-            data: Validated data to postprocess
-            **kwargs: Additional postprocessing context
-            
-        Returns:
-            Postprocessed data ready for business logic
-        """
-        postprocessed_data = data.copy()
-        
-        # Add computed fields if needed
-        if 'created_at' not in postprocessed_data and hasattr(self, 'created_at'):
-            postprocessed_data['created_at'] = datetime.now()
-        
-        if 'updated_at' not in postprocessed_data and hasattr(self, 'updated_at'):
-            postprocessed_data['updated_at'] = datetime.now()
-        
-        # Apply model-specific postprocessing
-        postprocessed_data = self._apply_model_postprocessing(postprocessed_data)
-        
-        logger.debug("Data postprocessing completed",
-                    field_count=len(postprocessed_data))
-        
-        return postprocessed_data
-    
-    def _apply_model_postprocessing(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Apply model-specific postprocessing logic.
-        
-        Override this method in subclasses to implement model-specific
-        postprocessing logic and computed field generation.
-        
-        Args:
-            data: Validated data to postprocess
-            
-        Returns:
-            Data with model-specific postprocessing applied
-        """
-        return data
-    
-    def validate_partial_data(
-        self,
-        data: Dict[str, Any],
-        fields_to_validate: Optional[Set[str]] = None
-    ) -> Dict[str, Any]:
-        """
-        Validate partial data for update operations.
-        
-        Provides partial data validation for PATCH operations and
-        incremental updates while maintaining data integrity.
-        
-        Args:
-            data: Partial data to validate
-            fields_to_validate: Optional set of specific fields to validate
-            
-        Returns:
-            Validated partial data
-            
-        Raises:
-            DataValidationError: If partial validation fails
-        """
-        try:
-            # Create partial schema for validation
-            partial_fields = fields_to_validate or set(data.keys())
-            
-            # Validate only specified fields
-            validated_data = self.load(data, partial=list(partial_fields))
-            
-            logger.debug("Partial data validation completed",
-                        validated_fields=list(validated_data.keys()),
-                        requested_fields=list(partial_fields))
-            
-            return validated_data
-            
-        except ValidationError as validation_error:
-            self.handle_error(validation_error, data)
-    
-    def get_field_metadata(self) -> Dict[str, Dict[str, Any]]:
-        """
-        Get metadata about schema fields for documentation and client generation.
-        
-        Returns:
-            Dictionary containing field metadata and validation rules
-        """
-        field_metadata = {}
-        
-        for field_name, field_obj in self.fields.items():
-            metadata = {
-                'type': type(field_obj).__name__,
-                'required': field_obj.required,
-                'allow_none': field_obj.allow_none,
-                'load_only': field_obj.load_only,
-                'dump_only': field_obj.dump_only
-            }
-            
-            # Add validation metadata
-            if hasattr(field_obj, 'validators') and field_obj.validators:
-                metadata['validators'] = []
-                for validator in field_obj.validators:
-                    if hasattr(validator, '__name__'):
-                        metadata['validators'].append(validator.__name__)
-                    else:
-                        metadata['validators'].append(str(validator))
-            
-            # Add field-specific metadata
-            if isinstance(field_obj, fields.String):
-                if hasattr(field_obj, 'validate') and field_obj.validate:
-                    for validator in field_obj.validate if isinstance(field_obj.validate, list) else [field_obj.validate]:
-                        if isinstance(validator, validate.Length):
-                            metadata['min_length'] = validator.min
-                            metadata['max_length'] = validator.max
-            
-            elif isinstance(field_obj, (fields.Integer, fields.Float)):
-                if hasattr(field_obj, 'validate') and field_obj.validate:
-                    for validator in field_obj.validate if isinstance(field_obj.validate, list) else [field_obj.validate]:
-                        if isinstance(validator, validate.Range):
-                            metadata['min_value'] = validator.min
-                            metadata['max_value'] = validator.max
-            
-            field_metadata[field_name] = metadata
-        
-        return field_metadata
-
-
-class InputValidator(DataModelValidator):
-    """
-    Input data validation and sanitization for HTTP requests and external data.
-    
-    Provides comprehensive input validation with sanitization, security checks,
-    and request data processing. Implements input validation maintaining
-    existing patterns per F-003-RQ-004 requirements.
-    
-    This validator implements:
-    - HTTP request data validation and sanitization
-    - Security input validation and XSS prevention
-    - File upload validation and processing
-    - Query parameter validation and type conversion
-    - Form data validation and multipart handling
-    
-    Security Features:
-        - Input sanitization and XSS prevention
-        - File upload validation and security checks
-        - SQL injection prevention through parameterization
-        - Cross-site scripting (XSS) protection
-        - Request size and rate limiting validation
-    
-    Example:
-        class ContactFormValidator(InputValidator):
-            name = fields.String(required=True, validate=validate.Length(min=2, max=100))
-            email = fields.Email(required=True)
-            message = fields.String(required=True, validate=validate.Length(min=10, max=1000))
-            phone = fields.String(validate=validate.Length(max=20))
-    """
-    
-    def __init__(self, *args, **kwargs):
-        """
-        Initialize input validator with security and sanitization features.
-        
-        Args:
-            *args: Positional arguments for DataModelValidator
-            **kwargs: Keyword arguments including security configuration
-        """
-        super().__init__(*args, **kwargs)
-        
-        # Security configuration
-        self.enable_sanitization = kwargs.pop('enable_sanitization', True)
-        self.max_request_size = kwargs.pop('max_request_size', 10 * 1024 * 1024)  # 10MB
-        self.allowed_file_types = kwargs.pop('allowed_file_types', set())
-        self.max_file_size = kwargs.pop('max_file_size', 5 * 1024 * 1024)  # 5MB
-        
-        logger.debug("Input validator initialized",
-                    enable_sanitization=self.enable_sanitization,
-                    max_request_size=self.max_request_size)
-    
-    @pre_load
-    def sanitize_input_data(self, data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
-        """
-        Sanitize input data for security and consistency.
-        
-        Provides comprehensive input sanitization including XSS prevention,
-        SQL injection protection, and data normalization.
+        Implements security requirements by sanitizing input data to prevent
+        injection attacks and ensure data quality before validation processing.
         
         Args:
             data: Input data to sanitize
-            **kwargs: Additional sanitization context
+            **kwargs: Additional load context
             
         Returns:
-            Sanitized input data
+            Sanitized input data ready for validation
         """
-        if not self.enable_sanitization:
+        if not self.sanitize_input or not isinstance(data, dict):
             return data
         
-        sanitized_data = {}
-        
-        for field_name, field_value in data.items():
-            try:
-                if isinstance(field_value, str):
-                    # Apply comprehensive string sanitization
-                    sanitized_value = sanitize_input(
-                        field_value,
-                        allow_html=self._should_allow_html(field_name),
-                        max_length=self._get_field_max_length(field_name)
-                    )
-                    
-                    # Apply field-specific sanitization
-                    sanitized_value = self._apply_field_sanitization(field_name, sanitized_value)
-                    
-                    sanitized_data[field_name] = sanitized_value
-                    
-                elif isinstance(field_value, list):
-                    # Sanitize list elements
-                    sanitized_list = []
-                    for item in field_value:
-                        if isinstance(item, str):
-                            sanitized_item = sanitize_input(item)
-                            sanitized_list.append(sanitized_item)
-                        else:
-                            sanitized_list.append(item)
-                    sanitized_data[field_name] = sanitized_list
-                    
-                else:
-                    # Keep non-string values as-is
-                    sanitized_data[field_name] = field_value
-                    
-            except Exception as sanitization_error:
-                logger.warning("Input sanitization failed for field",
-                             field_name=field_name,
-                             error=str(sanitization_error))
-                
-                # Use original value if sanitization fails
-                sanitized_data[field_name] = field_value
-        
-        logger.debug("Input sanitization completed",
-                    original_fields=len(data),
-                    sanitized_fields=len(sanitized_data))
-        
-        return sanitized_data
-    
-    def _should_allow_html(self, field_name: str) -> bool:
-        """
-        Determine if HTML should be allowed for a specific field.
-        
-        Args:
-            field_name: Name of the field to check
-            
-        Returns:
-            True if HTML should be allowed, False otherwise
-        """
-        # Fields that typically allow HTML content
-        html_fields = {'description', 'content', 'message', 'body', 'notes'}
-        return any(html_field in field_name.lower() for html_field in html_fields)
-    
-    def _get_field_max_length(self, field_name: str) -> Optional[int]:
-        """
-        Get maximum length for a specific field based on field metadata.
-        
-        Args:
-            field_name: Name of the field to check
-            
-        Returns:
-            Maximum length for the field or None if not specified
-        """
-        if field_name in self.fields:
-            field_obj = self.fields[field_name]
-            if isinstance(field_obj, fields.String) and hasattr(field_obj, 'validate'):
-                validators = field_obj.validate if isinstance(field_obj.validate, list) else [field_obj.validate]
-                for validator in validators:
-                    if isinstance(validator, validate.Length) and validator.max:
-                        return validator.max
-        
-        # Default max lengths for common field types
-        default_lengths = {
-            'email': 254,
-            'name': 100,
-            'title': 200,
-            'description': 1000,
-            'phone': 20,
-            'url': 2048
-        }
-        
-        for field_type, max_length in default_lengths.items():
-            if field_type in field_name.lower():
-                return max_length
-        
-        return None
-    
-    def _apply_field_sanitization(self, field_name: str, field_value: str) -> str:
-        """
-        Apply field-specific sanitization rules.
-        
-        Args:
-            field_name: Name of the field
-            field_value: Field value to sanitize
-            
-        Returns:
-            Field-specific sanitized value
-        """
-        field_name_lower = field_name.lower()
-        
-        # Email field sanitization
-        if 'email' in field_name_lower:
-            return field_value.lower().strip()
-        
-        # Phone field sanitization
-        elif 'phone' in field_name_lower:
-            # Remove non-phone characters
-            return re.sub(r'[^\d+()-.\s]', '', field_value)
-        
-        # URL field sanitization
-        elif 'url' in field_name_lower or 'website' in field_name_lower:
-            if field_value and not field_value.startswith(('http://', 'https://')):
-                return f"https://{field_value}"
-            return field_value
-        
-        # Name field sanitization
-        elif 'name' in field_name_lower:
-            # Remove excessive whitespace and capitalize properly
-            return ' '.join(word.capitalize() for word in field_value.split())
-        
-        return field_value
-    
-    def validate_file_upload(
-        self,
-        file_data: Dict[str, Any],
-        allowed_types: Optional[Set[str]] = None,
-        max_size: Optional[int] = None
-    ) -> Dict[str, Any]:
-        """
-        Validate file upload data with security checks.
-        
-        Provides comprehensive file upload validation including file type
-        checking, size validation, and security scanning.
-        
-        Args:
-            file_data: File upload data to validate
-            allowed_types: Optional set of allowed file types
-            max_size: Optional maximum file size in bytes
-            
-        Returns:
-            Validated file upload data
-            
-        Raises:
-            DataValidationError: If file validation fails
-        """
         try:
-            logger.debug("Starting file upload validation",
-                        file_fields=list(file_data.keys()))
+            # Record validation start time for performance monitoring
+            self.validation_start_time = datetime.now(timezone.utc)
             
-            # Validate file presence
-            if 'filename' not in file_data or not file_data['filename']:
-                raise DataValidationError(
-                    message="File name is required",
-                    error_code="FILE_NAME_MISSING",
-                    severity=ErrorSeverity.MEDIUM
-                )
-            
-            filename = file_data['filename']
-            file_size = file_data.get('size', 0)
-            content_type = file_data.get('content_type', '')
-            
-            # Validate file extension
-            file_extension = filename.split('.')[-1].lower() if '.' in filename else ''
-            allowed_extensions = allowed_types or self.allowed_file_types
-            
-            if allowed_extensions and file_extension not in allowed_extensions:
-                raise DataValidationError(
-                    message=f"File type '{file_extension}' is not allowed",
-                    error_code="INVALID_FILE_TYPE",
-                    context={
-                        'file_extension': file_extension,
-                        'allowed_types': list(allowed_extensions)
-                    },
-                    severity=ErrorSeverity.HIGH
-                )
-            
-            # Validate file size
-            max_file_size = max_size or self.max_file_size
-            if file_size > max_file_size:
-                raise DataValidationError(
-                    message=f"File size {file_size} exceeds maximum {max_file_size} bytes",
-                    error_code="FILE_TOO_LARGE",
-                    context={
-                        'file_size': file_size,
-                        'max_size': max_file_size
-                    },
-                    severity=ErrorSeverity.MEDIUM
-                )
-            
-            # Validate filename for security
-            if any(char in filename for char in ['..', '/', '\\', '<', '>', '|', ':', '*', '?', '"']):
-                raise DataValidationError(
-                    message="File name contains invalid characters",
-                    error_code="INVALID_FILE_NAME",
-                    context={'filename': filename},
-                    severity=ErrorSeverity.HIGH
-                )
-            
-            logger.debug("File upload validation completed successfully",
-                        filename=filename,
-                        file_size=file_size,
-                        content_type=content_type)
-            
-            return file_data
-            
-        except Exception as file_validation_error:
-            if isinstance(file_validation_error, DataValidationError):
-                raise
-            
-            raise DataValidationError(
-                message="File upload validation failed",
-                error_code="FILE_VALIDATION_ERROR",
-                cause=file_validation_error,
-                severity=ErrorSeverity.MEDIUM
+            # Sanitize input data using business utilities
+            sanitized_data = clean_data(
+                data,
+                remove_empty=False,  # Keep empty values for validation
+                remove_none=False,   # Keep None values for validation
+                strip_strings=True,  # Strip whitespace
+                convert_types=False  # Don't convert types yet
             )
+            
+            logger.debug("Input data sanitized for validation",
+                        original_fields=len(data),
+                        sanitized_fields=len(sanitized_data),
+                        validator_class=self.__class__.__name__)
+            
+            return sanitized_data
+            
+        except Exception as e:
+            logger.error("Failed to sanitize input data",
+                        error=str(e),
+                        validator_class=self.__class__.__name__)
+            
+            # Continue with original data if sanitization fails
+            return data
     
-    def validate_query_parameters(
-        self,
-        query_params: Dict[str, Any],
-        allowed_params: Optional[Set[str]] = None
-    ) -> Dict[str, Any]:
+    @post_load
+    def validate_business_rules_and_convert(self, data, **kwargs):
         """
-        Validate query parameters with type conversion and security checks.
+        Apply business rule validation and convert to business model.
+        
+        Performs comprehensive business rule validation after field validation
+        and optionally converts validated data to corresponding business model
+        instance per Section 5.2.4 integration requirements.
         
         Args:
-            query_params: Query parameters to validate
-            allowed_params: Optional set of allowed parameter names
+            data: Validated field data
+            **kwargs: Additional load context
             
         Returns:
-            Validated query parameters
+            Validated data or business model instance
             
         Raises:
-            DataValidationError: If query parameter validation fails
+            BusinessRuleViolationError: If business rules are violated
+            DataValidationError: If model conversion fails
         """
         try:
-            validated_params = {}
+            # Apply business rule validation if enabled
+            if self.enforce_business_rules:
+                self.validate_cross_field_rules(data)
+                self.validate_conditional_rules(data)
+                self.validate_custom_business_rules(data)
             
-            for param_name, param_value in query_params.items():
-                # Check if parameter is allowed
-                if allowed_params and param_name not in allowed_params:
-                    logger.warning("Ignored unknown query parameter",
-                                 param_name=param_name)
-                    continue
-                
-                # Apply type conversion and validation
-                if param_name in self.fields:
-                    field_obj = self.fields[param_name]
+            # Convert to business model if configured
+            convert_to_model = kwargs.get('convert_to_model', False)
+            if convert_to_model:
+                model_class = self.get_business_model_class()
+                if model_class:
                     try:
-                        # Convert and validate using field definition
-                        validated_value = field_obj.deserialize(param_value)
-                        validated_params[param_name] = validated_value
-                    except ValidationError as field_error:
+                        model_instance = model_class.from_dict(data)
+                        # Validate business rules at model level
+                        model_instance.validate_business_rules()
+                        return model_instance
+                    except Exception as e:
                         raise DataValidationError(
-                            message=f"Invalid query parameter '{param_name}': {field_error.messages}",
-                            error_code="INVALID_QUERY_PARAM",
+                            message=f"Failed to convert to {model_class.__name__} model",
+                            error_code="MODEL_CONVERSION_FAILED",
                             context={
-                                'param_name': param_name,
-                                'param_value': str(param_value)[:100]
+                                'model_class': model_class.__name__,
+                                'validator_class': self.__class__.__name__
                             },
+                            cause=e,
                             severity=ErrorSeverity.MEDIUM
                         )
-                else:
-                    # Apply basic sanitization for unknown parameters
-                    if isinstance(param_value, str):
-                        validated_params[param_name] = sanitize_input(param_value)
-                    else:
-                        validated_params[param_name] = param_value
             
-            logger.debug("Query parameter validation completed",
-                        original_params=len(query_params),
-                        validated_params=len(validated_params))
+            # Log successful validation
+            self._log_validation_success(data)
             
-            return validated_params
+            return data
             
-        except Exception as query_validation_error:
-            if isinstance(query_validation_error, DataValidationError):
-                raise
-            
+        except BusinessRuleViolationError:
+            # Re-raise business rule violations
+            raise
+        except Exception as e:
+            # Convert unexpected errors to validation errors
             raise DataValidationError(
-                message="Query parameter validation failed",
-                error_code="QUERY_PARAM_VALIDATION_ERROR",
-                cause=query_validation_error,
-                severity=ErrorSeverity.MEDIUM
-            )
-
-
-class OutputValidator(DataModelValidator):
-    """
-    Response data validation and serialization for consistent API outputs.
-    
-    Provides comprehensive output validation with response formatting,
-    consistency checking, and API contract enforcement. Implements response
-    validation maintaining existing patterns per F-004-RQ-004 requirements.
-    
-    This validator implements:
-    - Response data validation and consistency checking
-    - API response format standardization and serialization
-    - Output data transformation and formatting
-    - Response schema validation and compliance
-    - Performance optimization for response generation
-    
-    Response Format Features:
-        - Consistent JSON response structure
-        - HTTP status code validation and mapping
-        - Response metadata and pagination support
-        - Error response formatting and standardization
-        - Response compression and optimization
-    
-    Example:
-        class UserResponseValidator(OutputValidator):
-            id = fields.String(required=True)
-            email = fields.Email(required=True)
-            name = fields.String(required=True)
-            created_at = fields.DateTime(dump_only=True)
-            updated_at = fields.DateTime(dump_only=True)
-    """
-    
-    def __init__(self, *args, **kwargs):
-        """
-        Initialize output validator with response formatting features.
-        
-        Args:
-            *args: Positional arguments for DataModelValidator
-            **kwargs: Keyword arguments including response configuration
-        """
-        super().__init__(*args, **kwargs)
-        
-        # Response configuration
-        self.include_metadata = kwargs.pop('include_metadata', True)
-        self.include_timestamps = kwargs.pop('include_timestamps', True)
-        self.response_format = kwargs.pop('response_format', 'standard')
-        self.enable_compression = kwargs.pop('enable_compression', False)
-        
-        logger.debug("Output validator initialized",
-                    include_metadata=self.include_metadata,
-                    response_format=self.response_format)
-    
-    def format_success_response(
-        self,
-        data: Any,
-        status_code: int = 200,
-        message: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        """
-        Format successful response data with consistent structure.
-        
-        Args:
-            data: Response data to format
-            status_code: HTTP status code for response
-            message: Optional success message
-            metadata: Optional response metadata
-            
-        Returns:
-            Formatted success response dictionary
-        """
-        try:
-            logger.debug("Formatting success response",
-                        data_type=type(data).__name__,
-                        status_code=status_code)
-            
-            # Validate and serialize data
-            if data is not None:
-                serialized_data = self.dump_with_validation(data, validate_output=True)
-            else:
-                serialized_data = None
-            
-            # Build response structure
-            response = {
-                'success': True,
-                'status_code': status_code,
-                'data': serialized_data
-            }
-            
-            # Add optional message
-            if message:
-                response['message'] = message
-            
-            # Add metadata
-            if self.include_metadata and metadata:
-                response['metadata'] = metadata
-            
-            # Add timestamps
-            if self.include_timestamps:
-                response['timestamp'] = datetime.now().isoformat()
-            
-            logger.debug("Success response formatted successfully",
-                        response_fields=list(response.keys()))
-            
-            return response
-            
-        except Exception as formatting_error:
-            raise DataValidationError(
-                message="Failed to format success response",
-                error_code="RESPONSE_FORMAT_ERROR",
-                context={'status_code': status_code},
-                cause=formatting_error,
+                message="Business rule validation failed",
+                error_code="BUSINESS_RULE_VALIDATION_FAILED",
+                context={'validator_class': self.__class__.__name__},
+                cause=e,
                 severity=ErrorSeverity.MEDIUM
             )
     
-    def format_error_response(
-        self,
-        error: BaseBusinessException,
-        include_details: bool = False
-    ) -> Dict[str, Any]:
+    def validate_cross_field_rules(self, data: Dict[str, Any]) -> None:
         """
-        Format error response with consistent structure and security.
+        Validate cross-field business rules and dependencies.
+        
+        Override this method in subclasses to implement specific cross-field
+        validation logic that depends on multiple field values.
         
         Args:
-            error: Business exception to format
-            include_details: Whether to include detailed error information
-            
-        Returns:
-            Formatted error response dictionary
-        """
-        try:
-            logger.debug("Formatting error response",
-                        error_type=type(error).__name__,
-                        error_code=error.error_code)
-            
-            # Build error response structure
-            response = {
-                'success': False,
-                'error': {
-                    'code': error.error_code,
-                    'message': error.message,
-                    'type': error.category.value if hasattr(error, 'category') else 'error'
-                }
-            }
-            
-            # Add status code
-            if hasattr(error, 'http_status_code'):
-                response['status_code'] = error.http_status_code
-            
-            # Add detailed error information if requested
-            if include_details:
-                if hasattr(error, 'context') and error.context:
-                    response['error']['details'] = error.context
-                
-                if hasattr(error, 'validation_errors') and error.validation_errors:
-                    response['error']['validation_errors'] = error.validation_errors
-                
-                if hasattr(error, 'field_errors') and error.field_errors:
-                    response['error']['field_errors'] = error.field_errors
-            
-            # Add timestamps
-            if self.include_timestamps:
-                response['timestamp'] = datetime.now().isoformat()
-            
-            # Add request ID for tracking
-            if hasattr(error, 'request_id') and error.request_id:
-                response['request_id'] = error.request_id
-            
-            logger.debug("Error response formatted successfully",
-                        error_code=error.error_code)
-            
-            return response
-            
-        except Exception as formatting_error:
-            logger.error("Failed to format error response",
-                        original_error=str(error),
-                        formatting_error=str(formatting_error))
-            
-            # Return minimal error response
-            return {
-                'success': False,
-                'error': {
-                    'code': 'RESPONSE_FORMAT_ERROR',
-                    'message': 'An error occurred while formatting the response',
-                    'type': 'system_error'
-                },
-                'timestamp': datetime.now().isoformat()
-            }
-    
-    def format_paginated_response(
-        self,
-        data: List[Any],
-        page: int,
-        per_page: int,
-        total_count: int,
-        additional_metadata: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        """
-        Format paginated response with navigation metadata.
-        
-        Args:
-            data: List of data items for current page
-            page: Current page number (1-based)
-            per_page: Number of items per page
-            total_count: Total number of items
-            additional_metadata: Optional additional metadata
-            
-        Returns:
-            Formatted paginated response dictionary
-        """
-        try:
-            logger.debug("Formatting paginated response",
-                        data_count=len(data),
-                        page=page,
-                        per_page=per_page,
-                        total_count=total_count)
-            
-            # Validate and serialize data items
-            serialized_data = []
-            for item in data:
-                serialized_item = self.dump_with_validation(item, validate_output=True)
-                serialized_data.append(serialized_item)
-            
-            # Calculate pagination metadata
-            total_pages = (total_count + per_page - 1) // per_page
-            has_next = page < total_pages
-            has_prev = page > 1
-            
-            # Build pagination metadata
-            pagination = {
-                'page': page,
-                'per_page': per_page,
-                'total_count': total_count,
-                'total_pages': total_pages,
-                'has_next': has_next,
-                'has_prev': has_prev
-            }
-            
-            # Add navigation URLs if available
-            if has_next:
-                pagination['next_page'] = page + 1
-            if has_prev:
-                pagination['prev_page'] = page - 1
-            
-            # Build response structure
-            response = {
-                'success': True,
-                'data': serialized_data,
-                'pagination': pagination
-            }
-            
-            # Add additional metadata
-            if additional_metadata:
-                response['metadata'] = additional_metadata
-            
-            # Add timestamps
-            if self.include_timestamps:
-                response['timestamp'] = datetime.now().isoformat()
-            
-            logger.debug("Paginated response formatted successfully",
-                        items_count=len(serialized_data),
-                        total_pages=total_pages)
-            
-            return response
-            
-        except Exception as formatting_error:
-            raise DataValidationError(
-                message="Failed to format paginated response",
-                error_code="PAGINATED_RESPONSE_ERROR",
-                context={
-                    'page': page,
-                    'per_page': per_page,
-                    'total_count': total_count
-                },
-                cause=formatting_error,
-                severity=ErrorSeverity.MEDIUM
-            )
-    
-    def validate_response_schema(self, response_data: Dict[str, Any]) -> bool:
-        """
-        Validate response data against expected schema.
-        
-        Args:
-            response_data: Response data to validate
-            
-        Returns:
-            True if response schema is valid
+            data: Validated field data for cross-field validation
             
         Raises:
-            DataValidationError: If response schema validation fails
+            BusinessRuleViolationError: If cross-field rules are violated
+        """
+        # Base implementation - override in subclasses
+        pass
+    
+    def validate_conditional_rules(self, data: Dict[str, Any]) -> None:
+        """
+        Validate conditional business rules based on data context.
+        
+        Override this method in subclasses to implement conditional validation
+        rules that apply based on specific field values or combinations.
+        
+        Args:
+            data: Validated field data for conditional validation
+            
+        Raises:
+            BusinessRuleViolationError: If conditional rules are violated
+        """
+        # Base implementation - override in subclasses
+        pass
+    
+    def validate_custom_business_rules(self, data: Dict[str, Any]) -> None:
+        """
+        Validate custom business-specific rules.
+        
+        Override this method in subclasses to implement domain-specific
+        business rules that don't fit into standard validation patterns.
+        
+        Args:
+            data: Validated field data for custom validation
+            
+        Raises:
+            BusinessRuleViolationError: If custom rules are violated
+        """
+        # Base implementation - override in subclasses
+        pass
+    
+    def validate_business_rule(self, rule_name: str, value: Any, **kwargs) -> Any:
+        """
+        Validate individual business rule with comprehensive error handling.
+        
+        Provides standardized business rule validation with consistent error
+        reporting and audit trail generation for enterprise compliance.
+        
+        Args:
+            rule_name: Name of the business rule to validate
+            value: Value to validate against the business rule
+            **kwargs: Additional rule parameters and context
+            
+        Returns:
+            Validated value (potentially transformed)
+            
+        Raises:
+            BusinessRuleViolationError: If business rule validation fails
         """
         try:
-            # Check required response fields
-            required_fields = {'success'}
-            if 'success' not in response_data:
-                raise DataValidationError(
-                    message="Response missing required 'success' field",
-                    error_code="INVALID_RESPONSE_SCHEMA",
-                    severity=ErrorSeverity.HIGH
-                )
+            self.business_rules_applied += 1
             
-            # Validate success response structure
-            if response_data['success']:
-                if 'data' not in response_data:
-                    logger.warning("Success response missing 'data' field")
-            else:
-                if 'error' not in response_data:
-                    raise DataValidationError(
-                        message="Error response missing 'error' field",
-                        error_code="INVALID_ERROR_RESPONSE",
-                        severity=ErrorSeverity.HIGH
+            # Get rule configuration
+            rule_config = self.business_rules.get(rule_name, {})
+            rule_function = rule_config.get('function')
+            rule_parameters = rule_config.get('parameters', {})
+            rule_parameters.update(kwargs)
+            
+            # Apply business rule if function is defined
+            if rule_function and callable(rule_function):
+                try:
+                    result = rule_function(value, **rule_parameters)
+                    
+                    logger.debug("Business rule validation passed",
+                                rule_name=rule_name,
+                                validator_class=self.__class__.__name__)
+                    
+                    return result if result is not None else value
+                    
+                except BusinessRuleViolationError:
+                    # Re-raise business rule violations
+                    raise
+                except Exception as e:
+                    raise BusinessRuleViolationError(
+                        message=f"Business rule '{rule_name}' validation failed",
+                        error_code=f"BUSINESS_RULE_{rule_name.upper()}_FAILED",
+                        rule_name=rule_name,
+                        rule_parameters=rule_parameters,
+                        context={'value': str(value)[:100]},  # Limit for security
+                        cause=e,
+                        severity=ErrorSeverity.MEDIUM
                     )
             
-            logger.debug("Response schema validation passed")
-            return True
+            # Return original value if no rule function defined
+            return value
             
-        except Exception as schema_error:
-            if isinstance(schema_error, DataValidationError):
-                raise
-            
-            raise DataValidationError(
-                message="Response schema validation failed",
-                error_code="RESPONSE_SCHEMA_ERROR",
-                cause=schema_error,
+        except BusinessRuleViolationError:
+            raise
+        except Exception as e:
+            raise BusinessRuleViolationError(
+                message=f"Failed to validate business rule '{rule_name}'",
+                error_code="BUSINESS_RULE_VALIDATION_ERROR",
+                rule_name=rule_name,
+                cause=e,
                 severity=ErrorSeverity.MEDIUM
             )
-
-
-# ============================================================================
-# VALIDATION UTILITY FUNCTIONS
-# ============================================================================
-
-def validate_business_data(
-    data: Union[Dict[str, Any], str],
-    schema_class: Type[BaseValidator],
-    validation_context: Optional[ValidationContext] = None,
-    **schema_kwargs
-) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    """
-    Validate business data using specified schema and context.
     
-    Provides centralized business data validation with comprehensive error
-    handling, context management, and performance monitoring. Implements
-    primary validation entry point per Section 5.2.4 requirements.
+    def get_business_model_class(self) -> Optional[Type[BaseBusinessModel]]:
+        """
+        Get corresponding business model class for this validator.
+        
+        Override this method in subclasses to specify which business model
+        class corresponds to this validator for automatic conversion.
+        
+        Returns:
+            Business model class or None if no conversion available
+        """
+        # Base implementation returns None - override in subclasses
+        return None
+    
+    def handle_validation_error(self, error: MarshmallowValidationError) -> DataValidationError:
+        """
+        Convert marshmallow validation errors to business exceptions.
+        
+        Transforms marshmallow validation errors into standardized business
+        exceptions with proper error categorization and audit trail generation.
+        
+        Args:
+            error: Marshmallow validation error to convert
+            
+        Returns:
+            Business data validation error
+        """
+        self.validation_errors_count += len(error.messages) if hasattr(error, 'messages') else 1
+        
+        # Extract validation error details
+        validation_errors = []
+        field_errors = {}
+        
+        if hasattr(error, 'messages') and isinstance(error.messages, dict):
+            for field, messages in error.messages.items():
+                if isinstance(messages, list):
+                    field_errors[field] = messages
+                    for message in messages:
+                        validation_errors.append({
+                            'field': field,
+                            'message': message,
+                            'type': 'field_validation'
+                        })
+                else:
+                    field_errors[field] = [str(messages)]
+                    validation_errors.append({
+                        'field': field,
+                        'message': str(messages),
+                        'type': 'field_validation'
+                    })
+        
+        # Create business validation error
+        business_error = DataValidationError(
+            message=f"Validation failed for {self.__class__.__name__}",
+            error_code="SCHEMA_VALIDATION_FAILED",
+            validation_errors=validation_errors,
+            field_errors=field_errors,
+            context={
+                'validator_class': self.__class__.__name__,
+                'error_count': len(validation_errors)
+            },
+            cause=error,
+            severity=ErrorSeverity.MEDIUM
+        )
+        
+        # Log validation failure for audit trail
+        if ValidationConfig.LOG_VALIDATION_FAILURES:
+            logger.warning("Schema validation failed",
+                          validator_class=self.__class__.__name__,
+                          error_count=len(validation_errors),
+                          field_errors=list(field_errors.keys()))
+        
+        return business_error
+    
+    def _log_validation_success(self, data: Dict[str, Any]) -> None:
+        """Log successful validation for audit trail and performance monitoring."""
+        if self.validation_start_time:
+            validation_duration = (datetime.now(timezone.utc) - self.validation_start_time).total_seconds()
+        else:
+            validation_duration = 0
+        
+        logger.info("Validation completed successfully",
+                   validator_class=self.__class__.__name__,
+                   field_count=len(data),
+                   business_rules_applied=self.business_rules_applied,
+                   validation_duration_seconds=validation_duration,
+                   validation_errors_count=self.validation_errors_count)
+
+
+# ============================================================================
+# FIELD VALIDATORS AND CUSTOM VALIDATION FUNCTIONS
+# ============================================================================
+
+class EmailField(fields.Field):
+    """
+    Enhanced email field with business rule validation.
+    
+    Provides comprehensive email validation including format validation,
+    domain verification, and business-specific email policies.
+    """
+    
+    def _serialize(self, value: Any, attr: str, obj: Any, **kwargs) -> Optional[str]:
+        """Serialize email value to string."""
+        return str(value) if value else None
+    
+    def _deserialize(self, value: Any, attr: Optional[str], data: Optional[Dict], **kwargs) -> str:
+        """Deserialize and validate email value."""
+        if not value:
+            return value
+        
+        # Basic type validation
+        if not isinstance(value, str):
+            raise ValidationError("Email must be a string")
+        
+        # Clean and validate email
+        email_str = value.strip().lower()
+        
+        try:
+            # Use email-validator for comprehensive validation
+            valid_email = email_validate(email_str)
+            normalized_email = valid_email.email
+            
+            # Additional business rule validation
+            if not validate_email(normalized_email, strict=True):
+                raise ValidationError("Email format does not meet business requirements")
+            
+            return normalized_email
+            
+        except EmailNotValidError as e:
+            raise ValidationError(f"Invalid email format: {str(e)}")
+        except Exception as e:
+            raise ValidationError(f"Email validation failed: {str(e)}")
+
+
+class PhoneField(fields.Field):
+    """
+    Enhanced phone field with international validation.
+    
+    Provides comprehensive phone number validation including international
+    format support, regional validation, and business phone policies.
+    """
+    
+    def __init__(self, country_code: Optional[str] = None, format_type: str = "international", **kwargs):
+        """
+        Initialize phone field with validation options.
+        
+        Args:
+            country_code: Default country code for validation
+            format_type: Phone format type (international, national, e164)
+            **kwargs: Additional field arguments
+        """
+        self.country_code = country_code
+        self.format_type = format_type
+        super().__init__(**kwargs)
+    
+    def _serialize(self, value: Any, attr: str, obj: Any, **kwargs) -> Optional[str]:
+        """Serialize phone value to string."""
+        return str(value) if value else None
+    
+    def _deserialize(self, value: Any, attr: Optional[str], data: Optional[Dict], **kwargs) -> str:
+        """Deserialize and validate phone value."""
+        if not value:
+            return value
+        
+        # Basic type validation
+        if not isinstance(value, str):
+            raise ValidationError("Phone number must be a string")
+        
+        # Clean phone number
+        phone_str = re.sub(r'[^\d+()-.\s]', '', value.strip())
+        
+        try:
+            # Validate using business utilities
+            if validate_phone(phone_str, country_code=self.country_code, format_type=self.format_type):
+                return phone_str
+            else:
+                raise ValidationError("Invalid phone number format")
+                
+        except Exception as e:
+            raise ValidationError(f"Phone validation failed: {str(e)}")
+
+
+class CurrencyField(fields.Field):
+    """
+    Enhanced currency field with business rule validation.
+    
+    Provides comprehensive monetary amount validation including currency
+    code validation, precision handling, and business financial policies.
+    """
+    
+    def __init__(self, currency_code: Optional[str] = None, **kwargs):
+        """
+        Initialize currency field with validation options.
+        
+        Args:
+            currency_code: Required currency code for validation
+            **kwargs: Additional field arguments
+        """
+        self.currency_code = currency_code
+        super().__init__(**kwargs)
+    
+    def _serialize(self, value: Any, attr: str, obj: Any, **kwargs) -> Optional[Dict[str, Any]]:
+        """Serialize currency value to dictionary."""
+        if isinstance(value, MonetaryAmount):
+            return {
+                'amount': str(value.amount),
+                'currency_code': value.currency_code
+            }
+        return value
+    
+    def _deserialize(self, value: Any, attr: Optional[str], data: Optional[Dict], **kwargs) -> MonetaryAmount:
+        """Deserialize and validate currency value."""
+        if not value:
+            return value
+        
+        try:
+            # Handle different input formats
+            if isinstance(value, dict):
+                amount = value.get('amount')
+                currency_code = value.get('currency_code', self.currency_code)
+            elif isinstance(value, (int, float, str)):
+                amount = value
+                currency_code = self.currency_code
+            else:
+                raise ValidationError("Invalid currency format")
+            
+            # Validate currency components
+            if not currency_code:
+                raise ValidationError("Currency code is required")
+            
+            # Create and validate monetary amount
+            monetary_amount = MonetaryAmount(
+                amount=Decimal(str(amount)),
+                currency_code=currency_code
+            )
+            
+            # Business rule validation
+            validate_currency(monetary_amount.amount, monetary_amount.currency_code)
+            
+            return monetary_amount
+            
+        except (InvalidOperation, ValueError) as e:
+            raise ValidationError(f"Invalid monetary amount: {str(e)}")
+        except Exception as e:
+            raise ValidationError(f"Currency validation failed: {str(e)}")
+
+
+class DateTimeField(fields.DateTime):
+    """
+    Enhanced datetime field with business rule validation.
+    
+    Provides comprehensive date/time validation including timezone handling,
+    business date policies, and date range validation.
+    """
+    
+    def __init__(self, allow_future: bool = True, allow_past: bool = True, 
+                 business_days_only: bool = False, **kwargs):
+        """
+        Initialize datetime field with business validation options.
+        
+        Args:
+            allow_future: Allow future dates
+            allow_past: Allow past dates
+            business_days_only: Restrict to business days only
+            **kwargs: Additional field arguments
+        """
+        self.allow_future = allow_future
+        self.allow_past = allow_past
+        self.business_days_only = business_days_only
+        super().__init__(**kwargs)
+    
+    def _deserialize(self, value: Any, attr: Optional[str], data: Optional[Dict], **kwargs) -> datetime:
+        """Deserialize and validate datetime value."""
+        # Use parent deserialization
+        dt_value = super()._deserialize(value, attr, data, **kwargs)
+        
+        if not dt_value:
+            return dt_value
+        
+        # Ensure timezone awareness
+        if dt_value.tzinfo is None:
+            dt_value = dt_value.replace(tzinfo=timezone.utc)
+        
+        current_time = datetime.now(timezone.utc)
+        
+        # Validate future/past restrictions
+        if not self.allow_future and dt_value > current_time:
+            raise ValidationError("Future dates are not allowed")
+        
+        if not self.allow_past and dt_value < current_time:
+            raise ValidationError("Past dates are not allowed")
+        
+        # Validate business days restriction
+        if self.business_days_only and dt_value.weekday() >= 5:  # Saturday = 5, Sunday = 6
+            raise ValidationError("Only business days (Monday-Friday) are allowed")
+        
+        return dt_value
+
+
+def validate_unique_identifier(value: str) -> str:
+    """
+    Validate unique identifier format (UUID or custom ID).
     
     Args:
-        data: Business data to validate (dictionary or JSON string)
-        schema_class: Validator class to use for validation
-        validation_context: Optional validation context for rules
-        **schema_kwargs: Additional arguments for schema initialization
+        value: Identifier value to validate
         
     Returns:
-        Tuple of (validated_data, validation_warnings)
+        Validated identifier
         
     Raises:
-        DataValidationError: If validation fails
-        BusinessRuleViolationError: If business rules are violated
-        
-    Example:
-        class UserValidator(DataModelValidator):
-            name = fields.String(required=True)
-            email = fields.Email(required=True)
-        
-        context = ValidationContext(validation_type=ValidationType.STRICT)
-        validated_data, warnings = validate_business_data(
-            user_data, UserValidator, context
-        )
+        ValidationError: If identifier format is invalid
     """
-    start_time = datetime.now()
+    if not value:
+        raise ValidationError("Identifier cannot be empty")
     
+    # Try UUID validation first
     try:
-        logger.info("Starting business data validation",
-                   data_type=type(data).__name__,
-                   schema_class=schema_class.__name__)
+        uuid.UUID(value)
+        return value
+    except ValueError:
+        pass
+    
+    # Custom ID validation (alphanumeric with hyphens and underscores)
+    if re.match(r'^[a-zA-Z0-9_-]+$', value) and len(value) >= 3:
+        return value
+    
+    raise ValidationError("Invalid identifier format")
+
+
+def validate_slug_format(value: str) -> str:
+    """
+    Validate URL slug format for SEO and URL safety.
+    
+    Args:
+        value: Slug value to validate
         
-        # Initialize schema with context
-        schema = schema_class(
-            validation_context=validation_context,
-            **schema_kwargs
-        )
+    Returns:
+        Validated slug
         
-        # Perform validation
-        validated_data = schema.load_with_context(
-            data,
-            validation_context=validation_context
-        )
+    Raises:
+        ValidationError: If slug format is invalid
+    """
+    if not value:
+        raise ValidationError("Slug cannot be empty")
+    
+    # Convert to lowercase and strip
+    slug = value.lower().strip()
+    
+    # Validate slug pattern
+    if not re.match(r'^[a-z0-9\-]+$', slug):
+        raise ValidationError("Slug must contain only lowercase letters, numbers, and hyphens")
+    
+    # Check for reserved slugs
+    reserved_slugs = {'admin', 'api', 'root', 'system', 'user', 'public', 'private'}
+    if slug in reserved_slugs:
+        raise ValidationError(f"Slug '{slug}' is reserved and cannot be used")
+    
+    return slug
+
+
+def validate_business_entity_id(value: str, entity_type: str) -> str:
+    """
+    Validate business entity identifier with type-specific rules.
+    
+    Args:
+        value: Entity ID to validate
+        entity_type: Type of entity (user, organization, product, etc.)
         
-        # Get validation warnings from context
-        warnings = []
-        if validation_context:
-            warnings = validation_context.get_warnings()
+    Returns:
+        Validated entity ID
         
-        # Performance monitoring
-        duration = (datetime.now() - start_time).total_seconds()
+    Raises:
+        ValidationError: If entity ID is invalid
+    """
+    if not value:
+        raise ValidationError(f"{entity_type.title()} ID cannot be empty")
+    
+    # Clean the ID
+    entity_id = value.strip()
+    
+    # Basic format validation
+    if len(entity_id) < 3:
+        raise ValidationError(f"{entity_type.title()} ID must be at least 3 characters")
+    
+    # Entity-specific validation
+    if entity_type == 'user':
+        # User IDs can be UUID or username format
+        try:
+            uuid.UUID(entity_id)
+            return entity_id
+        except ValueError:
+            if re.match(r'^[a-zA-Z0-9_.-]+$', entity_id):
+                return entity_id
+            raise ValidationError("Invalid user ID format")
+    
+    elif entity_type in ['organization', 'product', 'order']:
+        # These entities typically use UUID format
+        try:
+            uuid.UUID(entity_id)
+            return entity_id
+        except ValueError:
+            raise ValidationError(f"Invalid {entity_type} ID format")
+    
+    # Default validation for other entity types
+    if re.match(r'^[a-zA-Z0-9_-]+$', entity_id):
+        return entity_id
+    
+    raise ValidationError(f"Invalid {entity_type} ID format")
+
+
+# ============================================================================
+# BUSINESS MODEL VALIDATORS
+# ============================================================================
+
+class UserValidator(BaseBusinessValidator):
+    """
+    Comprehensive user account validation schema.
+    
+    Provides complete user account validation including profile information,
+    authentication data, permissions, and business rule enforcement for
+    user management operations per F-004-RQ-001 requirements.
+    """
+    
+    # Core user fields
+    id = fields.Str(validate=validate_unique_identifier, allow_none=True)
+    username = fields.Str(
+        required=True,
+        validate=[
+            validate.Length(min=3, max=50),
+            validate.Regexp(r'^[a-zA-Z0-9_.-]+$', error="Username contains invalid characters")
+        ]
+    )
+    email = EmailField(required=True)
+    first_name = fields.Str(required=True, validate=validate.Length(min=1, max=50))
+    last_name = fields.Str(required=True, validate=validate.Length(min=1, max=50))
+    display_name = fields.Str(validate=validate.Length(max=100), allow_none=True)
+    avatar_url = fields.Url(allow_none=True)
+    
+    # Account status and permissions
+    status = fields.Enum(UserStatus, by_value=True, missing=UserStatus.ACTIVE)
+    role = fields.Enum(UserRole, by_value=True, missing=UserRole.USER)
+    permissions = fields.List(fields.Str(), missing=list)
+    
+    # Contact information
+    contact_info = fields.Nested('ContactInfoValidator', allow_none=True)
+    
+    # Authentication and security
+    last_login_at = DateTimeField(allow_none=True)
+    password_changed_at = DateTimeField(allow_none=True)
+    login_attempts = fields.Int(validate=validate.Range(min=0), missing=0)
+    is_locked = fields.Bool(missing=False)
+    lock_expires_at = DateTimeField(allow_none=True)
+    
+    # Profile and preferences
+    language_code = fields.Str(validate=validate.Length(min=2, max=5), missing="en")
+    timezone = fields.Str(missing="UTC")
+    date_format = fields.Str(missing="YYYY-MM-DD")
+    
+    @validates('username')
+    def validate_username_business_rules(self, value):
+        """Validate username business rules."""
+        if not value:
+            return value
         
-        logger.info("Business data validation completed successfully",
-                   validated_fields=len(validated_data) if isinstance(validated_data, dict) else 0,
-                   warning_count=len(warnings),
-                   duration_seconds=duration)
+        # Clean username
+        username = value.strip().lower()
         
-        return validated_data, warnings
+        # Check for reserved usernames
+        reserved = {'admin', 'root', 'system', 'api', 'www', 'mail', 'ftp'}
+        if username in reserved:
+            raise ValidationError("Username is reserved and cannot be used")
         
-    except Exception as validation_error:
-        duration = (datetime.now() - start_time).total_seconds()
+        return username
+    
+    @validates('email')
+    def validate_email_business_rules(self, value):
+        """Validate email business rules."""
+        return self.validate_business_rule('email_format', value)
+    
+    @validates_schema
+    def validate_user_business_rules(self, data, **kwargs):
+        """Validate cross-field user business rules."""
+        # Validate lock expiration consistency
+        if data.get('is_locked') and not data.get('lock_expires_at'):
+            raise ValidationError({
+                'lock_expires_at': ['Lock expiration time required for locked accounts']
+            })
         
-        logger.error("Business data validation failed",
-                    schema_class=schema_class.__name__,
-                    duration_seconds=duration,
-                    error=str(validation_error))
+        # Validate admin role permissions
+        if data.get('role') == UserRole.ADMIN and not data.get('permissions'):
+            # Admin users should have explicit permissions
+            pass  # Allow empty permissions for admin (they get all permissions)
+    
+    def get_business_model_class(self) -> Type[BaseBusinessModel]:
+        """Return User model class for conversion."""
+        return User
+
+
+class OrganizationValidator(BaseBusinessValidator):
+    """
+    Comprehensive organization validation schema.
+    
+    Provides complete organization validation including business information,
+    contact details, verification status, and business rule enforcement for
+    multi-tenant and B2B operations.
+    """
+    
+    # Core organization fields
+    id = fields.Str(validate=validate_unique_identifier, allow_none=True)
+    name = fields.Str(required=True, validate=validate.Length(min=1, max=200))
+    legal_name = fields.Str(validate=validate.Length(max=200), allow_none=True)
+    business_type = fields.Str(validate=validate.Length(max=50), allow_none=True)
+    
+    # Business identifiers
+    tax_id = fields.Str(validate=validate.Length(max=50), allow_none=True)
+    registration_number = fields.Str(validate=validate.Length(max=50), allow_none=True)
+    
+    # Contact information
+    primary_contact = fields.Nested('ContactInfoValidator', allow_none=True)
+    billing_address = fields.Nested('AddressValidator', allow_none=True)
+    shipping_address = fields.Nested('AddressValidator', allow_none=True)
+    
+    # Business details
+    website_url = fields.Url(allow_none=True)
+    description = fields.Str(validate=validate.Length(max=1000), allow_none=True)
+    industry = fields.Str(validate=validate.Length(max=100), allow_none=True)
+    employee_count = fields.Int(validate=validate.Range(min=1), allow_none=True)
+    
+    # Status and verification
+    status = fields.Enum(UserStatus, by_value=True, missing=UserStatus.ACTIVE)
+    is_verified = fields.Bool(missing=False)
+    verification_date = DateTimeField(allow_none=True)
+    
+    # Hierarchy
+    parent_organization_id = fields.Str(validate=validate_unique_identifier, allow_none=True)
+    
+    @validates('name')
+    def validate_organization_name(self, value):
+        """Validate organization name business rules."""
+        if not value:
+            return value
         
-        if isinstance(validation_error, BaseBusinessException):
+        # Sanitize organization name
+        clean_name = sanitize_input(value, allow_html=False, max_length=200)
+        
+        # Additional business rules can be added here
+        return clean_name
+    
+    @validates_schema
+    def validate_organization_business_rules(self, data, **kwargs):
+        """Validate cross-field organization business rules."""
+        # Verified organizations must have verification date
+        if data.get('is_verified') and not data.get('verification_date'):
+            raise ValidationError({
+                'verification_date': ['Verification date required for verified organizations']
+            })
+        
+        # Legal name should be provided for verified businesses
+        if data.get('is_verified') and not data.get('legal_name'):
+            # This is a warning, not an error
+            pass
+    
+    def get_business_model_class(self) -> Type[BaseBusinessModel]:
+        """Return Organization model class for conversion."""
+        return Organization
+
+
+class ProductValidator(BaseBusinessValidator):
+    """
+    Comprehensive product validation schema.
+    
+    Provides complete product validation including catalog information,
+    pricing, inventory, categorization, and business rule enforcement for
+    e-commerce and business catalog operations.
+    """
+    
+    # Core product fields
+    id = fields.Str(validate=validate_unique_identifier, allow_none=True)
+    sku = fields.Str(required=True, validate=validate.Length(min=1, max=50))
+    name = fields.Str(required=True, validate=validate.Length(min=1, max=200))
+    slug = fields.Str(required=True, validate=validate_slug_format)
+    description = fields.Str(validate=validate.Length(max=2000), allow_none=True)
+    short_description = fields.Str(validate=validate.Length(max=500), allow_none=True)
+    
+    # Categorization
+    category_id = fields.Str(validate=validate_unique_identifier, allow_none=True)
+    tags = fields.List(fields.Str(validate=validate.Length(max=50)), missing=list)
+    brand = fields.Str(validate=validate.Length(max=100), allow_none=True)
+    
+    # Pricing
+    base_price = fields.Nested('MonetaryAmountValidator', required=True)
+    sale_price = fields.Nested('MonetaryAmountValidator', allow_none=True)
+    cost_price = fields.Nested('MonetaryAmountValidator', allow_none=True)
+    
+    # Inventory
+    status = fields.Enum(ProductStatus, by_value=True, missing=ProductStatus.ACTIVE)
+    inventory_quantity = fields.Int(validate=validate.Range(min=0), missing=0)
+    low_stock_threshold = fields.Int(validate=validate.Range(min=0), missing=5)
+    track_inventory = fields.Bool(missing=True)
+    
+    # Physical attributes
+    weight = fields.Decimal(validate=validate.Range(min=0), allow_none=True)
+    dimensions = fields.Dict(allow_none=True)
+    
+    # Digital content
+    images = fields.List(fields.Url(), missing=list)
+    documents = fields.List(fields.Dict(), missing=list)
+    
+    # SEO and metadata
+    meta_title = fields.Str(validate=validate.Length(max=60), allow_none=True)
+    meta_description = fields.Str(validate=validate.Length(max=160), allow_none=True)
+    
+    @validates('sku')
+    def validate_sku_format(self, value):
+        """Validate SKU format and business rules."""
+        if not value:
+            return value
+        
+        # Clean and standardize SKU
+        sku = value.strip().upper()
+        sku = re.sub(r'[^\w\-]', '', sku)
+        
+        return sku
+    
+    @validates('dimensions')
+    def validate_dimensions_format(self, value):
+        """Validate product dimensions structure."""
+        if not value:
+            return value
+        
+        required_keys = {'length', 'width', 'height'}
+        if not all(key in value for key in required_keys):
+            raise ValidationError("Dimensions must include length, width, and height")
+        
+        # Validate all dimensions are positive
+        for key, dimension_value in value.items():
+            try:
+                if float(dimension_value) <= 0:
+                    raise ValidationError(f"Dimension {key} must be positive")
+            except (ValueError, TypeError):
+                raise ValidationError(f"Dimension {key} must be a valid number")
+        
+        return value
+    
+    @validates_schema
+    def validate_product_business_rules(self, data, **kwargs):
+        """Validate cross-field product business rules."""
+        # Sale price must be less than base price
+        base_price = data.get('base_price')
+        sale_price = data.get('sale_price')
+        
+        if base_price and sale_price:
+            if isinstance(base_price, dict) and isinstance(sale_price, dict):
+                base_amount = base_price.get('amount', 0)
+                sale_amount = sale_price.get('amount', 0)
+                
+                if sale_amount >= base_amount:
+                    raise ValidationError({
+                        'sale_price': ['Sale price must be less than base price']
+                    })
+        
+        # Active products should have positive inventory if tracking
+        status = data.get('status')
+        track_inventory = data.get('track_inventory', True)
+        inventory_quantity = data.get('inventory_quantity', 0)
+        
+        if (status == ProductStatus.ACTIVE and 
+            track_inventory and 
+            inventory_quantity <= 0):
+            # This is a warning for business logic, not a validation error
+            pass
+    
+    def get_business_model_class(self) -> Type[BaseBusinessModel]:
+        """Return Product model class for conversion."""
+        return Product
+
+
+class OrderValidator(BaseBusinessValidator):
+    """
+    Comprehensive order validation schema.
+    
+    Provides complete order validation including customer information,
+    line items, pricing calculations, shipping details, and business rule
+    enforcement for e-commerce and business transaction operations.
+    """
+    
+    # Core order fields
+    id = fields.Str(validate=validate_unique_identifier, allow_none=True)
+    order_number = fields.Str(allow_none=True)
+    
+    # Customer information
+    customer_id = fields.Str(validate=validate_unique_identifier, allow_none=True)
+    customer_email = EmailField(required=True)
+    customer_name = fields.Str(required=True, validate=validate.Length(min=1, max=100))
+    
+    # Order items
+    items = fields.List(fields.Nested('OrderItemValidator'), required=True, validate=validate.Length(min=1))
+    
+    # Pricing
+    subtotal = fields.Nested('MonetaryAmountValidator', required=True)
+    tax_amount = fields.Nested('MonetaryAmountValidator', missing={'amount': '0', 'currency_code': 'USD'})
+    shipping_amount = fields.Nested('MonetaryAmountValidator', missing={'amount': '0', 'currency_code': 'USD'})
+    discount_amount = fields.Nested('MonetaryAmountValidator', missing={'amount': '0', 'currency_code': 'USD'})
+    total_amount = fields.Nested('MonetaryAmountValidator', required=True)
+    
+    # Addresses
+    billing_address = fields.Nested('AddressValidator', required=True)
+    shipping_address = fields.Nested('AddressValidator', allow_none=True)
+    
+    # Status and tracking
+    status = fields.Enum(OrderStatus, by_value=True, missing=OrderStatus.PENDING)
+    order_date = DateTimeField(missing=datetime.now(timezone.utc))
+    shipped_date = DateTimeField(allow_none=True)
+    delivered_date = DateTimeField(allow_none=True)
+    
+    # Additional information
+    notes = fields.Str(validate=validate.Length(max=1000), allow_none=True)
+    tracking_number = fields.Str(allow_none=True)
+    payment_method = fields.Enum(PaymentMethod, by_value=True, allow_none=True)
+    
+    @validates('order_number')
+    def validate_order_number_format(self, value):
+        """Generate order number if not provided."""
+        if value is None:
+            # Generate order number with timestamp and random component
+            import time
+            timestamp = str(int(time.time()))[-6:]  # Last 6 digits of timestamp
+            random_part = str(uuid.uuid4()).replace('-', '')[:6].upper()
+            return f"ORD-{timestamp}-{random_part}"
+        return value
+    
+    @validates_schema
+    def validate_order_totals(self, data, **kwargs):
+        """Validate order total calculations."""
+        try:
+            # Extract amounts from nested data
+            subtotal = self._extract_amount(data.get('subtotal'))
+            tax_amount = self._extract_amount(data.get('tax_amount', {'amount': '0'}))
+            shipping_amount = self._extract_amount(data.get('shipping_amount', {'amount': '0'}))
+            discount_amount = self._extract_amount(data.get('discount_amount', {'amount': '0'}))
+            total_amount = self._extract_amount(data.get('total_amount'))
+            
+            # Calculate expected total
+            expected_total = subtotal + tax_amount + shipping_amount - discount_amount
+            
+            # Allow small rounding differences
+            if abs(expected_total - total_amount) > Decimal('0.01'):
+                raise ValidationError({
+                    'total_amount': [f'Order total {total_amount} does not match calculated amount {expected_total}']
+                })
+        
+        except (KeyError, TypeError, InvalidOperation):
+            # Skip validation if amounts are not properly formatted
+            pass
+        
+        # Validate status progression
+        status = data.get('status')
+        shipped_date = data.get('shipped_date')
+        delivered_date = data.get('delivered_date')
+        
+        if shipped_date and status not in [OrderStatus.SHIPPED, OrderStatus.DELIVERED]:
+            raise ValidationError({
+                'status': ['Orders with shipping date must be in shipped or delivered status']
+            })
+        
+        if delivered_date and status != OrderStatus.DELIVERED:
+            raise ValidationError({
+                'status': ['Orders with delivery date must be in delivered status']
+            })
+    
+    def _extract_amount(self, amount_data) -> Decimal:
+        """Extract decimal amount from monetary amount data."""
+        if isinstance(amount_data, dict):
+            return Decimal(str(amount_data.get('amount', 0)))
+        elif isinstance(amount_data, (int, float, str)):
+            return Decimal(str(amount_data))
+        return Decimal('0')
+    
+    def get_business_model_class(self) -> Type[BaseBusinessModel]:
+        """Return Order model class for conversion."""
+        return Order
+
+
+class OrderItemValidator(BaseBusinessValidator):
+    """
+    Order line item validation schema.
+    
+    Provides validation for individual order line items including product
+    references, quantities, pricing, and calculations.
+    """
+    
+    product_id = fields.Str(required=True, validate=validate_unique_identifier)
+    product_sku = fields.Str(required=True)
+    product_name = fields.Str(required=True, validate=validate.Length(min=1, max=200))
+    quantity = fields.Int(required=True, validate=validate.Range(min=1))
+    unit_price = fields.Nested('MonetaryAmountValidator', required=True)
+    total_price = fields.Nested('MonetaryAmountValidator', allow_none=True)
+    
+    # Discounts and adjustments
+    discount_amount = fields.Nested('MonetaryAmountValidator', allow_none=True)
+    tax_amount = fields.Nested('MonetaryAmountValidator', allow_none=True)
+    
+    # Product snapshot
+    product_attributes = fields.Dict(allow_none=True)
+    
+    @validates_schema
+    def validate_line_item_calculations(self, data, **kwargs):
+        """Validate line item total calculations."""
+        try:
+            quantity = data.get('quantity', 1)
+            unit_price = self._extract_amount(data.get('unit_price'))
+            discount_amount = self._extract_amount(data.get('discount_amount', {'amount': '0'}))
+            tax_amount = self._extract_amount(data.get('tax_amount', {'amount': '0'}))
+            total_price = self._extract_amount(data.get('total_price'))
+            
+            if total_price:  # Only validate if total_price is provided
+                expected_total = (unit_price * quantity) - discount_amount + tax_amount
+                
+                if abs(expected_total - total_price) > Decimal('0.01'):
+                    raise ValidationError({
+                        'total_price': [f'Line item total {total_price} does not match calculated amount {expected_total}']
+                    })
+        
+        except (KeyError, TypeError, InvalidOperation):
+            # Skip validation if amounts are not properly formatted
+            pass
+    
+    def _extract_amount(self, amount_data) -> Decimal:
+        """Extract decimal amount from monetary amount data."""
+        if isinstance(amount_data, dict):
+            return Decimal(str(amount_data.get('amount', 0)))
+        elif isinstance(amount_data, (int, float, str)):
+            return Decimal(str(amount_data))
+        return Decimal('0')
+    
+    def get_business_model_class(self) -> Type[BaseBusinessModel]:
+        """Return OrderItem model class for conversion."""
+        return OrderItem
+
+
+# ============================================================================
+# UTILITY VALIDATORS
+# ============================================================================
+
+class AddressValidator(BaseBusinessValidator):
+    """
+    Geographic address validation schema.
+    
+    Provides comprehensive address validation including format validation,
+    postal code verification, and regional address policies.
+    """
+    
+    street_line_1 = fields.Str(required=True, validate=validate.Length(min=1, max=100))
+    street_line_2 = fields.Str(validate=validate.Length(max=100), allow_none=True)
+    city = fields.Str(required=True, validate=validate.Length(min=1, max=50))
+    state_province = fields.Str(required=True, validate=validate.Length(min=1, max=50))
+    postal_code = fields.Str(required=True, validate=validate.Length(min=3, max=20))
+    country_code = fields.Str(required=True, validate=validate.Length(min=2, max=3))
+    
+    @validates('country_code')
+    def validate_country_code_format(self, value):
+        """Validate ISO country code format."""
+        if value:
+            country_code = value.upper().strip()
+            if len(country_code) not in [2, 3]:
+                raise ValidationError("Country code must be 2 or 3 characters")
+            return country_code
+        return value
+    
+    @validates('postal_code')
+    def validate_postal_code_format(self, value):
+        """Validate postal code format."""
+        if value:
+            postal_code = value.strip().upper()
+            # Additional validation can be added based on country
+            return postal_code
+        return value
+    
+    def get_business_model_class(self) -> Type[BaseBusinessModel]:
+        """Return Address model class for conversion."""
+        return Address
+
+
+class ContactInfoValidator(BaseBusinessValidator):
+    """
+    Contact information validation schema.
+    
+    Provides comprehensive contact information validation including email,
+    phone numbers, and communication preferences.
+    """
+    
+    primary_email = EmailField(allow_none=True)
+    secondary_email = EmailField(allow_none=True)
+    primary_phone = PhoneField(allow_none=True)
+    secondary_phone = PhoneField(allow_none=True)
+    preferred_contact_method = fields.Enum(ContactMethod, by_value=True, missing=ContactMethod.EMAIL)
+    allow_marketing = fields.Bool(missing=False)
+    timezone = fields.Str(validate=validate.Length(max=50), allow_none=True)
+    
+    @validates_schema
+    def validate_contact_requirements(self, data, **kwargs):
+        """Validate that at least one primary contact method is provided."""
+        primary_email = data.get('primary_email')
+        primary_phone = data.get('primary_phone')
+        
+        if not primary_email and not primary_phone:
+            raise ValidationError("At least one primary contact method (email or phone) is required")
+    
+    def get_business_model_class(self) -> Type[BaseBusinessModel]:
+        """Return ContactInfo model class for conversion."""
+        return ContactInfo
+
+
+class MonetaryAmountValidator(BaseBusinessValidator):
+    """
+    Monetary amount validation schema.
+    
+    Provides comprehensive monetary amount validation including currency
+    validation, precision handling, and business financial policies.
+    """
+    
+    amount = fields.Decimal(required=True, validate=validate.Range(min=0), places=2)
+    currency_code = fields.Str(required=True, validate=validate.Length(min=3, max=3))
+    
+    @validates('currency_code')
+    def validate_currency_code_format(self, value):
+        """Validate ISO 4217 currency code."""
+        if value:
+            currency = value.upper().strip()
+            if len(currency) != 3 or not currency.isalpha():
+                raise ValidationError("Currency code must be 3 letter ISO 4217 code")
+            return currency
+        return value
+    
+    @validates('amount')
+    def validate_amount_precision(self, value):
+        """Validate monetary amount precision."""
+        if value is not None:
+            # Ensure proper decimal precision
+            if value < 0:
+                raise ValidationError("Monetary amount cannot be negative")
+            
+            # Validate decimal places (2 for most currencies)
+            decimal_value = Decimal(str(value))
+            if decimal_value.as_tuple().exponent < -2:
+                raise ValidationError("Monetary amount cannot have more than 2 decimal places")
+        
+        return value
+    
+    def get_business_model_class(self) -> Type[BaseBusinessModel]:
+        """Return MonetaryAmount model class for conversion."""
+        return MonetaryAmount
+
+
+class PaginationValidator(BaseBusinessValidator):
+    """
+    Pagination parameters validation schema.
+    
+    Provides validation for API pagination parameters with business-appropriate
+    limits and default values.
+    """
+    
+    page = fields.Int(validate=validate.Range(min=1), missing=1)
+    page_size = fields.Int(validate=validate.Range(min=1, max=100), missing=20)
+    
+    def get_business_model_class(self) -> Type[BaseBusinessModel]:
+        """Return PaginationParams model class for conversion."""
+        return PaginationParams
+
+
+class SearchValidator(BaseBusinessValidator):
+    """
+    Search parameters validation schema.
+    
+    Provides validation for API search parameters with security validation
+    and business-appropriate search constraints.
+    """
+    
+    query = fields.Str(validate=validate.Length(max=200), allow_none=True)
+    filters = fields.Dict(allow_none=True)
+    include_inactive = fields.Bool(missing=False)
+    
+    @validates('query')
+    def validate_search_query(self, value):
+        """Validate and sanitize search query."""
+        if value is None:
+            return value
+        
+        # Sanitize search query for security
+        sanitized = sanitize_input(value, allow_html=False, max_length=200)
+        
+        # Remove potentially dangerous query patterns
+        sanitized = re.sub(r'[<>{}()[\]\\]', '', sanitized)
+        
+        return sanitized.strip() if sanitized else None
+    
+    @validates('filters')
+    def validate_search_filters(self, value):
+        """Validate search filters structure."""
+        if value is None:
+            return value
+        
+        if not isinstance(value, dict):
+            raise ValidationError("Filters must be a dictionary")
+        
+        # Limit number of filters to prevent DoS
+        if len(value) > 20:
+            raise ValidationError("Too many filter parameters")
+        
+        # Validate filter keys
+        validated_filters = {}
+        for key, filter_value in value.items():
+            if isinstance(key, str) and key.strip():
+                # Clean filter key
+                clean_key = re.sub(r'[^\w.]', '', key.strip())
+                if clean_key:
+                    validated_filters[clean_key] = filter_value
+        
+        return validated_filters
+    
+    def get_business_model_class(self) -> Type[BaseBusinessModel]:
+        """Return SearchParams model class for conversion."""
+        return SearchParams
+
+
+# ============================================================================
+# VALIDATION ENGINE AND ORCHESTRATION
+# ============================================================================
+
+class BusinessRuleEngine:
+    """
+    Comprehensive business rule validation engine.
+    
+    Provides centralized business rule management, validation orchestration,
+    and enterprise-grade rule enforcement with audit trails and performance
+    monitoring per Section 5.2.4 business logic requirements.
+    
+    Features:
+    - Rule-based validation engine with dynamic rule loading
+    - Cross-validator rule dependencies and validation chains
+    - Conditional validation based on data context
+    - Performance monitoring and validation metrics
+    - Audit trail generation for compliance requirements
+    - Integration with business exceptions and error handling
+    
+    Example:
+        rule_engine = BusinessRuleEngine()
+        rule_engine.register_rule('email_domain_validation', email_domain_rule)
+        
+        validator = UserValidator(business_rule_engine=rule_engine)
+        validated_data = validator.load(user_data, convert_to_model=True)
+    """
+    
+    def __init__(self):
+        """Initialize business rule engine with default configuration."""
+        self.rules = {}
+        self.rule_dependencies = {}
+        self.conditional_rules = {}
+        self.validation_metrics = {
+            'rules_executed': 0,
+            'rules_failed': 0,
+            'validation_time': 0.0
+        }
+        
+        # Register default business rules
+        self._register_default_rules()
+    
+    def register_rule(self, rule_name: str, rule_function: Callable, 
+                     dependencies: Optional[List[str]] = None,
+                     conditions: Optional[Dict[str, Any]] = None) -> None:
+        """
+        Register business rule with the validation engine.
+        
+        Args:
+            rule_name: Unique name for the business rule
+            rule_function: Function implementing the business rule logic
+            dependencies: List of other rules this rule depends on
+            conditions: Conditions that must be met for rule to apply
+        """
+        self.rules[rule_name] = {
+            'function': rule_function,
+            'dependencies': dependencies or [],
+            'conditions': conditions or {},
+            'execution_count': 0,
+            'failure_count': 0
+        }
+        
+        if dependencies:
+            self.rule_dependencies[rule_name] = dependencies
+        
+        if conditions:
+            self.conditional_rules[rule_name] = conditions
+        
+        logger.debug("Business rule registered",
+                    rule_name=rule_name,
+                    has_dependencies=bool(dependencies),
+                    has_conditions=bool(conditions))
+    
+    def execute_rule(self, rule_name: str, value: Any, context: Optional[Dict[str, Any]] = None) -> Any:
+        """
+        Execute specific business rule with comprehensive error handling.
+        
+        Args:
+            rule_name: Name of the rule to execute
+            value: Value to validate against the rule
+            context: Additional context for rule execution
+            
+        Returns:
+            Validated value (potentially transformed)
+            
+        Raises:
+            BusinessRuleViolationError: If rule validation fails
+        """
+        rule_config = self.rules.get(rule_name)
+        if not rule_config:
+            raise BusinessRuleViolationError(
+                message=f"Unknown business rule: {rule_name}",
+                error_code="UNKNOWN_BUSINESS_RULE",
+                rule_name=rule_name,
+                severity=ErrorSeverity.HIGH
+            )
+        
+        try:
+            # Update metrics
+            rule_config['execution_count'] += 1
+            self.validation_metrics['rules_executed'] += 1
+            
+            # Check rule conditions
+            if not self._check_rule_conditions(rule_name, context or {}):
+                logger.debug("Business rule skipped due to conditions",
+                           rule_name=rule_name)
+                return value
+            
+            # Execute rule dependencies first
+            dependencies = rule_config.get('dependencies', [])
+            for dependency in dependencies:
+                value = self.execute_rule(dependency, value, context)
+            
+            # Execute the rule
+            rule_function = rule_config['function']
+            start_time = datetime.now(timezone.utc)
+            
+            result = rule_function(value, context or {})
+            
+            execution_time = (datetime.now(timezone.utc) - start_time).total_seconds()
+            self.validation_metrics['validation_time'] += execution_time
+            
+            logger.debug("Business rule executed successfully",
+                        rule_name=rule_name,
+                        execution_time_seconds=execution_time)
+            
+            return result if result is not None else value
+            
+        except BusinessRuleViolationError:
+            # Update failure metrics
+            rule_config['failure_count'] += 1
+            self.validation_metrics['rules_failed'] += 1
             raise
+        except Exception as e:
+            # Convert unexpected errors to business rule violations
+            rule_config['failure_count'] += 1
+            self.validation_metrics['rules_failed'] += 1
+            
+            raise BusinessRuleViolationError(
+                message=f"Business rule '{rule_name}' execution failed",
+                error_code=f"RULE_{rule_name.upper()}_EXECUTION_FAILED",
+                rule_name=rule_name,
+                context={'error_type': type(e).__name__},
+                cause=e,
+                severity=ErrorSeverity.MEDIUM
+            )
+    
+    def validate_data(self, data: Dict[str, Any], rule_names: List[str],
+                     context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Validate data against multiple business rules.
         
+        Args:
+            data: Data to validate
+            rule_names: List of rule names to apply
+            context: Additional validation context
+            
+        Returns:
+            Validated data with potential transformations
+            
+        Raises:
+            BusinessRuleViolationError: If any rule validation fails
+        """
+        validated_data = data.copy()
+        validation_context = context or {}
+        validation_context.update({'data': validated_data})
+        
+        for field_name, field_value in validated_data.items():
+            for rule_name in rule_names:
+                if rule_name in self.rules:
+                    validated_data[field_name] = self.execute_rule(
+                        rule_name, field_value, validation_context
+                    )
+        
+        return validated_data
+    
+    def get_validation_metrics(self) -> Dict[str, Any]:
+        """
+        Get validation performance metrics.
+        
+        Returns:
+            Dictionary containing validation metrics and statistics
+        """
+        rule_stats = {}
+        for rule_name, rule_config in self.rules.items():
+            rule_stats[rule_name] = {
+                'execution_count': rule_config['execution_count'],
+                'failure_count': rule_config['failure_count'],
+                'success_rate': (
+                    (rule_config['execution_count'] - rule_config['failure_count']) / 
+                    rule_config['execution_count']
+                ) if rule_config['execution_count'] > 0 else 1.0
+            }
+        
+        return {
+            'global_metrics': self.validation_metrics,
+            'rule_statistics': rule_stats,
+            'total_rules': len(self.rules),
+            'average_execution_time': (
+                self.validation_metrics['validation_time'] / 
+                self.validation_metrics['rules_executed']
+            ) if self.validation_metrics['rules_executed'] > 0 else 0.0
+        }
+    
+    def _check_rule_conditions(self, rule_name: str, context: Dict[str, Any]) -> bool:
+        """Check if rule conditions are met for execution."""
+        conditions = self.conditional_rules.get(rule_name, {})
+        if not conditions:
+            return True
+        
+        for condition_key, condition_value in conditions.items():
+            context_value = context.get(condition_key)
+            
+            if condition_value != context_value:
+                return False
+        
+        return True
+    
+    def _register_default_rules(self) -> None:
+        """Register default business rules for common validation scenarios."""
+        
+        def email_domain_rule(value: str, context: Dict[str, Any]) -> str:
+            """Validate email domain against business policies."""
+            if not value or '@' not in value:
+                return value
+            
+            domain = value.split('@')[1].lower()
+            
+            # Business rule: Block disposable email domains
+            disposable_domains = {
+                'tempmail.org', '10minutemail.com', 'guerrillamail.info',
+                'mailinator.com', 'yopmail.com'
+            }
+            
+            if domain in disposable_domains:
+                raise BusinessRuleViolationError(
+                    message="Disposable email addresses are not allowed",
+                    error_code="DISPOSABLE_EMAIL_NOT_ALLOWED",
+                    rule_name="email_domain_validation",
+                    context={'domain': domain}
+                )
+            
+            return value
+        
+        def username_profanity_rule(value: str, context: Dict[str, Any]) -> str:
+            """Validate username against profanity filters."""
+            if not value:
+                return value
+            
+            # Simple profanity check (extend as needed)
+            prohibited_words = {'admin', 'root', 'test', 'null', 'undefined'}
+            
+            if value.lower() in prohibited_words:
+                raise BusinessRuleViolationError(
+                    message="Username contains prohibited content",
+                    error_code="USERNAME_PROHIBITED_CONTENT",
+                    rule_name="username_profanity_validation",
+                    context={'username': value}
+                )
+            
+            return value
+        
+        def currency_amount_rule(value: Decimal, context: Dict[str, Any]) -> Decimal:
+            """Validate currency amounts against business limits."""
+            if value is None:
+                return value
+            
+            # Business rule: Maximum transaction amount
+            max_amount = Decimal('100000.00')  # $100,000 limit
+            
+            if value > max_amount:
+                raise BusinessRuleViolationError(
+                    message=f"Amount exceeds maximum allowed limit of {max_amount}",
+                    error_code="AMOUNT_EXCEEDS_LIMIT",
+                    rule_name="currency_amount_validation",
+                    context={'amount': str(value), 'limit': str(max_amount)}
+                )
+            
+            return value
+        
+        # Register default rules
+        self.register_rule('email_domain_validation', email_domain_rule)
+        self.register_rule('username_profanity_validation', username_profanity_rule)
+        self.register_rule('currency_amount_validation', currency_amount_rule)
+
+
+# ============================================================================
+# VALIDATOR REGISTRY AND FACTORY
+# ============================================================================
+
+# Registry of all business validators for dynamic access
+BUSINESS_VALIDATOR_REGISTRY = {
+    # Core business validators
+    'User': UserValidator,
+    'Organization': OrganizationValidator,
+    'Product': ProductValidator,
+    'Order': OrderValidator,
+    'OrderItem': OrderItemValidator,
+    
+    # Utility validators
+    'Address': AddressValidator,
+    'ContactInfo': ContactInfoValidator,
+    'MonetaryAmount': MonetaryAmountValidator,
+    'Pagination': PaginationValidator,
+    'Search': SearchValidator,
+}
+
+# Global business rule engine instance
+business_rule_engine = BusinessRuleEngine()
+
+
+def get_validator_by_name(validator_name: str) -> Optional[Type[BaseBusinessValidator]]:
+    """
+    Get business validator class by name from registry.
+    
+    Args:
+        validator_name: Name of the validator class to retrieve
+        
+    Returns:
+        Validator class if found, None otherwise
+    """
+    return BUSINESS_VALIDATOR_REGISTRY.get(validator_name)
+
+
+def validate_data_with_schema(schema_name: str, data: Dict[str, Any], 
+                            convert_to_model: bool = False,
+                            context: Optional[Dict[str, Any]] = None) -> Union[Dict[str, Any], BaseBusinessModel]:
+    """
+    Validate data using specified schema with comprehensive error handling.
+    
+    Args:
+        schema_name: Name of the validation schema to use
+        data: Data dictionary to validate
+        convert_to_model: Whether to convert to business model instance
+        context: Additional validation context
+        
+    Returns:
+        Validated data dictionary or business model instance
+        
+    Raises:
+        DataValidationError: If schema not found or validation fails
+    """
+    validator_class = get_validator_by_name(schema_name)
+    if not validator_class:
         raise DataValidationError(
-            message="Business data validation failed",
-            error_code="BUSINESS_DATA_VALIDATION_ERROR",
+            message=f"Unknown validation schema: {schema_name}",
+            error_code="UNKNOWN_VALIDATION_SCHEMA",
             context={
-                'schema_class': schema_class.__name__,
-                'duration_seconds': duration
+                'schema_name': schema_name,
+                'available_schemas': list(BUSINESS_VALIDATOR_REGISTRY.keys())
             },
-            cause=validation_error,
             severity=ErrorSeverity.HIGH
         )
-
-
-def validate_request_data(
-    request_data: Dict[str, Any],
-    schema_class: Type[InputValidator],
-    sanitize: bool = True,
-    **validation_kwargs
-) -> Dict[str, Any]:
-    """
-    Validate HTTP request data with sanitization and security checks.
     
-    Provides comprehensive request data validation with input sanitization,
-    security validation, and request processing per F-003-RQ-004 requirements.
-    
-    Args:
-        request_data: HTTP request data to validate
-        schema_class: Input validator class for validation
-        sanitize: Whether to apply input sanitization
-        **validation_kwargs: Additional validation arguments
-        
-    Returns:
-        Validated request data
-        
-    Raises:
-        DataValidationError: If request validation fails
-        
-    Example:
-        class CreateUserRequest(InputValidator):
-            name = fields.String(required=True, validate=validate.Length(min=2))
-            email = fields.Email(required=True)
-        
-        validated_data = validate_request_data(
-            request.json, CreateUserRequest, sanitize=True
-        )
-    """
     try:
-        logger.debug("Starting request data validation",
-                    data_fields=list(request_data.keys()) if isinstance(request_data, dict) else [],
-                    schema_class=schema_class.__name__,
-                    sanitize=sanitize)
-        
-        # Create validation context for request
-        context = ValidationContext(
-            validation_type=ValidationType.SANITIZING if sanitize else ValidationType.STRICT,
-            validation_mode=ValidationMode.CREATE,
-            request_context=request_data
-        )
-        
-        # Initialize input validator
-        validator = schema_class(
-            validation_context=context,
-            enable_sanitization=sanitize,
-            **validation_kwargs
+        # Initialize validator with business rule engine
+        validator = validator_class(
+            business_rule_engine=business_rule_engine,
+            validation_context=context or {}
         )
         
         # Perform validation
-        validated_data = validator.load_with_context(request_data, context)
+        validated_data = validator.load(data, convert_to_model=convert_to_model)
         
-        logger.debug("Request data validation completed successfully",
-                    validated_fields=len(validated_data))
+        logger.info("Data validation completed successfully",
+                   schema_name=schema_name,
+                   field_count=len(data),
+                   converted_to_model=convert_to_model)
         
         return validated_data
         
-    except Exception as request_error:
-        logger.error("Request data validation failed",
-                    schema_class=schema_class.__name__,
-                    error=str(request_error))
-        
-        if isinstance(request_error, BaseBusinessException):
+    except MarshmallowValidationError as e:
+        # Convert marshmallow errors to business exceptions
+        business_error = BaseBusinessValidator().handle_validation_error(e)
+        business_error.context['schema_name'] = schema_name
+        raise business_error
+    except Exception as e:
+        if isinstance(e, BaseBusinessException):
             raise
         
         raise DataValidationError(
-            message="Request data validation failed",
-            error_code="REQUEST_VALIDATION_ERROR",
-            context={'schema_class': schema_class.__name__},
-            cause=request_error,
-            severity=ErrorSeverity.MEDIUM
-        )
-
-
-def validate_response_data(
-    response_data: Any,
-    schema_class: Type[OutputValidator],
-    format_response: bool = True,
-    **formatting_kwargs
-) -> Dict[str, Any]:
-    """
-    Validate response data with formatting and consistency checks.
-    
-    Provides comprehensive response data validation with format standardization,
-    consistency checking, and API contract enforcement per F-004-RQ-004 requirements.
-    
-    Args:
-        response_data: Response data to validate
-        schema_class: Output validator class for validation
-        format_response: Whether to format response structure
-        **formatting_kwargs: Additional formatting arguments
-        
-    Returns:
-        Validated and formatted response data
-        
-    Raises:
-        DataValidationError: If response validation fails
-        
-    Example:
-        class UserResponse(OutputValidator):
-            id = fields.String(required=True)
-            name = fields.String(required=True)
-            email = fields.Email(required=True)
-        
-        formatted_response = validate_response_data(
-            user_data, UserResponse, format_response=True
-        )
-    """
-    try:
-        logger.debug("Starting response data validation",
-                    data_type=type(response_data).__name__,
-                    schema_class=schema_class.__name__,
-                    format_response=format_response)
-        
-        # Create validation context for response
-        context = ValidationContext(
-            validation_type=ValidationType.STRICT,
-            validation_mode=ValidationMode.RESPONSE
-        )
-        
-        # Initialize output validator
-        validator = schema_class(
-            validation_context=context,
-            **formatting_kwargs
-        )
-        
-        if format_response:
-            # Format as success response
-            formatted_data = validator.format_success_response(
-                response_data,
-                **formatting_kwargs
-            )
-        else:
-            # Just validate without formatting
-            formatted_data = validator.dump_with_validation(response_data)
-        
-        logger.debug("Response data validation completed successfully")
-        
-        return formatted_data
-        
-    except Exception as response_error:
-        logger.error("Response data validation failed",
-                    schema_class=schema_class.__name__,
-                    error=str(response_error))
-        
-        if isinstance(response_error, BaseBusinessException):
-            raise
-        
-        raise DataValidationError(
-            message="Response data validation failed",
-            error_code="RESPONSE_VALIDATION_ERROR",
-            context={'schema_class': schema_class.__name__},
-            cause=response_error,
-            severity=ErrorSeverity.MEDIUM
-        )
-
-
-def create_validation_schema(
-    field_definitions: Dict[str, FieldType],
-    base_class: Type[BaseValidator] = DataModelValidator,
-    schema_name: str = "DynamicValidator"
-) -> Type[BaseValidator]:
-    """
-    Create validation schema dynamically from field definitions.
-    
-    Provides dynamic schema creation for flexible validation scenarios
-    and runtime schema generation based on business requirements.
-    
-    Args:
-        field_definitions: Dictionary of field names to field objects
-        base_class: Base validator class to inherit from
-        schema_name: Name for the dynamic schema class
-        
-    Returns:
-        Dynamically created validator class
-        
-    Example:
-        fields = {
-            'name': fields.String(required=True),
-            'email': fields.Email(required=True),
-            'age': fields.Integer(validate=validate.Range(min=0))
-        }
-        
-        DynamicValidator = create_validation_schema(fields, schema_name="UserValidator")
-        validator = DynamicValidator()
-    """
-    try:
-        logger.debug("Creating dynamic validation schema",
-                    field_count=len(field_definitions),
-                    base_class=base_class.__name__,
-                    schema_name=schema_name)
-        
-        # Validate field definitions
-        for field_name, field_obj in field_definitions.items():
-            if not isinstance(field_obj, fields.Field):
-                if isinstance(field_obj, type) and issubclass(field_obj, fields.Field):
-                    # Convert field class to instance
-                    field_definitions[field_name] = field_obj()
-                else:
-                    raise DataValidationError(
-                        message=f"Invalid field definition for '{field_name}'",
-                        error_code="INVALID_FIELD_DEFINITION",
-                        context={
-                            'field_name': field_name,
-                            'field_type': type(field_obj).__name__
-                        },
-                        severity=ErrorSeverity.MEDIUM
-                    )
-        
-        # Create dynamic schema class
-        schema_class = type(schema_name, (base_class,), field_definitions)
-        
-        logger.debug("Dynamic validation schema created successfully",
-                    schema_name=schema_name,
-                    field_count=len(field_definitions))
-        
-        return schema_class
-        
-    except Exception as creation_error:
-        logger.error("Dynamic schema creation failed",
-                    schema_name=schema_name,
-                    error=str(creation_error))
-        
-        if isinstance(creation_error, BaseBusinessException):
-            raise
-        
-        raise DataValidationError(
-            message="Dynamic validation schema creation failed",
-            error_code="DYNAMIC_SCHEMA_ERROR",
+            message=f"Data validation failed for schema {schema_name}",
+            error_code="VALIDATION_EXECUTION_FAILED",
             context={'schema_name': schema_name},
-            cause=creation_error,
+            cause=e,
             severity=ErrorSeverity.MEDIUM
         )
 
 
-def format_validation_errors(
-    validation_errors: List[Dict[str, Any]],
-    format_type: str = "detailed"
-) -> Dict[str, Any]:
+def create_validation_chain(*validator_names: str) -> Callable:
     """
-    Format validation errors for client responses.
-    
-    Provides consistent validation error formatting for API responses
-    with multiple format options for different client requirements.
+    Create validation chain that applies multiple validators in sequence.
     
     Args:
-        validation_errors: List of validation error dictionaries
-        format_type: Format type ("detailed", "summary", "field_only")
+        *validator_names: Names of validators to chain together
         
     Returns:
-        Formatted validation errors dictionary
+        Callable that performs chained validation
         
     Example:
-        errors = [
-            {'field': 'email', 'message': 'Invalid email format', 'code': 'INVALID_EMAIL'},
-            {'field': 'age', 'message': 'Must be at least 18', 'code': 'MIN_VALUE'}
-        ]
-        
-        formatted = format_validation_errors(errors, format_type="detailed")
+        user_validation_chain = create_validation_chain('User', 'ContactInfo')
+        validated_data = user_validation_chain(user_data)
     """
-    try:
-        logger.debug("Formatting validation errors",
-                    error_count=len(validation_errors),
-                    format_type=format_type)
+    def validation_chain(data: Dict[str, Any], 
+                        convert_to_model: bool = False,
+                        context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Execute validation chain on data."""
+        validated_data = data
         
-        if format_type == "detailed":
-            # Detailed format with all error information
-            formatted_errors = {
-                'error_count': len(validation_errors),
-                'errors': validation_errors,
-                'summary': f"{len(validation_errors)} validation error(s) occurred"
-            }
-            
-        elif format_type == "summary":
-            # Summary format with error count and messages
-            error_messages = [error.get('message', 'Validation error') for error in validation_errors]
-            formatted_errors = {
-                'error_count': len(validation_errors),
-                'messages': error_messages,
-                'summary': f"{len(validation_errors)} validation error(s) occurred"
-            }
-            
-        elif format_type == "field_only":
-            # Field-only format grouped by field name
-            field_errors = {}
-            for error in validation_errors:
-                field_name = error.get('field', 'unknown')
-                if field_name not in field_errors:
-                    field_errors[field_name] = []
-                field_errors[field_name].append(error.get('message', 'Validation error'))
-            
-            formatted_errors = {
-                'field_errors': field_errors,
-                'error_count': len(validation_errors)
-            }
-            
-        else:
-            raise DataValidationError(
-                message=f"Invalid error format type: {format_type}",
-                error_code="INVALID_FORMAT_TYPE",
-                context={
-                    'format_type': format_type,
-                    'valid_types': ['detailed', 'summary', 'field_only']
-                },
-                severity=ErrorSeverity.MEDIUM
+        for validator_name in validator_names:
+            validated_data = validate_data_with_schema(
+                validator_name, 
+                validated_data, 
+                convert_to_model=False,  # Only convert at the end
+                context=context
             )
         
-        logger.debug("Validation errors formatted successfully",
-                    format_type=format_type)
+        # Convert to model if requested and final validator supports it
+        if convert_to_model and validator_names:
+            final_validator_name = validator_names[-1]
+            validator_class = get_validator_by_name(final_validator_name)
+            if validator_class:
+                model_class = validator_class().get_business_model_class()
+                if model_class:
+                    return model_class.from_dict(validated_data)
         
-        return formatted_errors
+        return validated_data
+    
+    return validation_chain
+
+
+def batch_validate_data(data_items: List[Dict[str, Any]], schema_name: str,
+                       fail_fast: bool = False,
+                       context: Optional[Dict[str, Any]] = None) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Validate multiple data items in batch with error collection.
+    
+    Args:
+        data_items: List of data dictionaries to validate
+        schema_name: Name of validation schema to use
+        fail_fast: Whether to stop on first validation error
+        context: Additional validation context
         
-    except Exception as formatting_error:
-        logger.error("Validation error formatting failed",
-                    format_type=format_type,
-                    error=str(formatting_error))
-        
-        if isinstance(formatting_error, BaseBusinessException):
-            raise
-        
-        # Return basic error format if formatting fails
-        return {
-            'error_count': len(validation_errors),
-            'errors': validation_errors,
-            'format_error': str(formatting_error)
-        }
+    Returns:
+        Tuple of (validated_items, failed_items_with_errors)
+    """
+    validated_items = []
+    failed_items = []
+    
+    for index, data_item in enumerate(data_items):
+        try:
+            validated_item = validate_data_with_schema(
+                schema_name, data_item, context=context
+            )
+            validated_items.append(validated_item)
+            
+        except DataValidationError as e:
+            failed_item = {
+                'index': index,
+                'data': data_item,
+                'error': e.to_dict(),
+                'validation_errors': e.validation_errors,
+                'field_errors': e.field_errors
+            }
+            failed_items.append(failed_item)
+            
+            if fail_fast:
+                break
+                
+        except Exception as e:
+            failed_item = {
+                'index': index,
+                'data': data_item,
+                'error': {
+                    'message': str(e),
+                    'type': type(e).__name__
+                }
+            }
+            failed_items.append(failed_item)
+            
+            if fail_fast:
+                break
+    
+    logger.info("Batch validation completed",
+               schema_name=schema_name,
+               total_items=len(data_items),
+               validated_count=len(validated_items),
+               failed_count=len(failed_items))
+    
+    return validated_items, failed_items
 
 
-# ============================================================================
-# COMMON BUSINESS VALIDATION SCHEMAS
-# ============================================================================
-
-class CommonFieldValidators:
-    """Common field validators for business data validation."""
-    
-    # Email validation with business rules
-    email = fields.Email(
-        required=True,
-        validate=validate.Length(max=254),
-        error_messages={
-            'invalid': 'Please provide a valid email address',
-            'required': 'Email address is required'
-        }
-    )
-    
-    # Phone number validation
-    phone = fields.String(
-        validate=validate.Length(max=20),
-        error_messages={'invalid': 'Please provide a valid phone number'}
-    )
-    
-    # Name fields with proper validation
-    name = fields.String(
-        required=True,
-        validate=validate.Length(min=2, max=100),
-        error_messages={
-            'required': 'Name is required',
-            'invalid': 'Name must be between 2 and 100 characters'
-        }
-    )
-    
-    # Currency amount validation
-    amount = fields.Decimal(
-        places=2,
-        validate=validate.Range(min=0),
-        error_messages={
-            'invalid': 'Amount must be a valid positive number with up to 2 decimal places'
-        }
-    )
-    
-    # Date fields with timezone awareness
-    date_created = fields.DateTime(
-        dump_only=True,
-        format='iso',
-        error_messages={'invalid': 'Invalid date format'}
-    )
-    
-    date_updated = fields.DateTime(
-        dump_only=True,
-        format='iso',
-        error_messages={'invalid': 'Invalid date format'}
-    )
-
-
-# Module initialization logging
-logger.info("Business validators module initialized successfully",
-           module_version="1.0.0",
+# Initialize validation system logging
+logger.info("Business validation engine initialized successfully",
+           validator_count=len(BUSINESS_VALIDATOR_REGISTRY),
            marshmallow_version="3.20+",
-           validation_features=[
-               "marshmallow_schemas",
-               "business_rule_validation", 
-               "input_sanitization",
-               "output_formatting",
-               "context_management"
-           ])
+           business_rules_enabled=ValidationConfig.ENFORCE_BUSINESS_RULES,
+           rule_engine_initialized=True)
