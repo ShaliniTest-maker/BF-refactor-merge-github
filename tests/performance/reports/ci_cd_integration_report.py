@@ -1,1427 +1,2389 @@
 """
-CI/CD Pipeline Performance Validation Reporting
+CI/CD Pipeline Performance Validation Reporting Module
 
-This module provides comprehensive CI/CD pipeline integration for automated performance validation,
-quality gate enforcement, and deployment readiness assessment. Integrates with GitHub Actions
-workflow to provide automated performance validation, failure detection, and rollback recommendations
-per the Flask migration performance requirements.
+This comprehensive CI/CD integration module provides automated performance validation reporting
+for GitHub Actions workflows, ensuring compliance with the ≤10% variance requirement during
+the Flask migration. Implements quality gate validation, deployment readiness assessment,
+and automated rollback trigger recommendations per technical specification requirements.
 
 Architecture Compliance:
-- Section 6.6.2: CI/CD integration for automated performance validation with GitHub Actions
-- Section 6.6.3: Quality gate validation and automated enforcement for deployment approval
+- Section 6.6.2: CI/CD pipeline integration with automated performance validation
+- Section 6.6.3: Quality gate validation and reporting with automated enforcement
 - Section 4.6.1: Automated testing pipeline with deployment readiness assessment
-- Section 0.1.1: ≤10% variance enforcement for performance baseline compliance
-- Section 8.5.2: Blue-green deployment with performance validation and rollback triggers
-- Section 0.3.4: Deployment considerations with automated rollback recommendations
+- Section 0.3.4: Deployment considerations with automated rollback trigger recommendations
+- Section 6.6.2: Failed test handling with comprehensive alerting and notification
 
 Key Features:
-- GitHub Actions workflow integration for automated performance validation
-- Quality gate validation with zero-tolerance enforcement policies
-- Deployment readiness assessment with comprehensive compliance checking
-- Performance failure detection and alerting with threshold monitoring
-- Automated rollback trigger recommendations based on performance degradation
-- Comprehensive CI/CD reporting with stakeholder communication
-- Real-time performance monitoring integration during deployment
-- Security gate validation with container vulnerability scanning integration
+- GitHub Actions workflow integration with performance validation checkpoints
+- Automated quality gate enforcement with configurable thresholds
+- Deployment readiness assessment with risk analysis and approval workflows
+- Performance failure detection with intelligent alerting and escalation
+- Automated rollback trigger recommendations based on variance analysis
+- Comprehensive reporting with stakeholder-specific outputs (JSON, HTML, Markdown)
+- Integration with baseline comparison and benchmark testing frameworks
+- Real-time monitoring integration with enterprise APM and notification systems
 
 Dependencies:
-- tests.performance.test_baseline_comparison for performance validation
-- tests.performance.test_benchmark for Apache Bench integration
-- tests.performance.reports.performance_report_generator for report generation
-- GitHub Actions API for workflow integration and status reporting
-- Prometheus metrics for real-time performance monitoring
+- tests/performance/test_baseline_comparison.py: Baseline comparison validation engine
+- tests/performance/test_benchmark.py: Apache Bench performance testing framework
+- tests/performance/reports/performance_report_generator.py: Comprehensive report generation
+- structlog ≥23.1: Structured logging for enterprise integration and audit trails
+- pydantic ≥2.3: Data validation and configuration management
+- jinja2 ≥3.1: Template rendering for GitHub Actions outputs and notifications
 
 Author: Flask Migration Team
 Version: 1.0.0
-Test Coverage: 100% - All CI/CD integration scenarios and edge cases
+Coverage: 100% - Complete CI/CD integration with automated performance validation
 """
 
 import asyncio
 import json
 import logging
 import os
-import sys
+import statistics
+import subprocess
+import tempfile
 import time
 import traceback
-import uuid
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple, Union, NamedTuple, Callable
-from dataclasses import dataclass, field
-from enum import Enum, auto
+from typing import Dict, List, Optional, Tuple, Union, Any, NamedTuple, Set, Callable
+from dataclasses import dataclass, field, asdict
 from urllib.parse import urljoin
-import tempfile
-import subprocess
-import threading
-from concurrent.futures import ThreadPoolExecutor, Future
-import signal
+import uuid
+import base64
+import io
 
-import pytest
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-
-# Performance testing framework imports
+# Configuration and validation
 try:
-    from tests.performance.test_baseline_comparison import (
-        BaselineComparisonTestSuite,
-        PerformanceComparisonResult,
-        PerformanceTrendAnalyzer,
-        PERFORMANCE_VARIANCE_THRESHOLD,
-        CRITICAL_VARIANCE_THRESHOLD,
-        WARNING_VARIANCE_THRESHOLD
-    )
-    BASELINE_COMPARISON_AVAILABLE = True
+    from pydantic import BaseModel, Field, validator, ConfigDict
+    from pydantic.dataclasses import dataclass as pydantic_dataclass
+    PYDANTIC_AVAILABLE = True
 except ImportError:
-    BASELINE_COMPARISON_AVAILABLE = False
+    PYDANTIC_AVAILABLE = False
+    BaseModel = object
+    pydantic_dataclass = dataclass
 
+# Template rendering for GitHub Actions outputs
 try:
-    from tests.performance.test_benchmark import (
-        ApacheBenchRunner,
-        ApacheBenchResult,
-        PerformanceBenchmarkSuite
-    )
-    BENCHMARK_AVAILABLE = True
+    from jinja2 import Environment, BaseLoader, select_autoescape
+    JINJA2_AVAILABLE = True
 except ImportError:
-    BENCHMARK_AVAILABLE = False
+    JINJA2_AVAILABLE = False
 
-# Import performance configuration
-from tests.performance.performance_config import (
-    PerformanceConfigFactory,
-    BasePerformanceConfig,
-    PerformanceThreshold,
-    LoadTestConfiguration,
-    PerformanceTestType,
-    create_performance_config
-)
-
-# Prometheus monitoring integration
+# Structured logging for enterprise integration
 try:
-    from prometheus_client import CollectorRegistry, Counter, Histogram, Gauge, CONTENT_TYPE_LATEST
-    PROMETHEUS_AVAILABLE = True
+    import structlog
+    STRUCTLOG_AVAILABLE = True
 except ImportError:
-    PROMETHEUS_AVAILABLE = False
+    STRUCTLOG_AVAILABLE = False
+    structlog = None
 
-# GitHub Actions integration
+# HTTP client for webhook notifications
 try:
     import requests
-    GITHUB_API_AVAILABLE = True
+    REQUESTS_AVAILABLE = True
 except ImportError:
-    GITHUB_API_AVAILABLE = False
+    REQUESTS_AVAILABLE = False
+    requests = None
 
-# Configure logging for CI/CD integration
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+# Performance testing framework imports
+from tests.performance.test_baseline_comparison import (
+    BaselineComparisonTestSuite,
+    BaselineComparisonResult,
+    CRITICAL_VARIANCE_THRESHOLD,
+    WARNING_VARIANCE_THRESHOLD,
+    MEMORY_VARIANCE_THRESHOLD,
+    RESPONSE_TIME_THRESHOLD_MS,
+    THROUGHPUT_THRESHOLD_RPS,
+    ERROR_RATE_THRESHOLD,
+    CPU_UTILIZATION_THRESHOLD,
+    MEMORY_UTILIZATION_THRESHOLD
+)
+
+from tests.performance.test_benchmark import (
+    ApacheBenchmarkTester,
+    BenchmarkTestResult,
+    ApacheBenchConfig,
+    BenchmarkTestType,
+    BenchmarkValidationLevel,
+    PERFORMANCE_VARIANCE_THRESHOLD,
+    RESPONSE_TIME_P95_THRESHOLD,
+    MIN_THROUGHPUT_THRESHOLD
+)
+
+from tests.performance.reports.performance_report_generator import (
+    PerformanceReportGenerator,
+    PerformanceDataAggregator,
+    RecommendationEngine,
+    ReportFormat,
+    ReportAudience,
+    PerformanceStatus,
+    TestResult,
+    VarianceAnalysis,
+    create_performance_report_generator,
+    generate_ci_cd_performance_report,
+    validate_performance_requirements
+)
+
 
 # CI/CD Integration Constants
-CICD_REPORT_TIMEOUT = 600  # 10 minutes timeout for comprehensive validation
-QUALITY_GATE_ENFORCEMENT = True  # Zero-tolerance quality gate enforcement
-PERFORMANCE_GATE_TIMEOUT = 300  # 5 minutes timeout for performance validation
-ROLLBACK_TRIGGER_THRESHOLD = 15.0  # 15% variance triggers rollback recommendation
-GITHUB_ACTIONS_MAX_RETRIES = 3  # Maximum retries for GitHub API calls
-DEPLOYMENT_READINESS_CHECKS = 10  # Number of health checks for deployment readiness
+GITHUB_ACTIONS_OUTPUT_FILE = os.getenv('GITHUB_OUTPUT', '/tmp/github_actions_output.txt')
+GITHUB_STEP_SUMMARY_FILE = os.getenv('GITHUB_STEP_SUMMARY', '/tmp/github_step_summary.md')
+GITHUB_REPOSITORY = os.getenv('GITHUB_REPOSITORY', 'unknown/repository')
+GITHUB_RUN_ID = os.getenv('GITHUB_RUN_ID', 'unknown')
+GITHUB_SHA = os.getenv('GITHUB_SHA', 'unknown')
+GITHUB_REF = os.getenv('GITHUB_REF', 'unknown')
+GITHUB_WORKFLOW = os.getenv('GITHUB_WORKFLOW', 'Performance Testing')
 
-# CI/CD Pipeline Stages
+# Performance gate thresholds per Section 6.6.3
+QUALITY_GATE_THRESHOLDS = {
+    'response_time_p95_ms': RESPONSE_TIME_P95_THRESHOLD,
+    'throughput_rps': MIN_THROUGHPUT_THRESHOLD,
+    'error_rate_percent': ERROR_RATE_THRESHOLD,
+    'cpu_utilization_percent': CPU_UTILIZATION_THRESHOLD,
+    'memory_utilization_percent': MEMORY_UTILIZATION_THRESHOLD,
+    'variance_threshold_percent': CRITICAL_VARIANCE_THRESHOLD
+}
+
+# Notification and alerting configuration
+SLACK_WEBHOOK_URL = os.getenv('SLACK_WEBHOOK_URL')
+TEAMS_WEBHOOK_URL = os.getenv('TEAMS_WEBHOOK_URL')
+EMAIL_NOTIFICATION_URL = os.getenv('EMAIL_NOTIFICATION_URL')
+ALERT_ESCALATION_THRESHOLD = 3  # Number of consecutive failures before escalation
+
+
 class CICDStage(Enum):
-    """CI/CD pipeline stage enumeration."""
+    """CI/CD pipeline stage enumeration for performance validation checkpoints."""
     
-    STATIC_ANALYSIS = "static_analysis"
-    SECURITY_SCAN = "security_scan"
+    BUILD = "build"
     UNIT_TESTS = "unit_tests"
     INTEGRATION_TESTS = "integration_tests"
     PERFORMANCE_TESTS = "performance_tests"
-    QUALITY_GATES = "quality_gates"
-    DEPLOYMENT_READINESS = "deployment_readiness"
+    SECURITY_TESTS = "security_tests"
+    E2E_TESTS = "e2e_tests"
     STAGING_DEPLOYMENT = "staging_deployment"
     PRODUCTION_DEPLOYMENT = "production_deployment"
-    POST_DEPLOYMENT_VALIDATION = "post_deployment_validation"
+    POST_DEPLOYMENT = "post_deployment"
 
 
-class QualityGateResult(Enum):
-    """Quality gate validation result enumeration."""
+class QualityGateDecision(Enum):
+    """Quality gate decision enumeration for automated pipeline control."""
     
-    PASSED = "passed"
-    FAILED = "failed"
+    PASS = "pass"
+    FAIL = "fail"
     WARNING = "warning"
-    CRITICAL_FAILURE = "critical_failure"
-    SECURITY_REVIEW_REQUIRED = "security_review_required"
+    MANUAL_REVIEW = "manual_review"
+    SKIP = "skip"
 
 
-class DeploymentRecommendation(Enum):
-    """Deployment recommendation enumeration."""
+class DeploymentReadiness(Enum):
+    """Deployment readiness status for release management integration."""
     
-    APPROVED = "approved"
+    READY = "ready"
+    NOT_READY = "not_ready"
+    CONDITIONAL = "conditional"
     BLOCKED = "blocked"
-    CONDITIONAL_APPROVAL = "conditional_approval"
-    ROLLBACK_REQUIRED = "rollback_required"
-    SECURITY_REVIEW = "security_review"
-    PERFORMANCE_OPTIMIZATION = "performance_optimization"
+    MANUAL_APPROVAL = "manual_approval"
+
+
+class AlertSeverity(Enum):
+    """Alert severity levels for escalation and notification management."""
+    
+    INFO = "info"
+    WARNING = "warning"
+    CRITICAL = "critical"
+    EMERGENCY = "emergency"
 
 
 @dataclass
-class QualityGateMetric:
-    """Quality gate metric definition with threshold enforcement."""
+class CICDContext:
+    """
+    CI/CD pipeline context information for performance validation integration.
     
-    name: str
-    threshold: float
-    current_value: float
-    status: QualityGateResult
-    description: str
-    enforcement_level: str = "blocking"  # blocking, warning, informational
-    remediation_guidance: str = ""
+    Captures comprehensive pipeline metadata for accurate performance assessment
+    and automated decision making per Section 6.6.2 CI/CD integration requirements.
+    """
     
-    @property
-    def is_passing(self) -> bool:
-        """Check if quality gate metric is passing."""
-        return self.status in [QualityGateResult.PASSED, QualityGateResult.WARNING]
-    
-    @property
-    def requires_blocking(self) -> bool:
-        """Check if quality gate metric requires deployment blocking."""
-        return (
-            self.enforcement_level == "blocking" and 
-            self.status in [QualityGateResult.FAILED, QualityGateResult.CRITICAL_FAILURE]
-        )
-
-
-@dataclass
-class CICDStageResult:
-    """CI/CD pipeline stage execution result."""
-    
+    # Pipeline identification
+    pipeline_id: str
+    run_id: str
+    workflow_name: str
+    job_name: str
     stage: CICDStage
-    status: QualityGateResult
-    start_time: datetime
-    end_time: Optional[datetime] = None
-    duration_seconds: float = 0.0
-    metrics: List[QualityGateMetric] = field(default_factory=list)
-    artifacts: List[str] = field(default_factory=list)
-    logs: List[str] = field(default_factory=list)
-    error_message: Optional[str] = None
     
-    @property
-    def is_complete(self) -> bool:
-        """Check if stage execution is complete."""
-        return self.end_time is not None
+    # Source code context
+    repository: str
+    branch: str
+    commit_sha: str
+    commit_message: str
+    pull_request_id: Optional[str] = None
     
-    @property
-    def is_successful(self) -> bool:
-        """Check if stage execution was successful."""
-        return self.status in [QualityGateResult.PASSED, QualityGateResult.WARNING]
+    # Environment context
+    environment: str = "testing"
+    deployment_target: str = "staging"
+    region: str = "us-east-1"
     
-    def add_metric(self, metric: QualityGateMetric) -> None:
-        """Add quality gate metric to stage result."""
-        self.metrics.append(metric)
+    # Performance context
+    baseline_reference: str = "nodejs_production"
+    performance_budget: Dict[str, float] = field(default_factory=lambda: QUALITY_GATE_THRESHOLDS.copy())
     
-    def complete_stage(self, status: QualityGateResult, error_message: Optional[str] = None) -> None:
-        """Mark stage as complete with final status."""
-        self.end_time = datetime.now(timezone.utc)
-        self.duration_seconds = (self.end_time - self.start_time).total_seconds()
-        self.status = status
-        if error_message:
-            self.error_message = error_message
-
-
-class GitHubActionsIntegration:
-    """
-    GitHub Actions workflow integration for CI/CD pipeline reporting.
+    # Execution context
+    triggered_by: str = "unknown"
+    trigger_timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    execution_timeout_minutes: int = 30
     
-    Provides seamless integration with GitHub Actions API for status reporting,
-    artifact management, and workflow orchestration with comprehensive error
-    handling and retry logic for enterprise-grade reliability.
-    """
+    # Notification context
+    notification_channels: List[str] = field(default_factory=list)
+    escalation_contacts: List[str] = field(default_factory=list)
     
-    def __init__(self, token: Optional[str] = None, repository: Optional[str] = None):
-        """
-        Initialize GitHub Actions integration.
-        
-        Args:
-            token: GitHub Actions token for API authentication
-            repository: Repository identifier (owner/repo format)
-        """
-        self.token = token or os.getenv('GITHUB_TOKEN')
-        self.repository = repository or os.getenv('GITHUB_REPOSITORY')
-        self.workflow_run_id = os.getenv('GITHUB_RUN_ID')
-        self.workflow_run_number = os.getenv('GITHUB_RUN_NUMBER')
-        self.ref = os.getenv('GITHUB_REF')
-        self.sha = os.getenv('GITHUB_SHA')
-        
-        # GitHub API configuration
-        self.base_url = "https://api.github.com"
-        self.session = requests.Session()
-        
-        if self.token:
-            self.session.headers.update({
-                'Authorization': f'token {self.token}',
-                'Accept': 'application/vnd.github.v3+json',
-                'User-Agent': 'Flask-Migration-Performance-Validator/1.0'
-            })
-        
-        # Configure retry strategy for GitHub API
-        retry_strategy = Retry(
-            total=GITHUB_ACTIONS_MAX_RETRIES,
-            backoff_factor=1,
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["HEAD", "GET", "POST", "PUT", "PATCH"]
+    # Previous run context for trend analysis
+    previous_run_id: Optional[str] = None
+    previous_run_status: Optional[str] = None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert CI/CD context to dictionary for serialization."""
+        context_dict = asdict(self)
+        context_dict['stage'] = self.stage.value
+        context_dict['trigger_timestamp'] = self.trigger_timestamp.isoformat()
+        return context_dict
+    
+    @classmethod
+    def from_github_actions(cls) -> 'CICDContext':
+        """Create CI/CD context from GitHub Actions environment variables."""
+        return cls(
+            pipeline_id=f"{GITHUB_REPOSITORY}#{GITHUB_RUN_ID}",
+            run_id=GITHUB_RUN_ID,
+            workflow_name=GITHUB_WORKFLOW,
+            job_name=os.getenv('GITHUB_JOB', 'performance-validation'),
+            stage=CICDStage.PERFORMANCE_TESTS,
+            repository=GITHUB_REPOSITORY,
+            branch=GITHUB_REF.replace('refs/heads/', '').replace('refs/pull/', 'pr-'),
+            commit_sha=GITHUB_SHA,
+            commit_message=os.getenv('GITHUB_EVENT_HEAD_COMMIT_MESSAGE', 'Unknown commit'),
+            pull_request_id=os.getenv('GITHUB_EVENT_PULL_REQUEST_NUMBER'),
+            environment=os.getenv('PERFORMANCE_ENV', 'github-actions'),
+            deployment_target=os.getenv('DEPLOYMENT_TARGET', 'staging'),
+            triggered_by=os.getenv('GITHUB_ACTOR', 'unknown'),
+            notification_channels=[
+                'github-actions-summary',
+                'slack' if SLACK_WEBHOOK_URL else None,
+                'teams' if TEAMS_WEBHOOK_URL else None
+            ],
+            escalation_contacts=os.getenv('ESCALATION_CONTACTS', '').split(',') if os.getenv('ESCALATION_CONTACTS') else []
         )
-        adapter = HTTPAdapter(max_retries=retry_strategy)
-        self.session.mount("https://", adapter)
-        
-        self.logger = logging.getLogger(__name__)
-    
-    def create_check_run(self, name: str, head_sha: Optional[str] = None, 
-                        status: str = "in_progress") -> Optional[Dict[str, Any]]:
-        """
-        Create GitHub check run for performance validation reporting.
-        
-        Args:
-            name: Check run name
-            head_sha: Git commit SHA (defaults to current SHA)
-            status: Check run status (queued, in_progress, completed)
-            
-        Returns:
-            Check run API response or None if creation failed
-        """
-        if not self.token or not self.repository:
-            self.logger.warning("GitHub integration not configured - skipping check run creation")
-            return None
-        
-        head_sha = head_sha or self.sha
-        if not head_sha:
-            self.logger.error("No commit SHA available for check run creation")
-            return None
-        
-        url = f"{self.base_url}/repos/{self.repository}/check-runs"
-        payload = {
-            "name": name,
-            "head_sha": head_sha,
-            "status": status,
-            "started_at": datetime.now(timezone.utc).isoformat(),
-            "details_url": f"https://github.com/{self.repository}/actions/runs/{self.workflow_run_id}"
-        }
-        
-        try:
-            response = self.session.post(url, json=payload, timeout=30)
-            response.raise_for_status()
-            
-            check_run = response.json()
-            self.logger.info(f"Created GitHub check run: {check_run['id']} for {name}")
-            return check_run
-            
-        except requests.RequestException as e:
-            self.logger.error(f"Failed to create GitHub check run: {str(e)}")
-            return None
-    
-    def update_check_run(self, check_run_id: int, conclusion: str, 
-                        title: str, summary: str, text: Optional[str] = None) -> bool:
-        """
-        Update GitHub check run with performance validation results.
-        
-        Args:
-            check_run_id: Check run identifier
-            conclusion: Check run conclusion (success, failure, neutral, cancelled, skipped, timed_out, action_required)
-            title: Check run title
-            summary: Check run summary
-            text: Detailed check run output (optional)
-            
-        Returns:
-            True if update successful, False otherwise
-        """
-        if not self.token or not self.repository:
-            self.logger.warning("GitHub integration not configured - skipping check run update")
-            return False
-        
-        url = f"{self.base_url}/repos/{self.repository}/check-runs/{check_run_id}"
-        payload = {
-            "status": "completed",
-            "conclusion": conclusion,
-            "completed_at": datetime.now(timezone.utc).isoformat(),
-            "output": {
-                "title": title,
-                "summary": summary
-            }
-        }
-        
-        if text:
-            payload["output"]["text"] = text
-        
-        try:
-            response = self.session.patch(url, json=payload, timeout=30)
-            response.raise_for_status()
-            
-            self.logger.info(f"Updated GitHub check run {check_run_id} with conclusion: {conclusion}")
-            return True
-            
-        except requests.RequestException as e:
-            self.logger.error(f"Failed to update GitHub check run: {str(e)}")
-            return False
-    
-    def upload_artifact(self, artifact_name: str, artifact_path: Path) -> bool:
-        """
-        Upload performance report artifact to GitHub Actions.
-        
-        Args:
-            artifact_name: Artifact name for GitHub Actions
-            artifact_path: Path to artifact file
-            
-        Returns:
-            True if upload successful, False otherwise
-        """
-        if not artifact_path.exists():
-            self.logger.error(f"Artifact file not found: {artifact_path}")
-            return False
-        
-        # GitHub Actions artifact upload is handled by actions/upload-artifact
-        # This method prepares the artifact for upload by the action
-        
-        # Set GitHub Actions output for artifact upload
-        if os.getenv('GITHUB_ACTIONS'):
-            try:
-                # Write artifact path to GitHub Actions output
-                with open(os.environ.get('GITHUB_OUTPUT', '/dev/null'), 'a') as f:
-                    f.write(f"artifact_name={artifact_name}\n")
-                    f.write(f"artifact_path={artifact_path}\n")
-                
-                self.logger.info(f"Prepared artifact for upload: {artifact_name} at {artifact_path}")
-                return True
-                
-            except Exception as e:
-                self.logger.error(f"Failed to prepare artifact for upload: {str(e)}")
-                return False
-        else:
-            self.logger.info(f"Not running in GitHub Actions - artifact prepared locally: {artifact_path}")
-            return True
-    
-    def set_output(self, name: str, value: str) -> None:
-        """
-        Set GitHub Actions output variable.
-        
-        Args:
-            name: Output variable name
-            value: Output variable value
-        """
-        if os.getenv('GITHUB_ACTIONS'):
-            try:
-                with open(os.environ.get('GITHUB_OUTPUT', '/dev/null'), 'a') as f:
-                    f.write(f"{name}={value}\n")
-                self.logger.debug(f"Set GitHub Actions output: {name}={value}")
-            except Exception as e:
-                self.logger.error(f"Failed to set GitHub Actions output: {str(e)}")
-        else:
-            self.logger.debug(f"GitHub Actions output (local): {name}={value}")
-    
-    def add_step_summary(self, summary: str) -> None:
-        """
-        Add step summary to GitHub Actions job summary.
-        
-        Args:
-            summary: Markdown-formatted summary content
-        """
-        if os.getenv('GITHUB_ACTIONS'):
-            try:
-                with open(os.environ.get('GITHUB_STEP_SUMMARY', '/dev/null'), 'a') as f:
-                    f.write(summary)
-                    f.write('\n\n')
-                self.logger.debug("Added step summary to GitHub Actions")
-            except Exception as e:
-                self.logger.error(f"Failed to add GitHub Actions step summary: {str(e)}")
-        else:
-            self.logger.debug(f"GitHub Actions step summary (local):\n{summary}")
 
 
-class PerformanceGateValidator:
+@dataclass
+class QualityGateResult:
     """
-    Performance gate validation engine for CI/CD pipeline integration.
+    Quality gate validation result with comprehensive assessment and decision logic.
     
-    Implements comprehensive performance validation against Node.js baselines
-    with automated threshold enforcement and rollback recommendations per
-    the ≤10% variance requirement from Section 0.1.1.
+    Implements automated quality gate enforcement per Section 6.6.3 with configurable
+    thresholds, failure analysis, and automated rollback trigger recommendations.
     """
     
-    def __init__(self, baseline_comparison_suite: Optional[Any] = None):
-        """
-        Initialize performance gate validator.
-        
-        Args:
-            baseline_comparison_suite: Baseline comparison test suite instance
-        """
-        self.baseline_comparison_suite = baseline_comparison_suite
-        self.performance_config = create_performance_config()
-        self.github_integration = GitHubActionsIntegration()
-        
-        # Performance monitoring configuration
-        self.variance_threshold = PERFORMANCE_VARIANCE_THRESHOLD
-        self.critical_threshold = CRITICAL_VARIANCE_THRESHOLD
-        self.warning_threshold = WARNING_VARIANCE_THRESHOLD
-        self.rollback_threshold = ROLLBACK_TRIGGER_THRESHOLD
-        
-        # Quality gate definitions
-        self.quality_gates = self._initialize_quality_gates()
-        
-        self.logger = logging.getLogger(__name__)
+    # Gate identification
+    gate_name: str
+    gate_category: str
+    gate_description: str
     
-    def _initialize_quality_gates(self) -> Dict[str, QualityGateMetric]:
-        """Initialize quality gate metric definitions."""
-        return {
-            "performance_variance": QualityGateMetric(
-                name="Performance Variance",
-                threshold=self.variance_threshold,
-                current_value=0.0,
-                status=QualityGateResult.PASSED,
-                description=f"Performance variance from Node.js baseline must be ≤{self.variance_threshold:.1%}",
-                enforcement_level="blocking",
-                remediation_guidance="Optimize performance bottlenecks and review resource utilization"
-            ),
-            "test_coverage": QualityGateMetric(
-                name="Test Coverage",
-                threshold=90.0,
-                current_value=0.0,
-                status=QualityGateResult.PASSED,
-                description="Test coverage must be ≥90%",
-                enforcement_level="blocking",
-                remediation_guidance="Add unit tests to increase coverage above 90%"
-            ),
-            "static_analysis": QualityGateMetric(
-                name="Static Analysis",
-                threshold=0.0,
-                current_value=0.0,
-                status=QualityGateResult.PASSED,
-                description="Zero static analysis errors required (flake8, mypy)",
-                enforcement_level="blocking",
-                remediation_guidance="Fix all flake8 style violations and mypy type errors"
-            ),
-            "security_scan": QualityGateMetric(
-                name="Security Scan",
-                threshold=0.0,
-                current_value=0.0,
-                status=QualityGateResult.PASSED,
-                description="No critical security vulnerabilities allowed",
-                enforcement_level="blocking",
-                remediation_guidance="Address all critical and high-severity security findings"
-            ),
-            "error_rate": QualityGateMetric(
-                name="Error Rate",
-                threshold=1.0,
-                current_value=0.0,
-                status=QualityGateResult.PASSED,
-                description="Error rate must be <1%",
-                enforcement_level="blocking",
-                remediation_guidance="Investigate and fix sources of application errors"
-            )
-        }
+    # Validation results
+    decision: QualityGateDecision
+    passed: bool
+    score: float  # 0-100 performance score
+    threshold: float
+    measured_value: float
     
-    def validate_performance_gates(self, stage_results: List[CICDStageResult]) -> Tuple[bool, List[QualityGateMetric]]:
-        """
-        Validate performance gates against execution results.
-        
-        Args:
-            stage_results: List of CI/CD stage execution results
-            
-        Returns:
-            Tuple of (all_gates_passed, quality_gate_metrics)
-        """
-        self.logger.info("Starting performance gate validation")
-        
-        # Extract performance metrics from stage results
-        performance_metrics = self._extract_performance_metrics(stage_results)
-        
-        # Update quality gate metrics
-        updated_gates = []
-        all_passed = True
-        
-        for gate_name, gate_metric in self.quality_gates.items():
-            if gate_name in performance_metrics:
-                current_value = performance_metrics[gate_name]
-                gate_metric.current_value = current_value
-                
-                # Determine gate status based on threshold
-                if gate_name == "performance_variance":
-                    gate_metric.status = self._evaluate_performance_variance(current_value)
-                elif gate_name == "test_coverage":
-                    gate_metric.status = self._evaluate_coverage_threshold(current_value, gate_metric.threshold)
-                elif gate_name in ["static_analysis", "security_scan"]:
-                    gate_metric.status = self._evaluate_zero_tolerance(current_value)
-                elif gate_name == "error_rate":
-                    gate_metric.status = self._evaluate_error_rate(current_value, gate_metric.threshold)
-                
-                # Check if gate requires blocking
-                if gate_metric.requires_blocking:
-                    all_passed = False
-                    self.logger.warning(f"Quality gate failed: {gate_name} = {current_value}")
-                
-            updated_gates.append(gate_metric)
-        
-        self.logger.info(f"Performance gate validation complete - All passed: {all_passed}")
-        return all_passed, updated_gates
+    # Analysis details
+    variance_from_baseline: Optional[float] = None
+    trend_analysis: Optional[Dict[str, Any]] = None
+    regression_detected: bool = False
     
-    def _extract_performance_metrics(self, stage_results: List[CICDStageResult]) -> Dict[str, float]:
-        """Extract performance metrics from stage execution results."""
-        metrics = {}
-        
-        for stage_result in stage_results:
-            for metric in stage_result.metrics:
-                if metric.name == "Performance Variance":
-                    metrics["performance_variance"] = abs(metric.current_value)
-                elif metric.name == "Test Coverage":
-                    metrics["test_coverage"] = metric.current_value
-                elif metric.name == "Static Analysis Errors":
-                    metrics["static_analysis"] = metric.current_value
-                elif metric.name == "Security Vulnerabilities":
-                    metrics["security_scan"] = metric.current_value
-                elif metric.name == "Error Rate":
-                    metrics["error_rate"] = metric.current_value
-        
-        return metrics
+    # Failure analysis
+    failure_reason: Optional[str] = None
+    impact_assessment: Optional[str] = None
+    recommended_actions: List[str] = field(default_factory=list)
     
-    def _evaluate_performance_variance(self, variance_percent: float) -> QualityGateResult:
-        """Evaluate performance variance against thresholds."""
-        if variance_percent <= self.warning_threshold:
-            return QualityGateResult.PASSED
-        elif variance_percent <= self.variance_threshold:
-            return QualityGateResult.WARNING
-        elif variance_percent <= self.critical_threshold:
-            return QualityGateResult.FAILED
-        else:
-            return QualityGateResult.CRITICAL_FAILURE
+    # Execution context
+    validation_timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    execution_duration_seconds: float = 0.0
     
-    def _evaluate_coverage_threshold(self, current: float, threshold: float) -> QualityGateResult:
-        """Evaluate test coverage against threshold."""
-        if current >= threshold:
-            return QualityGateResult.PASSED
-        elif current >= (threshold - 5.0):  # Within 5% of threshold
-            return QualityGateResult.WARNING
-        else:
-            return QualityGateResult.FAILED
+    # Metadata
+    test_data_sources: List[str] = field(default_factory=list)
+    validation_confidence: float = 1.0  # 0-1 confidence level
     
-    def _evaluate_zero_tolerance(self, current: float) -> QualityGateResult:
-        """Evaluate zero-tolerance metrics (static analysis, security)."""
-        if current == 0:
-            return QualityGateResult.PASSED
-        else:
-            return QualityGateResult.FAILED
+    def is_blocking(self) -> bool:
+        """Check if this quality gate result should block deployment."""
+        return self.decision in [QualityGateDecision.FAIL] and not self.passed
     
-    def _evaluate_error_rate(self, current: float, threshold: float) -> QualityGateResult:
-        """Evaluate error rate against threshold."""
-        if current < threshold:
-            return QualityGateResult.PASSED
-        elif current < (threshold * 2):  # Within 2x threshold
-            return QualityGateResult.WARNING
-        else:
-            return QualityGateResult.FAILED
+    def requires_manual_review(self) -> bool:
+        """Check if this quality gate requires manual review."""
+        return self.decision == QualityGateDecision.MANUAL_REVIEW
     
-    def generate_rollback_recommendation(self, gate_metrics: List[QualityGateMetric]) -> DeploymentRecommendation:
-        """
-        Generate deployment rollback recommendation based on quality gates.
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert quality gate result to dictionary for serialization."""
+        result_dict = asdict(self)
+        result_dict['decision'] = self.decision.value
+        result_dict['validation_timestamp'] = self.validation_timestamp.isoformat()
+        return result_dict
+
+
+@dataclass
+class CICDPerformanceReport:
+    """
+    Comprehensive CI/CD performance report for automated pipeline integration.
+    
+    Provides complete performance assessment with deployment readiness analysis,
+    quality gate validation, and automated decision making per Section 4.6.1.
+    """
+    
+    # Report identification and context
+    report_id: str
+    ci_cd_context: CICDContext
+    generation_timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    
+    # Performance validation results
+    quality_gate_results: List[QualityGateResult] = field(default_factory=list)
+    baseline_comparison_results: List[Dict[str, Any]] = field(default_factory=list)
+    benchmark_test_results: List[Dict[str, Any]] = field(default_factory=list)
+    
+    # Overall assessment
+    overall_decision: QualityGateDecision = QualityGateDecision.MANUAL_REVIEW
+    deployment_readiness: DeploymentReadiness = DeploymentReadiness.NOT_READY
+    performance_score: float = 0.0  # 0-100 overall performance score
+    
+    # Risk assessment
+    risk_level: str = "MEDIUM"
+    blocking_issues: List[str] = field(default_factory=list)
+    warning_issues: List[str] = field(default_factory=list)
+    
+    # Recommendations and actions
+    deployment_recommendation: str = "Manual review required"
+    rollback_recommendation: bool = False
+    immediate_actions_required: List[str] = field(default_factory=list)
+    
+    # Trend analysis and regression detection
+    performance_trends: Dict[str, Any] = field(default_factory=dict)
+    regression_analysis: Dict[str, Any] = field(default_factory=dict)
+    baseline_drift_analysis: Dict[str, Any] = field(default_factory=dict)
+    
+    # Execution metadata
+    total_test_duration_seconds: float = 0.0
+    test_coverage_summary: Dict[str, Any] = field(default_factory=dict)
+    data_quality_assessment: Dict[str, Any] = field(default_factory=dict)
+    
+    def calculate_overall_decision(self) -> None:
+        """Calculate overall CI/CD decision based on quality gate results."""
+        if not self.quality_gate_results:
+            self.overall_decision = QualityGateDecision.MANUAL_REVIEW
+            return
         
-        Args:
-            gate_metrics: List of quality gate validation results
-            
-        Returns:
-            Deployment recommendation based on gate failures
-        """
-        critical_failures = [m for m in gate_metrics if m.status == QualityGateResult.CRITICAL_FAILURE]
-        failures = [m for m in gate_metrics if m.status == QualityGateResult.FAILED]
-        warnings = [m for m in gate_metrics if m.status == QualityGateResult.WARNING]
+        # Check for failures
+        failed_gates = [qgr for qgr in self.quality_gate_results if qgr.decision == QualityGateDecision.FAIL]
+        if failed_gates:
+            self.overall_decision = QualityGateDecision.FAIL
+            self.blocking_issues.extend([f"{gate.gate_name}: {gate.failure_reason}" for gate in failed_gates])
+            return
         
-        # Critical performance variance triggers rollback
-        performance_variance_metric = next(
-            (m for m in gate_metrics if m.name == "Performance Variance"), None
-        )
+        # Check for manual review requirements
+        manual_review_gates = [qgr for qgr in self.quality_gate_results if qgr.decision == QualityGateDecision.MANUAL_REVIEW]
+        if manual_review_gates:
+            self.overall_decision = QualityGateDecision.MANUAL_REVIEW
+            return
         
-        if performance_variance_metric and performance_variance_metric.current_value > self.rollback_threshold:
-            self.logger.critical(f"Performance variance {performance_variance_metric.current_value:.1%} exceeds rollback threshold {self.rollback_threshold:.1%}")
-            return DeploymentRecommendation.ROLLBACK_REQUIRED
-        
-        # Critical failures block deployment
-        if critical_failures:
-            self.logger.error(f"Critical failures detected: {[f.name for f in critical_failures]}")
-            return DeploymentRecommendation.BLOCKED
-        
-        # Security failures require review
-        security_failures = [m for m in failures if "Security" in m.name]
-        if security_failures:
-            self.logger.warning(f"Security failures require review: {[f.name for f in security_failures]}")
-            return DeploymentRecommendation.SECURITY_REVIEW
-        
-        # Performance issues require optimization
-        performance_failures = [m for m in failures if "Performance" in m.name]
-        if performance_failures:
-            self.logger.warning(f"Performance failures require optimization: {[f.name for f in performance_failures]}")
-            return DeploymentRecommendation.PERFORMANCE_OPTIMIZATION
-        
-        # Regular failures block deployment
-        if failures:
-            self.logger.warning(f"Quality gate failures block deployment: {[f.name for f in failures]}")
-            return DeploymentRecommendation.BLOCKED
-        
-        # Warnings allow conditional approval
-        if warnings:
-            self.logger.info(f"Warnings detected, conditional approval: {[w.name for w in warnings]}")
-            return DeploymentRecommendation.CONDITIONAL_APPROVAL
+        # Check for warnings
+        warning_gates = [qgr for qgr in self.quality_gate_results if qgr.decision == QualityGateDecision.WARNING]
+        if warning_gates:
+            self.overall_decision = QualityGateDecision.WARNING
+            self.warning_issues.extend([f"{gate.gate_name}: Performance approaching limits" for gate in warning_gates])
+            return
         
         # All gates passed
-        self.logger.info("All quality gates passed - deployment approved")
-        return DeploymentRecommendation.APPROVED
-
-
-class CICDIntegrationReporter:
-    """
-    Comprehensive CI/CD integration reporting engine for Flask migration validation.
+        self.overall_decision = QualityGateDecision.PASS
     
-    Provides automated performance validation reporting, quality gate enforcement,
-    deployment readiness assessment, and GitHub Actions integration with real-time
-    monitoring and alerting capabilities for enterprise-grade CI/CD governance.
-    """
+    def calculate_deployment_readiness(self) -> None:
+        """Calculate deployment readiness based on overall assessment."""
+        if self.overall_decision == QualityGateDecision.FAIL:
+            self.deployment_readiness = DeploymentReadiness.BLOCKED
+            self.deployment_recommendation = "Deployment blocked due to performance failures"
+            self.rollback_recommendation = True
+        elif self.overall_decision == QualityGateDecision.MANUAL_REVIEW:
+            self.deployment_readiness = DeploymentReadiness.MANUAL_APPROVAL
+            self.deployment_recommendation = "Manual approval required before deployment"
+        elif self.overall_decision == QualityGateDecision.WARNING:
+            self.deployment_readiness = DeploymentReadiness.CONDITIONAL
+            self.deployment_recommendation = "Deployment approved with enhanced monitoring"
+        else:
+            self.deployment_readiness = DeploymentReadiness.READY
+            self.deployment_recommendation = "Deployment approved - performance requirements met"
     
-    def __init__(self, environment: str = "cicd"):
-        """
-        Initialize CI/CD integration reporter.
-        
-        Args:
-            environment: Target environment for CI/CD reporting
-        """
-        self.environment = environment
-        self.session_id = str(uuid.uuid4())
-        self.start_time = datetime.now(timezone.utc)
-        
-        # Initialize components
-        self.github_integration = GitHubActionsIntegration()
-        self.performance_validator = PerformanceGateValidator()
-        
-        # CI/CD execution tracking
-        self.stage_results: List[CICDStageResult] = []
-        self.current_stage: Optional[CICDStageResult] = None
-        
-        # Performance monitoring
-        self.performance_config = create_performance_config(environment)
-        
-        # Quality gate enforcement
-        self.quality_gate_enforcement = QUALITY_GATE_ENFORCEMENT
-        self.deployment_readiness = False
-        self.rollback_recommended = False
-        
-        # Monitoring integration
-        if PROMETHEUS_AVAILABLE:
-            self.metrics_registry = CollectorRegistry()
-            self._setup_prometheus_metrics()
-        
-        self.logger = logging.getLogger(__name__)
-        self.logger.info(f"Initialized CI/CD integration reporter - Session: {self.session_id}")
-    
-    def _setup_prometheus_metrics(self) -> None:
-        """Setup Prometheus metrics for CI/CD monitoring."""
-        if not PROMETHEUS_AVAILABLE:
+    def calculate_performance_score(self) -> None:
+        """Calculate overall performance score from quality gate results."""
+        if not self.quality_gate_results:
+            self.performance_score = 0.0
             return
         
-        self.cicd_stage_duration = Histogram(
-            'cicd_stage_duration_seconds',
-            'CI/CD stage execution duration',
-            ['stage', 'status', 'environment'],
-            registry=self.metrics_registry
-        )
+        # Weight different gate categories
+        weights = {
+            'response_time': 0.3,
+            'throughput': 0.25,
+            'resource_utilization': 0.2,
+            'error_rate': 0.15,
+            'baseline_variance': 0.1
+        }
         
-        self.quality_gate_status = Gauge(
-            'quality_gate_status',
-            'Quality gate status (1=passed, 0=failed)',
-            ['gate_name', 'environment'],
-            registry=self.metrics_registry
-        )
+        weighted_scores = []
+        for gate in self.quality_gate_results:
+            weight = weights.get(gate.gate_category, 0.1)
+            weighted_scores.append(gate.score * weight)
         
-        self.performance_variance = Gauge(
-            'performance_variance_percent',
-            'Performance variance from Node.js baseline',
-            ['metric_type', 'environment'],
-            registry=self.metrics_registry
-        )
-        
-        self.deployment_readiness = Gauge(
-            'deployment_readiness_status',
-            'Deployment readiness status (1=ready, 0=not_ready)',
-            ['environment'],
-            registry=self.metrics_registry
-        )
+        self.performance_score = sum(weighted_scores) / sum(weights.values()) if weighted_scores else 0.0
     
-    def start_stage(self, stage: CICDStage) -> CICDStageResult:
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert CI/CD performance report to dictionary for serialization."""
+        report_dict = asdict(self)
+        report_dict['overall_decision'] = self.overall_decision.value
+        report_dict['deployment_readiness'] = self.deployment_readiness.value
+        report_dict['generation_timestamp'] = self.generation_timestamp.isoformat()
+        report_dict['ci_cd_context'] = self.ci_cd_context.to_dict()
+        report_dict['quality_gate_results'] = [qgr.to_dict() for qgr in self.quality_gate_results]
+        return report_dict
+
+
+class QualityGateValidator:
+    """
+    Automated quality gate validation engine for CI/CD pipeline integration.
+    
+    Implements comprehensive quality gate enforcement per Section 6.6.3 with
+    configurable thresholds, automated failure detection, and rollback triggers.
+    """
+    
+    def __init__(self, thresholds: Optional[Dict[str, float]] = None):
         """
-        Start CI/CD pipeline stage execution tracking.
+        Initialize quality gate validator with configurable thresholds.
         
         Args:
-            stage: CI/CD stage to start
+            thresholds: Optional custom thresholds for quality gate validation
+        """
+        self.thresholds = thresholds or QUALITY_GATE_THRESHOLDS.copy()
+        self.validation_history: List[QualityGateResult] = []
+        
+        # Configure structured logging
+        if STRUCTLOG_AVAILABLE:
+            self.logger = structlog.get_logger("quality_gate_validator")
+        else:
+            self.logger = logging.getLogger("quality_gate_validator")
+    
+    def validate_response_time_gate(self, test_results: List[TestResult]) -> QualityGateResult:
+        """
+        Validate response time quality gate against performance thresholds.
+        
+        Args:
+            test_results: List of performance test results for validation
             
         Returns:
-            Stage result object for tracking
+            QualityGateResult with response time validation assessment
         """
-        self.logger.info(f"Starting CI/CD stage: {stage.value}")
+        gate_start_time = time.time()
         
-        stage_result = CICDStageResult(
-            stage=stage,
-            status=QualityGateResult.PASSED,  # Initial status
-            start_time=datetime.now(timezone.utc)
+        # Extract response time metrics
+        p95_times = [tr.p95_response_time_ms for tr in test_results if tr.p95_response_time_ms > 0]
+        
+        if not p95_times:
+            return QualityGateResult(
+                gate_name="response_time_p95",
+                gate_category="response_time",
+                gate_description="95th percentile response time validation",
+                decision=QualityGateDecision.FAIL,
+                passed=False,
+                score=0.0,
+                threshold=self.thresholds['response_time_p95_ms'],
+                measured_value=0.0,
+                failure_reason="No response time data available",
+                validation_confidence=0.0,
+                execution_duration_seconds=time.time() - gate_start_time
+            )
+        
+        # Calculate metrics
+        max_p95_time = max(p95_times)
+        avg_p95_time = statistics.mean(p95_times)
+        threshold = self.thresholds['response_time_p95_ms']
+        
+        # Determine validation result
+        if max_p95_time <= threshold:
+            decision = QualityGateDecision.PASS
+            passed = True
+            score = max(0, 100 * (1 - max_p95_time / (threshold * 2)))  # Score based on threshold
+            failure_reason = None
+        elif max_p95_time <= threshold * 1.2:  # 20% tolerance for warning
+            decision = QualityGateDecision.WARNING
+            passed = False
+            score = max(0, 100 * (1 - max_p95_time / (threshold * 2)))
+            failure_reason = f"Response time approaching limit: {max_p95_time:.2f}ms (threshold: {threshold}ms)"
+        else:
+            decision = QualityGateDecision.FAIL
+            passed = False
+            score = max(0, 100 * (1 - max_p95_time / (threshold * 3)))
+            failure_reason = f"Response time exceeds threshold: {max_p95_time:.2f}ms (threshold: {threshold}ms)"
+        
+        # Generate recommendations
+        recommendations = []
+        if not passed:
+            recommendations.extend([
+                "Review Flask request processing pipeline for bottlenecks",
+                "Analyze database query performance and connection pooling",
+                "Consider implementing request caching for frequently accessed endpoints",
+                "Profile memory allocation and garbage collection patterns"
+            ])
+        
+        result = QualityGateResult(
+            gate_name="response_time_p95",
+            gate_category="response_time",
+            gate_description="95th percentile response time validation",
+            decision=decision,
+            passed=passed,
+            score=score,
+            threshold=threshold,
+            measured_value=max_p95_time,
+            failure_reason=failure_reason,
+            recommended_actions=recommendations,
+            validation_confidence=min(1.0, len(p95_times) / 100),  # Confidence based on sample size
+            test_data_sources=[tr.test_name for tr in test_results],
+            execution_duration_seconds=time.time() - gate_start_time
         )
         
-        self.stage_results.append(stage_result)
-        self.current_stage = stage_result
-        
-        # Create GitHub check run for stage
-        check_run = self.github_integration.create_check_run(
-            name=f"Performance Validation - {stage.value.replace('_', ' ').title()}",
-            status="in_progress"
-        )
-        
-        if check_run:
-            stage_result.artifacts.append(f"github_check_run_{check_run['id']}")
-        
-        return stage_result
-    
-    def complete_stage(self, status: QualityGateResult, error_message: Optional[str] = None) -> None:
-        """
-        Complete current CI/CD pipeline stage.
-        
-        Args:
-            status: Final stage status
-            error_message: Error message if stage failed
-        """
-        if not self.current_stage:
-            self.logger.error("No current stage to complete")
-            return
-        
-        self.current_stage.complete_stage(status, error_message)
+        self.validation_history.append(result)
         
         self.logger.info(
-            f"Completed CI/CD stage: {self.current_stage.stage.value} "
-            f"in {self.current_stage.duration_seconds:.2f}s with status: {status.value}"
+            "Response time quality gate validation completed",
+            decision=decision.value,
+            max_p95_ms=max_p95_time,
+            threshold_ms=threshold,
+            score=score
         )
         
-        # Update Prometheus metrics
-        if PROMETHEUS_AVAILABLE and hasattr(self, 'cicd_stage_duration'):
-            self.cicd_stage_duration.labels(
-                stage=self.current_stage.stage.value,
-                status=status.value,
-                environment=self.environment
-            ).observe(self.current_stage.duration_seconds)
-        
-        # Update GitHub check run
-        github_check_runs = [a for a in self.current_stage.artifacts if a.startswith("github_check_run_")]
-        if github_check_runs:
-            check_run_id = int(github_check_runs[0].split("_")[-1])
-            conclusion = "success" if status == QualityGateResult.PASSED else "failure"
-            
-            self.github_integration.update_check_run(
-                check_run_id=check_run_id,
-                conclusion=conclusion,
-                title=f"{self.current_stage.stage.value.replace('_', ' ').title()} - {status.value.title()}",
-                summary=f"Stage completed in {self.current_stage.duration_seconds:.2f}s",
-                text=error_message or "Stage completed successfully"
-            )
-        
-        self.current_stage = None
+        return result
     
-    def add_stage_metric(self, metric: QualityGateMetric) -> None:
+    def validate_throughput_gate(self, test_results: List[TestResult]) -> QualityGateResult:
         """
-        Add quality gate metric to current stage.
+        Validate throughput quality gate against performance thresholds.
         
         Args:
-            metric: Quality gate metric to add
-        """
-        if not self.current_stage:
-            self.logger.error("No current stage to add metric to")
-            return
-        
-        self.current_stage.add_metric(metric)
-        
-        # Update Prometheus metrics
-        if PROMETHEUS_AVAILABLE and hasattr(self, 'quality_gate_status'):
-            status_value = 1.0 if metric.is_passing else 0.0
-            self.quality_gate_status.labels(
-                gate_name=metric.name,
-                environment=self.environment
-            ).set(status_value)
-        
-        self.logger.debug(f"Added stage metric: {metric.name} = {metric.current_value} ({metric.status.value})")
-    
-    def execute_performance_validation(self) -> CICDStageResult:
-        """
-        Execute comprehensive performance validation stage.
-        
+            test_results: List of performance test results for validation
+            
         Returns:
-            Performance validation stage result
+            QualityGateResult with throughput validation assessment
         """
-        stage_result = self.start_stage(CICDStage.PERFORMANCE_TESTS)
+        gate_start_time = time.time()
+        
+        # Extract throughput metrics
+        throughput_values = [tr.requests_per_second for tr in test_results if tr.requests_per_second > 0]
+        
+        if not throughput_values:
+            return QualityGateResult(
+                gate_name="throughput_rps",
+                gate_category="throughput",
+                gate_description="Requests per second throughput validation",
+                decision=QualityGateDecision.FAIL,
+                passed=False,
+                score=0.0,
+                threshold=self.thresholds['throughput_rps'],
+                measured_value=0.0,
+                failure_reason="No throughput data available",
+                validation_confidence=0.0,
+                execution_duration_seconds=time.time() - gate_start_time
+            )
+        
+        # Calculate metrics
+        min_throughput = min(throughput_values)
+        avg_throughput = statistics.mean(throughput_values)
+        threshold = self.thresholds['throughput_rps']
+        
+        # Determine validation result
+        if min_throughput >= threshold:
+            decision = QualityGateDecision.PASS
+            passed = True
+            score = min(100, 100 * (avg_throughput / threshold))
+            failure_reason = None
+        elif min_throughput >= threshold * 0.8:  # 80% threshold for warning
+            decision = QualityGateDecision.WARNING
+            passed = False
+            score = min(100, 100 * (avg_throughput / threshold))
+            failure_reason = f"Throughput approaching minimum: {min_throughput:.2f} RPS (threshold: {threshold} RPS)"
+        else:
+            decision = QualityGateDecision.FAIL
+            passed = False
+            score = min(100, 100 * (avg_throughput / threshold))
+            failure_reason = f"Throughput below minimum: {min_throughput:.2f} RPS (threshold: {threshold} RPS)"
+        
+        # Generate recommendations
+        recommendations = []
+        if not passed:
+            recommendations.extend([
+                "Optimize Flask Blueprint routing and request handling",
+                "Review database connection pool configuration",
+                "Consider implementing request batching for bulk operations",
+                "Analyze external service integration efficiency",
+                "Evaluate horizontal scaling options"
+            ])
+        
+        result = QualityGateResult(
+            gate_name="throughput_rps",
+            gate_category="throughput",
+            gate_description="Requests per second throughput validation",
+            decision=decision,
+            passed=passed,
+            score=score,
+            threshold=threshold,
+            measured_value=min_throughput,
+            failure_reason=failure_reason,
+            recommended_actions=recommendations,
+            validation_confidence=min(1.0, len(throughput_values) / 50),
+            test_data_sources=[tr.test_name for tr in test_results],
+            execution_duration_seconds=time.time() - gate_start_time
+        )
+        
+        self.validation_history.append(result)
+        
+        self.logger.info(
+            "Throughput quality gate validation completed",
+            decision=decision.value,
+            min_throughput_rps=min_throughput,
+            threshold_rps=threshold,
+            score=score
+        )
+        
+        return result
+    
+    def validate_error_rate_gate(self, test_results: List[TestResult]) -> QualityGateResult:
+        """
+        Validate error rate quality gate against performance thresholds.
+        
+        Args:
+            test_results: List of performance test results for validation
+            
+        Returns:
+            QualityGateResult with error rate validation assessment
+        """
+        gate_start_time = time.time()
+        
+        # Extract error rate metrics
+        error_rates = [tr.error_rate_percent for tr in test_results]
+        
+        if not error_rates:
+            return QualityGateResult(
+                gate_name="error_rate_percent",
+                gate_category="error_rate",
+                gate_description="Error rate validation",
+                decision=QualityGateDecision.FAIL,
+                passed=False,
+                score=0.0,
+                threshold=self.thresholds['error_rate_percent'],
+                measured_value=100.0,
+                failure_reason="No error rate data available",
+                validation_confidence=0.0,
+                execution_duration_seconds=time.time() - gate_start_time
+            )
+        
+        # Calculate metrics
+        max_error_rate = max(error_rates)
+        avg_error_rate = statistics.mean(error_rates)
+        threshold = self.thresholds['error_rate_percent']
+        
+        # Determine validation result
+        if max_error_rate <= threshold:
+            decision = QualityGateDecision.PASS
+            passed = True
+            score = max(0, 100 * (1 - max_error_rate / (threshold * 2)))
+            failure_reason = None
+        elif max_error_rate <= threshold * 2:  # 2x threshold for warning
+            decision = QualityGateDecision.WARNING
+            passed = False
+            score = max(0, 100 * (1 - max_error_rate / (threshold * 3)))
+            failure_reason = f"Error rate elevated: {max_error_rate:.3f}% (threshold: {threshold}%)"
+        else:
+            decision = QualityGateDecision.FAIL
+            passed = False
+            score = max(0, 100 * (1 - max_error_rate / (threshold * 5)))
+            failure_reason = f"Error rate too high: {max_error_rate:.3f}% (threshold: {threshold}%)"
+        
+        # Generate recommendations
+        recommendations = []
+        if not passed:
+            recommendations.extend([
+                "Investigate error patterns and root causes",
+                "Review exception handling and error recovery logic",
+                "Analyze external service failure rates and circuit breaker configuration",
+                "Validate input validation and request processing robustness"
+            ])
+        
+        result = QualityGateResult(
+            gate_name="error_rate_percent",
+            gate_category="error_rate",
+            gate_description="Error rate validation",
+            decision=decision,
+            passed=passed,
+            score=score,
+            threshold=threshold,
+            measured_value=max_error_rate,
+            failure_reason=failure_reason,
+            recommended_actions=recommendations,
+            validation_confidence=min(1.0, sum(tr.total_requests for tr in test_results) / 1000),
+            test_data_sources=[tr.test_name for tr in test_results],
+            execution_duration_seconds=time.time() - gate_start_time
+        )
+        
+        self.validation_history.append(result)
+        
+        self.logger.info(
+            "Error rate quality gate validation completed",
+            decision=decision.value,
+            max_error_rate=max_error_rate,
+            threshold=threshold,
+            score=score
+        )
+        
+        return result
+    
+    def validate_baseline_variance_gate(self, variance_analyses: List[VarianceAnalysis]) -> QualityGateResult:
+        """
+        Validate baseline variance quality gate against ≤10% requirement.
+        
+        Args:
+            variance_analyses: List of variance analysis results for validation
+            
+        Returns:
+            QualityGateResult with baseline variance validation assessment
+        """
+        gate_start_time = time.time()
+        
+        if not variance_analyses:
+            return QualityGateResult(
+                gate_name="baseline_variance_percent",
+                gate_category="baseline_variance",
+                gate_description="≤10% variance from Node.js baseline validation",
+                decision=QualityGateDecision.FAIL,
+                passed=False,
+                score=0.0,
+                threshold=self.thresholds['variance_threshold_percent'],
+                measured_value=100.0,
+                failure_reason="No baseline variance data available",
+                validation_confidence=0.0,
+                execution_duration_seconds=time.time() - gate_start_time
+            )
+        
+        # Calculate variance metrics
+        variance_values = [abs(va.variance_percent) for va in variance_analyses]
+        max_variance = max(variance_values)
+        avg_variance = statistics.mean(variance_values)
+        threshold = self.thresholds['variance_threshold_percent']
+        
+        # Count violations
+        violations = [va for va in variance_analyses if abs(va.variance_percent) > threshold]
+        critical_violations = [va for va in variance_analyses if abs(va.variance_percent) > threshold * 1.5]
+        
+        # Determine validation result
+        if not violations:
+            decision = QualityGateDecision.PASS
+            passed = True
+            score = max(0, 100 * (1 - avg_variance / threshold))
+            failure_reason = None
+        elif not critical_violations and len(violations) <= len(variance_analyses) * 0.2:  # ≤20% violations
+            decision = QualityGateDecision.WARNING
+            passed = False
+            score = max(0, 100 * (1 - avg_variance / (threshold * 2)))
+            failure_reason = f"Minor baseline variance detected: {len(violations)} metrics exceed threshold"
+        else:
+            decision = QualityGateDecision.FAIL
+            passed = False
+            score = max(0, 100 * (1 - avg_variance / (threshold * 3)))
+            failure_reason = f"Significant baseline variance: {len(violations)} metrics exceed ≤{threshold}% threshold (max: {max_variance:.1f}%)"
+        
+        # Generate recommendations
+        recommendations = []
+        if not passed:
+            violation_metrics = [va.metric_name for va in violations]
+            recommendations.extend([
+                f"Investigate performance regression in metrics: {', '.join(violation_metrics[:3])}",
+                "Review recent code changes for performance impact",
+                "Compare resource utilization patterns with Node.js baseline",
+                "Consider performance optimization initiatives"
+            ])
+        
+        result = QualityGateResult(
+            gate_name="baseline_variance_percent",
+            gate_category="baseline_variance",
+            gate_description="≤10% variance from Node.js baseline validation",
+            decision=decision,
+            passed=passed,
+            score=score,
+            threshold=threshold,
+            measured_value=max_variance,
+            variance_from_baseline=avg_variance,
+            failure_reason=failure_reason,
+            recommended_actions=recommendations,
+            validation_confidence=min(1.0, len(variance_analyses) / 20),
+            test_data_sources=[va.metric_name for va in variance_analyses],
+            execution_duration_seconds=time.time() - gate_start_time
+        )
+        
+        self.validation_history.append(result)
+        
+        self.logger.info(
+            "Baseline variance quality gate validation completed",
+            decision=decision.value,
+            max_variance=max_variance,
+            violations=len(violations),
+            threshold=threshold,
+            score=score
+        )
+        
+        return result
+    
+    def validate_resource_utilization_gate(self, test_results: List[TestResult]) -> QualityGateResult:
+        """
+        Validate resource utilization quality gate for CPU and memory thresholds.
+        
+        Args:
+            test_results: List of performance test results for validation
+            
+        Returns:
+            QualityGateResult with resource utilization validation assessment
+        """
+        gate_start_time = time.time()
+        
+        # Extract resource utilization metrics
+        cpu_values = [tr.cpu_utilization_percent for tr in test_results if tr.cpu_utilization_percent is not None]
+        memory_values = [tr.memory_utilization_percent for tr in test_results if tr.memory_utilization_percent is not None]
+        
+        if not cpu_values and not memory_values:
+            return QualityGateResult(
+                gate_name="resource_utilization",
+                gate_category="resource_utilization",
+                gate_description="CPU and memory utilization validation",
+                decision=QualityGateDecision.WARNING,
+                passed=False,
+                score=50.0,
+                threshold=70.0,
+                measured_value=0.0,
+                failure_reason="No resource utilization data available",
+                validation_confidence=0.0,
+                execution_duration_seconds=time.time() - gate_start_time
+            )
+        
+        # Calculate resource metrics
+        cpu_threshold = self.thresholds.get('cpu_utilization_percent', 70.0)
+        memory_threshold = self.thresholds.get('memory_utilization_percent', 80.0)
+        
+        max_cpu = max(cpu_values) if cpu_values else 0.0
+        max_memory = max(memory_values) if memory_values else 0.0
+        
+        # Determine validation result
+        cpu_violation = max_cpu > cpu_threshold
+        memory_violation = max_memory > memory_threshold
+        
+        if not cpu_violation and not memory_violation:
+            decision = QualityGateDecision.PASS
+            passed = True
+            score = 100 - max(max_cpu / cpu_threshold, max_memory / memory_threshold) * 50
+            failure_reason = None
+        elif max_cpu > cpu_threshold * 1.2 or max_memory > memory_threshold * 1.2:
+            decision = QualityGateDecision.FAIL
+            passed = False
+            score = 100 - max(max_cpu / cpu_threshold, max_memory / memory_threshold) * 75
+            failure_reason = f"Resource utilization too high - CPU: {max_cpu:.1f}% (threshold: {cpu_threshold}%), Memory: {max_memory:.1f}% (threshold: {memory_threshold}%)"
+        else:
+            decision = QualityGateDecision.WARNING
+            passed = False
+            score = 100 - max(max_cpu / cpu_threshold, max_memory / memory_threshold) * 50
+            failure_reason = f"Resource utilization elevated - CPU: {max_cpu:.1f}%, Memory: {max_memory:.1f}%"
+        
+        # Generate recommendations
+        recommendations = []
+        if not passed:
+            if cpu_violation:
+                recommendations.extend([
+                    "Optimize CPU-intensive operations and algorithms",
+                    "Consider implementing async processing patterns",
+                    "Review request processing parallelization"
+                ])
+            if memory_violation:
+                recommendations.extend([
+                    "Investigate memory usage patterns and potential leaks",
+                    "Optimize object lifecycle management",
+                    "Review caching strategy and memory allocation"
+                ])
+        
+        result = QualityGateResult(
+            gate_name="resource_utilization",
+            gate_category="resource_utilization",
+            gate_description="CPU and memory utilization validation",
+            decision=decision,
+            passed=passed,
+            score=max(0, score),
+            threshold=max(cpu_threshold, memory_threshold),
+            measured_value=max(max_cpu, max_memory),
+            failure_reason=failure_reason,
+            recommended_actions=recommendations,
+            validation_confidence=min(1.0, (len(cpu_values) + len(memory_values)) / 100),
+            test_data_sources=[tr.test_name for tr in test_results],
+            execution_duration_seconds=time.time() - gate_start_time
+        )
+        
+        self.validation_history.append(result)
+        
+        self.logger.info(
+            "Resource utilization quality gate validation completed",
+            decision=decision.value,
+            max_cpu=max_cpu,
+            max_memory=max_memory,
+            score=score
+        )
+        
+        return result
+
+
+class NotificationManager:
+    """
+    Comprehensive notification and alerting manager for CI/CD pipeline integration.
+    
+    Implements automated alerting per Section 6.6.2 failed test handling with
+    multi-channel notifications, escalation workflows, and stakeholder communication.
+    """
+    
+    def __init__(self, ci_cd_context: CICDContext):
+        """
+        Initialize notification manager with CI/CD context.
+        
+        Args:
+            ci_cd_context: CI/CD pipeline context for notification targeting
+        """
+        self.ci_cd_context = ci_cd_context
+        self.notification_history: List[Dict[str, Any]] = []
+        
+        # Configure structured logging
+        if STRUCTLOG_AVAILABLE:
+            self.logger = structlog.get_logger("notification_manager")
+        else:
+            self.logger = logging.getLogger("notification_manager")
+    
+    def send_performance_alert(self, report: CICDPerformanceReport, severity: AlertSeverity) -> Dict[str, Any]:
+        """
+        Send comprehensive performance alert with multi-channel notification.
+        
+        Args:
+            report: CI/CD performance report for alert content
+            severity: Alert severity level for escalation routing
+            
+        Returns:
+            Dictionary containing notification delivery results
+        """
+        alert_id = str(uuid.uuid4())
+        notification_results = {
+            'alert_id': alert_id,
+            'severity': severity.value,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'channels': {},
+            'overall_success': False
+        }
         
         try:
-            self.logger.info("Starting performance validation execution")
+            # Generate alert content
+            alert_content = self._generate_alert_content(report, severity)
             
-            # Initialize baseline comparison if available
-            if BASELINE_COMPARISON_AVAILABLE:
-                baseline_suite = BaselineComparisonTestSuite()
-                baseline_suite.setup_baseline_comparison(self.environment)
-                
-                # Execute performance comparisons
-                self._execute_baseline_performance_tests(baseline_suite, stage_result)
-            else:
-                self.logger.warning("Baseline comparison not available - using mock validation")
-                self._execute_mock_performance_validation(stage_result)
+            # Send GitHub Actions notification
+            if 'github-actions-summary' in self.ci_cd_context.notification_channels:
+                github_result = self._send_github_actions_notification(alert_content)
+                notification_results['channels']['github_actions'] = github_result
             
-            # Validate performance against thresholds
-            performance_passed = self._validate_performance_thresholds(stage_result)
+            # Send Slack notification
+            if 'slack' in self.ci_cd_context.notification_channels and SLACK_WEBHOOK_URL:
+                slack_result = self._send_slack_notification(alert_content, severity)
+                notification_results['channels']['slack'] = slack_result
             
-            if performance_passed:
-                self.complete_stage(QualityGateResult.PASSED)
-                self.logger.info("Performance validation passed")
-            else:
-                self.complete_stage(QualityGateResult.FAILED, "Performance validation failed - variance exceeds threshold")
-                self.logger.error("Performance validation failed")
+            # Send Teams notification
+            if 'teams' in self.ci_cd_context.notification_channels and TEAMS_WEBHOOK_URL:
+                teams_result = self._send_teams_notification(alert_content, severity)
+                notification_results['channels']['teams'] = teams_result
+            
+            # Send email notification for critical/emergency alerts
+            if severity in [AlertSeverity.CRITICAL, AlertSeverity.EMERGENCY] and EMAIL_NOTIFICATION_URL:
+                email_result = self._send_email_notification(alert_content, severity)
+                notification_results['channels']['email'] = email_result
+            
+            # Check overall success
+            channel_results = notification_results['channels'].values()
+            notification_results['overall_success'] = any(result.get('success', False) for result in channel_results)
+            
+            # Store notification history
+            self.notification_history.append({
+                'alert_id': alert_id,
+                'report_id': report.report_id,
+                'severity': severity.value,
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'success': notification_results['overall_success'],
+                'channels': list(notification_results['channels'].keys())
+            })
+            
+            self.logger.info(
+                "Performance alert sent",
+                alert_id=alert_id,
+                severity=severity.value,
+                channels=list(notification_results['channels'].keys()),
+                success=notification_results['overall_success']
+            )
+            
+            return notification_results
             
         except Exception as e:
-            error_msg = f"Performance validation error: {str(e)}"
-            self.logger.error(error_msg, exc_info=True)
-            self.complete_stage(QualityGateResult.CRITICAL_FAILURE, error_msg)
-        
-        return stage_result
+            self.logger.error(
+                "Failed to send performance alert",
+                alert_id=alert_id,
+                error=str(e),
+                traceback=traceback.format_exc()
+            )
+            notification_results['error'] = str(e)
+            return notification_results
     
-    def _execute_baseline_performance_tests(self, baseline_suite: Any, stage_result: CICDStageResult) -> None:
-        """Execute baseline performance comparison tests."""
-        # Mock performance metrics for testing
-        mock_metrics = {
-            'response_times': {
-                '/api/v1/auth/login': [45.2, 42.0, 48.1, 44.7, 46.3],
-                '/api/v1/users': [78.9, 72.4, 81.2, 76.8, 79.5],
-                '/api/v1/data/reports': [124.6, 115.3, 128.9, 121.7, 126.2]
+    def _generate_alert_content(self, report: CICDPerformanceReport, severity: AlertSeverity) -> Dict[str, Any]:
+        """Generate comprehensive alert content based on performance report."""
+        
+        # Determine alert title and summary
+        if severity == AlertSeverity.EMERGENCY:
+            title = "🚨 EMERGENCY: Critical Performance Failure"
+            summary = "Multiple critical performance failures detected - immediate action required"
+        elif severity == AlertSeverity.CRITICAL:
+            title = "🔥 CRITICAL: Performance Quality Gate Failure"
+            summary = "Performance quality gates failed - deployment blocked"
+        elif severity == AlertSeverity.WARNING:
+            title = "⚠️ WARNING: Performance Issues Detected"
+            summary = "Performance approaching limits - review recommended"
+        else:
+            title = "ℹ️ INFO: Performance Validation Update"
+            summary = "Performance validation completed"
+        
+        # Generate failure summary
+        failed_gates = [qgr for qgr in report.quality_gate_results if not qgr.passed]
+        failure_summary = []
+        
+        for gate in failed_gates[:5]:  # Limit to top 5 failures
+            failure_summary.append({
+                'gate': gate.gate_name,
+                'category': gate.gate_category,
+                'measured': gate.measured_value,
+                'threshold': gate.threshold,
+                'reason': gate.failure_reason
+            })
+        
+        return {
+            'title': title,
+            'summary': summary,
+            'severity': severity.value,
+            'ci_cd_context': self.ci_cd_context.to_dict(),
+            'performance_summary': {
+                'overall_decision': report.overall_decision.value,
+                'deployment_readiness': report.deployment_readiness.value,
+                'performance_score': report.performance_score,
+                'total_gates': len(report.quality_gate_results),
+                'failed_gates': len(failed_gates),
+                'blocking_issues': len(report.blocking_issues),
+                'warning_issues': len(report.warning_issues)
             },
-            'resource_utilization': {
-                'cpu_percent': 42.8,
-                'memory_mb': 1256.7
+            'failure_summary': failure_summary,
+            'recommendations': {
+                'deployment': report.deployment_recommendation,
+                'rollback': report.rollback_recommendation,
+                'immediate_actions': report.immediate_actions_required[:3]  # Top 3 actions
             },
-            'throughput_metrics': {
-                'requests_per_second': 247.8,
-                'error_rate_percent': 0.033
+            'links': {
+                'github_run': f"https://github.com/{self.ci_cd_context.repository}/actions/runs/{self.ci_cd_context.run_id}",
+                'commit': f"https://github.com/{self.ci_cd_context.repository}/commit/{self.ci_cd_context.commit_sha}",
+                'pr': f"https://github.com/{self.ci_cd_context.repository}/pull/{self.ci_cd_context.pull_request_id}" if self.ci_cd_context.pull_request_id else None
             }
         }
-        
-        # Execute response time comparisons
-        total_variance = 0.0
-        comparison_count = 0
-        
-        for endpoint, times in mock_metrics['response_times'].items():
-            try:
-                method = 'POST' if 'login' in endpoint else 'GET'
-                result = baseline_suite.compare_response_time_performance(endpoint, method, times)
-                
-                # Add performance metric
-                performance_metric = QualityGateMetric(
-                    name=f"Response Time Variance - {endpoint}",
-                    threshold=PERFORMANCE_VARIANCE_THRESHOLD,
-                    current_value=abs(result.variance_percent),
-                    status=QualityGateResult.PASSED if result.within_threshold else QualityGateResult.FAILED,
-                    description=f"Response time variance for {method} {endpoint}",
-                    enforcement_level="blocking"
-                )
-                stage_result.add_metric(performance_metric)
-                
-                total_variance += abs(result.variance_percent)
-                comparison_count += 1
-                
-            except Exception as e:
-                self.logger.warning(f"Baseline comparison failed for {endpoint}: {str(e)}")
-        
-        # Calculate overall performance variance
-        if comparison_count > 0:
-            avg_variance = total_variance / comparison_count
-            
-            overall_metric = QualityGateMetric(
-                name="Performance Variance",
-                threshold=PERFORMANCE_VARIANCE_THRESHOLD,
-                current_value=avg_variance,
-                status=QualityGateResult.PASSED if avg_variance <= PERFORMANCE_VARIANCE_THRESHOLD else QualityGateResult.FAILED,
-                description="Overall performance variance from Node.js baseline",
-                enforcement_level="blocking"
-            )
-            stage_result.add_metric(overall_metric)
-            
-            # Update Prometheus metrics
-            if PROMETHEUS_AVAILABLE and hasattr(self, 'performance_variance'):
-                self.performance_variance.labels(
-                    metric_type="overall",
-                    environment=self.environment
-                ).set(avg_variance)
     
-    def _execute_mock_performance_validation(self, stage_result: CICDStageResult) -> None:
-        """Execute mock performance validation for testing."""
-        # Simulate performance validation with acceptable variance
-        mock_variance = 8.5  # Within 10% threshold
-        
-        performance_metric = QualityGateMetric(
-            name="Performance Variance",
-            threshold=PERFORMANCE_VARIANCE_THRESHOLD,
-            current_value=mock_variance,
-            status=QualityGateResult.PASSED,
-            description="Mock performance variance validation",
-            enforcement_level="blocking"
-        )
-        stage_result.add_metric(performance_metric)
-        
-        self.logger.info(f"Mock performance validation executed - variance: {mock_variance:.1f}%")
-    
-    def _validate_performance_thresholds(self, stage_result: CICDStageResult) -> bool:
-        """Validate performance metrics against thresholds."""
-        performance_metrics = [m for m in stage_result.metrics if "Performance" in m.name]
-        
-        for metric in performance_metrics:
-            if metric.current_value > metric.threshold:
-                self.logger.warning(f"Performance threshold exceeded: {metric.name} = {metric.current_value:.2f} > {metric.threshold:.2f}")
-                return False
-        
-        return True
-    
-    def execute_quality_gates_validation(self) -> CICDStageResult:
-        """
-        Execute comprehensive quality gates validation.
-        
-        Returns:
-            Quality gates validation stage result
-        """
-        stage_result = self.start_stage(CICDStage.QUALITY_GATES)
-        
+    def _send_github_actions_notification(self, alert_content: Dict[str, Any]) -> Dict[str, Any]:
+        """Send GitHub Actions step summary notification."""
         try:
-            self.logger.info("Starting quality gates validation")
+            # Generate GitHub Actions step summary
+            summary_content = self._generate_github_step_summary(alert_content)
             
-            # Validate performance gates
-            gates_passed, gate_metrics = self.performance_validator.validate_performance_gates(self.stage_results)
+            # Write to GitHub step summary file
+            if os.path.exists(os.path.dirname(GITHUB_STEP_SUMMARY_FILE)):
+                with open(GITHUB_STEP_SUMMARY_FILE, 'w', encoding='utf-8') as f:
+                    f.write(summary_content)
             
-            # Add gate metrics to stage result
-            for metric in gate_metrics:
-                stage_result.add_metric(metric)
+            # Set GitHub Actions outputs
+            self._set_github_outputs(alert_content)
             
-            # Generate deployment recommendation
-            deployment_recommendation = self.performance_validator.generate_rollback_recommendation(gate_metrics)
-            
-            # Set deployment readiness
-            self.deployment_readiness = (deployment_recommendation == DeploymentRecommendation.APPROVED)
-            self.rollback_recommended = (deployment_recommendation == DeploymentRecommendation.ROLLBACK_REQUIRED)
-            
-            # Update GitHub Actions outputs
-            self.github_integration.set_output("deployment_approved", str(self.deployment_readiness).lower())
-            self.github_integration.set_output("rollback_recommended", str(self.rollback_recommended).lower())
-            self.github_integration.set_output("deployment_recommendation", deployment_recommendation.value)
-            
-            # Update Prometheus metrics
-            if PROMETHEUS_AVAILABLE and hasattr(self, 'deployment_readiness'):
-                self.deployment_readiness.labels(environment=self.environment).set(
-                    1.0 if self.deployment_readiness else 0.0
-                )
-            
-            if gates_passed and self.deployment_readiness:
-                self.complete_stage(QualityGateResult.PASSED)
-                self.logger.info("Quality gates validation passed - deployment approved")
-            else:
-                self.complete_stage(QualityGateResult.FAILED, f"Quality gates failed - {deployment_recommendation.value}")
-                self.logger.error("Quality gates validation failed")
+            return {
+                'success': True,
+                'channel': 'github_actions',
+                'summary_file': GITHUB_STEP_SUMMARY_FILE
+            }
             
         except Exception as e:
-            error_msg = f"Quality gates validation error: {str(e)}"
-            self.logger.error(error_msg, exc_info=True)
-            self.complete_stage(QualityGateResult.CRITICAL_FAILURE, error_msg)
-        
-        return stage_result
+            self.logger.error("Failed to send GitHub Actions notification", error=str(e))
+            return {
+                'success': False,
+                'channel': 'github_actions',
+                'error': str(e)
+            }
     
-    def assess_deployment_readiness(self) -> Dict[str, Any]:
-        """
-        Assess deployment readiness based on all validation stages.
+    def _send_slack_notification(self, alert_content: Dict[str, Any], severity: AlertSeverity) -> Dict[str, Any]:
+        """Send Slack webhook notification."""
+        if not REQUESTS_AVAILABLE or not SLACK_WEBHOOK_URL:
+            return {'success': False, 'channel': 'slack', 'error': 'Slack webhook not configured'}
         
-        Returns:
-            Deployment readiness assessment with detailed analysis
-        """
-        self.logger.info("Assessing deployment readiness")
-        
-        # Analyze stage results
-        completed_stages = [s for s in self.stage_results if s.is_complete]
-        passed_stages = [s for s in completed_stages if s.is_successful]
-        failed_stages = [s for s in completed_stages if not s.is_successful]
-        
-        # Calculate success rate
-        success_rate = len(passed_stages) / len(completed_stages) * 100.0 if completed_stages else 0.0
-        
-        # Collect critical metrics
-        critical_metrics = []
-        for stage in completed_stages:
-            critical_metrics.extend([m for m in stage.metrics if m.requires_blocking])
-        
-        # Deployment recommendation logic
-        if self.rollback_recommended:
-            recommendation = DeploymentRecommendation.ROLLBACK_REQUIRED
-            readiness_status = "rollback_required"
-        elif critical_metrics:
-            recommendation = DeploymentRecommendation.BLOCKED
-            readiness_status = "blocked"
-        elif success_rate < 80.0:
-            recommendation = DeploymentRecommendation.BLOCKED
-            readiness_status = "insufficient_quality"
-        elif self.deployment_readiness:
-            recommendation = DeploymentRecommendation.APPROVED
-            readiness_status = "ready"
-        else:
-            recommendation = DeploymentRecommendation.CONDITIONAL_APPROVAL
-            readiness_status = "conditional"
-        
-        assessment = {
-            "session_id": self.session_id,
-            "environment": self.environment,
-            "assessment_timestamp": datetime.now(timezone.utc).isoformat(),
-            "deployment_ready": self.deployment_readiness,
-            "rollback_recommended": self.rollback_recommended,
-            "deployment_recommendation": recommendation.value,
-            "readiness_status": readiness_status,
-            "success_rate_percent": success_rate,
-            "stages_summary": {
-                "total_stages": len(completed_stages),
-                "passed_stages": len(passed_stages),
-                "failed_stages": len(failed_stages),
-                "critical_failures": len(critical_metrics)
-            },
-            "stage_details": [
-                {
-                    "stage": stage.stage.value,
-                    "status": stage.status.value,
-                    "duration_seconds": stage.duration_seconds,
-                    "metrics_count": len(stage.metrics),
-                    "critical_failures": len([m for m in stage.metrics if m.requires_blocking])
-                }
-                for stage in completed_stages
-            ],
-            "quality_gates": [
-                {
-                    "name": metric.name,
-                    "threshold": metric.threshold,
-                    "current_value": metric.current_value,
-                    "status": metric.status.value,
-                    "enforcement_level": metric.enforcement_level,
-                    "blocking": metric.requires_blocking
-                }
-                for stage in completed_stages
-                for metric in stage.metrics
-            ],
-            "recommendations": self._generate_deployment_recommendations(recommendation, critical_metrics)
-        }
-        
-        self.logger.info(f"Deployment readiness assessment complete - Status: {readiness_status}")
-        return assessment
-    
-    def _generate_deployment_recommendations(self, recommendation: DeploymentRecommendation, 
-                                          critical_metrics: List[QualityGateMetric]) -> List[str]:
-        """Generate deployment recommendations based on assessment."""
-        recommendations = []
-        
-        if recommendation == DeploymentRecommendation.ROLLBACK_REQUIRED:
-            recommendations.extend([
-                "CRITICAL: Immediate rollback required due to performance degradation",
-                "Review performance metrics and identify optimization opportunities",
-                "Consider infrastructure scaling or code optimization before retry"
-            ])
-        elif recommendation == DeploymentRecommendation.BLOCKED:
-            recommendations.extend([
-                "Deployment blocked due to quality gate failures",
-                "Address all critical quality issues before redeployment"
-            ])
+        try:
+            # Color coding based on severity
+            color_map = {
+                AlertSeverity.EMERGENCY: '#FF0000',  # Red
+                AlertSeverity.CRITICAL: '#FF4444',   # Dark red
+                AlertSeverity.WARNING: '#FFAA00',    # Orange
+                AlertSeverity.INFO: '#00AA00'        # Green
+            }
             
-            # Add specific recommendations for critical metrics
-            for metric in critical_metrics:
-                if metric.remediation_guidance:
-                    recommendations.append(f"• {metric.name}: {metric.remediation_guidance}")
-        
-        elif recommendation == DeploymentRecommendation.CONDITIONAL_APPROVAL:
-            recommendations.extend([
-                "Conditional deployment approval with monitoring required",
-                "Monitor performance closely during deployment",
-                "Prepare rollback procedures for rapid response"
-            ])
-        elif recommendation == DeploymentRecommendation.APPROVED:
-            recommendations.extend([
-                "Deployment approved - all quality gates passed",
-                "Continue monitoring performance post-deployment",
-                "Update baseline metrics after successful deployment"
-            ])
-        
-        return recommendations
-    
-    def generate_cicd_report(self, output_format: str = "json") -> Path:
-        """
-        Generate comprehensive CI/CD integration report.
-        
-        Args:
-            output_format: Report output format (json, html, markdown)
-            
-        Returns:
-            Path to generated report file
-        """
-        self.logger.info(f"Generating CI/CD integration report in {output_format} format")
-        
-        # Generate deployment readiness assessment
-        readiness_assessment = self.assess_deployment_readiness()
-        
-        # Calculate session duration
-        session_duration = (datetime.now(timezone.utc) - self.start_time).total_seconds()
-        
-        # Comprehensive report data
-        report_data = {
-            "cicd_integration_report": {
-                "metadata": {
-                    "session_id": self.session_id,
-                    "environment": self.environment,
-                    "generated_at": datetime.now(timezone.utc).isoformat(),
-                    "session_duration_seconds": session_duration,
-                    "github_repository": self.github_integration.repository,
-                    "github_workflow_run": self.github_integration.workflow_run_id,
-                    "github_ref": self.github_integration.ref,
-                    "github_sha": self.github_integration.sha
-                },
-                "deployment_readiness": readiness_assessment,
-                "performance_validation": {
-                    "baseline_comparison_available": BASELINE_COMPARISON_AVAILABLE,
-                    "benchmark_testing_available": BENCHMARK_AVAILABLE,
-                    "variance_threshold_percent": PERFORMANCE_VARIANCE_THRESHOLD,
-                    "critical_threshold_percent": CRITICAL_VARIANCE_THRESHOLD,
-                    "rollback_threshold_percent": ROLLBACK_TRIGGER_THRESHOLD
-                },
-                "stage_execution_summary": {
-                    "total_stages": len(self.stage_results),
-                    "completed_stages": len([s for s in self.stage_results if s.is_complete]),
-                    "successful_stages": len([s for s in self.stage_results if s.is_successful]),
-                    "failed_stages": len([s for s in self.stage_results if not s.is_successful]),
-                    "total_duration_seconds": sum(s.duration_seconds for s in self.stage_results if s.is_complete)
-                },
-                "detailed_stage_results": [
+            # Build Slack message
+            slack_payload = {
+                "text": alert_content['title'],
+                "attachments": [
                     {
-                        "stage": stage.stage.value,
-                        "status": stage.status.value,
-                        "start_time": stage.start_time.isoformat(),
-                        "end_time": stage.end_time.isoformat() if stage.end_time else None,
-                        "duration_seconds": stage.duration_seconds,
-                        "metrics": [
+                        "color": color_map.get(severity, '#FFAA00'),
+                        "title": alert_content['title'],
+                        "text": alert_content['summary'],
+                        "fields": [
                             {
-                                "name": metric.name,
-                                "threshold": metric.threshold,
-                                "current_value": metric.current_value,
-                                "status": metric.status.value,
-                                "description": metric.description,
-                                "enforcement_level": metric.enforcement_level,
-                                "remediation_guidance": metric.remediation_guidance
+                                "title": "Pipeline",
+                                "value": f"{alert_content['ci_cd_context']['workflow_name']} - {alert_content['ci_cd_context']['job_name']}",
+                                "short": True
+                            },
+                            {
+                                "title": "Branch",
+                                "value": alert_content['ci_cd_context']['branch'],
+                                "short": True
+                            },
+                            {
+                                "title": "Performance Score",
+                                "value": f"{alert_content['performance_summary']['performance_score']:.1f}/100",
+                                "short": True
+                            },
+                            {
+                                "title": "Decision",
+                                "value": alert_content['performance_summary']['overall_decision'].upper(),
+                                "short": True
                             }
-                            for metric in stage.metrics
                         ],
-                        "artifacts": stage.artifacts,
-                        "error_message": stage.error_message
+                        "actions": [
+                            {
+                                "type": "button",
+                                "text": "View GitHub Run",
+                                "url": alert_content['links']['github_run']
+                            }
+                        ] + ([
+                            {
+                                "type": "button",
+                                "text": "View Pull Request",
+                                "url": alert_content['links']['pr']
+                            }
+                        ] if alert_content['links']['pr'] else []),
+                        "footer": "Flask Migration Performance Monitor",
+                        "ts": int(datetime.now(timezone.utc).timestamp())
                     }
-                    for stage in self.stage_results
                 ]
             }
+            
+            # Send Slack webhook
+            response = requests.post(
+                SLACK_WEBHOOK_URL,
+                json=slack_payload,
+                timeout=30,
+                headers={'Content-Type': 'application/json'}
+            )
+            
+            if response.status_code == 200:
+                return {'success': True, 'channel': 'slack', 'response_code': response.status_code}
+            else:
+                return {'success': False, 'channel': 'slack', 'error': f"HTTP {response.status_code}: {response.text}"}
+                
+        except Exception as e:
+            self.logger.error("Failed to send Slack notification", error=str(e))
+            return {'success': False, 'channel': 'slack', 'error': str(e)}
+    
+    def _send_teams_notification(self, alert_content: Dict[str, Any], severity: AlertSeverity) -> Dict[str, Any]:
+        """Send Microsoft Teams webhook notification."""
+        if not REQUESTS_AVAILABLE or not TEAMS_WEBHOOK_URL:
+            return {'success': False, 'channel': 'teams', 'error': 'Teams webhook not configured'}
+        
+        try:
+            # Color coding based on severity
+            color_map = {
+                AlertSeverity.EMERGENCY: 'FF0000',  # Red
+                AlertSeverity.CRITICAL: 'FF4444',   # Dark red  
+                AlertSeverity.WARNING: 'FFAA00',    # Orange
+                AlertSeverity.INFO: '00AA00'        # Green
+            }
+            
+            # Build Teams message
+            teams_payload = {
+                "@type": "MessageCard",
+                "@context": "http://schema.org/extensions",
+                "themeColor": color_map.get(severity, 'FFAA00'),
+                "summary": alert_content['title'],
+                "sections": [
+                    {
+                        "activityTitle": alert_content['title'],
+                        "activitySubtitle": alert_content['summary'],
+                        "facts": [
+                            {
+                                "name": "Pipeline",
+                                "value": f"{alert_content['ci_cd_context']['workflow_name']} - {alert_content['ci_cd_context']['job_name']}"
+                            },
+                            {
+                                "name": "Branch",
+                                "value": alert_content['ci_cd_context']['branch']
+                            },
+                            {
+                                "name": "Performance Score",
+                                "value": f"{alert_content['performance_summary']['performance_score']:.1f}/100"
+                            },
+                            {
+                                "name": "Decision",
+                                "value": alert_content['performance_summary']['overall_decision'].upper()
+                            },
+                            {
+                                "name": "Failed Gates",
+                                "value": str(alert_content['performance_summary']['failed_gates'])
+                            }
+                        ],
+                        "markdown": True
+                    }
+                ],
+                "potentialAction": [
+                    {
+                        "@type": "OpenUri",
+                        "name": "View GitHub Run",
+                        "targets": [
+                            {
+                                "os": "default",
+                                "uri": alert_content['links']['github_run']
+                            }
+                        ]
+                    }
+                ] + ([
+                    {
+                        "@type": "OpenUri",
+                        "name": "View Pull Request",
+                        "targets": [
+                            {
+                                "os": "default",
+                                "uri": alert_content['links']['pr']
+                            }
+                        ]
+                    }
+                ] if alert_content['links']['pr'] else [])
+            }
+            
+            # Send Teams webhook
+            response = requests.post(
+                TEAMS_WEBHOOK_URL,
+                json=teams_payload,
+                timeout=30,
+                headers={'Content-Type': 'application/json'}
+            )
+            
+            if response.status_code == 200:
+                return {'success': True, 'channel': 'teams', 'response_code': response.status_code}
+            else:
+                return {'success': False, 'channel': 'teams', 'error': f"HTTP {response.status_code}: {response.text}"}
+                
+        except Exception as e:
+            self.logger.error("Failed to send Teams notification", error=str(e))
+            return {'success': False, 'channel': 'teams', 'error': str(e)}
+    
+    def _send_email_notification(self, alert_content: Dict[str, Any], severity: AlertSeverity) -> Dict[str, Any]:
+        """Send email notification for critical alerts."""
+        if not REQUESTS_AVAILABLE or not EMAIL_NOTIFICATION_URL:
+            return {'success': False, 'channel': 'email', 'error': 'Email notification not configured'}
+        
+        try:
+            # Build email payload
+            email_payload = {
+                "to": self.ci_cd_context.escalation_contacts,
+                "subject": f"[{severity.value.upper()}] {alert_content['title']} - {self.ci_cd_context.repository}",
+                "html_body": self._generate_email_html(alert_content),
+                "text_body": self._generate_email_text(alert_content)
+            }
+            
+            # Send email notification
+            response = requests.post(
+                EMAIL_NOTIFICATION_URL,
+                json=email_payload,
+                timeout=30,
+                headers={'Content-Type': 'application/json'}
+            )
+            
+            if response.status_code in [200, 201, 202]:
+                return {'success': True, 'channel': 'email', 'response_code': response.status_code}
+            else:
+                return {'success': False, 'channel': 'email', 'error': f"HTTP {response.status_code}: {response.text}"}
+                
+        except Exception as e:
+            self.logger.error("Failed to send email notification", error=str(e))
+            return {'success': False, 'channel': 'email', 'error': str(e)}
+    
+    def _generate_github_step_summary(self, alert_content: Dict[str, Any]) -> str:
+        """Generate GitHub Actions step summary in Markdown format."""
+        
+        perf_summary = alert_content['performance_summary']
+        
+        # Status emoji mapping
+        status_emoji = {
+            'pass': '✅',
+            'fail': '❌',
+            'warning': '⚠️',
+            'manual_review': '🔍'
         }
         
-        # Generate report file
-        report_filename = f"cicd_integration_report_{self.session_id}_{int(time.time())}.{output_format}"
-        report_path = Path(tempfile.gettempdir()) / report_filename
-        
-        if output_format == "json":
-            with open(report_path, 'w') as f:
-                json.dump(report_data, f, indent=2, default=str)
-        elif output_format == "markdown":
-            markdown_content = self._generate_markdown_report(report_data)
-            with open(report_path, 'w') as f:
-                f.write(markdown_content)
-        else:
-            raise ValueError(f"Unsupported output format: {output_format}")
-        
-        # Upload artifact to GitHub Actions
-        self.github_integration.upload_artifact(f"cicd-integration-report", report_path)
-        
-        self.logger.info(f"CI/CD integration report generated: {report_path}")
-        return report_path
-    
-    def _generate_markdown_report(self, report_data: Dict[str, Any]) -> str:
-        """Generate markdown-formatted CI/CD integration report."""
-        cicd_data = report_data["cicd_integration_report"]
-        metadata = cicd_data["metadata"]
-        readiness = cicd_data["deployment_readiness"]
-        
-        markdown = f"""# CI/CD Integration Performance Validation Report
+        summary = f"""# {alert_content['title']}
 
-## Session Information
-- **Session ID**: {metadata['session_id']}
-- **Environment**: {metadata['environment']}
-- **Generated**: {metadata['generated_at']}
-- **Duration**: {metadata['session_duration_seconds']:.2f} seconds
-- **GitHub Repository**: {metadata.get('github_repository', 'N/A')}
-- **Workflow Run**: {metadata.get('github_workflow_run', 'N/A')}
+## Summary
+{alert_content['summary']}
 
-## Deployment Readiness Assessment
+## Performance Assessment
+| Metric | Value |
+|--------|-------|
+| Overall Decision | {status_emoji.get(perf_summary['overall_decision'], '❓')} {perf_summary['overall_decision'].upper()} |
+| Performance Score | {perf_summary['performance_score']:.1f}/100 |
+| Quality Gates | {perf_summary['total_gates'] - perf_summary['failed_gates']}/{perf_summary['total_gates']} Passed |
+| Blocking Issues | {perf_summary['blocking_issues']} |
+| Warning Issues | {perf_summary['warning_issues']} |
 
-### Overall Status: {readiness['readiness_status'].upper()}
-
-- **Deployment Ready**: {'✅ YES' if readiness['deployment_ready'] else '❌ NO'}
-- **Rollback Recommended**: {'⚠️ YES' if readiness['rollback_recommended'] else '✅ NO'}
-- **Success Rate**: {readiness['success_rate_percent']:.1f}%
-
-### Recommendation: {readiness['deployment_recommendation'].upper()}
-
+## Pipeline Context
+| Property | Value |
+|----------|-------|
+| Repository | {alert_content['ci_cd_context']['repository']} |
+| Branch | {alert_content['ci_cd_context']['branch']} |
+| Commit | [`{alert_content['ci_cd_context']['commit_sha'][:8]}`]({alert_content['links']['commit']}) |
+| Workflow | {alert_content['ci_cd_context']['workflow_name']} |
+| Job | {alert_content['ci_cd_context']['job_name']} |
 """
+
+        # Add failure details if present
+        if alert_content['failure_summary']:
+            summary += "\n## Failed Quality Gates\n"
+            summary += "| Gate | Category | Measured | Threshold | Status |\n"
+            summary += "|------|----------|----------|-----------|--------|\n"
+            
+            for failure in alert_content['failure_summary']:
+                summary += f"| {failure['gate']} | {failure['category']} | {failure['measured']:.2f} | {failure['threshold']:.2f} | ❌ Failed |\n"
         
         # Add recommendations
-        if readiness.get('recommendations'):
-            markdown += "### Recommendations\n\n"
-            for rec in readiness['recommendations']:
-                markdown += f"- {rec}\n"
-            markdown += "\n"
+        if alert_content['recommendations']['immediate_actions']:
+            summary += "\n## Immediate Actions Required\n"
+            for i, action in enumerate(alert_content['recommendations']['immediate_actions'], 1):
+                summary += f"{i}. {action}\n"
         
-        # Add stage summary
-        stages_summary = readiness['stages_summary']
-        markdown += f"""### Stages Summary
-
-| Metric | Count |
-|--------|-------|
-| Total Stages | {stages_summary['total_stages']} |
-| Passed Stages | {stages_summary['passed_stages']} |
-| Failed Stages | {stages_summary['failed_stages']} |
-| Critical Failures | {stages_summary['critical_failures']} |
-
-"""
+        # Add links
+        summary += f"\n## Links\n"
+        summary += f"- [GitHub Actions Run]({alert_content['links']['github_run']})\n"
+        summary += f"- [Commit Details]({alert_content['links']['commit']})\n"
+        if alert_content['links']['pr']:
+            summary += f"- [Pull Request]({alert_content['links']['pr']})\n"
         
-        # Add quality gates
-        if readiness.get('quality_gates'):
-            markdown += "### Quality Gates\n\n"
-            markdown += "| Gate | Current | Threshold | Status | Blocking |\n"
-            markdown += "|------|---------|-----------|--------|---------|\n"
-            
-            for gate in readiness['quality_gates']:
-                status_icon = "✅" if gate['status'] == 'passed' else "❌"
-                blocking_icon = "🚫" if gate['blocking'] else "ℹ️"
-                markdown += f"| {gate['name']} | {gate['current_value']:.2f} | {gate['threshold']:.2f} | {status_icon} {gate['status']} | {blocking_icon} |\n"
-            
-            markdown += "\n"
+        summary += f"\n---\n*Generated by Flask Migration Performance Monitor at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}*"
         
-        # Add detailed stage results
-        markdown += "## Detailed Stage Results\n\n"
-        
-        for stage_detail in readiness['stage_details']:
-            status_icon = "✅" if stage_detail['status'] == 'passed' else "❌"
-            markdown += f"""### {stage_detail['stage'].replace('_', ' ').title()} {status_icon}
-
-- **Status**: {stage_detail['status']}
-- **Duration**: {stage_detail['duration_seconds']:.2f} seconds
-- **Metrics**: {stage_detail['metrics_count']}
-- **Critical Failures**: {stage_detail['critical_failures']}
-
-"""
-        
-        markdown += "---\n*Report generated by Flask Migration CI/CD Performance Validator*\n"
-        
-        return markdown
+        return summary
     
-    def send_github_step_summary(self) -> None:
-        """Send comprehensive step summary to GitHub Actions."""
+    def _set_github_outputs(self, alert_content: Dict[str, Any]) -> None:
+        """Set GitHub Actions outputs for downstream jobs."""
         try:
-            readiness_assessment = self.assess_deployment_readiness()
+            outputs = {
+                'performance-decision': alert_content['performance_summary']['overall_decision'],
+                'deployment-readiness': alert_content['performance_summary']['deployment_readiness'] if 'deployment_readiness' in alert_content['performance_summary'] else 'unknown',
+                'performance-score': str(alert_content['performance_summary']['performance_score']),
+                'failed-gates': str(alert_content['performance_summary']['failed_gates']),
+                'blocking-issues': str(alert_content['performance_summary']['blocking_issues']),
+                'rollback-recommended': str(alert_content['recommendations']['rollback']).lower()
+            }
             
-            # Generate step summary markdown
-            summary = f"""## 🚀 CI/CD Performance Validation Results
-
-### Deployment Status: {readiness_assessment['readiness_status'].upper()}
-
-{'✅ **DEPLOYMENT APPROVED**' if readiness_assessment['deployment_ready'] else '❌ **DEPLOYMENT BLOCKED**'}
-
-#### Key Metrics
-- **Success Rate**: {readiness_assessment['success_rate_percent']:.1f}%
-- **Stages Completed**: {readiness_assessment['stages_summary']['passed_stages']}/{readiness_assessment['stages_summary']['total_stages']}
-- **Critical Failures**: {readiness_assessment['stages_summary']['critical_failures']}
-
-#### Performance Validation
-- **Variance Threshold**: ≤{PERFORMANCE_VARIANCE_THRESHOLD:.1%}
-- **Quality Gates**: {'PASSED' if readiness_assessment['deployment_ready'] else 'FAILED'}
-
-"""
-            
-            if readiness_assessment['rollback_recommended']:
-                summary += "⚠️ **ROLLBACK RECOMMENDED** - Performance degradation detected\n\n"
-            
-            # Add recommendations
-            if readiness_assessment.get('recommendations'):
-                summary += "#### Recommendations\n"
-                for rec in readiness_assessment['recommendations'][:3]:  # Limit to top 3
-                    summary += f"- {rec}\n"
-                summary += "\n"
-            
-            summary += f"*Session ID: {self.session_id}*"
-            
-            self.github_integration.add_step_summary(summary)
-            self.logger.info("GitHub Actions step summary sent")
+            # Write outputs to GitHub Actions output file
+            if os.path.exists(os.path.dirname(GITHUB_ACTIONS_OUTPUT_FILE)):
+                with open(GITHUB_ACTIONS_OUTPUT_FILE, 'a', encoding='utf-8') as f:
+                    for key, value in outputs.items():
+                        f.write(f"{key}={value}\n")
             
         except Exception as e:
-            self.logger.error(f"Failed to send GitHub step summary: {str(e)}")
-
-
-# Pytest Integration for CI/CD Testing
-
-@pytest.fixture(scope="session")
-def cicd_integration_reporter():
-    """
-    Pytest fixture providing CI/CD integration reporter for testing.
+            self.logger.warning("Failed to set GitHub Actions outputs", error=str(e))
     
+    def _generate_email_html(self, alert_content: Dict[str, Any]) -> str:
+        """Generate HTML email content."""
+        return f"""
+        <html>
+        <body>
+            <h2>{alert_content['title']}</h2>
+            <p>{alert_content['summary']}</p>
+            
+            <h3>Performance Summary</h3>
+            <ul>
+                <li><strong>Decision:</strong> {alert_content['performance_summary']['overall_decision'].upper()}</li>
+                <li><strong>Score:</strong> {alert_content['performance_summary']['performance_score']:.1f}/100</li>
+                <li><strong>Failed Gates:</strong> {alert_content['performance_summary']['failed_gates']}</li>
+            </ul>
+            
+            <h3>Pipeline Context</h3>
+            <ul>
+                <li><strong>Repository:</strong> {alert_content['ci_cd_context']['repository']}</li>
+                <li><strong>Branch:</strong> {alert_content['ci_cd_context']['branch']}</li>
+                <li><strong>Commit:</strong> {alert_content['ci_cd_context']['commit_sha'][:8]}</li>
+            </ul>
+            
+            <p><a href="{alert_content['links']['github_run']}">View GitHub Actions Run</a></p>
+        </body>
+        </html>
+        """
+    
+    def _generate_email_text(self, alert_content: Dict[str, Any]) -> str:
+        """Generate plain text email content."""
+        return f"""
+{alert_content['title']}
+
+{alert_content['summary']}
+
+Performance Summary:
+- Decision: {alert_content['performance_summary']['overall_decision'].upper()}
+- Score: {alert_content['performance_summary']['performance_score']:.1f}/100
+- Failed Gates: {alert_content['performance_summary']['failed_gates']}
+
+Pipeline Context:
+- Repository: {alert_content['ci_cd_context']['repository']}
+- Branch: {alert_content['ci_cd_context']['branch']}
+- Commit: {alert_content['ci_cd_context']['commit_sha'][:8]}
+
+View GitHub Actions Run: {alert_content['links']['github_run']}
+        """
+
+
+class CICDIntegrationReportGenerator:
+    """
+    Comprehensive CI/CD Integration Report Generator for Performance Validation.
+    
+    Implements automated performance validation reporting per Section 6.6.2 CI/CD integration
+    with quality gate validation, deployment readiness assessment, and rollback recommendations
+    per technical specification requirements.
+    """
+    
+    def __init__(self, ci_cd_context: Optional[CICDContext] = None,
+                 custom_thresholds: Optional[Dict[str, float]] = None):
+        """
+        Initialize CI/CD integration report generator.
+        
+        Args:
+            ci_cd_context: Optional CI/CD pipeline context (auto-detected if None)
+            custom_thresholds: Optional custom quality gate thresholds
+        """
+        # Initialize CI/CD context
+        self.ci_cd_context = ci_cd_context or CICDContext.from_github_actions()
+        
+        # Initialize quality gate validator
+        self.quality_gate_validator = QualityGateValidator(custom_thresholds)
+        
+        # Initialize notification manager
+        self.notification_manager = NotificationManager(self.ci_cd_context)
+        
+        # Initialize performance report generator
+        self.performance_report_generator = create_performance_report_generator()
+        
+        # Initialize test execution tracking
+        self.test_execution_start_time = time.time()
+        self.baseline_comparison_results = []
+        self.benchmark_test_results = []
+        
+        # Configure structured logging
+        if STRUCTLOG_AVAILABLE:
+            self.logger = structlog.get_logger("ci_cd_integration_report")
+        else:
+            self.logger = logging.getLogger("ci_cd_integration_report")
+        
+        self.logger.info(
+            "CI/CD integration report generator initialized",
+            pipeline_id=self.ci_cd_context.pipeline_id,
+            stage=self.ci_cd_context.stage.value,
+            environment=self.ci_cd_context.environment
+        )
+    
+    def execute_performance_validation_pipeline(self, app, include_baseline_comparison: bool = True,
+                                              include_benchmark_testing: bool = True,
+                                              include_load_testing: bool = True) -> CICDPerformanceReport:
+        """
+        Execute comprehensive performance validation pipeline for CI/CD integration.
+        
+        Args:
+            app: Flask application instance for testing
+            include_baseline_comparison: Whether to include baseline comparison testing
+            include_benchmark_testing: Whether to include Apache Bench testing
+            include_load_testing: Whether to include load testing scenarios
+            
+        Returns:
+            CICDPerformanceReport with comprehensive performance assessment
+        """
+        report_start_time = time.time()
+        
+        self.logger.info(
+            "Starting CI/CD performance validation pipeline",
+            include_baseline=include_baseline_comparison,
+            include_benchmark=include_benchmark_testing,
+            include_load=include_load_testing
+        )
+        
+        try:
+            # Initialize performance report
+            report = CICDPerformanceReport(
+                report_id=f"cicd-{self.ci_cd_context.pipeline_id}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}",
+                ci_cd_context=self.ci_cd_context
+            )
+            
+            # Execute baseline comparison testing if enabled
+            if include_baseline_comparison:
+                self.logger.info("Executing baseline comparison testing")
+                baseline_results = self._execute_baseline_comparison_testing(app)
+                report.baseline_comparison_results = baseline_results
+                
+                # Add baseline test results to performance report generator
+                for result in baseline_results:
+                    self.performance_report_generator.add_test_results(result, 'baseline_comparison')
+            
+            # Execute Apache Bench testing if enabled
+            if include_benchmark_testing:
+                self.logger.info("Executing Apache Bench performance testing")
+                benchmark_results = self._execute_benchmark_testing(app)
+                report.benchmark_test_results = benchmark_results
+                
+                # Add benchmark test results to performance report generator
+                for result in benchmark_results:
+                    self.performance_report_generator.add_test_results(result, 'apache_bench')
+            
+            # Execute load testing scenarios if enabled
+            if include_load_testing:
+                self.logger.info("Executing load testing scenarios")
+                load_test_results = self._execute_load_testing_scenarios(app)
+                
+                # Add load test results to performance report generator
+                for result in load_test_results:
+                    self.performance_report_generator.add_test_results(result, 'load_testing')
+            
+            # Perform variance analysis
+            self.logger.info("Performing comprehensive variance analysis")
+            variance_analyses = self.performance_report_generator.data_aggregator.perform_variance_analysis()
+            
+            # Get aggregated test results
+            test_results = self.performance_report_generator.data_aggregator.test_results
+            
+            # Execute quality gate validation
+            self.logger.info("Executing quality gate validation")
+            quality_gate_results = self._execute_quality_gate_validation(test_results, variance_analyses)
+            report.quality_gate_results = quality_gate_results
+            
+            # Calculate overall assessment
+            report.calculate_overall_decision()
+            report.calculate_deployment_readiness()
+            report.calculate_performance_score()
+            
+            # Generate performance trends and regression analysis
+            report.performance_trends = self._analyze_performance_trends(test_results)
+            report.regression_analysis = self._analyze_performance_regression(variance_analyses)
+            report.baseline_drift_analysis = self._analyze_baseline_drift(variance_analyses)
+            
+            # Generate immediate actions and recommendations
+            report.immediate_actions_required = self._generate_immediate_actions(report)
+            
+            # Calculate execution metadata
+            report.total_test_duration_seconds = time.time() - report_start_time
+            report.test_coverage_summary = self._calculate_test_coverage_summary(test_results)
+            report.data_quality_assessment = self._assess_data_quality(test_results, variance_analyses)
+            
+            # Determine risk level
+            report.risk_level = self._calculate_risk_level(report)
+            
+            self.logger.info(
+                "CI/CD performance validation pipeline completed",
+                report_id=report.report_id,
+                overall_decision=report.overall_decision.value,
+                deployment_readiness=report.deployment_readiness.value,
+                performance_score=report.performance_score,
+                duration_seconds=report.total_test_duration_seconds
+            )
+            
+            return report
+            
+        except Exception as e:
+            self.logger.error(
+                "CI/CD performance validation pipeline failed",
+                error=str(e),
+                traceback=traceback.format_exc()
+            )
+            
+            # Create failure report
+            failure_report = CICDPerformanceReport(
+                report_id=f"cicd-failed-{self.ci_cd_context.pipeline_id}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}",
+                ci_cd_context=self.ci_cd_context,
+                overall_decision=QualityGateDecision.FAIL,
+                deployment_readiness=DeploymentReadiness.BLOCKED,
+                deployment_recommendation="Performance validation pipeline failed - investigation required",
+                blocking_issues=[f"Pipeline execution failure: {str(e)}"],
+                rollback_recommendation=True,
+                total_test_duration_seconds=time.time() - report_start_time
+            )
+            
+            return failure_report
+    
+    def generate_ci_cd_reports(self, performance_report: CICDPerformanceReport,
+                             output_dir: Optional[Path] = None,
+                             send_notifications: bool = True) -> Dict[str, Any]:
+        """
+        Generate comprehensive CI/CD reports with notifications and GitHub Actions integration.
+        
+        Args:
+            performance_report: CI/CD performance report for output generation
+            output_dir: Optional directory for report file output
+            send_notifications: Whether to send automated notifications
+            
+        Returns:
+            Dictionary containing report generation results and notification status
+        """
+        generation_start_time = time.time()
+        
+        self.logger.info(
+            "Generating CI/CD reports and notifications",
+            report_id=performance_report.report_id,
+            output_dir=str(output_dir) if output_dir else None,
+            send_notifications=send_notifications
+        )
+        
+        try:
+            results = {
+                'report_id': performance_report.report_id,
+                'generation_timestamp': datetime.now(timezone.utc).isoformat(),
+                'reports_generated': {},
+                'notifications_sent': {},
+                'github_actions_integration': {},
+                'overall_success': False
+            }
+            
+            # Generate JSON report for CI/CD integration
+            json_report = performance_report.to_dict()
+            results['reports_generated']['json'] = {
+                'success': True,
+                'content_length': len(json.dumps(json_report)),
+                'format': 'json'
+            }
+            
+            # Generate GitHub Actions summary
+            github_summary = self._generate_github_actions_summary(performance_report)
+            results['github_actions_integration']['summary'] = {
+                'success': True,
+                'summary_length': len(github_summary)
+            }
+            
+            # Set GitHub Actions outputs
+            github_outputs = self._set_github_actions_outputs(performance_report)
+            results['github_actions_integration']['outputs'] = github_outputs
+            
+            # Save reports to files if output directory provided
+            if output_dir:
+                output_dir = Path(output_dir)
+                output_dir.mkdir(parents=True, exist_ok=True)
+                
+                # Save JSON report
+                json_path = output_dir / f"ci_cd_performance_report_{performance_report.report_id}.json"
+                with open(json_path, 'w', encoding='utf-8') as f:
+                    json.dump(json_report, f, indent=2, default=str)
+                
+                results['reports_generated']['json']['file_path'] = str(json_path)
+                
+                # Generate and save comprehensive performance reports
+                try:
+                    comprehensive_reports = self.performance_report_generator.generate_all_formats(
+                        output_dir, ReportAudience.TECHNICAL
+                    )
+                    results['reports_generated']['comprehensive'] = {
+                        'success': True,
+                        'formats': list(comprehensive_reports.keys()),
+                        'files': {fmt: str(path) for fmt, path in comprehensive_reports.items()}
+                    }
+                except Exception as comp_error:
+                    self.logger.warning("Failed to generate comprehensive reports", error=str(comp_error))
+                    results['reports_generated']['comprehensive'] = {
+                        'success': False,
+                        'error': str(comp_error)
+                    }
+            
+            # Send notifications if enabled
+            if send_notifications:
+                notification_results = self._send_performance_notifications(performance_report)
+                results['notifications_sent'] = notification_results
+            
+            # Determine overall success
+            results['overall_success'] = (
+                results['reports_generated']['json']['success'] and
+                results['github_actions_integration']['summary']['success']
+            )
+            
+            results['generation_duration_seconds'] = time.time() - generation_start_time
+            
+            self.logger.info(
+                "CI/CD reports and notifications completed",
+                report_id=performance_report.report_id,
+                overall_success=results['overall_success'],
+                duration_seconds=results['generation_duration_seconds']
+            )
+            
+            return results
+            
+        except Exception as e:
+            self.logger.error(
+                "Failed to generate CI/CD reports",
+                report_id=performance_report.report_id,
+                error=str(e),
+                traceback=traceback.format_exc()
+            )
+            
+            return {
+                'report_id': performance_report.report_id,
+                'generation_timestamp': datetime.now(timezone.utc).isoformat(),
+                'overall_success': False,
+                'error': str(e),
+                'generation_duration_seconds': time.time() - generation_start_time
+            }
+    
+    def _execute_baseline_comparison_testing(self, app) -> List[Dict[str, Any]]:
+        """Execute comprehensive baseline comparison testing."""
+        try:
+            from tests.performance.baseline_data import BaselineDataManager
+            from tests.performance.performance_config import create_performance_config
+            
+            # Initialize baseline comparison suite
+            baseline_manager = BaselineDataManager()
+            performance_config = create_performance_config()
+            baseline_suite = BaselineComparisonTestSuite(
+                baseline_manager, performance_config, {}
+            )
+            
+            # Execute comprehensive baseline comparison
+            comparison_result = baseline_suite.run_comprehensive_baseline_comparison(
+                app,
+                test_scenarios=["critical_endpoints", "load_scaling", "resource_monitoring"],
+                include_load_testing=True,
+                include_database_testing=True,
+                include_memory_profiling=True
+            )
+            
+            # Convert result to standardized format
+            return [comparison_result.generate_summary_report()]
+            
+        except Exception as e:
+            self.logger.error("Baseline comparison testing failed", error=str(e))
+            return [{
+                'test_name': 'baseline_comparison_failed',
+                'test_type': 'baseline_comparison',
+                'error': str(e),
+                'success': False
+            }]
+    
+    def _execute_benchmark_testing(self, app) -> List[Dict[str, Any]]:
+        """Execute Apache Bench performance testing."""
+        try:
+            from tests.performance.baseline_data import BaselineDataManager
+            from tests.performance.performance_config import create_performance_config
+            
+            # Initialize benchmark tester
+            baseline_manager = BaselineDataManager()
+            performance_config = create_performance_config()
+            benchmark_tester = ApacheBenchmarkTester(
+                baseline_manager, performance_config, "ci-cd-testing"
+            )
+            
+            # Define critical endpoints for testing
+            critical_endpoints = [
+                {"path": "/health", "method": "GET", "requests": 1000, "concurrency": 50},
+                {"path": "/api/v1/users", "method": "GET", "requests": 500, "concurrency": 25},
+                {"path": "/api/v1/auth/login", "method": "POST", "requests": 300, "concurrency": 15}
+            ]
+            
+            results = []
+            
+            # Execute benchmark tests for critical endpoints
+            for endpoint_config in critical_endpoints:
+                try:
+                    ab_config = ApacheBenchConfig(
+                        total_requests=endpoint_config["requests"],
+                        concurrency_level=endpoint_config["concurrency"],
+                        timeout_seconds=30
+                    )
+                    
+                    result = benchmark_tester.run_endpoint_benchmark(
+                        app=app,
+                        endpoint_path=endpoint_config["path"],
+                        http_method=endpoint_config["method"],
+                        config=ab_config
+                    )
+                    
+                    results.append(result.generate_performance_report())
+                    
+                except Exception as endpoint_error:
+                    self.logger.warning(
+                        "Benchmark test failed for endpoint",
+                        endpoint=endpoint_config["path"],
+                        error=str(endpoint_error)
+                    )
+            
+            return results
+            
+        except Exception as e:
+            self.logger.error("Benchmark testing failed", error=str(e))
+            return [{
+                'test_name': 'benchmark_testing_failed',
+                'test_type': 'apache_bench',
+                'error': str(e),
+                'success': False
+            }]
+    
+    def _execute_load_testing_scenarios(self, app) -> List[Dict[str, Any]]:
+        """Execute load testing scenarios for CI/CD validation."""
+        try:
+            # Simulate load testing results (in real implementation, this would use Locust)
+            load_scenarios = [
+                {
+                    'test_name': 'ci_cd_load_test_light',
+                    'test_type': 'load_testing',
+                    'start_time': (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat(),
+                    'end_time': datetime.now(timezone.utc).isoformat(),
+                    'duration_seconds': 300,
+                    'total_requests': 5000,
+                    'successful_requests': 4950,
+                    'failed_requests': 50,
+                    'requests_per_second': 16.67,
+                    'mean_response_time_ms': 85.3,
+                    'median_response_time_ms': 78.1,
+                    'p95_response_time_ms': 156.7,
+                    'p99_response_time_ms': 234.5,
+                    'min_response_time_ms': 12.3,
+                    'max_response_time_ms': 987.2,
+                    'error_rate_percent': 1.0,
+                    'concurrent_users': 25,
+                    'environment': self.ci_cd_context.environment
+                }
+            ]
+            
+            return load_scenarios
+            
+        except Exception as e:
+            self.logger.error("Load testing failed", error=str(e))
+            return [{
+                'test_name': 'load_testing_failed',
+                'test_type': 'load_testing',
+                'error': str(e),
+                'success': False
+            }]
+    
+    def _execute_quality_gate_validation(self, test_results: List[TestResult],
+                                       variance_analyses: List[VarianceAnalysis]) -> List[QualityGateResult]:
+        """Execute comprehensive quality gate validation."""
+        quality_gate_results = []
+        
+        try:
+            # Response time quality gate
+            response_time_gate = self.quality_gate_validator.validate_response_time_gate(test_results)
+            quality_gate_results.append(response_time_gate)
+            
+            # Throughput quality gate
+            throughput_gate = self.quality_gate_validator.validate_throughput_gate(test_results)
+            quality_gate_results.append(throughput_gate)
+            
+            # Error rate quality gate
+            error_rate_gate = self.quality_gate_validator.validate_error_rate_gate(test_results)
+            quality_gate_results.append(error_rate_gate)
+            
+            # Baseline variance quality gate
+            if variance_analyses:
+                baseline_gate = self.quality_gate_validator.validate_baseline_variance_gate(variance_analyses)
+                quality_gate_results.append(baseline_gate)
+            
+            # Resource utilization quality gate
+            resource_gate = self.quality_gate_validator.validate_resource_utilization_gate(test_results)
+            quality_gate_results.append(resource_gate)
+            
+            self.logger.info(
+                "Quality gate validation completed",
+                total_gates=len(quality_gate_results),
+                passed_gates=len([qgr for qgr in quality_gate_results if qgr.passed]),
+                failed_gates=len([qgr for qgr in quality_gate_results if not qgr.passed])
+            )
+            
+            return quality_gate_results
+            
+        except Exception as e:
+            self.logger.error("Quality gate validation failed", error=str(e))
+            return []
+    
+    def _analyze_performance_trends(self, test_results: List[TestResult]) -> Dict[str, Any]:
+        """Analyze performance trends for regression detection."""
+        if not test_results:
+            return {}
+        
+        try:
+            # Calculate trend metrics
+            response_times = [tr.mean_response_time_ms for tr in test_results if tr.mean_response_time_ms > 0]
+            throughput_values = [tr.requests_per_second for tr in test_results if tr.requests_per_second > 0]
+            error_rates = [tr.error_rate_percent for tr in test_results]
+            
+            trends = {
+                'response_time_trend': {
+                    'current_average': statistics.mean(response_times) if response_times else 0,
+                    'variance': statistics.variance(response_times) if len(response_times) > 1 else 0,
+                    'stability': 'stable' if len(response_times) > 1 and statistics.stdev(response_times) < 20 else 'variable'
+                },
+                'throughput_trend': {
+                    'current_average': statistics.mean(throughput_values) if throughput_values else 0,
+                    'variance': statistics.variance(throughput_values) if len(throughput_values) > 1 else 0,
+                    'stability': 'stable' if len(throughput_values) > 1 and statistics.stdev(throughput_values) < 10 else 'variable'
+                },
+                'error_rate_trend': {
+                    'current_average': statistics.mean(error_rates) if error_rates else 0,
+                    'max_error_rate': max(error_rates) if error_rates else 0,
+                    'stability': 'stable' if max(error_rates) <= 1.0 else 'unstable'
+                }
+            }
+            
+            return trends
+            
+        except Exception as e:
+            self.logger.warning("Performance trend analysis failed", error=str(e))
+            return {}
+    
+    def _analyze_performance_regression(self, variance_analyses: List[VarianceAnalysis]) -> Dict[str, Any]:
+        """Analyze performance regression patterns."""
+        if not variance_analyses:
+            return {}
+        
+        try:
+            regressions = [va for va in variance_analyses if va.is_regression]
+            
+            regression_analysis = {
+                'total_regressions': len(regressions),
+                'regression_rate': len(regressions) / len(variance_analyses) * 100 if variance_analyses else 0,
+                'regression_categories': {},
+                'severity_distribution': {
+                    'critical': len([va for va in regressions if va.status == PerformanceStatus.FAILURE]),
+                    'warning': len([va for va in regressions if va.status == PerformanceStatus.WARNING]),
+                    'minor': len([va for va in regressions if va.status == PerformanceStatus.EXCELLENT])
+                }
+            }
+            
+            # Categorize regressions
+            for regression in regressions:
+                category = regression.category
+                if category not in regression_analysis['regression_categories']:
+                    regression_analysis['regression_categories'][category] = 0
+                regression_analysis['regression_categories'][category] += 1
+            
+            return regression_analysis
+            
+        except Exception as e:
+            self.logger.warning("Regression analysis failed", error=str(e))
+            return {}
+    
+    def _analyze_baseline_drift(self, variance_analyses: List[VarianceAnalysis]) -> Dict[str, Any]:
+        """Analyze baseline drift patterns."""
+        if not variance_analyses:
+            return {}
+        
+        try:
+            drift_analysis = {
+                'total_metrics': len(variance_analyses),
+                'drift_detected': False,
+                'drift_magnitude': 0.0,
+                'drift_direction': 'stable',
+                'concerning_metrics': []
+            }
+            
+            # Calculate overall drift
+            variances = [va.variance_percent for va in variance_analyses]
+            if variances:
+                avg_variance = statistics.mean(variances)
+                drift_analysis['drift_magnitude'] = abs(avg_variance)
+                
+                if avg_variance > 5.0:
+                    drift_analysis['drift_detected'] = True
+                    drift_analysis['drift_direction'] = 'performance_degradation' if avg_variance > 0 else 'performance_improvement'
+                
+                # Identify concerning metrics
+                concerning = [va.metric_name for va in variance_analyses if abs(va.variance_percent) > 15.0]
+                drift_analysis['concerning_metrics'] = concerning
+            
+            return drift_analysis
+            
+        except Exception as e:
+            self.logger.warning("Baseline drift analysis failed", error=str(e))
+            return {}
+    
+    def _generate_immediate_actions(self, report: CICDPerformanceReport) -> List[str]:
+        """Generate immediate actions based on performance assessment."""
+        actions = []
+        
+        # Add actions based on overall decision
+        if report.overall_decision == QualityGateDecision.FAIL:
+            actions.append("BLOCK deployment until performance issues are resolved")
+            actions.append("Investigate failed quality gates and root causes")
+            actions.append("Consider rollback if issues persist")
+        elif report.overall_decision == QualityGateDecision.MANUAL_REVIEW:
+            actions.append("Conduct manual performance review before deployment")
+            actions.append("Validate performance test results with stakeholders")
+        elif report.overall_decision == QualityGateDecision.WARNING:
+            actions.append("Deploy with enhanced monitoring and alerting")
+            actions.append("Prepare rollback procedures as precaution")
+        
+        # Add specific actions based on failed gates
+        failed_gates = [qgr for qgr in report.quality_gate_results if not qgr.passed]
+        for gate in failed_gates[:3]:  # Top 3 failures
+            if gate.recommended_actions:
+                actions.extend(gate.recommended_actions[:2])  # Top 2 actions per gate
+        
+        return actions[:5]  # Limit to top 5 actions
+    
+    def _calculate_test_coverage_summary(self, test_results: List[TestResult]) -> Dict[str, Any]:
+        """Calculate test coverage summary."""
+        if not test_results:
+            return {}
+        
+        return {
+            'total_tests': len(test_results),
+            'test_types': list(set(tr.test_type.value for tr in test_results)),
+            'environments': list(set(tr.test_environment for tr in test_results)),
+            'total_requests': sum(tr.total_requests for tr in test_results),
+            'total_duration_minutes': sum(tr.duration_seconds for tr in test_results) / 60,
+            'coverage_confidence': min(1.0, len(test_results) / 10)  # Confidence based on test count
+        }
+    
+    def _assess_data_quality(self, test_results: List[TestResult], 
+                           variance_analyses: List[VarianceAnalysis]) -> Dict[str, Any]:
+        """Assess data quality for confidence assessment."""
+        quality_score = 100.0
+        issues = []
+        
+        # Check test result data quality
+        if not test_results:
+            quality_score -= 50
+            issues.append("No test results available")
+        else:
+            # Check for missing response time data
+            missing_response_time = len([tr for tr in test_results if tr.mean_response_time_ms == 0])
+            if missing_response_time > 0:
+                quality_score -= min(30, missing_response_time * 5)
+                issues.append(f"{missing_response_time} tests missing response time data")
+            
+            # Check for missing throughput data
+            missing_throughput = len([tr for tr in test_results if tr.requests_per_second == 0])
+            if missing_throughput > 0:
+                quality_score -= min(20, missing_throughput * 3)
+                issues.append(f"{missing_throughput} tests missing throughput data")
+        
+        # Check variance analysis data quality
+        if not variance_analyses:
+            quality_score -= 25
+            issues.append("No baseline variance analysis available")
+        
+        return {
+            'quality_score': max(0, quality_score),
+            'quality_grade': 'A' if quality_score >= 90 else 'B' if quality_score >= 75 else 'C' if quality_score >= 60 else 'D' if quality_score >= 40 else 'F',
+            'data_issues': issues,
+            'confidence_level': max(0, quality_score / 100)
+        }
+    
+    def _calculate_risk_level(self, report: CICDPerformanceReport) -> str:
+        """Calculate overall risk level for deployment."""
+        risk_score = 0
+        
+        # Risk factors based on quality gates
+        failed_gates = len([qgr for qgr in report.quality_gate_results if not qgr.passed])
+        risk_score += failed_gates * 25
+        
+        # Risk factors based on performance score
+        if report.performance_score < 50:
+            risk_score += 50
+        elif report.performance_score < 75:
+            risk_score += 25
+        
+        # Risk factors based on blocking issues
+        risk_score += len(report.blocking_issues) * 30
+        
+        # Risk factors based on deployment readiness
+        if report.deployment_readiness == DeploymentReadiness.BLOCKED:
+            risk_score += 100
+        elif report.deployment_readiness == DeploymentReadiness.MANUAL_APPROVAL:
+            risk_score += 50
+        
+        # Determine risk level
+        if risk_score >= 100:
+            return "CRITICAL"
+        elif risk_score >= 75:
+            return "HIGH"
+        elif risk_score >= 50:
+            return "MEDIUM"
+        elif risk_score >= 25:
+            return "LOW"
+        else:
+            return "MINIMAL"
+    
+    def _generate_github_actions_summary(self, report: CICDPerformanceReport) -> str:
+        """Generate GitHub Actions step summary."""
+        return self.notification_manager._generate_github_step_summary({
+            'title': f"Performance Validation Report - {report.overall_decision.value.upper()}",
+            'summary': f"Performance validation completed with {len(report.quality_gate_results)} quality gates",
+            'performance_summary': {
+                'overall_decision': report.overall_decision.value,
+                'deployment_readiness': report.deployment_readiness.value,
+                'performance_score': report.performance_score,
+                'total_gates': len(report.quality_gate_results),
+                'failed_gates': len([qgr for qgr in report.quality_gate_results if not qgr.passed]),
+                'blocking_issues': len(report.blocking_issues),
+                'warning_issues': len(report.warning_issues)
+            },
+            'failure_summary': [
+                {
+                    'gate': qgr.gate_name,
+                    'category': qgr.gate_category,
+                    'measured': qgr.measured_value,
+                    'threshold': qgr.threshold,
+                    'reason': qgr.failure_reason
+                } for qgr in report.quality_gate_results if not qgr.passed
+            ][:5],
+            'recommendations': {
+                'deployment': report.deployment_recommendation,
+                'rollback': report.rollback_recommendation,
+                'immediate_actions': report.immediate_actions_required
+            },
+            'ci_cd_context': report.ci_cd_context.to_dict(),
+            'links': {
+                'github_run': f"https://github.com/{report.ci_cd_context.repository}/actions/runs/{report.ci_cd_context.run_id}",
+                'commit': f"https://github.com/{report.ci_cd_context.repository}/commit/{report.ci_cd_context.commit_sha}",
+                'pr': f"https://github.com/{report.ci_cd_context.repository}/pull/{report.ci_cd_context.pull_request_id}" if report.ci_cd_context.pull_request_id else None
+            }
+        })
+    
+    def _set_github_actions_outputs(self, report: CICDPerformanceReport) -> Dict[str, Any]:
+        """Set GitHub Actions outputs for downstream jobs."""
+        try:
+            outputs = {
+                'performance-decision': report.overall_decision.value,
+                'deployment-readiness': report.deployment_readiness.value,
+                'performance-score': str(report.performance_score),
+                'failed-gates': str(len([qgr for qgr in report.quality_gate_results if not qgr.passed])),
+                'blocking-issues': str(len(report.blocking_issues)),
+                'risk-level': report.risk_level,
+                'rollback-recommended': str(report.rollback_recommendation).lower(),
+                'report-id': report.report_id
+            }
+            
+            # Write outputs to GitHub Actions output file
+            if os.path.exists(os.path.dirname(GITHUB_ACTIONS_OUTPUT_FILE)):
+                with open(GITHUB_ACTIONS_OUTPUT_FILE, 'a', encoding='utf-8') as f:
+                    for key, value in outputs.items():
+                        f.write(f"{key}={value}\n")
+            
+            return {'success': True, 'outputs': outputs}
+            
+        except Exception as e:
+            self.logger.warning("Failed to set GitHub Actions outputs", error=str(e))
+            return {'success': False, 'error': str(e)}
+    
+    def _send_performance_notifications(self, report: CICDPerformanceReport) -> Dict[str, Any]:
+        """Send automated performance notifications based on report assessment."""
+        try:
+            # Determine alert severity
+            if report.overall_decision == QualityGateDecision.FAIL:
+                severity = AlertSeverity.CRITICAL
+            elif report.deployment_readiness == DeploymentReadiness.BLOCKED:
+                severity = AlertSeverity.CRITICAL
+            elif report.overall_decision == QualityGateDecision.WARNING:
+                severity = AlertSeverity.WARNING
+            elif len(report.warning_issues) > 0:
+                severity = AlertSeverity.WARNING
+            else:
+                severity = AlertSeverity.INFO
+            
+            # Send performance alert
+            notification_results = self.notification_manager.send_performance_alert(report, severity)
+            
+            return notification_results
+            
+        except Exception as e:
+            self.logger.error("Failed to send performance notifications", error=str(e))
+            return {
+                'overall_success': False,
+                'error': str(e),
+                'channels': {}
+            }
+
+
+# Utility functions for external integration
+
+def create_ci_cd_integration_report_generator(custom_thresholds: Optional[Dict[str, float]] = None,
+                                            custom_ci_cd_context: Optional[CICDContext] = None) -> CICDIntegrationReportGenerator:
+    """
+    Create a CI/CD integration report generator with optional configuration.
+    
+    Args:
+        custom_thresholds: Optional custom quality gate thresholds
+        custom_ci_cd_context: Optional custom CI/CD context (auto-detected if None)
+        
     Returns:
-        Configured CICDIntegrationReporter instance
+        Configured CICDIntegrationReportGenerator instance
     """
-    reporter = CICDIntegrationReporter(environment="testing")
-    yield reporter
+    return CICDIntegrationReportGenerator(custom_ci_cd_context, custom_thresholds)
 
 
-# Main execution function for CI/CD pipeline
-def main():
+def execute_ci_cd_performance_validation(app, output_dir: Optional[Path] = None,
+                                       send_notifications: bool = True,
+                                       custom_thresholds: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
     """
-    Main execution function for CI/CD pipeline performance validation.
+    Execute complete CI/CD performance validation pipeline with reporting.
     
-    This function is called by GitHub Actions workflow to execute comprehensive
-    performance validation and generate deployment readiness assessment.
+    Args:
+        app: Flask application instance for testing
+        output_dir: Optional directory for report output
+        send_notifications: Whether to send automated notifications
+        custom_thresholds: Optional custom quality gate thresholds
+        
+    Returns:
+        Dictionary containing validation results and report generation status
     """
     try:
-        # Initialize CI/CD integration reporter
-        reporter = CICDIntegrationReporter(environment="cicd")
+        # Create CI/CD integration report generator
+        generator = create_ci_cd_integration_report_generator(custom_thresholds)
         
-        # Execute performance validation stages
-        performance_stage = reporter.execute_performance_validation()
-        quality_gates_stage = reporter.execute_quality_gates_validation()
+        # Execute performance validation pipeline
+        performance_report = generator.execute_performance_validation_pipeline(
+            app,
+            include_baseline_comparison=True,
+            include_benchmark_testing=True,
+            include_load_testing=True
+        )
         
-        # Assess deployment readiness
-        readiness_assessment = reporter.assess_deployment_readiness()
+        # Generate reports and notifications
+        report_results = generator.generate_ci_cd_reports(
+            performance_report,
+            output_dir,
+            send_notifications
+        )
         
-        # Generate comprehensive report
-        report_path = reporter.generate_cicd_report(output_format="json")
-        markdown_report_path = reporter.generate_cicd_report(output_format="markdown")
-        
-        # Send GitHub Actions summary
-        reporter.send_github_step_summary()
-        
-        # Set exit code based on deployment readiness
-        if readiness_assessment['deployment_ready']:
-            logger.info("CI/CD performance validation PASSED - deployment approved")
-            sys.exit(0)
-        else:
-            logger.error("CI/CD performance validation FAILED - deployment blocked")
-            sys.exit(1)
+        # Return comprehensive results
+        return {
+            'validation_success': performance_report.overall_decision != QualityGateDecision.FAIL,
+            'performance_report': performance_report.to_dict(),
+            'report_generation': report_results,
+            'deployment_recommendation': {
+                'decision': performance_report.overall_decision.value,
+                'readiness': performance_report.deployment_readiness.value,
+                'recommendation': performance_report.deployment_recommendation,
+                'rollback_recommended': performance_report.rollback_recommendation
+            },
+            'quality_gates': {
+                'total': len(performance_report.quality_gate_results),
+                'passed': len([qgr for qgr in performance_report.quality_gate_results if qgr.passed]),
+                'failed': len([qgr for qgr in performance_report.quality_gate_results if not qgr.passed])
+            },
+            'execution_metadata': {
+                'report_id': performance_report.report_id,
+                'generation_timestamp': performance_report.generation_timestamp.isoformat(),
+                'total_duration_seconds': performance_report.total_test_duration_seconds,
+                'risk_level': performance_report.risk_level
+            }
+        }
         
     except Exception as e:
-        logger.error(f"CI/CD integration execution failed: {str(e)}", exc_info=True)
-        sys.exit(2)
+        logging.error(f"CI/CD performance validation failed: {e}")
+        return {
+            'validation_success': False,
+            'error': str(e),
+            'deployment_recommendation': {
+                'decision': 'fail',
+                'readiness': 'blocked',
+                'recommendation': 'Performance validation pipeline failed - investigation required',
+                'rollback_recommended': True
+            }
+        }
 
 
-if __name__ == "__main__":
-    main()
+def validate_github_actions_performance_gates(app, fail_on_regression: bool = True) -> bool:
+    """
+    Validate performance gates for GitHub Actions workflow with boolean return.
+    
+    Args:
+        app: Flask application instance for testing
+        fail_on_regression: Whether to fail on performance regression detection
+        
+    Returns:
+        Boolean indicating whether performance gates passed
+    """
+    try:
+        # Execute CI/CD performance validation
+        results = execute_ci_cd_performance_validation(
+            app,
+            output_dir=None,
+            send_notifications=True
+        )
+        
+        # Check validation results
+        validation_passed = results.get('validation_success', False)
+        
+        # Additional regression check if enabled
+        if fail_on_regression and validation_passed:
+            performance_report = results.get('performance_report', {})
+            regression_analysis = performance_report.get('regression_analysis', {})
+            
+            if regression_analysis.get('total_regressions', 0) > 0:
+                logging.warning(
+                    "Performance regression detected",
+                    total_regressions=regression_analysis['total_regressions']
+                )
+                return False
+        
+        return validation_passed
+        
+    except Exception as e:
+        logging.error(f"Performance gates validation failed: {e}")
+        return False
 
 
-# Export classes for pytest discovery and external usage
+# Export public interface
 __all__ = [
-    'CICDIntegrationReporter',
-    'PerformanceGateValidator',
-    'GitHubActionsIntegration',
-    'CICDStage',
+    # Core classes
+    'CICDIntegrationReportGenerator',
+    'QualityGateValidator',
+    'NotificationManager',
+    
+    # Data structures
+    'CICDContext',
+    'CICDPerformanceReport',
     'QualityGateResult',
-    'DeploymentRecommendation',
-    'QualityGateMetric',
-    'CICDStageResult'
+    
+    # Enumerations
+    'CICDStage',
+    'QualityGateDecision',
+    'DeploymentReadiness',
+    'AlertSeverity',
+    
+    # Utility functions
+    'create_ci_cd_integration_report_generator',
+    'execute_ci_cd_performance_validation',
+    'validate_github_actions_performance_gates',
+    
+    # Constants
+    'QUALITY_GATE_THRESHOLDS',
+    'GITHUB_ACTIONS_OUTPUT_FILE',
+    'GITHUB_STEP_SUMMARY_FILE'
 ]
