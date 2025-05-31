@@ -1,267 +1,356 @@
 """
-Flask Application Package Initialization
+Main Source Package Initialization
+==================================
 
-This module establishes the src package as the main Flask application package,
-implementing a modular Blueprint-based architecture for enterprise-grade scalability.
-Provides centralized imports for the Flask application factory and core components,
-supporting the strategic migration from Node.js to Python 3.8+ with Flask 2.3+.
+Python package initialization file for the main src module, establishing the Flask application
+as a proper Python package and providing centralized imports for the application factory and
+core components.
 
-Key Features:
-- Flask application factory pattern support
-- Blueprint-based modular architecture
-- Enterprise integration components
-- Type-safe imports with Python 3.8+ compatibility
-- Centralized configuration and dependency management
+This module serves as the primary entry point for the Flask application package, implementing
+Python packaging standards and supporting Blueprint-based modular architecture as specified
+in the technical requirements for the Node.js to Python/Flask migration project.
 
-Architecture Alignment:
-- Section 5.1.2: Core Components Table - Flask Blueprint organization
-- Section 6.1.1: Flask Application Factory Pattern Implementation
-- Section 0.1.2: Affected Components - Modular component architecture
-- Section 3.1.1: Python 3.8+ runtime environment requirements
+Architecture:
+- Establishes proper Python package namespace for modular organization
+- Provides centralized imports for Flask application factory accessibility
+- Supports Blueprint-based architecture per Section 5.1.2 of technical specifications
+- Implements package-level metadata and version management
+- Enables seamless integration with enterprise Python infrastructure
 
-Performance Requirements:
-- ≤10% variance from Node.js baseline per Section 0.1.1
-- Horizontal scaling through WSGI server deployment per Section 6.1.3
-- Connection pooling optimization per Section 6.1.3
-
-Author: Enterprise Migration Team
-Version: 1.0.0
-Python: 3.8+
-Flask: 2.3+
+Package Structure:
+- Application factory pattern with centralized extension initialization
+- Blueprint-based modular architecture for maintainable code organization
+- Enterprise-grade configuration and environment management
+- Comprehensive logging and monitoring integration capabilities
 """
 
-from typing import Optional, Any, Dict
+import os
 import sys
+from typing import Optional, Any, Dict
 
-# Package metadata following Python packaging standards
+# Package metadata and version information
 __version__ = "1.0.0"
-__author__ = "Enterprise Migration Team"
-__description__ = "Flask Application Package - Node.js to Python Migration"
-__python_requires__ = ">=3.8"
+__title__ = "Flask Migration Application"
+__description__ = "Enterprise Flask application migrated from Node.js/Express.js"
+__author__ = "Migration Team"
+__email__ = "migration@company.com"
+__license__ = "Proprietary"
 
-# Ensure Python version compatibility
-if sys.version_info < (3, 8):
-    raise RuntimeError(
-        f"Python 3.8+ is required for this application. "
-        f"Current version: {sys.version_info.major}.{sys.version_info.minor}"
-    )
+# Package-level constants for Flask application configuration
+PACKAGE_NAME = "src"
+APPLICATION_NAME = "flask-migration-app"
+DEFAULT_CONFIG_ENV = "development"
 
-# Lazy import pattern for application factory to prevent circular imports
-# This allows the package to be imported without immediately initializing Flask
-_app_factory = None
-
-def get_app_factory():
-    """
-    Lazy-load the Flask application factory.
-    
-    This pattern prevents circular imports and allows the package
-    to be imported without immediately creating Flask instances.
-    
-    Returns:
-        Callable: The Flask application factory function
-        
-    Raises:
-        ImportError: If the app module cannot be imported
-        AttributeError: If create_app function is not found
-    """
-    global _app_factory
-    if _app_factory is None:
-        try:
-            from .app import create_app
-            _app_factory = create_app
-        except ImportError as e:
-            raise ImportError(
-                f"Failed to import Flask application factory: {e}. "
-                "Ensure src/app.py exists and contains create_app function."
-            ) from e
-    return _app_factory
-
-def create_app(*args, **kwargs) -> Any:
-    """
-    Create and configure the Flask application instance.
-    
-    This function delegates to the actual application factory in app.py,
-    providing a convenient entry point for application creation while
-    maintaining the factory pattern requirements.
-    
-    Args:
-        *args: Positional arguments to pass to the application factory
-        **kwargs: Keyword arguments to pass to the application factory
-        
-    Returns:
-        Flask: Configured Flask application instance
-        
-    Example:
-        >>> from src import create_app
-        >>> app = create_app()
-        >>> app.run(debug=True)
-    """
-    factory = get_app_factory()
-    return factory(*args, **kwargs)
-
-# Core module namespace organization for Blueprint architecture
-# These imports are structured to support the modular Flask Blueprint pattern
-
-# Authentication and authorization components
-def get_auth_module():
-    """Lazy import for authentication module."""
-    try:
-        from . import auth
-        return auth
-    except ImportError:
-        return None
-
-# Blueprint organization and registration
-def get_blueprints_module():
-    """Lazy import for blueprints module."""
-    try:
-        from . import blueprints
-        return blueprints
-    except ImportError:
-        return None
-
-# Data access layer with PyMongo and Motor
-def get_data_module():
-    """Lazy import for data access module."""
-    try:
-        from . import data
-        return data
-    except ImportError:
-        return None
-
-# Business logic processing engine
-def get_business_module():
-    """Lazy import for business logic module."""
-    try:
-        from . import business
-        return business
-    except ImportError:
-        return None
-
-# External service integrations
-def get_integrations_module():
-    """Lazy import for integrations module."""
-    try:
-        from . import integrations
-        return integrations
-    except ImportError:
-        return None
-
-# Caching layer with Redis
-def get_cache_module():
-    """Lazy import for cache module."""
-    try:
-        from . import cache
-        return cache
-    except ImportError:
-        return None
-
-# Monitoring and observability
-def get_monitoring_module():
-    """Lazy import for monitoring module."""
-    try:
-        from . import monitoring
-        return monitoring
-    except ImportError:
-        return None
-
-# Configuration management
-def get_config_module():
-    """Lazy import for configuration module."""
-    try:
-        from . import config
-        return config
-    except ImportError:
-        return None
-
-# Utility functions
-def get_utils_module():
-    """Lazy import for utilities module."""
-    try:
-        from . import utils
-        return utils
-    except ImportError:
-        return None
-
-# Package health check for dependency validation
-def validate_package_dependencies() -> Dict[str, bool]:
-    """
-    Validate the availability of core package dependencies.
-    
-    This function checks that all required modules can be imported
-    successfully, providing diagnostic information for troubleshooting.
-    
-    Returns:
-        Dict[str, bool]: Dictionary mapping module names to availability status
-        
-    Example:
-        >>> from src import validate_package_dependencies
-        >>> status = validate_package_dependencies()
-        >>> print("Auth module available:", status.get('auth', False))
-    """
-    modules = {
-        'auth': get_auth_module(),
-        'blueprints': get_blueprints_module(),
-        'data': get_data_module(),
-        'business': get_business_module(),
-        'integrations': get_integrations_module(),
-        'cache': get_cache_module(),
-        'monitoring': get_monitoring_module(),
-        'config': get_config_module(),
-        'utils': get_utils_module(),
-    }
-    
-    return {name: module is not None for name, module in modules.items()}
-
-# Public API following Python packaging conventions
-__all__ = [
-    # Core application factory
-    'create_app',
-    'get_app_factory',
-    
-    # Module accessors
-    'get_auth_module',
-    'get_blueprints_module',
-    'get_data_module',
-    'get_business_module',
-    'get_integrations_module',
-    'get_cache_module',
-    'get_monitoring_module',
-    'get_config_module',
-    'get_utils_module',
-    
-    # Package utilities
-    'validate_package_dependencies',
-    
-    # Metadata
-    '__version__',
-    '__author__',
-    '__description__',
-    '__python_requires__',
+# Environment and configuration management
+SUPPORTED_ENVIRONMENTS = ["development", "testing", "staging", "production"]
+REQUIRED_ENV_VARS = [
+    "SECRET_KEY",
+    "JWT_SECRET_KEY", 
+    "MONGODB_URI",
+    "REDIS_URL"
 ]
 
-# Package-level configuration for development and debugging
-# This allows easy access to package information during development
+# Import core application components for package-level accessibility
+try:
+    # Import Flask application factory - primary entry point
+    from src.app import create_app, create_wsgi_app
+    
+    # Import application configuration components
+    from src.app import application as wsgi_application
+    
+    # Import key Flask extensions for external access if needed
+    from src.app import (
+        mongo_client,
+        motor_client, 
+        redis_client,
+        logger
+    )
+    
+    # Core application initialization successful
+    _CORE_IMPORTS_AVAILABLE = True
+    
+except ImportError as e:
+    # Handle graceful import failure during package development
+    _CORE_IMPORTS_AVAILABLE = False
+    
+    # Define fallback functions for development scenarios
+    def create_app(config_name: Optional[str] = None):
+        """Fallback application factory when core imports fail"""
+        raise ImportError(f"Core application components not available: {e}")
+    
+    def create_wsgi_app():
+        """Fallback WSGI application factory"""
+        raise ImportError(f"WSGI application not available: {e}")
+    
+    # Fallback application instance
+    wsgi_application = None
+    
+    # Fallback client instances
+    mongo_client = None
+    motor_client = None
+    redis_client = None
+    logger = None
+
+
+# Blueprint module imports for modular architecture support
+try:
+    # Import Blueprint registration functionality when available
+    from src.blueprints import register_all_blueprints
+    
+    _BLUEPRINT_IMPORTS_AVAILABLE = True
+    
+except ImportError:
+    # Blueprints not yet implemented - graceful degradation
+    _BLUEPRINT_IMPORTS_AVAILABLE = False
+    
+    def register_all_blueprints(app):
+        """Fallback blueprint registration function"""
+        pass
+
+
+# Configuration and utilities imports
+try:
+    # Import configuration management when available
+    from src.config.settings import Config, get_config
+    
+    _CONFIG_IMPORTS_AVAILABLE = True
+    
+except ImportError:
+    # Configuration not yet implemented - provide fallback
+    _CONFIG_IMPORTS_AVAILABLE = False
+    
+    class Config:
+        """Fallback configuration class"""
+        pass
+    
+    def get_config():
+        """Fallback configuration getter"""
+        return Config()
+
+
 def get_package_info() -> Dict[str, Any]:
     """
-    Get comprehensive package information for debugging and monitoring.
+    Get comprehensive package information and metadata.
+    
+    Returns comprehensive information about the package including version,
+    component availability, environment configuration, and system status.
     
     Returns:
-        Dict[str, Any]: Package metadata and status information
-        
-    Example:
-        >>> from src import get_package_info
-        >>> info = get_package_info()
-        >>> print(f"Package version: {info['version']}")
+        Dict containing package metadata, version info, and component status
     """
     return {
-        'version': __version__,
-        'author': __author__,
-        'description': __description__,
-        'python_requires': __python_requires__,
-        'python_version': f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
-        'dependencies_status': validate_package_dependencies(),
+        "name": PACKAGE_NAME,
+        "version": __version__,
+        "title": __title__,
+        "description": __description__,
+        "author": __author__,
+        "email": __email__,
+        "license": __license__,
+        "application_name": APPLICATION_NAME,
+        "supported_environments": SUPPORTED_ENVIRONMENTS,
+        "component_status": {
+            "core_imports": _CORE_IMPORTS_AVAILABLE,
+            "blueprint_imports": _BLUEPRINT_IMPORTS_AVAILABLE,
+            "config_imports": _CONFIG_IMPORTS_AVAILABLE
+        },
+        "python_version": sys.version,
+        "package_path": os.path.dirname(__file__)
     }
 
-# Add package info to public API
-__all__.append('get_package_info')
+
+def validate_environment() -> Dict[str, Any]:
+    """
+    Validate required environment variables and system dependencies.
+    
+    Performs comprehensive validation of the runtime environment including
+    required environment variables, Python version compatibility, and
+    critical dependency availability.
+    
+    Returns:
+        Dict containing environment validation results and status
+    """
+    validation_result = {
+        "valid": True,
+        "python_version_compatible": True,
+        "required_env_vars": {},
+        "missing_env_vars": [],
+        "warnings": [],
+        "errors": []
+    }
+    
+    # Validate Python version compatibility (3.8+)
+    python_version = sys.version_info
+    if python_version < (3, 8):
+        validation_result["valid"] = False
+        validation_result["python_version_compatible"] = False
+        validation_result["errors"].append(
+            f"Python 3.8+ required, found {python_version.major}.{python_version.minor}"
+        )
+    
+    # Validate required environment variables
+    for env_var in REQUIRED_ENV_VARS:
+        value = os.getenv(env_var)
+        validation_result["required_env_vars"][env_var] = bool(value)
+        
+        if not value:
+            validation_result["missing_env_vars"].append(env_var)
+            validation_result["warnings"].append(f"Environment variable {env_var} not set")
+    
+    # Check for missing environment variables
+    if validation_result["missing_env_vars"]:
+        validation_result["warnings"].append(
+            "Some environment variables are missing - application may not function correctly"
+        )
+    
+    # Validate component import status
+    if not _CORE_IMPORTS_AVAILABLE:
+        validation_result["warnings"].append("Core application components not available")
+    
+    if not _BLUEPRINT_IMPORTS_AVAILABLE:
+        validation_result["warnings"].append("Blueprint components not available")
+    
+    if not _CONFIG_IMPORTS_AVAILABLE:
+        validation_result["warnings"].append("Configuration components not available")
+    
+    return validation_result
+
+
+def get_application_factory():
+    """
+    Get the Flask application factory function.
+    
+    Returns the primary Flask application factory function for programmatic
+    application creation with proper error handling and validation.
+    
+    Returns:
+        Flask application factory function
+        
+    Raises:
+        ImportError: If core application components are not available
+        RuntimeError: If environment validation fails
+    """
+    if not _CORE_IMPORTS_AVAILABLE:
+        raise ImportError("Core application components not available - check imports")
+    
+    # Validate environment before returning factory
+    env_validation = validate_environment()
+    if not env_validation["python_version_compatible"]:
+        raise RuntimeError("Python version incompatible - upgrade to Python 3.8+")
+    
+    return create_app
+
+
+def get_wsgi_application():
+    """
+    Get the WSGI application instance for production deployment.
+    
+    Returns the configured WSGI application instance suitable for deployment
+    with Gunicorn, uWSGI, or other WSGI servers.
+    
+    Returns:
+        Configured Flask WSGI application instance
+        
+    Raises:
+        ImportError: If core application components are not available
+        RuntimeError: If application instance is not properly configured
+    """
+    if not _CORE_IMPORTS_AVAILABLE:
+        raise ImportError("Core application components not available - check imports")
+    
+    if wsgi_application is None:
+        raise RuntimeError("WSGI application not properly initialized")
+    
+    return wsgi_application
+
+
+def initialize_package_logging():
+    """
+    Initialize package-level logging configuration.
+    
+    Sets up basic logging for the package initialization and import processes,
+    providing visibility into package loading and component availability.
+    """
+    import logging
+    
+    # Configure basic logging for package initialization
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    package_logger = logging.getLogger(PACKAGE_NAME)
+    
+    # Log package initialization status
+    package_logger.info(f"Package {PACKAGE_NAME} v{__version__} initializing")
+    package_logger.info(f"Core imports available: {_CORE_IMPORTS_AVAILABLE}")
+    package_logger.info(f"Blueprint imports available: {_BLUEPRINT_IMPORTS_AVAILABLE}")
+    package_logger.info(f"Config imports available: {_CONFIG_IMPORTS_AVAILABLE}")
+    
+    # Log environment validation results
+    env_validation = validate_environment()
+    if env_validation["warnings"]:
+        for warning in env_validation["warnings"]:
+            package_logger.warning(warning)
+    
+    if env_validation["errors"]:
+        for error in env_validation["errors"]:
+            package_logger.error(error)
+    
+    package_logger.info("Package initialization completed")
+
+
+# Package-level exports for public API
+__all__ = [
+    # Package metadata
+    "__version__",
+    "__title__", 
+    "__description__",
+    "__author__",
+    "__email__",
+    "__license__",
+    
+    # Core application factory functions
+    "create_app",
+    "create_wsgi_app",
+    "wsgi_application",
+    
+    # Database and cache clients
+    "mongo_client",
+    "motor_client", 
+    "redis_client",
+    
+    # Configuration components
+    "Config",
+    "get_config",
+    
+    # Blueprint registration
+    "register_all_blueprints",
+    
+    # Package utility functions
+    "get_package_info",
+    "validate_environment",
+    "get_application_factory",
+    "get_wsgi_application",
+    "initialize_package_logging",
+    
+    # Package constants
+    "PACKAGE_NAME",
+    "APPLICATION_NAME",
+    "SUPPORTED_ENVIRONMENTS",
+    "REQUIRED_ENV_VARS"
+]
+
+
+# Initialize package logging on import
+if __name__ != "__main__":
+    # Only initialize logging when imported as a package
+    try:
+        initialize_package_logging()
+    except Exception:
+        # Graceful handling of logging initialization failures
+        pass
+
+
+# Package initialization completed - ready for use
+# The src package is now properly initialized with Flask application factory
+# accessibility and Blueprint-based modular architecture support
