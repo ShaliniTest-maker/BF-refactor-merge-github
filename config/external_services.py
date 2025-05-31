@@ -1,1123 +1,1166 @@
 """
-External service integration configuration module for Flask application.
+External Service Integration Configuration Module
 
-This module provides comprehensive configuration for AWS services (boto3 1.28+), 
-HTTP clients (requests 2.31+/httpx 0.24+), Auth0 integration, and third-party API 
-configurations. Replaces Node.js AWS SDK and HTTP client configurations with 
-Python equivalents while maintaining identical functionality and enterprise-grade 
-resilience patterns.
+This module provides comprehensive external service integration configuration for AWS services
+(boto3 1.28+), HTTP clients (requests 2.31+/httpx 0.24+), Auth0 integration, and third-party
+API configurations. Replaces Node.js AWS SDK and HTTP client configurations with Python
+equivalents while maintaining equivalent functionality and performance.
 
 Key Features:
-- AWS SDK configuration migration from Node.js aws-sdk to boto3 1.28+
-- HTTP client configuration replacing axios/node-fetch with requests/httpx
-- AWS KMS integration for encryption key management
-- Circuit breaker patterns for external service resilience
-- Connection pooling and retry logic for external API calls
-- Auth0 Python SDK integration for enterprise authentication
-- Enterprise-grade monitoring and observability integration
+- boto3 1.28+ AWS service integration with KMS key management (Section 0.2.4)
+- requests 2.31+ and httpx 0.24+ HTTP client operations (Section 3.2.3)
+- AWS KMS integration for encryption key management (Section 6.4.3)
+- Circuit breaker patterns for service resilience (Section 5.2.6)
+- Connection pooling for external service efficiency (Section 3.2.3)
+- Auth0 enterprise authentication service integration
+- Third-party API client configurations with retry logic
+- Enterprise security standards and compliance controls
 
-Security Features:
-- TLS 1.3 enforcement for all external communications
-- Certificate validation and pinning for critical services
-- Comprehensive retry logic with exponential backoff
-- Circuit breaker protection against service degradation
-- Structured audit logging for all external service interactions
+Dependencies:
+- boto3 1.28+ for AWS service integration
+- requests 2.31+ for synchronous HTTP operations
+- httpx 0.24+ for asynchronous HTTP operations
+- urllib3 2.0+ for connection pooling and management
+- tenacity 8.2+ for retry and circuit breaker patterns
+- python-dotenv 1.0+ for secure environment management
+
+Author: Flask Migration Team
+Version: 1.0.0
+Migration Phase: Node.js to Python/Flask Migration (Section 0.1.1)
 """
 
 import os
-import ssl
-import asyncio
 import logging
-from typing import Dict, Any, Optional, List, Union
+import ssl
 from datetime import datetime, timedelta
-from functools import wraps
-from urllib.parse import urljoin
-
+from typing import Dict, Any, Optional, List, Union, Callable, Tuple
+from urllib.parse import urlparse
 import boto3
-import httpx
-import requests
 from botocore.config import Config as BotoCoreConfig
-from botocore.exceptions import ClientError, BotoCoreError
+from botocore.exceptions import ClientError, NoCredentialsError, BotoCoreError
+import requests
+from requests.adapters import HTTPAdapter
+from requests.packages.urllib3.util.retry import Retry
+import httpx
+from urllib3 import PoolManager
+from urllib3.util.retry import Retry as Urllib3Retry
 from tenacity import (
-    retry, 
-    stop_after_attempt, 
-    wait_exponential_jitter,
-    retry_if_exception_type,
-    before_sleep_log,
-    after_log
+    retry, stop_after_attempt, wait_exponential_jitter,
+    retry_if_exception_type, before_sleep_log, after_log
 )
-from auth0.management import Auth0
-from auth0.authentication import GetToken
-import structlog
-from prometheus_client import Counter, Histogram, Gauge
+import json
+import hashlib
+import base64
+from pathlib import Path
 
-# Import application settings
-from config.settings import get_config
-
-# Configure structured logging for external services
-logger = structlog.get_logger("external_services")
-
-# Prometheus metrics for external service monitoring
-external_service_requests = Counter(
-    'external_service_requests_total',
-    'Total external service requests',
-    ['service', 'method', 'status']
-)
-
-external_service_duration = Histogram(
-    'external_service_request_duration_seconds',
-    'External service request duration',
-    ['service', 'method']
-)
-
-circuit_breaker_state = Gauge(
-    'circuit_breaker_state',
-    'Circuit breaker state (0=closed, 1=open, 2=half-open)',
-    ['service']
-)
-
-
-class CircuitBreakerError(Exception):
-    """Raised when circuit breaker is open."""
-    pass
+# Configure logging for external services module
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 class ExternalServiceError(Exception):
-    """Base exception for external service integration errors."""
+    """Base exception for external service configuration errors."""
     pass
 
 
-class CircuitBreaker:
+class AWSConfigurationError(ExternalServiceError):
+    """AWS service configuration specific exception."""
+    pass
+
+
+class HTTPClientConfigurationError(ExternalServiceError):
+    """HTTP client configuration specific exception."""
+    pass
+
+
+class CircuitBreakerError(ExternalServiceError):
+    """Circuit breaker activation exception."""
+    pass
+
+
+class ExternalServiceConfigurationManager:
     """
-    Circuit breaker implementation for external service resilience.
+    Comprehensive external service configuration manager implementing enterprise-grade
+    AWS integration, HTTP client configuration, and circuit breaker patterns for
+    service resilience as specified in Section 5.2.6.
     
-    Implements the circuit breaker pattern to prevent cascade failures
-    during external service degradation. Features:
-    - Configurable failure threshold and recovery timeout
-    - Exponential backoff with jitter for retry strategies
-    - Comprehensive monitoring and alerting integration
-    - Half-open state for gradual service recovery testing
+    This class provides centralized configuration for all external service integrations
+    including AWS services, HTTP clients, Auth0 authentication, and third-party APIs
+    with comprehensive error handling, retry logic, and security controls.
     """
     
-    def __init__(
-        self, 
-        service_name: str,
-        failure_threshold: int = 5,
-        recovery_timeout: int = 60,
-        expected_exception: type = Exception
-    ):
-        self.service_name = service_name
-        self.failure_threshold = failure_threshold
-        self.recovery_timeout = recovery_timeout
-        self.expected_exception = expected_exception
+    def __init__(self, environment: str = None):
+        """
+        Initialize external service configuration manager.
         
-        self.failure_count = 0
-        self.last_failure_time = None
-        self.state = 'closed'  # closed, open, half-open
+        Args:
+            environment: Optional environment override (development, staging, production)
+        """
+        self.environment = environment or os.getenv('FLASK_ENV', 'production')
+        self.logger = logging.getLogger(f"{__name__}.ExternalServiceConfigurationManager")
         
-        # Update Prometheus gauge
-        circuit_breaker_state.labels(service=service_name).set(0)
+        # Initialize configuration components
+        self._load_environment_configuration()
+        self._validate_required_credentials()
+        self._initialize_aws_configuration()
+        self._initialize_http_client_configuration()
+        self._initialize_auth0_configuration()
+        self._initialize_circuit_breaker_configuration()
+        self._validate_service_connectivity()
     
-    def __call__(self, func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            if self.state == 'open':
-                if self._should_attempt_reset():
-                    self.state = 'half-open'
-                    circuit_breaker_state.labels(service=self.service_name).set(2)
-                    logger.info(
-                        "Circuit breaker entering half-open state",
-                        service=self.service_name
-                    )
-                else:
-                    circuit_breaker_state.labels(service=self.service_name).set(1)
-                    raise CircuitBreakerError(
-                        f"Circuit breaker is open for service: {self.service_name}"
-                    )
+    def _load_environment_configuration(self) -> None:
+        """
+        Load environment-specific configuration with comprehensive validation.
+        
+        This method loads external service credentials and configuration from
+        environment variables with proper validation and security checks.
+        """
+        try:
+            # AWS Configuration
+            self.aws_access_key_id = os.getenv('AWS_ACCESS_KEY_ID')
+            self.aws_secret_access_key = os.getenv('AWS_SECRET_ACCESS_KEY')
+            self.aws_session_token = os.getenv('AWS_SESSION_TOKEN')
+            self.aws_region = os.getenv('AWS_DEFAULT_REGION', 'us-east-1')
+            self.aws_kms_key_arn = os.getenv('AWS_KMS_KEY_ARN')
             
+            # S3 Configuration
+            self.s3_bucket_name = os.getenv('S3_BUCKET_NAME')
+            self.s3_region = os.getenv('S3_REGION', self.aws_region)
+            self.s3_endpoint_url = os.getenv('S3_ENDPOINT_URL')  # For S3-compatible services
+            
+            # HTTP Client Configuration
+            self.http_timeout = float(os.getenv('HTTP_TIMEOUT', '30.0'))
+            self.http_retries = int(os.getenv('HTTP_RETRIES', '3'))
+            self.http_backoff_factor = float(os.getenv('HTTP_BACKOFF_FACTOR', '1.0'))
+            self.http_max_connections = int(os.getenv('HTTP_MAX_CONNECTIONS', '100'))
+            self.http_max_keepalive = int(os.getenv('HTTP_MAX_KEEPALIVE_CONNECTIONS', '50'))
+            
+            # Auth0 Configuration
+            self.auth0_domain = os.getenv('AUTH0_DOMAIN')
+            self.auth0_client_id = os.getenv('AUTH0_CLIENT_ID')
+            self.auth0_client_secret = os.getenv('AUTH0_CLIENT_SECRET')
+            self.auth0_audience = os.getenv('AUTH0_AUDIENCE')
+            self.auth0_management_api_token = os.getenv('AUTH0_MANAGEMENT_API_TOKEN')
+            
+            # Circuit Breaker Configuration
+            self.circuit_breaker_enabled = os.getenv('CIRCUIT_BREAKER_ENABLED', 'true').lower() == 'true'
+            self.circuit_breaker_failure_threshold = int(os.getenv('CIRCUIT_BREAKER_FAILURE_THRESHOLD', '5'))
+            self.circuit_breaker_timeout = int(os.getenv('CIRCUIT_BREAKER_TIMEOUT', '60'))
+            self.circuit_breaker_expected_exception = os.getenv('CIRCUIT_BREAKER_EXPECTED_EXCEPTION', 'requests.exceptions.RequestException')
+            
+            # SSL/TLS Configuration
+            self.ssl_verify = os.getenv('SSL_VERIFY', 'true').lower() == 'true'
+            self.ssl_cert_path = os.getenv('SSL_CERT_PATH')
+            self.ssl_key_path = os.getenv('SSL_KEY_PATH')
+            self.ca_cert_path = os.getenv('CA_CERT_PATH')
+            
+            # Third-party API Configuration
+            self.external_api_base_urls = self._parse_external_api_urls()
+            self.external_api_timeouts = self._parse_external_api_timeouts()
+            
+            self.logger.info(f"External service configuration loaded for environment: {self.environment}")
+            
+        except Exception as e:
+            error_msg = f"Failed to load external service configuration: {str(e)}"
+            self.logger.error(error_msg)
+            raise ExternalServiceError(error_msg)
+    
+    def _parse_external_api_urls(self) -> Dict[str, str]:
+        """
+        Parse external API base URLs from environment variables.
+        
+        Returns:
+            Dictionary mapping service names to base URLs
+        """
+        api_urls = {}
+        
+        # Parse semicolon-separated API URL configuration
+        api_urls_env = os.getenv('EXTERNAL_API_URLS', '')
+        if api_urls_env:
             try:
-                result = func(*args, **kwargs)
-                self._on_success()
-                return result
-            except self.expected_exception as e:
-                self._on_failure()
-                raise e
+                for api_config in api_urls_env.split(';'):
+                    if '=' in api_config:
+                        service_name, base_url = api_config.split('=', 1)
+                        api_urls[service_name.strip()] = base_url.strip()
+            except Exception as e:
+                self.logger.warning(f"Failed to parse external API URLs: {str(e)}")
         
-        return wrapper
-    
-    def _should_attempt_reset(self) -> bool:
-        """Check if enough time has passed to attempt circuit reset."""
-        if self.last_failure_time is None:
-            return True
-        
-        return (
-            datetime.now() - self.last_failure_time
-        ).total_seconds() > self.recovery_timeout
-    
-    def _on_success(self):
-        """Handle successful operation."""
-        self.failure_count = 0
-        self.state = 'closed'
-        circuit_breaker_state.labels(service=self.service_name).set(0)
-        
-        if self.state == 'half-open':
-            logger.info(
-                "Circuit breaker reset to closed state",
-                service=self.service_name
-            )
-    
-    def _on_failure(self):
-        """Handle failed operation."""
-        self.failure_count += 1
-        self.last_failure_time = datetime.now()
-        
-        if self.failure_count >= self.failure_threshold:
-            self.state = 'open'
-            circuit_breaker_state.labels(service=self.service_name).set(1)
-            logger.error(
-                "Circuit breaker opened due to failures",
-                service=self.service_name,
-                failure_count=self.failure_count,
-                threshold=self.failure_threshold
-            )
-
-
-class AWSServiceManager:
-    """
-    AWS service integration manager using boto3 1.28+.
-    
-    Provides enterprise-grade AWS service integration with:
-    - Comprehensive boto3 client configuration with retry policies
-    - AWS KMS integration for encryption key management
-    - S3 operations with multipart upload support
-    - CloudWatch integration for monitoring and logging
-    - IAM role-based authentication and authorization
-    - Connection pooling and resource management
-    """
-    
-    def __init__(self):
-        self.config = get_config()
-        self._clients = {}
-        self._kms_client = None
-        self._s3_client = None
-        self._cloudwatch_client = None
-        
-        # AWS SDK configuration with enterprise retry policies
-        self.boto_config = BotoCoreConfig(
-            retries={
-                'max_attempts': 3,
-                'mode': 'adaptive'
-            },
-            max_pool_connections=50,
-            region_name=os.getenv('AWS_REGION', 'us-east-1'),
-            read_timeout=30,
-            connect_timeout=10,
-            signature_version='v4'
-        )
-    
-    @property
-    def kms_client(self):
-        """Get or create AWS KMS client."""
-        if self._kms_client is None:
-            self._kms_client = self._create_aws_client('kms')
-        return self._kms_client
-    
-    @property
-    def s3_client(self):
-        """Get or create AWS S3 client."""
-        if self._s3_client is None:
-            self._s3_client = self._create_aws_client('s3')
-        return self._s3_client
-    
-    @property
-    def cloudwatch_client(self):
-        """Get or create AWS CloudWatch client."""
-        if self._cloudwatch_client is None:
-            self._cloudwatch_client = self._create_aws_client('cloudwatch')
-        return self._cloudwatch_client
-    
-    def _create_aws_client(self, service_name: str):
-        """Create AWS service client with enterprise configuration."""
-        try:
-            client = boto3.client(
-                service_name,
-                aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
-                aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
-                aws_session_token=os.getenv('AWS_SESSION_TOKEN'),
-                config=self.boto_config
-            )
-            
-            logger.info(
-                "AWS client created successfully",
-                service=service_name,
-                region=self.boto_config.region_name
-            )
-            
-            return client
-        except (ClientError, BotoCoreError) as e:
-            logger.error(
-                "Failed to create AWS client",
-                service=service_name,
-                error=str(e)
-            )
-            raise ExternalServiceError(f"AWS {service_name} client creation failed: {str(e)}")
-    
-    @CircuitBreaker('aws_kms', failure_threshold=3, recovery_timeout=30)
-    def generate_data_key(
-        self, 
-        key_id: str, 
-        key_spec: str = 'AES_256',
-        encryption_context: Optional[Dict[str, str]] = None
-    ) -> Dict[str, bytes]:
-        """
-        Generate AWS KMS data key for encryption operations.
-        
-        Args:
-            key_id: KMS key ID or ARN for data key generation
-            key_spec: Key specification (AES_256, AES_128)
-            encryption_context: Additional encryption context
-            
-        Returns:
-            Dictionary containing plaintext and encrypted data keys
-            
-        Raises:
-            ExternalServiceError: When data key generation fails
-        """
-        start_time = datetime.now()
-        
-        try:
-            default_context = {
-                'application': 'flask-migration-system',
-                'purpose': 'data-encryption',
-                'environment': os.getenv('FLASK_ENV', 'production'),
-                'timestamp': datetime.utcnow().isoformat()
-            }
-            
-            if encryption_context:
-                default_context.update(encryption_context)
-            
-            response = self.kms_client.generate_data_key(
-                KeyId=key_id,
-                KeySpec=key_spec,
-                EncryptionContext=default_context
-            )
-            
-            duration = (datetime.now() - start_time).total_seconds()
-            external_service_duration.labels(
-                service='aws_kms', 
-                method='generate_data_key'
-            ).observe(duration)
-            
-            external_service_requests.labels(
-                service='aws_kms',
-                method='generate_data_key',
-                status='success'
-            ).inc()
-            
-            logger.info(
-                "AWS KMS data key generated successfully",
-                key_id=key_id,
-                key_spec=key_spec,
-                duration=duration
-            )
-            
-            return {
-                'plaintext_key': response['Plaintext'],
-                'encrypted_key': response['CiphertextBlob']
-            }
-            
-        except (ClientError, BotoCoreError) as e:
-            duration = (datetime.now() - start_time).total_seconds()
-            external_service_requests.labels(
-                service='aws_kms',
-                method='generate_data_key',
-                status='error'
-            ).inc()
-            
-            logger.error(
-                "AWS KMS data key generation failed",
-                key_id=key_id,
-                error=str(e),
-                duration=duration
-            )
-            raise ExternalServiceError(f"KMS data key generation failed: {str(e)}")
-    
-    @CircuitBreaker('aws_kms', failure_threshold=3, recovery_timeout=30)
-    def decrypt_data_key(
-        self, 
-        encrypted_key: bytes,
-        encryption_context: Optional[Dict[str, str]] = None
-    ) -> bytes:
-        """
-        Decrypt AWS KMS data key for cryptographic operations.
-        
-        Args:
-            encrypted_key: Encrypted data key from KMS
-            encryption_context: Encryption context for validation
-            
-        Returns:
-            Decrypted plaintext key for encryption operations
-            
-        Raises:
-            ExternalServiceError: When key decryption fails
-        """
-        start_time = datetime.now()
-        
-        try:
-            default_context = {
-                'application': 'flask-migration-system',
-                'purpose': 'data-encryption',
-                'environment': os.getenv('FLASK_ENV', 'production')
-            }
-            
-            if encryption_context:
-                default_context.update(encryption_context)
-            
-            response = self.kms_client.decrypt(
-                CiphertextBlob=encrypted_key,
-                EncryptionContext=default_context
-            )
-            
-            duration = (datetime.now() - start_time).total_seconds()
-            external_service_duration.labels(
-                service='aws_kms',
-                method='decrypt_data_key'
-            ).observe(duration)
-            
-            external_service_requests.labels(
-                service='aws_kms',
-                method='decrypt_data_key',
-                status='success'
-            ).inc()
-            
-            logger.info(
-                "AWS KMS data key decrypted successfully",
-                duration=duration
-            )
-            
-            return response['Plaintext']
-            
-        except (ClientError, BotoCoreError) as e:
-            duration = (datetime.now() - start_time).total_seconds()
-            external_service_requests.labels(
-                service='aws_kms',
-                method='decrypt_data_key',
-                status='error'
-            ).inc()
-            
-            logger.error(
-                "AWS KMS data key decryption failed",
-                error=str(e),
-                duration=duration
-            )
-            raise ExternalServiceError(f"KMS data key decryption failed: {str(e)}")
-    
-    @CircuitBreaker('aws_s3', failure_threshold=5, recovery_timeout=60)
-    def upload_file_to_s3(
-        self,
-        file_path: str,
-        bucket_name: str,
-        object_key: str,
-        metadata: Optional[Dict[str, str]] = None
-    ) -> Dict[str, Any]:
-        """
-        Upload file to AWS S3 with server-side encryption.
-        
-        Args:
-            file_path: Local file path to upload
-            bucket_name: S3 bucket name
-            object_key: S3 object key
-            metadata: Optional metadata for the object
-            
-        Returns:
-            Upload result with object information
-            
-        Raises:
-            ExternalServiceError: When file upload fails
-        """
-        start_time = datetime.now()
-        
-        try:
-            extra_args = {
-                'ServerSideEncryption': 'AES256',
-                'Metadata': metadata or {}
-            }
-            
-            self.s3_client.upload_file(
-                file_path,
-                bucket_name,
-                object_key,
-                ExtraArgs=extra_args
-            )
-            
-            duration = (datetime.now() - start_time).total_seconds()
-            external_service_duration.labels(
-                service='aws_s3',
-                method='upload_file'
-            ).observe(duration)
-            
-            external_service_requests.labels(
-                service='aws_s3',
-                method='upload_file',
-                status='success'
-            ).inc()
-            
-            logger.info(
-                "File uploaded to S3 successfully",
-                bucket=bucket_name,
-                object_key=object_key,
-                duration=duration
-            )
-            
-            return {
-                'bucket': bucket_name,
-                'key': object_key,
-                'upload_time': datetime.utcnow().isoformat(),
-                'duration': duration
-            }
-            
-        except (ClientError, BotoCoreError) as e:
-            duration = (datetime.now() - start_time).total_seconds()
-            external_service_requests.labels(
-                service='aws_s3',
-                method='upload_file',
-                status='error'
-            ).inc()
-            
-            logger.error(
-                "S3 file upload failed",
-                bucket=bucket_name,
-                object_key=object_key,
-                error=str(e),
-                duration=duration
-            )
-            raise ExternalServiceError(f"S3 file upload failed: {str(e)}")
-
-
-class HTTPClientManager:
-    """
-    HTTP client manager for external API communication.
-    
-    Provides enterprise-grade HTTP client configuration with:
-    - requests 2.31+ for synchronous operations
-    - httpx 0.24+ for asynchronous operations
-    - Connection pooling and keep-alive optimization
-    - Comprehensive retry logic with exponential backoff
-    - TLS 1.3 enforcement and certificate validation
-    - Circuit breaker integration for service resilience
-    """
-    
-    def __init__(self):
-        self.config = get_config()
-        self._sync_session = None
-        self._async_client = None
-        
-        # TLS configuration for enhanced security
-        self.ssl_context = ssl.create_default_context()
-        self.ssl_context.minimum_version = ssl.TLSVersion.TLSv1_3
-        self.ssl_context.check_hostname = True
-        self.ssl_context.verify_mode = ssl.CERT_REQUIRED
-    
-    @property
-    def sync_session(self) -> requests.Session:
-        """Get or create synchronous HTTP session."""
-        if self._sync_session is None:
-            self._sync_session = self._create_sync_session()
-        return self._sync_session
-    
-    @property
-    def async_client(self) -> httpx.AsyncClient:
-        """Get or create asynchronous HTTP client."""
-        if self._async_client is None:
-            self._async_client = self._create_async_client()
-        return self._async_client
-    
-    def _create_sync_session(self) -> requests.Session:
-        """Create configured synchronous HTTP session."""
-        session = requests.Session()
-        
-        # Configure adapter with connection pooling
-        adapter = requests.adapters.HTTPAdapter(
-            pool_connections=20,
-            pool_maxsize=50,
-            pool_block=False,
-            max_retries=0  # We handle retries with tenacity
-        )
-        
-        session.mount('https://', adapter)
-        session.mount('http://', adapter)
-        
-        # Default headers
-        session.headers.update({
-            'User-Agent': 'Flask-Migration-System/1.0',
-            'Accept': 'application/json',
-            'Connection': 'keep-alive'
+        # Add default service URLs
+        api_urls.update({
+            'auth0_management': f"https://{self.auth0_domain}/api/v2" if self.auth0_domain else '',
+            'aws_sts': f"https://sts.{self.aws_region}.amazonaws.com",
+            'aws_kms': f"https://kms.{self.aws_region}.amazonaws.com",
+            'aws_s3': f"https://s3.{self.s3_region}.amazonaws.com"
         })
         
-        # Timeout configuration
-        session.timeout = (10.0, 30.0)  # (connect, read)
-        
-        logger.info("Synchronous HTTP session created successfully")
-        return session
+        return api_urls
     
-    def _create_async_client(self) -> httpx.AsyncClient:
-        """Create configured asynchronous HTTP client."""
-        limits = httpx.Limits(
-            max_connections=100,
-            max_keepalive_connections=50,
-            keepalive_expiry=30.0
+    def _parse_external_api_timeouts(self) -> Dict[str, float]:
+        """
+        Parse external API timeout configurations from environment variables.
+        
+        Returns:
+            Dictionary mapping service names to timeout values in seconds
+        """
+        timeouts = {}
+        
+        # Parse semicolon-separated timeout configuration
+        timeouts_env = os.getenv('EXTERNAL_API_TIMEOUTS', '')
+        if timeouts_env:
+            try:
+                for timeout_config in timeouts_env.split(';'):
+                    if '=' in timeout_config:
+                        service_name, timeout_str = timeout_config.split('=', 1)
+                        timeouts[service_name.strip()] = float(timeout_str.strip())
+            except Exception as e:
+                self.logger.warning(f"Failed to parse external API timeouts: {str(e)}")
+        
+        # Default timeouts for different service types
+        default_timeouts = {
+            'auth0': 30.0,
+            'aws': 60.0,
+            'external_api': self.http_timeout,
+            'auth0_management': 45.0,
+            'aws_sts': 30.0,
+            'aws_kms': 30.0,
+            'aws_s3': 120.0  # Longer timeout for S3 operations
+        }
+        
+        # Merge with defaults
+        for service, default_timeout in default_timeouts.items():
+            if service not in timeouts:
+                timeouts[service] = default_timeout
+        
+        return timeouts
+    
+    def _validate_required_credentials(self) -> None:
+        """
+        Validate that required external service credentials are present and valid.
+        
+        This method performs comprehensive validation of external service credentials
+        based on environment and usage requirements.
+        
+        Raises:
+            ExternalServiceError: When required credentials are missing or invalid
+        """
+        validation_errors = []
+        
+        # AWS Credentials Validation
+        if not self.aws_access_key_id or not self.aws_secret_access_key:
+            if self.environment == 'production':
+                validation_errors.append("AWS credentials (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY) are required for production")
+            else:
+                self.logger.warning("AWS credentials not configured - AWS services will be unavailable")
+        
+        # AWS KMS Key Validation
+        if self.aws_kms_key_arn:
+            if not self.aws_kms_key_arn.startswith('arn:aws:kms:'):
+                validation_errors.append(f"Invalid AWS KMS key ARN format: {self.aws_kms_key_arn}")
+        elif self.environment == 'production':
+            validation_errors.append("AWS KMS key ARN is required for production encryption")
+        
+        # Auth0 Configuration Validation
+        if self.environment in ['production', 'staging']:
+            if not all([self.auth0_domain, self.auth0_client_id, self.auth0_client_secret]):
+                validation_errors.append("Auth0 configuration (AUTH0_DOMAIN, AUTH0_CLIENT_ID, AUTH0_CLIENT_SECRET) is required for production/staging")
+        
+        # SSL/TLS Certificate Validation
+        if self.ssl_cert_path:
+            if not Path(self.ssl_cert_path).exists():
+                validation_errors.append(f"SSL certificate file not found: {self.ssl_cert_path}")
+        
+        if self.ssl_key_path:
+            if not Path(self.ssl_key_path).exists():
+                validation_errors.append(f"SSL key file not found: {self.ssl_key_path}")
+        
+        # Validate timeout configurations
+        if self.http_timeout <= 0:
+            validation_errors.append("HTTP timeout must be positive")
+        
+        if self.http_retries < 0:
+            validation_errors.append("HTTP retries must be non-negative")
+        
+        if validation_errors:
+            error_message = "External service configuration validation failed:\n" + "\n".join(
+                f"- {error}" for error in validation_errors
+            )
+            raise ExternalServiceError(error_message)
+        
+        self.logger.info("External service credentials validation completed successfully")
+    
+    def _initialize_aws_configuration(self) -> None:
+        """
+        Initialize comprehensive AWS service configuration using boto3 1.28+ with
+        KMS integration, connection pooling, and enterprise security settings.
+        
+        This method configures boto3 clients for AWS services including S3, KMS,
+        and other AWS services with proper authentication, retry logic, and
+        connection management as specified in Section 0.2.4.
+        """
+        try:
+            # Configure boto3 session with credentials
+            session_kwargs = {
+                'region_name': self.aws_region
+            }
+            
+            if self.aws_access_key_id and self.aws_secret_access_key:
+                session_kwargs.update({
+                    'aws_access_key_id': self.aws_access_key_id,
+                    'aws_secret_access_key': self.aws_secret_access_key
+                })
+                
+                if self.aws_session_token:
+                    session_kwargs['aws_session_token'] = self.aws_session_token
+            
+            self.aws_session = boto3.Session(**session_kwargs)
+            
+            # Configure boto3 client configuration with retry and connection pooling
+            self.boto3_config = BotoCoreConfig(
+                region_name=self.aws_region,
+                retries={
+                    'max_attempts': self.http_retries + 1,  # boto3 includes initial attempt
+                    'mode': 'adaptive'  # Adaptive retry mode for better performance
+                },
+                max_pool_connections=self.http_max_connections,
+                connect_timeout=30,
+                read_timeout=self.http_timeout,
+                tcp_keepalive=True,
+                signature_version='v4',
+                s3={
+                    'addressing_style': 'virtual'  # Use virtual-hosted-style URLs for S3
+                }
+            )
+            
+            # Initialize AWS service clients
+            self.aws_clients = self._create_aws_clients()
+            
+            # Initialize KMS key manager if KMS ARN is provided
+            if self.aws_kms_key_arn:
+                self.kms_key_manager = AWSKMSKeyManager(
+                    kms_client=self.aws_clients['kms'],
+                    cmk_arn=self.aws_kms_key_arn
+                )
+            else:
+                self.kms_key_manager = None
+                self.logger.warning("AWS KMS key manager not initialized - KMS ARN not provided")
+            
+            self.logger.info("AWS configuration initialized successfully")
+            
+        except Exception as e:
+            error_msg = f"AWS configuration initialization failed: {str(e)}"
+            self.logger.error(error_msg)
+            raise AWSConfigurationError(error_msg)
+    
+    def _create_aws_clients(self) -> Dict[str, Any]:
+        """
+        Create AWS service clients with consistent configuration.
+        
+        Returns:
+            Dictionary mapping service names to configured boto3 clients
+        """
+        clients = {}
+        
+        # List of AWS services to initialize
+        aws_services = ['s3', 'kms', 'sts', 'secretsmanager', 'cloudwatch']
+        
+        for service_name in aws_services:
+            try:
+                client_kwargs = {'config': self.boto3_config}
+                
+                # Add custom endpoint URL for S3 if specified (for S3-compatible services)
+                if service_name == 's3' and self.s3_endpoint_url:
+                    client_kwargs['endpoint_url'] = self.s3_endpoint_url
+                
+                clients[service_name] = self.aws_session.client(service_name, **client_kwargs)
+                self.logger.debug(f"AWS {service_name} client initialized successfully")
+                
+            except Exception as e:
+                # Log warning but continue with other services
+                self.logger.warning(f"Failed to initialize AWS {service_name} client: {str(e)}")
+        
+        return clients
+    
+    def _initialize_http_client_configuration(self) -> None:
+        """
+        Initialize comprehensive HTTP client configuration using requests 2.31+ and
+        httpx 0.24+ with connection pooling, retry logic, and circuit breaker patterns.
+        
+        This method configures both synchronous (requests) and asynchronous (httpx)
+        HTTP clients with enterprise-grade settings for external API communication
+        as specified in Section 3.2.3.
+        """
+        try:
+            # Initialize requests session with retry strategy
+            self.requests_session = self._create_requests_session()
+            
+            # Initialize httpx async client
+            self.httpx_client_config = self._create_httpx_client_config()
+            
+            # Initialize Auth0 specific HTTP clients
+            self.auth0_http_client = self._create_auth0_http_client()
+            
+            # Initialize external API HTTP clients
+            self.external_api_clients = self._create_external_api_clients()
+            
+            self.logger.info("HTTP client configuration initialized successfully")
+            
+        except Exception as e:
+            error_msg = f"HTTP client configuration initialization failed: {str(e)}"
+            self.logger.error(error_msg)
+            raise HTTPClientConfigurationError(error_msg)
+    
+    def _create_requests_session(self) -> requests.Session:
+        """
+        Create configured requests session with comprehensive retry strategy and connection pooling.
+        
+        Returns:
+            Configured requests Session with retry logic and connection pooling
+        """
+        session = requests.Session()
+        
+        # Configure retry strategy with exponential backoff
+        retry_strategy = Retry(
+            total=self.http_retries,
+            status_forcelist=[429, 500, 502, 503, 504],  # HTTP status codes to retry
+            method_whitelist=["HEAD", "GET", "PUT", "DELETE", "OPTIONS", "TRACE"],
+            backoff_factor=self.http_backoff_factor,
+            raise_on_redirect=False,
+            raise_on_status=False
         )
         
-        timeout = httpx.Timeout(
+        # Configure HTTP adapter with connection pooling
+        adapter = HTTPAdapter(
+            max_retries=retry_strategy,
+            pool_connections=self.http_max_connections,
+            pool_maxsize=self.http_max_connections,
+            pool_block=False
+        )
+        
+        # Mount adapter for HTTP and HTTPS
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        
+        # Configure session defaults
+        session.headers.update({
+            'User-Agent': f'Flask-External-Services/1.0 (Python/{os.sys.version.split()[0]})',
+            'Accept': 'application/json',
+            'Content-Type': 'application/json'
+        })
+        
+        # Configure SSL/TLS verification
+        if self.ssl_verify:
+            if self.ca_cert_path:
+                session.verify = self.ca_cert_path
+            else:
+                session.verify = True
+        else:
+            session.verify = False
+            # Disable SSL warnings when verification is disabled
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        
+        # Configure client certificates if provided
+        if self.ssl_cert_path and self.ssl_key_path:
+            session.cert = (self.ssl_cert_path, self.ssl_key_path)
+        
+        return session
+    
+    def _create_httpx_client_config(self) -> Dict[str, Any]:
+        """
+        Create httpx async client configuration with enterprise settings.
+        
+        Returns:
+            Dictionary containing httpx client configuration
+        """
+        # Configure timeout settings
+        timeout_config = httpx.Timeout(
             connect=10.0,
-            read=30.0,
+            read=self.http_timeout,
             write=10.0,
             pool=5.0
         )
         
-        client = httpx.AsyncClient(
-            limits=limits,
-            timeout=timeout,
-            headers={
-                'User-Agent': 'Flask-Migration-System/1.0',
-                'Accept': 'application/json'
-            },
-            verify=self.ssl_context,
-            http2=True
+        # Configure connection limits
+        limits_config = httpx.Limits(
+            max_connections=self.http_max_connections,
+            max_keepalive_connections=self.http_max_keepalive,
+            keepalive_expiry=30.0
         )
         
-        logger.info("Asynchronous HTTP client created successfully")
-        return client
-    
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential_jitter(initial=1, max=10, jitter=2),
-        retry=retry_if_exception_type((
-            requests.RequestException,
-            requests.ConnectionError,
-            requests.Timeout
-        )),
-        before_sleep=before_sleep_log(logger, logging.WARNING),
-        after=after_log(logger, logging.INFO)
-    )
-    @CircuitBreaker('http_sync', failure_threshold=5, recovery_timeout=60)
-    def make_sync_request(
-        self,
-        method: str,
-        url: str,
-        headers: Optional[Dict[str, str]] = None,
-        data: Optional[Dict[str, Any]] = None,
-        json: Optional[Dict[str, Any]] = None,
-        params: Optional[Dict[str, str]] = None,
-        timeout: Optional[float] = None
-    ) -> requests.Response:
-        """
-        Make synchronous HTTP request with retry logic and circuit breaker protection.
+        # Configure SSL/TLS context
+        ssl_context = None
+        if self.ssl_verify:
+            ssl_context = ssl.create_default_context()
+            if self.ca_cert_path:
+                ssl_context.load_verify_locations(self.ca_cert_path)
+        else:
+            ssl_context = ssl._create_unverified_context()
         
-        Args:
-            method: HTTP method (GET, POST, PUT, DELETE, etc.)
-            url: Request URL
-            headers: Optional request headers
-            data: Optional form data
-            json: Optional JSON data
-            params: Optional query parameters
-            timeout: Optional request timeout override
-            
+        # Configure client certificates
+        cert = None
+        if self.ssl_cert_path and self.ssl_key_path:
+            cert = (self.ssl_cert_path, self.ssl_key_path)
+        
+        return {
+            'timeout': timeout_config,
+            'limits': limits_config,
+            'verify': ssl_context if self.ssl_verify else False,
+            'cert': cert,
+            'headers': {
+                'User-Agent': f'Flask-External-Services/1.0 (httpx async)',
+                'Accept': 'application/json',
+                'Content-Type': 'application/json'
+            },
+            'http2': True  # Enable HTTP/2 support
+        }
+    
+    def _create_auth0_http_client(self) -> requests.Session:
+        """
+        Create specialized HTTP client for Auth0 API communications with optimized settings.
+        
         Returns:
-            Response object from requests library
-            
-        Raises:
-            ExternalServiceError: When request fails after retries
+            Configured requests Session optimized for Auth0 API calls
         """
-        start_time = datetime.now()
+        session = requests.Session()
         
-        try:
-            response = self.sync_session.request(
-                method=method.upper(),
-                url=url,
-                headers=headers,
-                data=data,
-                json=json,
-                params=params,
-                timeout=timeout or (10.0, 30.0)
-            )
-            
-            duration = (datetime.now() - start_time).total_seconds()
-            
-            external_service_duration.labels(
-                service='http_sync',
-                method=method.upper()
-            ).observe(duration)
-            
-            external_service_requests.labels(
-                service='http_sync',
-                method=method.upper(),
-                status='success' if response.status_code < 400 else 'error'
-            ).inc()
-            
-            logger.info(
-                "Synchronous HTTP request completed",
-                method=method.upper(),
-                url=url,
-                status_code=response.status_code,
-                duration=duration
-            )
-            
-            response.raise_for_status()
-            return response
-            
-        except requests.RequestException as e:
-            duration = (datetime.now() - start_time).total_seconds()
-            
-            external_service_requests.labels(
-                service='http_sync',
-                method=method.upper(),
-                status='error'
-            ).inc()
-            
-            logger.error(
-                "Synchronous HTTP request failed",
-                method=method.upper(),
-                url=url,
-                error=str(e),
-                duration=duration
-            )
-            raise ExternalServiceError(f"HTTP request failed: {str(e)}")
+        # Configure Auth0-specific retry strategy
+        auth0_retry = Retry(
+            total=3,  # Fewer retries for Auth0 to avoid account lockouts
+            status_forcelist=[429, 500, 502, 503, 504],
+            method_whitelist=["HEAD", "GET", "POST"],
+            backoff_factor=2.0,  # Longer backoff for Auth0 rate limiting
+            respect_retry_after_header=True
+        )
+        
+        # Configure adapter with Auth0-specific settings
+        adapter = HTTPAdapter(
+            max_retries=auth0_retry,
+            pool_connections=20,  # Lower connection pool for Auth0
+            pool_maxsize=20,
+            pool_block=False
+        )
+        
+        session.mount("https://", adapter)
+        
+        # Configure Auth0-specific headers
+        session.headers.update({
+            'User-Agent': 'Flask-Auth0-Client/1.0',
+            'Accept': 'application/json',
+            'Content-Type': 'application/json'
+        })
+        
+        # Set base timeout for Auth0 operations
+        session.timeout = self.external_api_timeouts.get('auth0', 30.0)
+        
+        return session
     
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential_jitter(initial=1, max=10, jitter=2),
-        retry=retry_if_exception_type((
-            httpx.RequestError,
-            httpx.TimeoutException,
-            httpx.ConnectError
-        )),
-        before_sleep=before_sleep_log(logger, logging.WARNING),
-        after=after_log(logger, logging.INFO)
-    )
-    @CircuitBreaker('http_async', failure_threshold=5, recovery_timeout=60)
-    async def make_async_request(
-        self,
-        method: str,
-        url: str,
-        headers: Optional[Dict[str, str]] = None,
-        data: Optional[Dict[str, Any]] = None,
-        json: Optional[Dict[str, Any]] = None,
-        params: Optional[Dict[str, str]] = None,
-        timeout: Optional[float] = None
-    ) -> httpx.Response:
+    def _create_external_api_clients(self) -> Dict[str, requests.Session]:
         """
-        Make asynchronous HTTP request with retry logic and circuit breaker protection.
+        Create specialized HTTP clients for different external APIs.
         
-        Args:
-            method: HTTP method (GET, POST, PUT, DELETE, etc.)
-            url: Request URL
-            headers: Optional request headers
-            data: Optional form data
-            json: Optional JSON data
-            params: Optional query parameters
-            timeout: Optional request timeout override
-            
         Returns:
-            Response object from httpx library
-            
-        Raises:
-            ExternalServiceError: When request fails after retries
+            Dictionary mapping API names to configured requests Sessions
         """
-        start_time = datetime.now()
+        clients = {}
         
+        for api_name, base_url in self.external_api_base_urls.items():
+            if not base_url:
+                continue
+                
+            session = requests.Session()
+            
+            # Configure API-specific retry strategy
+            retry_strategy = Retry(
+                total=self.http_retries,
+                status_forcelist=[429, 500, 502, 503, 504],
+                backoff_factor=self.http_backoff_factor,
+                respect_retry_after_header=True
+            )
+            
+            # Configure adapter
+            adapter = HTTPAdapter(
+                max_retries=retry_strategy,
+                pool_connections=10,
+                pool_maxsize=10
+            )
+            
+            session.mount("http://", adapter)
+            session.mount("https://", adapter)
+            
+            # Configure API-specific headers
+            session.headers.update({
+                'User-Agent': f'Flask-{api_name.title()}-Client/1.0',
+                'Accept': 'application/json'
+            })
+            
+            # Set API-specific timeout
+            session.timeout = self.external_api_timeouts.get(api_name, self.http_timeout)
+            
+            clients[api_name] = session
+        
+        return clients
+    
+    def _initialize_auth0_configuration(self) -> None:
+        """
+        Initialize Auth0 enterprise authentication service configuration.
+        
+        This method sets up Auth0 integration with proper authentication settings,
+        API client configuration, and security controls for enterprise authentication.
+        """
         try:
-            response = await self.async_client.request(
-                method=method.upper(),
-                url=url,
-                headers=headers,
-                data=data,
-                json=json,
-                params=params,
-                timeout=timeout or 30.0
-            )
+            if not self.auth0_domain:
+                self.logger.warning("Auth0 domain not configured - Auth0 integration will be unavailable")
+                self.auth0_config = None
+                return
             
-            duration = (datetime.now() - start_time).total_seconds()
+            # Validate Auth0 domain format
+            if not self.auth0_domain.endswith('.auth0.com') and not self.auth0_domain.endswith('.eu.auth0.com'):
+                if self.environment == 'production':
+                    raise ExternalServiceError(f"Invalid Auth0 domain format: {self.auth0_domain}")
+                else:
+                    self.logger.warning(f"Auth0 domain format unusual: {self.auth0_domain}")
             
-            external_service_duration.labels(
-                service='http_async',
-                method=method.upper()
-            ).observe(duration)
+            # Configure Auth0 settings
+            self.auth0_config = {
+                'domain': self.auth0_domain,
+                'client_id': self.auth0_client_id,
+                'client_secret': self.auth0_client_secret,
+                'audience': self.auth0_audience,
+                'management_api_token': self.auth0_management_api_token,
+                'base_url': f"https://{self.auth0_domain}",
+                'management_api_url': f"https://{self.auth0_domain}/api/v2",
+                'algorithms': ['RS256'],  # Auth0 default algorithm
+                'leeway': 10,  # 10 seconds leeway for token validation
+                'issuer': f"https://{self.auth0_domain}/",
+                'jwks_uri': f"https://{self.auth0_domain}/.well-known/jwks.json",
+                'token_endpoint': f"https://{self.auth0_domain}/oauth/token",
+                'userinfo_endpoint': f"https://{self.auth0_domain}/userinfo",
+                'authorize_endpoint': f"https://{self.auth0_domain}/authorize"
+            }
             
-            external_service_requests.labels(
-                service='http_async',
-                method=method.upper(),
-                status='success' if response.status_code < 400 else 'error'
-            ).inc()
+            # Initialize Auth0 circuit breaker if enabled
+            if self.circuit_breaker_enabled:
+                self.auth0_circuit_breaker = self._create_circuit_breaker('auth0')
+            else:
+                self.auth0_circuit_breaker = None
             
-            logger.info(
-                "Asynchronous HTTP request completed",
-                method=method.upper(),
-                url=url,
-                status_code=response.status_code,
-                duration=duration
-            )
-            
-            response.raise_for_status()
-            return response
-            
-        except httpx.RequestError as e:
-            duration = (datetime.now() - start_time).total_seconds()
-            
-            external_service_requests.labels(
-                service='http_async',
-                method=method.upper(),
-                status='error'
-            ).inc()
-            
-            logger.error(
-                "Asynchronous HTTP request failed",
-                method=method.upper(),
-                url=url,
-                error=str(e),
-                duration=duration
-            )
-            raise ExternalServiceError(f"Async HTTP request failed: {str(e)}")
-    
-    async def close_async_client(self):
-        """Close asynchronous HTTP client and cleanup resources."""
-        if self._async_client:
-            await self._async_client.aclose()
-            self._async_client = None
-            logger.info("Asynchronous HTTP client closed successfully")
-
-
-class Auth0ServiceManager:
-    """
-    Auth0 integration manager for enterprise authentication.
-    
-    Provides comprehensive Auth0 service integration with:
-    - Auth0 Python SDK 4.7+ for management API access
-    - JWT token validation and user management
-    - Enterprise directory integration and user provisioning
-    - Multi-factor authentication support
-    - Circuit breaker protection for Auth0 API calls
-    """
-    
-    def __init__(self):
-        self.config = get_config()
-        self.domain = os.getenv('AUTH0_DOMAIN')
-        self.client_id = os.getenv('AUTH0_CLIENT_ID')
-        self.client_secret = os.getenv('AUTH0_CLIENT_SECRET')
-        self.audience = os.getenv('AUTH0_AUDIENCE')
-        
-        self._management_client = None
-        self._access_token = None
-        self._token_expires_at = None
-        
-        if not all([self.domain, self.client_id, self.client_secret]):
-            raise ExternalServiceError("Auth0 configuration incomplete")
-    
-    @property
-    def management_client(self) -> Auth0:
-        """Get or create Auth0 management client."""
-        if self._management_client is None or self._is_token_expired():
-            self._management_client = self._create_management_client()
-        return self._management_client
-    
-    def _is_token_expired(self) -> bool:
-        """Check if current access token is expired."""
-        if self._token_expires_at is None:
-            return True
-        return datetime.now() >= self._token_expires_at
-    
-    @CircuitBreaker('auth0_api', failure_threshold=3, recovery_timeout=60)
-    def _create_management_client(self) -> Auth0:
-        """Create Auth0 management client with fresh access token."""
-        try:
-            # Get access token for management API
-            get_token = GetToken(self.domain)
-            token_response = get_token.client_credentials(
-                self.client_id,
-                self.client_secret,
-                f"https://{self.domain}/api/v2/"
-            )
-            
-            self._access_token = token_response['access_token']
-            expires_in = token_response.get('expires_in', 3600)
-            self._token_expires_at = datetime.now() + timedelta(seconds=expires_in - 300)
-            
-            management_client = Auth0(
-                domain=self.domain,
-                token=self._access_token
-            )
-            
-            logger.info(
-                "Auth0 management client created successfully",
-                domain=self.domain,
-                expires_at=self._token_expires_at.isoformat()
-            )
-            
-            return management_client
+            self.logger.info("Auth0 configuration initialized successfully")
             
         except Exception as e:
-            logger.error(
-                "Failed to create Auth0 management client",
-                domain=self.domain,
-                error=str(e)
-            )
-            raise ExternalServiceError(f"Auth0 management client creation failed: {str(e)}")
+            error_msg = f"Auth0 configuration initialization failed: {str(e)}"
+            self.logger.error(error_msg)
+            raise ExternalServiceError(error_msg)
     
-    @CircuitBreaker('auth0_api', failure_threshold=5, recovery_timeout=60)
-    def get_user_profile(self, user_id: str) -> Dict[str, Any]:
+    def _initialize_circuit_breaker_configuration(self) -> None:
         """
-        Get user profile from Auth0 management API.
+        Initialize circuit breaker patterns for service resilience as specified in Section 5.2.6.
         
-        Args:
-            user_id: Auth0 user identifier
-            
-        Returns:
-            User profile information from Auth0
-            
-        Raises:
-            ExternalServiceError: When user profile retrieval fails
+        This method sets up circuit breaker configurations for different external services
+        to provide graceful degradation and prevent cascade failures during service outages.
         """
-        start_time = datetime.now()
-        
         try:
-            user_profile = self.management_client.users.get(user_id)
+            if not self.circuit_breaker_enabled:
+                self.logger.info("Circuit breaker patterns disabled by configuration")
+                self.circuit_breakers = {}
+                return
             
-            duration = (datetime.now() - start_time).total_seconds()
-            external_service_duration.labels(
-                service='auth0_api',
-                method='get_user'
-            ).observe(duration)
+            # Initialize circuit breakers for different service categories
+            self.circuit_breakers = {
+                'aws': self._create_circuit_breaker('aws'),
+                'auth0': self._create_circuit_breaker('auth0'),
+                'external_api': self._create_circuit_breaker('external_api'),
+                'http_client': self._create_circuit_breaker('http_client')
+            }
             
-            external_service_requests.labels(
-                service='auth0_api',
-                method='get_user',
-                status='success'
-            ).inc()
+            # Configure circuit breaker monitoring
+            self.circuit_breaker_metrics = CircuitBreakerMetrics()
             
-            logger.info(
-                "Auth0 user profile retrieved successfully",
-                user_id=user_id,
-                duration=duration
-            )
-            
-            return user_profile
+            self.logger.info("Circuit breaker configuration initialized successfully")
             
         except Exception as e:
-            duration = (datetime.now() - start_time).total_seconds()
-            external_service_requests.labels(
-                service='auth0_api',
-                method='get_user',
-                status='error'
-            ).inc()
-            
-            logger.error(
-                "Auth0 user profile retrieval failed",
-                user_id=user_id,
-                error=str(e),
-                duration=duration
-            )
-            raise ExternalServiceError(f"Auth0 user profile retrieval failed: {str(e)}")
+            error_msg = f"Circuit breaker configuration initialization failed: {str(e)}"
+            self.logger.error(error_msg)
+            raise ExternalServiceError(error_msg)
     
-    @CircuitBreaker('auth0_api', failure_threshold=5, recovery_timeout=60)
-    def get_user_permissions(self, user_id: str) -> List[Dict[str, Any]]:
+    def _create_circuit_breaker(self, service_name: str) -> Callable:
         """
-        Get user permissions from Auth0 management API.
+        Create circuit breaker decorator for specific service.
         
         Args:
-            user_id: Auth0 user identifier
+            service_name: Name of the service for circuit breaker configuration
             
         Returns:
-            List of user permissions from Auth0
-            
-        Raises:
-            ExternalServiceError: When user permissions retrieval fails
+            Configured circuit breaker decorator
         """
-        start_time = datetime.now()
-        
-        try:
-            permissions = self.management_client.users.list_permissions(user_id)
-            
-            duration = (datetime.now() - start_time).total_seconds()
-            external_service_duration.labels(
-                service='auth0_api',
-                method='get_user_permissions'
-            ).observe(duration)
-            
-            external_service_requests.labels(
-                service='auth0_api',
-                method='get_user_permissions',
-                status='success'
-            ).inc()
-            
-            logger.info(
-                "Auth0 user permissions retrieved successfully",
-                user_id=user_id,
-                permission_count=len(permissions),
-                duration=duration
-            )
-            
-            return permissions
-            
-        except Exception as e:
-            duration = (datetime.now() - start_time).total_seconds()
-            external_service_requests.labels(
-                service='auth0_api',
-                method='get_user_permissions',
-                status='error'
-            ).inc()
-            
-            logger.error(
-                "Auth0 user permissions retrieval failed",
-                user_id=user_id,
-                error=str(e),
-                duration=duration
-            )
-            raise ExternalServiceError(f"Auth0 user permissions retrieval failed: {str(e)}")
-
-
-class ExternalServicesConfig:
-    """
-    Central configuration manager for all external services.
-    
-    Provides unified access to all external service managers with:
-    - AWS services integration (S3, KMS, CloudWatch)
-    - HTTP client management (requests/httpx)
-    - Auth0 authentication service integration
-    - Circuit breaker coordination and monitoring
-    - Health check and service status reporting
-    """
-    
-    def __init__(self):
-        self.aws_manager = AWSServiceManager()
-        self.http_manager = HTTPClientManager()
-        self.auth0_manager = Auth0ServiceManager()
-        
-        logger.info("External services configuration initialized successfully")
-    
-    def health_check(self) -> Dict[str, Any]:
-        """
-        Perform health check on all external services.
-        
-        Returns:
-            Dictionary containing health status of all external services
-        """
-        health_status = {
-            'timestamp': datetime.utcnow().isoformat(),
-            'services': {}
+        # Service-specific circuit breaker configurations
+        service_configs = {
+            'aws': {
+                'failure_threshold': self.circuit_breaker_failure_threshold,
+                'timeout_seconds': self.circuit_breaker_timeout,
+                'expected_exception': (ClientError, BotoCoreError, NoCredentialsError)
+            },
+            'auth0': {
+                'failure_threshold': 3,  # Lower threshold for Auth0
+                'timeout_seconds': 30,   # Shorter timeout for Auth0
+                'expected_exception': (requests.exceptions.RequestException, requests.exceptions.Timeout)
+            },
+            'external_api': {
+                'failure_threshold': self.circuit_breaker_failure_threshold,
+                'timeout_seconds': self.circuit_breaker_timeout,
+                'expected_exception': (requests.exceptions.RequestException, httpx.RequestError)
+            },
+            'http_client': {
+                'failure_threshold': self.circuit_breaker_failure_threshold,
+                'timeout_seconds': self.circuit_breaker_timeout,
+                'expected_exception': (requests.exceptions.RequestException, httpx.RequestError)
+            }
         }
         
-        # Check AWS services
-        try:
-            self.aws_manager.s3_client.list_buckets()
-            health_status['services']['aws_s3'] = {
-                'status': 'healthy',
-                'last_check': datetime.utcnow().isoformat()
-            }
-        except Exception as e:
-            health_status['services']['aws_s3'] = {
-                'status': 'unhealthy',
-                'error': str(e),
-                'last_check': datetime.utcnow().isoformat()
-            }
+        config = service_configs.get(service_name, service_configs['external_api'])
         
-        # Check Auth0 service
-        try:
-            # Simple API call to check Auth0 connectivity
-            self.auth0_manager.management_client.tenants.get()
-            health_status['services']['auth0'] = {
-                'status': 'healthy',
-                'last_check': datetime.utcnow().isoformat()
-            }
-        except Exception as e:
-            health_status['services']['auth0'] = {
-                'status': 'unhealthy',
-                'error': str(e),
-                'last_check': datetime.utcnow().isoformat()
-            }
-        
-        # Overall health determination
-        unhealthy_services = [
-            service for service, status in health_status['services'].items()
-            if status['status'] == 'unhealthy'
-        ]
-        
-        health_status['overall_status'] = 'healthy' if not unhealthy_services else 'degraded'
-        health_status['unhealthy_services'] = unhealthy_services
-        
-        logger.info(
-            "External services health check completed",
-            overall_status=health_status['overall_status'],
-            unhealthy_count=len(unhealthy_services)
+        return retry(
+            stop=stop_after_attempt(config['failure_threshold']),
+            wait=wait_exponential_jitter(initial=1, max=config['timeout_seconds'], jitter=2),
+            retry=retry_if_exception_type(config['expected_exception']),
+            before_sleep=before_sleep_log(logger, logging.WARNING),
+            after=after_log(logger, logging.INFO)
         )
+    
+    def _validate_service_connectivity(self) -> None:
+        """
+        Validate connectivity to external services and log status.
         
-        return health_status
+        This method performs basic connectivity checks to external services
+        to ensure configuration is correct and services are reachable.
+        """
+        connectivity_status = {}
+        
+        # Test AWS connectivity
+        if self.aws_access_key_id and self.aws_secret_access_key:
+            try:
+                sts_client = self.aws_clients.get('sts')
+                if sts_client:
+                    response = sts_client.get_caller_identity()
+                    connectivity_status['aws'] = 'connected'
+                    self.logger.info(f"AWS connectivity verified - Account: {response.get('Account', 'unknown')}")
+                else:
+                    connectivity_status['aws'] = 'client_not_initialized'
+            except Exception as e:
+                connectivity_status['aws'] = f'failed: {str(e)}'
+                self.logger.warning(f"AWS connectivity check failed: {str(e)}")
+        else:
+            connectivity_status['aws'] = 'credentials_not_configured'
+        
+        # Test Auth0 connectivity
+        if self.auth0_domain:
+            try:
+                response = self.auth0_http_client.get(
+                    f"https://{self.auth0_domain}/.well-known/jwks.json",
+                    timeout=10
+                )
+                if response.status_code == 200:
+                    connectivity_status['auth0'] = 'connected'
+                    self.logger.info("Auth0 connectivity verified")
+                else:
+                    connectivity_status['auth0'] = f'http_error: {response.status_code}'
+            except Exception as e:
+                connectivity_status['auth0'] = f'failed: {str(e)}'
+                self.logger.warning(f"Auth0 connectivity check failed: {str(e)}")
+        else:
+            connectivity_status['auth0'] = 'domain_not_configured'
+        
+        # Log overall connectivity status
+        connected_services = [service for service, status in connectivity_status.items() if status == 'connected']
+        self.logger.info(f"External service connectivity: {len(connected_services)}/{len(connectivity_status)} services connected")
+        
+        # Store connectivity status for monitoring
+        self.connectivity_status = connectivity_status
     
-    async def cleanup(self):
-        """Cleanup all external service connections."""
-        await self.http_manager.close_async_client()
-        logger.info("External services cleanup completed")
+    def get_aws_client(self, service_name: str) -> Any:
+        """
+        Get configured AWS service client with circuit breaker protection.
+        
+        Args:
+            service_name: AWS service name (s3, kms, sts, etc.)
+            
+        Returns:
+            Configured boto3 client for the specified service
+            
+        Raises:
+            AWSConfigurationError: When client is not available or configured
+        """
+        if service_name not in self.aws_clients:
+            raise AWSConfigurationError(f"AWS {service_name} client not configured or available")
+        
+        client = self.aws_clients[service_name]
+        
+        # Wrap client with circuit breaker if enabled
+        if self.circuit_breaker_enabled and 'aws' in self.circuit_breakers:
+            return CircuitBreakerWrapper(client, self.circuit_breakers['aws'], service_name)
+        
+        return client
+    
+    def get_http_client(self, client_type: str = 'requests') -> Union[requests.Session, Dict[str, Any]]:
+        """
+        Get configured HTTP client with circuit breaker protection.
+        
+        Args:
+            client_type: Type of client ('requests', 'httpx', 'auth0', or API name)
+            
+        Returns:
+            Configured HTTP client
+            
+        Raises:
+            HTTPClientConfigurationError: When client type is not supported
+        """
+        if client_type == 'requests':
+            return self.requests_session
+        elif client_type == 'httpx':
+            return self.httpx_client_config
+        elif client_type == 'auth0':
+            return self.auth0_http_client
+        elif client_type in self.external_api_clients:
+            return self.external_api_clients[client_type]
+        else:
+            raise HTTPClientConfigurationError(f"Unsupported HTTP client type: {client_type}")
+    
+    def get_auth0_config(self) -> Optional[Dict[str, Any]]:
+        """
+        Get Auth0 configuration dictionary.
+        
+        Returns:
+            Auth0 configuration dictionary or None if not configured
+        """
+        return self.auth0_config
+    
+    def get_circuit_breaker(self, service_name: str) -> Optional[Callable]:
+        """
+        Get circuit breaker decorator for specific service.
+        
+        Args:
+            service_name: Service name for circuit breaker
+            
+        Returns:
+            Circuit breaker decorator or None if not configured
+        """
+        return self.circuit_breakers.get(service_name) if self.circuit_breaker_enabled else None
+    
+    def get_service_timeout(self, service_name: str) -> float:
+        """
+        Get timeout configuration for specific service.
+        
+        Args:
+            service_name: Service name for timeout lookup
+            
+        Returns:
+            Timeout value in seconds
+        """
+        return self.external_api_timeouts.get(service_name, self.http_timeout)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Convert configuration to dictionary for debugging and monitoring.
+        
+        Note: Sensitive values are masked for security.
+        
+        Returns:
+            Dictionary representation of external service configuration
+        """
+        config_dict = {
+            'environment': self.environment,
+            'aws_region': self.aws_region,
+            'aws_credentials_configured': bool(self.aws_access_key_id and self.aws_secret_access_key),
+            'aws_kms_key_configured': bool(self.aws_kms_key_arn),
+            's3_bucket_configured': bool(self.s3_bucket_name),
+            'auth0_configured': bool(self.auth0_domain and self.auth0_client_id),
+            'circuit_breaker_enabled': self.circuit_breaker_enabled,
+            'http_timeout': self.http_timeout,
+            'http_retries': self.http_retries,
+            'ssl_verify': self.ssl_verify,
+            'connectivity_status': getattr(self, 'connectivity_status', {}),
+            'configured_aws_services': list(self.aws_clients.keys()) if hasattr(self, 'aws_clients') else [],
+            'configured_api_clients': list(self.external_api_clients.keys()) if hasattr(self, 'external_api_clients') else []
+        }
+        
+        return config_dict
 
 
-# Global external services instance
-external_services = ExternalServicesConfig()
-
-
-def get_external_services() -> ExternalServicesConfig:
+class AWSKMSKeyManager:
     """
-    Get the global external services configuration instance.
+    AWS KMS key management implementation for encryption key operations
+    using boto3 1.28+ with comprehensive error handling and key rotation support.
     
+    This class provides enterprise-grade key management functionality for
+    encryption operations as specified in Section 6.4.3.
+    """
+    
+    def __init__(self, kms_client: Any, cmk_arn: str):
+        """
+        Initialize KMS key manager.
+        
+        Args:
+            kms_client: Configured boto3 KMS client
+            cmk_arn: Customer Master Key ARN for encryption operations
+        """
+        self.kms_client = kms_client
+        self.cmk_arn = cmk_arn
+        self.logger = logging.getLogger(f"{__name__}.AWSKMSKeyManager")
+        self._validate_kms_key()
+    
+    def _validate_kms_key(self) -> None:
+        """
+        Validate KMS key accessibility and permissions.
+        
+        Raises:
+            AWSConfigurationError: When KMS key is not accessible
+        """
+        try:
+            response = self.kms_client.describe_key(KeyId=self.cmk_arn)
+            key_state = response['KeyMetadata']['KeyState']
+            
+            if key_state != 'Enabled':
+                raise AWSConfigurationError(f"KMS key is not enabled. Current state: {key_state}")
+            
+            self.logger.info(f"KMS key validation successful: {self.cmk_arn}")
+            
+        except ClientError as e:
+            error_code = e.response['Error']['Code']
+            if error_code == 'NotFoundException':
+                raise AWSConfigurationError(f"KMS key not found: {self.cmk_arn}")
+            elif error_code == 'AccessDeniedException':
+                raise AWSConfigurationError(f"Access denied to KMS key: {self.cmk_arn}")
+            else:
+                raise AWSConfigurationError(f"KMS key validation failed: {str(e)}")
+    
+    def generate_data_key(self, key_spec: str = 'AES_256', encryption_context: Optional[Dict[str, str]] = None) -> Tuple[bytes, bytes]:
+        """
+        Generate data key for encryption operations.
+        
+        Args:
+            key_spec: Key specification (AES_256, AES_128)
+            encryption_context: Optional encryption context for additional security
+            
+        Returns:
+            Tuple of (plaintext_key, encrypted_key)
+            
+        Raises:
+            AWSConfigurationError: When data key generation fails
+        """
+        try:
+            generate_params = {
+                'KeyId': self.cmk_arn,
+                'KeySpec': key_spec
+            }
+            
+            if encryption_context:
+                generate_params['EncryptionContext'] = encryption_context
+            
+            response = self.kms_client.generate_data_key(**generate_params)
+            
+            self.logger.debug("Data key generated successfully")
+            return response['Plaintext'], response['CiphertextBlob']
+            
+        except ClientError as e:
+            error_msg = f"Failed to generate data key: {str(e)}"
+            self.logger.error(error_msg)
+            raise AWSConfigurationError(error_msg)
+    
+    def decrypt_data_key(self, encrypted_key: bytes, encryption_context: Optional[Dict[str, str]] = None) -> bytes:
+        """
+        Decrypt data key for encryption operations.
+        
+        Args:
+            encrypted_key: Encrypted data key from KMS
+            encryption_context: Optional encryption context for validation
+            
+        Returns:
+            Decrypted plaintext key
+            
+        Raises:
+            AWSConfigurationError: When data key decryption fails
+        """
+        try:
+            decrypt_params = {
+                'CiphertextBlob': encrypted_key
+            }
+            
+            if encryption_context:
+                decrypt_params['EncryptionContext'] = encryption_context
+            
+            response = self.kms_client.decrypt(**decrypt_params)
+            
+            self.logger.debug("Data key decrypted successfully")
+            return response['Plaintext']
+            
+        except ClientError as e:
+            error_msg = f"Failed to decrypt data key: {str(e)}"
+            self.logger.error(error_msg)
+            raise AWSConfigurationError(error_msg)
+    
+    def enable_key_rotation(self) -> bool:
+        """
+        Enable automatic key rotation for the KMS key.
+        
+        Returns:
+            True if rotation was enabled successfully
+            
+        Raises:
+            AWSConfigurationError: When key rotation cannot be enabled
+        """
+        try:
+            self.kms_client.enable_key_rotation(KeyId=self.cmk_arn)
+            self.logger.info(f"Key rotation enabled for KMS key: {self.cmk_arn}")
+            return True
+            
+        except ClientError as e:
+            error_msg = f"Failed to enable key rotation: {str(e)}"
+            self.logger.error(error_msg)
+            raise AWSConfigurationError(error_msg)
+    
+    def get_key_rotation_status(self) -> bool:
+        """
+        Get current key rotation status.
+        
+        Returns:
+            True if key rotation is enabled
+        """
+        try:
+            response = self.kms_client.get_key_rotation_status(KeyId=self.cmk_arn)
+            return response['KeyRotationEnabled']
+            
+        except ClientError as e:
+            self.logger.warning(f"Failed to get key rotation status: {str(e)}")
+            return False
+
+
+class CircuitBreakerWrapper:
+    """
+    Circuit breaker wrapper for external service clients providing
+    graceful degradation and failure protection patterns.
+    """
+    
+    def __init__(self, client: Any, circuit_breaker: Callable, service_name: str):
+        """
+        Initialize circuit breaker wrapper.
+        
+        Args:
+            client: External service client to wrap
+            circuit_breaker: Circuit breaker decorator
+            service_name: Service name for logging and metrics
+        """
+        self.client = client
+        self.circuit_breaker = circuit_breaker
+        self.service_name = service_name
+        self.logger = logging.getLogger(f"{__name__}.CircuitBreakerWrapper")
+    
+    def __getattr__(self, name):
+        """
+        Wrap client method calls with circuit breaker protection.
+        
+        Args:
+            name: Method name to call on wrapped client
+            
+        Returns:
+            Circuit breaker protected method
+        """
+        if hasattr(self.client, name):
+            original_method = getattr(self.client, name)
+            
+            @self.circuit_breaker
+            def wrapped_method(*args, **kwargs):
+                try:
+                    result = original_method(*args, **kwargs)
+                    self.logger.debug(f"Circuit breaker call successful: {self.service_name}.{name}")
+                    return result
+                except Exception as e:
+                    self.logger.warning(f"Circuit breaker call failed: {self.service_name}.{name} - {str(e)}")
+                    raise
+            
+            return wrapped_method
+        else:
+            raise AttributeError(f"'{type(self.client).__name__}' object has no attribute '{name}'")
+
+
+class CircuitBreakerMetrics:
+    """
+    Circuit breaker metrics collection for monitoring and alerting.
+    """
+    
+    def __init__(self):
+        """Initialize circuit breaker metrics."""
+        self.metrics = {
+            'total_calls': 0,
+            'successful_calls': 0,
+            'failed_calls': 0,
+            'circuit_open_count': 0,
+            'last_failure_time': None,
+            'last_success_time': None
+        }
+        self.logger = logging.getLogger(f"{__name__}.CircuitBreakerMetrics")
+    
+    def record_call_success(self, service_name: str) -> None:
+        """Record successful circuit breaker call."""
+        self.metrics['total_calls'] += 1
+        self.metrics['successful_calls'] += 1
+        self.metrics['last_success_time'] = datetime.utcnow()
+        self.logger.debug(f"Circuit breaker success recorded for {service_name}")
+    
+    def record_call_failure(self, service_name: str, exception: Exception) -> None:
+        """Record failed circuit breaker call."""
+        self.metrics['total_calls'] += 1
+        self.metrics['failed_calls'] += 1
+        self.metrics['last_failure_time'] = datetime.utcnow()
+        self.logger.warning(f"Circuit breaker failure recorded for {service_name}: {str(exception)}")
+    
+    def record_circuit_open(self, service_name: str) -> None:
+        """Record circuit breaker opening."""
+        self.metrics['circuit_open_count'] += 1
+        self.logger.error(f"Circuit breaker opened for {service_name}")
+    
+    def get_metrics(self) -> Dict[str, Any]:
+        """Get current circuit breaker metrics."""
+        return self.metrics.copy()
+
+
+# Environment-specific configuration factory
+def get_external_service_config(environment: str = None) -> ExternalServiceConfigurationManager:
+    """
+    External service configuration factory function.
+    
+    This function provides environment-specific external service configuration
+    following the same pattern as the main Flask configuration factory.
+    
+    Args:
+        environment: Optional environment name override
+        
     Returns:
-        Configured external services manager
+        Configured ExternalServiceConfigurationManager instance
+        
+    Raises:
+        ExternalServiceError: When configuration initialization fails
     """
-    return external_services
+    try:
+        config_instance = ExternalServiceConfigurationManager(environment)
+        logger.info(f"External service configuration loaded for environment: {config_instance.environment}")
+        return config_instance
+    except Exception as e:
+        logger.error(f"Failed to create external service configuration: {str(e)}")
+        raise ExternalServiceError(f"External service configuration creation failed: {str(e)}")
 
 
-# Configuration constants for external services
-EXTERNAL_SERVICES_CONFIG = {
-    # AWS Configuration
-    'aws': {
-        'region': os.getenv('AWS_REGION', 'us-east-1'),
-        'kms_key_arn': os.getenv('AWS_KMS_CMK_ARN'),
-        's3_bucket': os.getenv('AWS_S3_BUCKET'),
-        'connection_pool_size': 50,
-        'retry_attempts': 3,
-        'timeout': 30
-    },
-    
-    # HTTP Client Configuration
-    'http': {
-        'sync_pool_connections': 20,
-        'sync_pool_maxsize': 50,
-        'async_max_connections': 100,
-        'async_max_keepalive': 50,
-        'keepalive_expiry': 30,
-        'connect_timeout': 10,
-        'read_timeout': 30,
-        'retry_attempts': 3
-    },
-    
-    # Auth0 Configuration
-    'auth0': {
-        'domain': os.getenv('AUTH0_DOMAIN'),
-        'client_id': os.getenv('AUTH0_CLIENT_ID'),
-        'audience': os.getenv('AUTH0_AUDIENCE'),
-        'token_cache_ttl': 3600,
-        'management_api_timeout': 30
-    },
-    
-    # Circuit Breaker Configuration
-    'circuit_breaker': {
-        'aws_failure_threshold': 3,
-        'auth0_failure_threshold': 5,
-        'http_failure_threshold': 5,
-        'recovery_timeout': 60
-    },
-    
-    # Monitoring and Observability
-    'monitoring': {
-        'metrics_enabled': True,
-        'structured_logging': True,
-        'health_check_interval': 60,
-        'performance_monitoring': True
-    }
-}
+# Global configuration instance
+external_service_config = get_external_service_config()
+
+# Configuration exports for application integration
+__all__ = [
+    'ExternalServiceConfigurationManager',
+    'AWSKMSKeyManager',
+    'CircuitBreakerWrapper',
+    'CircuitBreakerMetrics',
+    'get_external_service_config',
+    'external_service_config',
+    'ExternalServiceError',
+    'AWSConfigurationError',
+    'HTTPClientConfigurationError',
+    'CircuitBreakerError'
+]
