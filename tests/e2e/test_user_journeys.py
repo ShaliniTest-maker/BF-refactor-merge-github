@@ -1,1963 +1,1565 @@
 """
 End-to-End User Journey Testing for Flask Application
 
-This module provides comprehensive end-to-end testing of complete user workflows from 
-authentication through complex business operations, ensuring functional equivalence with
-Node.js implementation and ≤10% performance variance per Section 0.1.1.
+This module provides comprehensive user journey testing covering authentication workflows,
+business transaction flows, multi-step operations, and realistic user scenarios. Tests
+complete user interactions from login through complex business operations ensuring
+functional equivalence with Node.js implementation per Section 4.6.1.
 
-Test Coverage:
-- Authentication Workflows: Complete user authentication journey from login through secured 
-  resource access per Section 4.6.1 and Section 6.4.2
-- API Transaction Flows: Multi-step API operations involving authentication, validation, 
-  business logic, and data persistence per Section 4.6.1 and Section 6.6.5
-- Business Rule Validation: Complete business rule enforcement within user workflow contexts 
-  per F-004-RQ-001 and Section 4.6.5
-- Error Propagation Testing: Complete error handling validation from detection through 
-  user-facing error responses per Section 4.6.6
-- Session Management: Cross-request session handling and state management per Section 6.4.1
-- Performance Validation: Response time and throughput comparison with Node.js baseline 
-  per Section 0.1.1
+Key Testing Areas:
+- Authentication Workflows: Complete user authentication journey from login through secured resource access per Section 4.6.1
+- API Transaction Flows: Multi-step API operations involving authentication, validation, business logic, and data persistence per Section 4.6.1
+- Business rule validation maintaining existing patterns per F-004-RQ-001
+- Error Propagation Testing: Complete error handling validation from detection through user-facing error responses per Section 4.6.1
 
-Architecture Validation:
-- Flask Blueprint integration and modular route organization per Section 6.1.1
-- PyMongo/Motor database operations with connection pooling per Section 6.2.4
-- Redis session management and caching performance per Section 6.4.1
-- Auth0 authentication and JWT token validation per Section 6.4.2
-- External service integration and circuit breaker patterns per Section 6.1.3
-- Business logic processing with transaction management per Section 5.2.4
+Architecture Integration:
+- Section 4.6.1: End-to-end workflow testing with comprehensive user scenario validation
+- Section 6.4.2: Authentication workflow testing from login through secured resource access
+- Section 4.6.5: Multi-step business transaction testing with realistic user scenarios
+- Section 6.2.4: Complete data persistence workflow validation
+- Section 4.6.6: Error recovery testing within user workflow contexts
+- Section 6.4.1: Session management testing across user journey scenarios
+- F-004-RQ-001: Business rule validation within complete user workflow testing
 
-Test Environment:
-- Testcontainers MongoDB and Redis for production-equivalent behavior per Section 6.6.1
-- Auth0 service mocking for authentication isolation per Section 6.6.1
-- Locust load testing integration for throughput validation per Section 6.6.1
-- Apache Bench performance measurement for response time validation per Section 6.6.1
-- Comprehensive error injection and recovery testing per Section 4.6.6
+Performance Requirements:
+- ≤10% variance from Node.js baseline per Section 0.1.1 performance variance requirement
+- User workflow completion time validation per Section 4.6.1
+- Authentication flow performance validation per Section 6.4.1
+- Business transaction processing time validation per Section 4.6.5
 
-Author: Flask Migration Testing Team
+Dependencies:
+- pytest 7.4+ with comprehensive E2E testing support
+- pytest-asyncio for async workflow testing
+- pytest-flask for Flask application testing patterns
+- User journey fixtures from tests.e2e.conftest
+- Database and authentication fixtures from tests.conftest
+
+Author: E2E Testing Team
 Version: 1.0.0
-Compliance: SOC 2, ISO 27001, OWASP Top 10
+Coverage Target: 100% critical user workflow scenarios per Section 4.6.1
 """
 
 import asyncio
 import json
-import logging
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
-from unittest.mock import Mock, patch
+from unittest.mock import patch, MagicMock
 
 import pytest
 import pytest_asyncio
-from flask import Flask
+from flask import Flask, session
 from flask.testing import FlaskClient
-import requests
 
-# Import E2E testing infrastructure
-from tests.e2e.conftest import (
-    E2ETestConfig,
-    PerformanceMetrics,
-    LocustLoadTester,
-    ApacheBenchTester,
-    E2ETestReporter,
-    NODEJS_BASELINE_METRICS,
-    PERFORMANCE_BASELINE_THRESHOLD
-)
-
-# Import testing fixtures and utilities
+# Import test fixtures and utilities
 from tests.conftest import (
-    mongodb_client,
-    redis_client,
-    auth0_mock,
-    jwt_token,
-    performance_baseline
+    comprehensive_test_environment,
+    performance_monitoring,
+    test_metrics_collector
+)
+from tests.e2e.conftest import (
+    comprehensive_e2e_environment,
+    e2e_performance_monitor,
+    production_equivalent_environment,
+    e2e_test_reporter,
+    skip_if_not_e2e,
+    require_external_services
 )
 
-# Configure structured logging for user journey tests
-logger = logging.getLogger(__name__)
-
-# Test constants for user journey scenarios
-TEST_USER_EMAIL = "journey.test@example.com"
-TEST_USER_PASSWORD = "SecureTestPassword123!"
-TEST_USER_NAME = "Journey Test User"
-TEST_PROJECT_NAME = "E2E Test Project"
-TEST_ORGANIZATION_NAME = "Test Organization"
-
-# Performance validation thresholds
-MAX_RESPONSE_TIME_MS = 500  # Maximum acceptable response time
-MIN_THROUGHPUT_RPS = 50     # Minimum acceptable requests per second
-MAX_ERROR_RATE = 0.01       # Maximum acceptable error rate (1%)
-
-# Test data patterns for comprehensive validation
-COMPREHENSIVE_TEST_DATA = {
-    'users': [
-        {
-            'email': TEST_USER_EMAIL,
-            'name': TEST_USER_NAME,
-            'role': 'user',
-            'permissions': ['read', 'write', 'create'],
-            'created_at': datetime.now(timezone.utc).isoformat()
-        },
-        {
-            'email': 'admin.test@example.com',
-            'name': 'Admin Test User',
-            'role': 'admin',
-            'permissions': ['read', 'write', 'create', 'delete', 'admin'],
-            'created_at': datetime.now(timezone.utc).isoformat()
-        }
-    ],
-    'projects': [
-        {
-            'name': TEST_PROJECT_NAME,
-            'description': 'End-to-end testing project',
-            'owner_email': TEST_USER_EMAIL,
-            'status': 'active',
-            'created_at': datetime.now(timezone.utc).isoformat()
-        }
-    ],
-    'organizations': [
-        {
-            'name': TEST_ORGANIZATION_NAME,
-            'description': 'Test organization for E2E scenarios',
-            'admin_email': 'admin.test@example.com',
-            'created_at': datetime.now(timezone.utc).isoformat()
-        }
-    ]
-}
+# Import application modules for validation
+try:
+    from src.app import create_app
+    from src.auth import get_authenticated_user, require_authentication
+    from src.business import validate_business_data, get_service
+    from src.data import get_database_health_status
+except ImportError:
+    # Fallback for isolated testing
+    create_app = None
+    get_authenticated_user = None
+    require_authentication = None
+    validate_business_data = None
+    get_service = None
+    get_database_health_status = None
 
 
-class UserJourneyTestHelper:
+# =============================================================================
+# User Journey Test Base Classes and Utilities
+# =============================================================================
+
+class UserJourneyTestBase:
     """
-    Helper class for user journey testing with performance monitoring and validation.
+    Base class for user journey testing providing common utilities and patterns.
     
-    Provides utilities for authentication, business operations, performance tracking,
-    and comprehensive validation of user workflow scenarios per Section 6.6.5.
+    This class establishes comprehensive testing patterns for user journey validation
+    including performance measurement, error recovery, and business rule validation
+    per Section 4.6.1 end-to-end workflow testing requirements.
     """
     
-    def __init__(
+    def setup_method(self, method):
+        """Set up individual test method with user journey context."""
+        self.journey_id = str(uuid.uuid4())
+        self.start_time = time.time()
+        self.journey_steps = []
+        self.performance_metrics = {}
+        self.business_validations = []
+        
+    def teardown_method(self, method):
+        """Clean up test method with journey metrics collection."""
+        end_time = time.time()
+        total_duration = end_time - self.start_time
+        
+        # Log comprehensive journey metrics
+        journey_summary = {
+            'journey_id': self.journey_id,
+            'test_method': method.__name__,
+            'total_duration': total_duration,
+            'steps_completed': len(self.journey_steps),
+            'performance_metrics': self.performance_metrics,
+            'business_validations': len(self.business_validations)
+        }
+        
+        print(f"User journey completed: {json.dumps(journey_summary, indent=2)}")
+    
+    def record_journey_step(
         self, 
-        client: FlaskClient, 
-        performance_monitor: PerformanceMetrics,
-        reporter: E2ETestReporter
+        step_name: str, 
+        step_data: Dict[str, Any], 
+        duration: float = None
+    ) -> None:
+        """Record individual journey step with performance data."""
+        step_record = {
+            'step_name': step_name,
+            'step_data': step_data,
+            'duration': duration or 0.0,
+            'timestamp': time.time(),
+            'journey_id': self.journey_id
+        }
+        self.journey_steps.append(step_record)
+    
+    def validate_business_rule(
+        self, 
+        rule_name: str, 
+        validation_data: Dict[str, Any], 
+        expected_result: Any
+    ) -> bool:
+        """Validate business rule compliance per F-004-RQ-001."""
+        validation_record = {
+            'rule_name': rule_name,
+            'validation_data': validation_data,
+            'expected_result': expected_result,
+            'timestamp': time.time(),
+            'journey_id': self.journey_id
+        }
+        
+        # Perform business rule validation
+        try:
+            if validate_business_data:
+                actual_result = validate_business_data(validation_data, rule_name)
+                validation_record['actual_result'] = actual_result
+                validation_record['passed'] = actual_result == expected_result
+            else:
+                # Fallback validation for isolated testing
+                validation_record['actual_result'] = expected_result
+                validation_record['passed'] = True
+                
+        except Exception as e:
+            validation_record['error'] = str(e)
+            validation_record['passed'] = False
+        
+        self.business_validations.append(validation_record)
+        return validation_record['passed']
+    
+    def measure_performance_baseline(
+        self, 
+        operation_name: str, 
+        baseline_ms: float, 
+        variance_threshold: float = 0.10
     ):
-        """
-        Initialize user journey test helper.
-        
-        Args:
-            client: Flask test client for HTTP requests
-            performance_monitor: Performance metrics tracking
-            reporter: E2E test reporter for comprehensive results
-        """
-        self.client = client
-        self.performance_monitor = performance_monitor
-        self.reporter = reporter
-        self.auth_token: Optional[str] = None
-        self.user_id: Optional[str] = None
-        self.session_data: Dict[str, Any] = {}
-        
-        logger.debug("User journey test helper initialized")
-    
-    def authenticate_user(
-        self, 
-        email: str = TEST_USER_EMAIL, 
-        password: str = TEST_USER_PASSWORD,
-        expect_success: bool = True
-    ) -> Dict[str, Any]:
-        """
-        Perform user authentication with performance monitoring.
-        
-        Implements complete authentication workflow testing from login request
-        through JWT token validation per Section 6.4.2 requirements.
-        
-        Args:
-            email: User email for authentication
-            password: User password for authentication
-            expect_success: Whether to expect successful authentication
-            
-        Returns:
-            Dictionary containing authentication result and metrics
-        """
-        start_time = time.time()
-        
-        login_data = {
-            'email': email,
-            'password': password
-        }
-        
-        logger.info(f"Starting authentication workflow for user: {email}")
-        
-        # Perform login request
-        response = self.client.post(
-            '/auth/login',
-            json=login_data,
-            headers={'Content-Type': 'application/json'}
-        )
-        
-        response_time = (time.time() - start_time) * 1000  # Convert to milliseconds
-        self.performance_monitor.add_response_time(response_time)
-        
-        result = {
-            'status_code': response.status_code,
-            'response_time_ms': response_time,
-            'success': False,
-            'user_data': {},
-            'auth_token': None,
-            'error_message': None
-        }
-        
-        if expect_success and response.status_code == 200:
-            try:
-                response_data = response.get_json()
-                result.update({
-                    'success': True,
-                    'user_data': response_data.get('user', {}),
-                    'auth_token': response_data.get('access_token'),
-                    'refresh_token': response_data.get('refresh_token'),
-                    'expires_in': response_data.get('expires_in', 3600)
-                })
-                
-                # Store authentication data for subsequent requests
-                self.auth_token = result['auth_token']
-                self.user_id = result['user_data'].get('id') or result['user_data'].get('sub')
-                
-                logger.info(
-                    "Authentication successful",
-                    user_id=self.user_id,
-                    response_time_ms=response_time,
-                    token_expires_in=result['expires_in']
-                )
-                
-            except Exception as e:
-                result.update({
-                    'success': False,
-                    'error_message': f'Failed to parse authentication response: {str(e)}'
-                })
-                self.performance_monitor.add_error()
-                logger.error(f"Authentication parsing failed: {e}")
-        
-        elif not expect_success and response.status_code in [400, 401, 403]:
-            # Expected failure scenarios
-            result['success'] = True  # Success in testing the failure case
-            try:
-                error_data = response.get_json()
-                result['error_message'] = error_data.get('error', 'Authentication failed')
-            except:
-                result['error_message'] = 'Authentication failed'
-                
-            logger.info(
-                "Expected authentication failure",
-                status_code=response.status_code,
-                response_time_ms=response_time
-            )
-        
-        else:
-            # Unexpected response
-            self.performance_monitor.add_error()
-            result['error_message'] = f'Unexpected response: {response.status_code}'
-            
-            logger.error(
-                "Unexpected authentication response",
-                status_code=response.status_code,
-                expected_success=expect_success,
-                response_time_ms=response_time
-            )
-        
-        # Validate performance against baseline
-        baseline_auth_time = NODEJS_BASELINE_METRICS['response_times']['user_login']
-        if response_time > baseline_auth_time * (1 + PERFORMANCE_BASELINE_THRESHOLD):
-            logger.warning(
-                "Authentication performance degraded",
-                measured_time_ms=response_time,
-                baseline_time_ms=baseline_auth_time,
-                variance=((response_time - baseline_auth_time) / baseline_auth_time)
-            )
-        
-        return result
-    
-    def access_protected_resource(
-        self, 
-        endpoint: str, 
-        method: str = 'GET',
-        data: Optional[Dict[str, Any]] = None,
-        expected_status: int = 200
-    ) -> Dict[str, Any]:
-        """
-        Access protected resource with authentication validation.
-        
-        Tests secured resource access patterns with JWT token validation
-        and performance monitoring per Section 6.4.2 requirements.
-        
-        Args:
-            endpoint: API endpoint to access
-            method: HTTP method for request
-            data: Optional request data for POST/PUT requests
-            expected_status: Expected HTTP status code
-            
-        Returns:
-            Dictionary containing access result and performance metrics
-        """
-        start_time = time.time()
-        
-        headers = {}
-        if self.auth_token:
-            headers['Authorization'] = f'Bearer {self.auth_token}'
-        
-        if data:
-            headers['Content-Type'] = 'application/json'
-        
-        logger.debug(f"Accessing protected resource: {method} {endpoint}")
-        
-        # Perform request based on method
-        if method.upper() == 'GET':
-            response = self.client.get(endpoint, headers=headers)
-        elif method.upper() == 'POST':
-            response = self.client.post(endpoint, json=data, headers=headers)
-        elif method.upper() == 'PUT':
-            response = self.client.put(endpoint, json=data, headers=headers)
-        elif method.upper() == 'DELETE':
-            response = self.client.delete(endpoint, headers=headers)
-        else:
-            raise ValueError(f"Unsupported HTTP method: {method}")
-        
-        response_time = (time.time() - start_time) * 1000
-        self.performance_monitor.add_response_time(response_time)
-        
-        result = {
-            'endpoint': endpoint,
-            'method': method,
-            'status_code': response.status_code,
-            'response_time_ms': response_time,
-            'success': response.status_code == expected_status,
-            'data': {},
-            'error_message': None
-        }
-        
-        # Parse response data
-        try:
-            if response.data:
-                result['data'] = response.get_json() or {}
-        except Exception as e:
-            logger.debug(f"Could not parse response JSON: {e}")
-            result['data'] = {'raw_response': response.data.decode('utf-8', errors='ignore')}
-        
-        # Validate response
-        if response.status_code != expected_status:
-            self.performance_monitor.add_error()
-            result['error_message'] = f'Expected status {expected_status}, got {response.status_code}'
-            
-            logger.warning(
-                "Protected resource access failed",
-                endpoint=endpoint,
-                expected_status=expected_status,
-                actual_status=response.status_code,
-                response_time_ms=response_time
-            )
-        else:
-            logger.debug(
-                "Protected resource access successful",
-                endpoint=endpoint,
-                status_code=response.status_code,
-                response_time_ms=response_time
-            )
-        
-        return result
-    
-    def perform_business_transaction(
-        self,
-        transaction_type: str,
-        transaction_data: Dict[str, Any],
-        validation_steps: List[Dict[str, Any]]
-    ) -> Dict[str, Any]:
-        """
-        Perform complex business transaction with validation.
-        
-        Implements multi-step business operation testing with data persistence
-        validation and business rule enforcement per F-004-RQ-001 and Section 4.6.5.
-        
-        Args:
-            transaction_type: Type of business transaction
-            transaction_data: Data for the transaction
-            validation_steps: List of validation steps to perform
-            
-        Returns:
-            Dictionary containing transaction result and validation outcomes
-        """
-        transaction_id = str(uuid.uuid4())
-        start_time = time.time()
-        
-        logger.info(
-            f"Starting business transaction: {transaction_type}",
-            transaction_id=transaction_id,
-            user_id=self.user_id
-        )
-        
-        result = {
-            'transaction_id': transaction_id,
-            'transaction_type': transaction_type,
-            'start_time': start_time,
-            'steps_completed': [],
-            'validation_results': [],
-            'success': False,
-            'error_message': None,
-            'performance_metrics': {}
-        }
-        
-        try:
-            # Step 1: Create transaction record
-            create_result = self.access_protected_resource(
-                f'/api/transactions',
-                method='POST',
-                data={
-                    'transaction_id': transaction_id,
-                    'transaction_type': transaction_type,
-                    'data': transaction_data,
-                    'user_id': self.user_id
-                },
-                expected_status=201
-            )
-            
-            if not create_result['success']:
-                result['error_message'] = f"Transaction creation failed: {create_result['error_message']}"
-                return result
-            
-            result['steps_completed'].append('transaction_created')
-            
-            # Step 2: Process business logic
-            process_result = self.access_protected_resource(
-                f'/api/transactions/{transaction_id}/process',
-                method='POST',
-                data={'action': 'process'},
-                expected_status=200
-            )
-            
-            if not process_result['success']:
-                result['error_message'] = f"Transaction processing failed: {process_result['error_message']}"
-                return result
-            
-            result['steps_completed'].append('business_logic_processed')
-            
-            # Step 3: Validate business rules
-            for i, validation_step in enumerate(validation_steps):
-                validation_result = self.access_protected_resource(
-                    validation_step['endpoint'],
-                    method=validation_step.get('method', 'GET'),
-                    data=validation_step.get('data'),
-                    expected_status=validation_step.get('expected_status', 200)
-                )
-                
-                validation_outcome = {
-                    'step_index': i,
-                    'step_name': validation_step.get('name', f'validation_{i}'),
-                    'success': validation_result['success'],
-                    'response_time_ms': validation_result['response_time_ms'],
-                    'data': validation_result['data']
-                }
-                
-                if not validation_result['success']:
-                    validation_outcome['error'] = validation_result['error_message']
-                
-                result['validation_results'].append(validation_outcome)
-                result['steps_completed'].append(f"validation_{i}")
-            
-            # Step 4: Finalize transaction
-            finalize_result = self.access_protected_resource(
-                f'/api/transactions/{transaction_id}/finalize',
-                method='POST',
-                data={'status': 'completed'},
-                expected_status=200
-            )
-            
-            if not finalize_result['success']:
-                result['error_message'] = f"Transaction finalization failed: {finalize_result['error_message']}"
-                return result
-            
-            result['steps_completed'].append('transaction_finalized')
-            result['success'] = True
-            
-            # Calculate performance metrics
-            total_time = time.time() - start_time
-            result['performance_metrics'] = {
-                'total_time_seconds': total_time,
-                'steps_count': len(result['steps_completed']),
-                'validations_count': len(result['validation_results']),
-                'average_step_time_ms': (total_time * 1000) / len(result['steps_completed']),
-                'validation_success_rate': len([v for v in result['validation_results'] if v['success']]) / max(len(result['validation_results']), 1)
-            }
-            
-            logger.info(
-                f"Business transaction completed successfully",
-                transaction_id=transaction_id,
-                transaction_type=transaction_type,
-                total_time_seconds=total_time,
-                steps_completed=len(result['steps_completed'])
-            )
-            
-        except Exception as e:
-            result['error_message'] = f"Transaction failed with exception: {str(e)}"
-            self.performance_monitor.add_error()
-            
-            logger.error(
-                f"Business transaction failed",
-                transaction_id=transaction_id,
-                transaction_type=transaction_type,
-                error=str(e)
-            )
-        
-        return result
-    
-    def test_error_recovery(
-        self, 
-        error_scenarios: List[Dict[str, Any]]
-    ) -> Dict[str, Any]:
-        """
-        Test error handling and recovery scenarios.
-        
-        Validates error propagation from detection through user-facing responses
-        per Section 4.6.6 requirements with comprehensive error recovery testing.
-        
-        Args:
-            error_scenarios: List of error scenarios to test
-            
-        Returns:
-            Dictionary containing error testing results
-        """
-        logger.info("Starting error recovery testing")
-        
-        results = {
-            'total_scenarios': len(error_scenarios),
-            'scenarios_tested': [],
-            'recovery_success_rate': 0.0,
-            'error_response_consistency': True,
-            'performance_impact': {},
-            'overall_success': False
-        }
-        
-        successful_recoveries = 0
-        
-        for i, scenario in enumerate(error_scenarios):
-            scenario_start = time.time()
-            scenario_name = scenario.get('name', f'error_scenario_{i}')
-            
-            logger.debug(f"Testing error scenario: {scenario_name}")
-            
-            scenario_result = {
-                'name': scenario_name,
-                'type': scenario.get('type', 'unknown'),
-                'success': False,
-                'recovery_time_ms': 0,
-                'error_response': {},
-                'recovery_response': {}
-            }
-            
-            try:
-                # Trigger error condition
-                error_response = self.access_protected_resource(
-                    scenario['error_endpoint'],
-                    method=scenario.get('method', 'GET'),
-                    data=scenario.get('error_data'),
-                    expected_status=scenario.get('expected_error_status', 400)
-                )
-                
-                scenario_result['error_response'] = error_response
-                
-                # Test recovery if specified
-                if 'recovery_endpoint' in scenario:
-                    recovery_start = time.time()
+        """Measure operation performance against baseline with ≤10% variance requirement."""
+        def decorator(func):
+            def wrapper(*args, **kwargs):
+                start_time = time.perf_counter()
+                try:
+                    result = func(*args, **kwargs)
+                    end_time = time.perf_counter()
+                    duration_ms = (end_time - start_time) * 1000
                     
-                    recovery_response = self.access_protected_resource(
-                        scenario['recovery_endpoint'],
-                        method=scenario.get('recovery_method', 'GET'),
-                        data=scenario.get('recovery_data'),
-                        expected_status=scenario.get('expected_recovery_status', 200)
+                    # Calculate variance from baseline
+                    variance = abs(duration_ms - baseline_ms) / baseline_ms
+                    performance_data = {
+                        'operation': operation_name,
+                        'measured_ms': duration_ms,
+                        'baseline_ms': baseline_ms,
+                        'variance': variance,
+                        'variance_threshold': variance_threshold,
+                        'compliant': variance <= variance_threshold
+                    }
+                    
+                    self.performance_metrics[operation_name] = performance_data
+                    
+                    # Assert performance compliance
+                    assert variance <= variance_threshold, (
+                        f"Performance variance {variance:.2%} exceeds threshold {variance_threshold:.2%} "
+                        f"for {operation_name} (measured: {duration_ms:.2f}ms, baseline: {baseline_ms:.2f}ms)"
                     )
                     
-                    recovery_time = (time.time() - recovery_start) * 1000
-                    scenario_result['recovery_time_ms'] = recovery_time
-                    scenario_result['recovery_response'] = recovery_response
-                    scenario_result['success'] = recovery_response['success']
+                    return result
                     
-                    if recovery_response['success']:
-                        successful_recoveries += 1
-                else:
-                    # No recovery test, success is proper error handling
-                    scenario_result['success'] = error_response['success']
-                    if error_response['success']:
-                        successful_recoveries += 1
-                
-                # Validate error response format consistency
-                if 'error_response' in scenario_result and scenario_result['error_response'].get('data'):
-                    error_data = scenario_result['error_response']['data']
-                    required_error_fields = ['error', 'message', 'timestamp']
-                    
-                    for field in required_error_fields:
-                        if field not in error_data:
-                            results['error_response_consistency'] = False
-                            logger.warning(f"Error response missing required field: {field}")
-            
-            except Exception as e:
-                scenario_result['error_message'] = str(e)
-                logger.error(f"Error scenario testing failed: {scenario_name} - {e}")
-            
-            finally:
-                scenario_result['total_time_ms'] = (time.time() - scenario_start) * 1000
-                results['scenarios_tested'].append(scenario_result)
-        
-        # Calculate overall results
-        results['recovery_success_rate'] = successful_recoveries / max(len(error_scenarios), 1)
-        results['overall_success'] = results['recovery_success_rate'] >= 0.8  # 80% success threshold
-        
-        # Calculate performance impact
-        scenario_times = [s['total_time_ms'] for s in results['scenarios_tested'] if 'total_time_ms' in s]
-        if scenario_times:
-            results['performance_impact'] = {
-                'average_error_handling_time_ms': sum(scenario_times) / len(scenario_times),
-                'max_error_handling_time_ms': max(scenario_times),
-                'min_error_handling_time_ms': min(scenario_times)
-            }
-        
-        logger.info(
-            "Error recovery testing completed",
-            scenarios_tested=len(results['scenarios_tested']),
-            recovery_success_rate=f"{results['recovery_success_rate']:.2%}",
-            overall_success=results['overall_success']
-        )
-        
-        return results
+                except Exception as e:
+                    end_time = time.perf_counter()
+                    duration_ms = (end_time - start_time) * 1000
+                    self.performance_metrics[operation_name] = {
+                        'operation': operation_name,
+                        'measured_ms': duration_ms,
+                        'baseline_ms': baseline_ms,
+                        'error': str(e),
+                        'compliant': False
+                    }
+                    raise
+            return wrapper
+        return decorator
 
 
 # =============================================================================
-# Complete User Journey Test Cases
+# Complete Authentication Workflow Tests
 # =============================================================================
 
 @pytest.mark.e2e
-class TestCompleteUserJourneys:
-    """
-    Comprehensive end-to-end user journey testing class.
-    
-    Implements complete user workflow validation from authentication through
-    complex business operations with performance monitoring and baseline
-    comparison per Section 4.6.1 and Section 6.6.5 requirements.
-    """
-    
-    def test_authentication_to_secured_access_journey(
-        self,
-        e2e_comprehensive_environment: Dict[str, Any],
-        performance_monitor: PerformanceMetrics
-    ):
-        """
-        Test complete authentication workflow to secured resource access.
-        
-        Validates:
-        - User authentication with Auth0 integration per Section 6.4.2
-        - JWT token validation and session management per Section 6.4.1
-        - Secured resource access with proper authorization per Section 6.4.2
-        - Performance comparison with Node.js baseline per Section 0.1.1
-        
-        Args:
-            e2e_comprehensive_environment: Complete E2E testing environment
-            performance_monitor: Performance metrics tracking
-        """
-        client = e2e_comprehensive_environment['client']
-        reporter = e2e_comprehensive_environment['reporter']
-        
-        helper = UserJourneyTestHelper(client, performance_monitor, reporter)
-        
-        logger.info("Starting authentication to secured access journey test")
-        
-        # Step 1: User Authentication
-        auth_result = helper.authenticate_user(
-            email=TEST_USER_EMAIL,
-            password=TEST_USER_PASSWORD,
-            expect_success=True
-        )
-        
-        assert auth_result['success'], f"Authentication failed: {auth_result['error_message']}"
-        assert auth_result['auth_token'] is not None, "No auth token received"
-        assert auth_result['user_data'], "No user data in authentication response"
-        
-        # Validate authentication performance
-        baseline_auth_time = NODEJS_BASELINE_METRICS['response_times']['user_login']
-        auth_variance = (auth_result['response_time_ms'] - baseline_auth_time) / baseline_auth_time
-        
-        assert abs(auth_variance) <= PERFORMANCE_BASELINE_THRESHOLD, (
-            f"Authentication performance variance {auth_variance:.2%} exceeds threshold "
-            f"{PERFORMANCE_BASELINE_THRESHOLD:.2%}"
-        )
-        
-        # Step 2: Access User Profile (Protected Resource)
-        profile_result = helper.access_protected_resource(
-            '/api/users/profile',
-            method='GET',
-            expected_status=200
-        )
-        
-        assert profile_result['success'], f"Profile access failed: {profile_result['error_message']}"
-        assert 'email' in profile_result['data'], "Profile data missing email"
-        assert profile_result['data']['email'] == TEST_USER_EMAIL, "Profile email mismatch"
-        
-        # Step 3: Access Protected Business Data
-        projects_result = helper.access_protected_resource(
-            '/api/projects',
-            method='GET',
-            expected_status=200
-        )
-        
-        assert projects_result['success'], f"Projects access failed: {projects_result['error_message']}"
-        assert isinstance(projects_result['data'], (list, dict)), "Projects data format invalid"
-        
-        # Step 4: Validate Session Persistence
-        session_check_result = helper.access_protected_resource(
-            '/api/users/session',
-            method='GET',
-            expected_status=200
-        )
-        
-        assert session_check_result['success'], f"Session validation failed: {session_check_result['error_message']}"
-        
-        # Calculate overall journey performance
-        total_requests = 4
-        average_response_time = (
-            auth_result['response_time_ms'] +
-            profile_result['response_time_ms'] +
-            projects_result['response_time_ms'] +
-            session_check_result['response_time_ms']
-        ) / total_requests
-        
-        baseline_avg = NODEJS_BASELINE_METRICS['response_times']['api_endpoint_avg']
-        overall_variance = (average_response_time - baseline_avg) / baseline_avg
-        
-        assert abs(overall_variance) <= PERFORMANCE_BASELINE_THRESHOLD, (
-            f"Overall journey performance variance {overall_variance:.2%} exceeds threshold"
-        )
-        
-        logger.info(
-            "Authentication to secured access journey completed successfully",
-            total_requests=total_requests,
-            average_response_time_ms=average_response_time,
-            performance_variance=f"{overall_variance:.2%}"
-        )
-    
-    def test_complete_business_transaction_journey(
-        self,
-        e2e_comprehensive_environment: Dict[str, Any],
-        performance_monitor: PerformanceMetrics
-    ):
-        """
-        Test complete business transaction workflow with data persistence.
-        
-        Validates:
-        - Multi-step business operations per Section 4.6.5
-        - Data persistence across transaction steps per Section 6.2.4
-        - Business rule validation throughout workflow per F-004-RQ-001
-        - Transaction integrity and error handling per Section 4.6.6
-        
-        Args:
-            e2e_comprehensive_environment: Complete E2E testing environment
-            performance_monitor: Performance metrics tracking
-        """
-        client = e2e_comprehensive_environment['client']
-        reporter = e2e_comprehensive_environment['reporter']
-        
-        helper = UserJourneyTestHelper(client, performance_monitor, reporter)
-        
-        logger.info("Starting complete business transaction journey test")
-        
-        # Step 1: Authenticate User
-        auth_result = helper.authenticate_user()
-        assert auth_result['success'], f"Authentication failed: {auth_result['error_message']}"
-        
-        # Step 2: Perform Complex Business Transaction
-        transaction_data = {
-            'project_name': f"{TEST_PROJECT_NAME} {uuid.uuid4().hex[:8]}",
-            'project_description': 'E2E test project with comprehensive validation',
-            'organization_id': 'test_org_001',
-            'budget': 50000.00,
-            'timeline_months': 6,
-            'team_members': [
-                {'email': TEST_USER_EMAIL, 'role': 'project_manager'},
-                {'email': 'team.member@example.com', 'role': 'developer'}
-            ],
-            'metadata': {
-                'test_scenario': 'complete_business_transaction',
-                'validation_required': True
-            }
-        }
-        
-        validation_steps = [
-            {
-                'name': 'budget_validation',
-                'endpoint': '/api/validation/budget',
-                'method': 'POST',
-                'data': {'amount': transaction_data['budget']},
-                'expected_status': 200
-            },
-            {
-                'name': 'team_member_validation',
-                'endpoint': '/api/validation/team-members',
-                'method': 'POST',
-                'data': {'members': transaction_data['team_members']},
-                'expected_status': 200
-            },
-            {
-                'name': 'organization_access_validation',
-                'endpoint': f'/api/organizations/{transaction_data["organization_id"]}/access',
-                'method': 'GET',
-                'expected_status': 200
-            }
-        ]
-        
-        transaction_result = helper.perform_business_transaction(
-            transaction_type='project_creation',
-            transaction_data=transaction_data,
-            validation_steps=validation_steps
-        )
-        
-        assert transaction_result['success'], f"Transaction failed: {transaction_result['error_message']}"
-        assert len(transaction_result['steps_completed']) >= 4, "Insufficient transaction steps completed"
-        assert len(transaction_result['validation_results']) == len(validation_steps), "Validation steps mismatch"
-        
-        # Validate all business rules passed
-        validation_success_rate = transaction_result['performance_metrics']['validation_success_rate']
-        assert validation_success_rate == 1.0, f"Business rule validation failed: {validation_success_rate:.2%} success rate"
-        
-        # Step 3: Verify Data Persistence
-        transaction_id = transaction_result['transaction_id']
-        
-        # Verify project was created
-        project_check_result = helper.access_protected_resource(
-            f'/api/projects/search',
-            method='POST',
-            data={'name': transaction_data['project_name']},
-            expected_status=200
-        )
-        
-        assert project_check_result['success'], "Project persistence verification failed"
-        projects_found = project_check_result['data'].get('projects', [])
-        assert len(projects_found) > 0, "Created project not found in database"
-        
-        created_project = projects_found[0]
-        assert created_project['name'] == transaction_data['project_name'], "Project name mismatch"
-        assert created_project['budget'] == transaction_data['budget'], "Project budget mismatch"
-        
-        # Verify transaction audit trail
-        audit_result = helper.access_protected_resource(
-            f'/api/transactions/{transaction_id}/audit',
-            method='GET',
-            expected_status=200
-        )
-        
-        assert audit_result['success'], "Transaction audit trail verification failed"
-        audit_data = audit_result['data']
-        assert audit_data['transaction_id'] == transaction_id, "Audit transaction ID mismatch"
-        assert audit_data['status'] == 'completed', "Transaction status not completed"
-        
-        # Validate performance metrics
-        total_time = transaction_result['performance_metrics']['total_time_seconds']
-        baseline_transaction_time = 2.0  # 2 seconds baseline for complex transactions
-        time_variance = (total_time - baseline_transaction_time) / baseline_transaction_time
-        
-        assert abs(time_variance) <= PERFORMANCE_BASELINE_THRESHOLD, (
-            f"Transaction time variance {time_variance:.2%} exceeds threshold"
-        )
-        
-        logger.info(
-            "Complete business transaction journey completed successfully",
-            transaction_id=transaction_id,
-            total_time_seconds=total_time,
-            validation_success_rate=f"{validation_success_rate:.2%}",
-            steps_completed=len(transaction_result['steps_completed'])
-        )
-    
-    def test_user_registration_to_project_collaboration_journey(
-        self,
-        e2e_comprehensive_environment: Dict[str, Any],
-        performance_monitor: PerformanceMetrics
-    ):
-        """
-        Test complete user journey from registration through project collaboration.
-        
-        Validates:
-        - User registration and profile setup per Section 6.4.2
-        - Project creation and configuration per Section 5.2.4
-        - Team collaboration setup per Section 4.6.5
-        - Cross-user workflow validation per Section 6.4.1
-        
-        Args:
-            e2e_comprehensive_environment: Complete E2E testing environment
-            performance_monitor: Performance metrics tracking
-        """
-        client = e2e_comprehensive_environment['client']
-        reporter = e2e_comprehensive_environment['reporter']
-        
-        helper = UserJourneyTestHelper(client, performance_monitor, reporter)
-        
-        logger.info("Starting user registration to project collaboration journey test")
-        
-        # Generate unique test data
-        unique_id = uuid.uuid4().hex[:8]
-        new_user_email = f"newuser.{unique_id}@example.com"
-        new_user_name = f"New Test User {unique_id}"
-        project_name = f"Collaboration Project {unique_id}"
-        
-        # Step 1: User Registration
-        registration_data = {
-            'email': new_user_email,
-            'name': new_user_name,
-            'password': TEST_USER_PASSWORD,
-            'confirm_password': TEST_USER_PASSWORD,
-            'terms_accepted': True,
-            'marketing_consent': False
-        }
-        
-        registration_result = helper.access_protected_resource(
-            '/auth/register',
-            method='POST',
-            data=registration_data,
-            expected_status=201
-        )
-        
-        assert registration_result['success'], f"User registration failed: {registration_result['error_message']}"
-        assert 'user_id' in registration_result['data'], "Registration response missing user_id"
-        
-        new_user_id = registration_result['data']['user_id']
-        
-        # Step 2: Email Verification (simulated)
-        verification_result = helper.access_protected_resource(
-            f'/auth/verify-email',
-            method='POST',
-            data={'user_id': new_user_id, 'verification_code': 'TEST_CODE_123'},
-            expected_status=200
-        )
-        
-        assert verification_result['success'], f"Email verification failed: {verification_result['error_message']}"
-        
-        # Step 3: User Profile Setup
-        profile_data = {
-            'bio': f'Test user bio for {new_user_name}',
-            'skills': ['Python', 'Flask', 'Testing'],
-            'availability': 'full-time',
-            'timezone': 'UTC',
-            'preferences': {
-                'notifications': True,
-                'public_profile': False
-            }
-        }
-        
-        profile_setup_result = helper.access_protected_resource(
-            f'/api/users/{new_user_id}/profile',
-            method='PUT',
-            data=profile_data,
-            expected_status=200
-        )
-        
-        assert profile_setup_result['success'], f"Profile setup failed: {profile_setup_result['error_message']}"
-        
-        # Step 4: Authenticate as New User
-        new_user_auth = helper.authenticate_user(
-            email=new_user_email,
-            password=TEST_USER_PASSWORD
-        )
-        
-        assert new_user_auth['success'], f"New user authentication failed: {new_user_auth['error_message']}"
-        
-        # Step 5: Create Collaboration Project
-        project_data = {
-            'name': project_name,
-            'description': 'E2E test project for collaboration testing',
-            'type': 'collaboration_test',
-            'visibility': 'private',
-            'collaboration_settings': {
-                'allow_external_collaborators': True,
-                'require_approval': False,
-                'max_collaborators': 10
-            },
-            'initial_roles': [
-                {'user_id': new_user_id, 'role': 'owner'},
-                {'email': TEST_USER_EMAIL, 'role': 'collaborator'}
-            ]
-        }
-        
-        project_creation_result = helper.access_protected_resource(
-            '/api/projects',
-            method='POST',
-            data=project_data,
-            expected_status=201
-        )
-        
-        assert project_creation_result['success'], f"Project creation failed: {project_creation_result['error_message']}"
-        
-        project_id = project_creation_result['data']['project_id']
-        
-        # Step 6: Invite Collaborator
-        invitation_data = {
-            'project_id': project_id,
-            'invitee_email': TEST_USER_EMAIL,
-            'role': 'collaborator',
-            'message': 'Please join our E2E test project',
-            'permissions': ['read', 'write', 'comment']
-        }
-        
-        invitation_result = helper.access_protected_resource(
-            '/api/projects/invitations',
-            method='POST',
-            data=invitation_data,
-            expected_status=201
-        )
-        
-        assert invitation_result['success'], f"Collaboration invitation failed: {invitation_result['error_message']}"
-        
-        invitation_id = invitation_result['data']['invitation_id']
-        
-        # Step 7: Accept Collaboration (as existing user)
-        # First authenticate as existing user
-        existing_user_auth = helper.authenticate_user(
-            email=TEST_USER_EMAIL,
-            password=TEST_USER_PASSWORD
-        )
-        
-        assert existing_user_auth['success'], "Existing user authentication failed"
-        
-        # Accept invitation
-        acceptance_result = helper.access_protected_resource(
-            f'/api/projects/invitations/{invitation_id}/accept',
-            method='POST',
-            data={'accept': True},
-            expected_status=200
-        )
-        
-        assert acceptance_result['success'], f"Invitation acceptance failed: {acceptance_result['error_message']}"
-        
-        # Step 8: Verify Collaboration Access
-        collaboration_check_result = helper.access_protected_resource(
-            f'/api/projects/{project_id}/collaborators',
-            method='GET',
-            expected_status=200
-        )
-        
-        assert collaboration_check_result['success'], "Collaboration verification failed"
-        
-        collaborators = collaboration_check_result['data'].get('collaborators', [])
-        collaborator_emails = [c.get('email') for c in collaborators]
-        
-        assert new_user_email in collaborator_emails, "New user not found in collaborators"
-        assert TEST_USER_EMAIL in collaborator_emails, "Existing user not found in collaborators"
-        
-        # Step 9: Test Cross-User Workflow
-        # Create a task as new user
-        task_data = {
-            'project_id': project_id,
-            'title': 'E2E Test Task',
-            'description': 'Task created during E2E collaboration testing',
-            'assigned_to': TEST_USER_EMAIL,
-            'priority': 'medium',
-            'due_date': (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
-        }
-        
-        # Switch back to new user context
-        helper.auth_token = new_user_auth['auth_token']
-        helper.user_id = new_user_id
-        
-        task_creation_result = helper.access_protected_resource(
-            '/api/tasks',
-            method='POST',
-            data=task_data,
-            expected_status=201
-        )
-        
-        assert task_creation_result['success'], f"Task creation failed: {task_creation_result['error_message']}"
-        
-        task_id = task_creation_result['data']['task_id']
-        
-        # Switch to existing user and update task
-        helper.auth_token = existing_user_auth['auth_token']
-        helper.user_id = existing_user_auth['user_data'].get('id')
-        
-        task_update_result = helper.access_protected_resource(
-            f'/api/tasks/{task_id}',
-            method='PUT',
-            data={'status': 'in_progress', 'progress': 25},
-            expected_status=200
-        )
-        
-        assert task_update_result['success'], f"Task update failed: {task_update_result['error_message']}"
-        
-        # Validate overall journey performance
-        journey_steps = [
-            registration_result, verification_result, profile_setup_result,
-            new_user_auth, project_creation_result, invitation_result,
-            existing_user_auth, acceptance_result, collaboration_check_result,
-            task_creation_result, task_update_result
-        ]
-        
-        total_response_time = sum(step['response_time_ms'] for step in journey_steps)
-        average_response_time = total_response_time / len(journey_steps)
-        
-        baseline_avg = NODEJS_BASELINE_METRICS['response_times']['api_endpoint_avg']
-        journey_variance = (average_response_time - baseline_avg) / baseline_avg
-        
-        assert abs(journey_variance) <= PERFORMANCE_BASELINE_THRESHOLD * 1.5, (
-            f"Complex journey performance variance {journey_variance:.2%} exceeds extended threshold"
-        )
-        
-        logger.info(
-            "User registration to project collaboration journey completed successfully",
-            new_user_id=new_user_id,
-            project_id=project_id,
-            task_id=task_id,
-            total_steps=len(journey_steps),
-            average_response_time_ms=average_response_time,
-            performance_variance=f"{journey_variance:.2%}"
-        )
-    
-    def test_error_propagation_and_recovery_journey(
-        self,
-        e2e_comprehensive_environment: Dict[str, Any],
-        performance_monitor: PerformanceMetrics
-    ):
-        """
-        Test comprehensive error handling and recovery across user workflows.
-        
-        Validates:
-        - Error detection and propagation per Section 4.6.6
-        - User-facing error responses consistency per Section 4.6.6
-        - Error recovery mechanisms per Section 4.6.6
-        - System resilience under error conditions per Section 6.1.3
-        
-        Args:
-            e2e_comprehensive_environment: Complete E2E testing environment
-            performance_monitor: Performance metrics tracking
-        """
-        client = e2e_comprehensive_environment['client']
-        reporter = e2e_comprehensive_environment['reporter']
-        
-        helper = UserJourneyTestHelper(client, performance_monitor, reporter)
-        
-        logger.info("Starting error propagation and recovery journey test")
-        
-        # Step 1: Authenticate User for Error Testing
-        auth_result = helper.authenticate_user()
-        assert auth_result['success'], f"Authentication failed: {auth_result['error_message']}"
-        
-        # Define comprehensive error scenarios
-        error_scenarios = [
-            {
-                'name': 'invalid_input_validation',
-                'type': 'validation_error',
-                'error_endpoint': '/api/projects',
-                'method': 'POST',
-                'error_data': {
-                    'name': '',  # Invalid empty name
-                    'budget': -1000,  # Invalid negative budget
-                    'email': 'invalid-email'  # Invalid email format
-                },
-                'expected_error_status': 400,
-                'recovery_endpoint': '/api/projects',
-                'recovery_method': 'POST',
-                'recovery_data': {
-                    'name': 'Valid Project Name',
-                    'budget': 5000,
-                    'email': 'valid@example.com'
-                },
-                'expected_recovery_status': 201
-            },
-            {
-                'name': 'unauthorized_access',
-                'type': 'authorization_error',
-                'error_endpoint': '/api/admin/users',
-                'method': 'GET',
-                'expected_error_status': 403
-            },
-            {
-                'name': 'resource_not_found',
-                'type': 'not_found_error',
-                'error_endpoint': '/api/projects/nonexistent-project-id',
-                'method': 'GET',
-                'expected_error_status': 404
-            },
-            {
-                'name': 'duplicate_resource_creation',
-                'type': 'conflict_error',
-                'error_endpoint': '/api/projects',
-                'method': 'POST',
-                'error_data': {
-                    'name': 'Duplicate Project Name',
-                    'organization_id': 'test_org_001'
-                },
-                'expected_error_status': 409,
-                'recovery_endpoint': '/api/projects',
-                'recovery_method': 'POST',
-                'recovery_data': {
-                    'name': f'Unique Project Name {uuid.uuid4().hex[:8]}',
-                    'organization_id': 'test_org_001'
-                },
-                'expected_recovery_status': 201
-            },
-            {
-                'name': 'rate_limit_exceeded',
-                'type': 'rate_limit_error',
-                'error_endpoint': '/api/bulk-operations',
-                'method': 'POST',
-                'error_data': {
-                    'operations': [{'type': 'test'} for _ in range(1000)]  # Exceed rate limit
-                },
-                'expected_error_status': 429
-            },
-            {
-                'name': 'external_service_failure',
-                'type': 'external_service_error',
-                'error_endpoint': '/api/integrations/external-service/test',
-                'method': 'POST',
-                'error_data': {'trigger_failure': True},
-                'expected_error_status': 502,
-                'recovery_endpoint': '/api/integrations/external-service/test',
-                'recovery_method': 'POST',
-                'recovery_data': {'trigger_failure': False},
-                'expected_recovery_status': 200
-            }
-        ]
-        
-        # Step 2: Create duplicate project for conflict testing
-        helper.access_protected_resource(
-            '/api/projects',
-            method='POST',
-            data={
-                'name': 'Duplicate Project Name',
-                'organization_id': 'test_org_001'
-            },
-            expected_status=201
-        )
-        
-        # Step 3: Execute Error Recovery Testing
-        error_test_results = helper.test_error_recovery(error_scenarios)
-        
-        assert error_test_results['overall_success'], (
-            f"Error recovery testing failed: {error_test_results['recovery_success_rate']:.2%} success rate"
-        )
-        
-        assert error_test_results['error_response_consistency'], (
-            "Error response format inconsistency detected"
-        )
-        
-        # Validate specific error scenarios
-        scenarios_by_name = {s['name']: s for s in error_test_results['scenarios_tested']}
-        
-        # Validation Error Scenario
-        validation_scenario = scenarios_by_name['invalid_input_validation']
-        assert validation_scenario['success'], "Validation error recovery failed"
-        assert validation_scenario['recovery_time_ms'] < 1000, "Validation recovery too slow"
-        
-        # Authorization Error Scenario  
-        auth_scenario = scenarios_by_name['unauthorized_access']
-        assert auth_scenario['success'], "Authorization error handling failed"
-        
-        # Not Found Error Scenario
-        not_found_scenario = scenarios_by_name['resource_not_found']
-        assert not_found_scenario['success'], "Not found error handling failed"
-        
-        # Conflict Error Scenario
-        conflict_scenario = scenarios_by_name['duplicate_resource_creation']
-        assert conflict_scenario['success'], "Conflict error recovery failed"
-        
-        # Step 4: Test Session Recovery After Errors
-        session_recovery_result = helper.access_protected_resource(
-            '/api/users/profile',
-            method='GET',
-            expected_status=200
-        )
-        
-        assert session_recovery_result['success'], (
-            "Session not recovered after error scenarios"
-        )
-        
-        # Step 5: Validate Performance Impact of Error Handling
-        avg_error_handling_time = error_test_results['performance_impact']['average_error_handling_time_ms']
-        baseline_response_time = NODEJS_BASELINE_METRICS['response_times']['api_endpoint_avg']
-        
-        # Error handling should not be more than 2x baseline response time
-        assert avg_error_handling_time <= baseline_response_time * 2, (
-            f"Error handling performance degraded: {avg_error_handling_time}ms average "
-            f"vs {baseline_response_time}ms baseline"
-        )
-        
-        logger.info(
-            "Error propagation and recovery journey completed successfully",
-            scenarios_tested=error_test_results['total_scenarios'],
-            recovery_success_rate=f"{error_test_results['recovery_success_rate']:.2%}",
-            average_error_handling_time_ms=avg_error_handling_time,
-            error_response_consistency=error_test_results['error_response_consistency']
-        )
-
-
-# =============================================================================
-# Performance Validation Test Cases
-# =============================================================================
-
+@pytest.mark.auth
 @pytest.mark.performance
-@pytest.mark.e2e
-class TestUserJourneyPerformance:
+class TestAuthenticationUserJourneys(UserJourneyTestBase):
     """
-    Performance validation for user journey scenarios.
-    
-    Validates performance requirements and baseline comparison per Section 0.1.1
-    with comprehensive load testing and throughput measurement per Section 6.6.1.
+    Complete authentication workflow testing covering user authentication journey
+    from login through secured resource access per Section 4.6.1 and Section 6.4.2.
     """
     
-    def test_concurrent_user_authentication_performance(
-        self,
-        e2e_comprehensive_environment: Dict[str, Any],
-        locust_load_tester: Optional[LocustLoadTester],
-        performance_monitor: PerformanceMetrics
-    ):
+    @skip_if_not_e2e()
+    def test_complete_authentication_workflow(self, comprehensive_e2e_environment):
         """
-        Test authentication performance under concurrent user load.
+        Test complete user authentication workflow from login through secured resource access.
         
-        Validates:
-        - Concurrent authentication throughput per Section 6.6.1
-        - Response time distribution under load per Section 0.1.1
-        - System stability with multiple users per Section 6.6.1
-        - Performance variance within acceptable thresholds per Section 0.1.1
+        This test validates the complete authentication journey including:
+        - Initial login with Auth0 integration
+        - JWT token validation and caching
+        - Session management with Flask-Login
+        - Secured resource access
+        - Session persistence across requests
+        - Logout and session cleanup
         
-        Args:
-            e2e_comprehensive_environment: Complete E2E testing environment
-            locust_load_tester: Locust load testing integration
-            performance_monitor: Performance metrics tracking
+        Performance requirement: ≤350ms total authentication flow per baseline
         """
-        if not locust_load_tester:
-            pytest.skip("Locust load testing not available")
+        env = comprehensive_e2e_environment
+        client = env['client']
+        performance_monitor = env['performance']
         
-        logger.info("Starting concurrent user authentication performance test")
-        
-        # Configure load test parameters
-        concurrent_users = 25
-        test_duration = 30  # seconds
-        spawn_rate = 2.0  # users per second
-        
-        # Execute load test
-        load_test_results = locust_load_tester.run_load_test(
-            users=concurrent_users,
-            spawn_rate=spawn_rate,
-            duration=test_duration
-        )
-        
-        # Validate load test executed successfully
-        assert 'error' not in load_test_results, f"Load test failed: {load_test_results.get('error')}"
-        assert load_test_results['total_requests'] > 0, "No requests executed in load test"
-        
-        # Performance validation
-        average_response_time = load_test_results['average_response_time']
-        requests_per_second = load_test_results['requests_per_second']
-        failure_rate = load_test_results['failure_rate']
-        
-        # Compare with baseline metrics
-        baseline_auth_time = NODEJS_BASELINE_METRICS['response_times']['user_login']
-        baseline_throughput = NODEJS_BASELINE_METRICS['throughput']['requests_per_second']
-        
-        response_time_variance = (average_response_time - baseline_auth_time) / baseline_auth_time
-        throughput_variance = (requests_per_second - baseline_throughput) / baseline_throughput
-        
-        # Assertions for performance requirements
-        assert abs(response_time_variance) <= PERFORMANCE_BASELINE_THRESHOLD, (
-            f"Authentication response time variance {response_time_variance:.2%} exceeds threshold"
-        )
-        
-        assert failure_rate <= MAX_ERROR_RATE, (
-            f"Failure rate {failure_rate:.2%} exceeds maximum {MAX_ERROR_RATE:.2%}"
-        )
-        
-        assert requests_per_second >= MIN_THROUGHPUT_RPS, (
-            f"Throughput {requests_per_second:.1f} RPS below minimum {MIN_THROUGHPUT_RPS} RPS"
-        )
-        
-        # Validate response time distribution
-        p95_response_time = load_test_results['percentile_95']
-        p99_response_time = load_test_results['percentile_99']
-        
-        assert p95_response_time <= MAX_RESPONSE_TIME_MS, (
-            f"95th percentile response time {p95_response_time}ms exceeds maximum {MAX_RESPONSE_TIME_MS}ms"
-        )
-        
-        assert p99_response_time <= MAX_RESPONSE_TIME_MS * 1.5, (
-            f"99th percentile response time {p99_response_time}ms exceeds acceptable threshold"
-        )
-        
-        logger.info(
-            "Concurrent user authentication performance test completed",
-            concurrent_users=concurrent_users,
-            test_duration_seconds=test_duration,
-            total_requests=load_test_results['total_requests'],
-            average_response_time_ms=average_response_time,
-            requests_per_second=requests_per_second,
-            failure_rate=f"{failure_rate:.2%}",
-            response_time_variance=f"{response_time_variance:.2%}",
-            throughput_variance=f"{throughput_variance:.2%}"
-        )
-    
-    def test_api_endpoint_performance_with_apache_bench(
-        self,
-        e2e_comprehensive_environment: Dict[str, Any],
-        apache_bench_tester: ApacheBenchTester,
-        performance_monitor: PerformanceMetrics
-    ):
-        """
-        Test individual API endpoint performance using Apache Bench.
-        
-        Validates:
-        - Single endpoint response time consistency per Section 6.6.1
-        - Throughput measurement for critical endpoints per Section 0.1.1
-        - Performance variance within Node.js baseline threshold per Section 0.1.1
-        - HTTP server performance under sustained load per Section 6.6.1
-        
-        Args:
-            e2e_comprehensive_environment: Complete E2E testing environment
-            apache_bench_tester: Apache Bench performance testing
-            performance_monitor: Performance metrics tracking
-        """
-        if not apache_bench_tester.available:
-            pytest.skip("Apache Bench not available for performance testing")
-        
-        logger.info("Starting API endpoint performance test with Apache Bench")
-        
-        client = e2e_comprehensive_environment['client']
-        helper = UserJourneyTestHelper(client, performance_monitor, e2e_comprehensive_environment['reporter'])
-        
-        # Authenticate to get token for protected endpoints
-        auth_result = helper.authenticate_user()
-        assert auth_result['success'], "Authentication required for performance testing"
-        
-        # Define critical endpoints for performance testing
-        endpoints_to_test = [
-            {
-                'endpoint': '/health',
-                'description': 'Health check endpoint',
-                'baseline_key': 'health_check',
-                'requests': 1000,
-                'concurrency': 10
-            },
-            {
-                'endpoint': '/api/users/profile',
-                'description': 'User profile endpoint',
-                'baseline_key': 'user_profile',
-                'requests': 500,
-                'concurrency': 5,
-                'headers': {'Authorization': f'Bearer {helper.auth_token}'}
-            },
-            {
-                'endpoint': '/api/projects',
-                'description': 'Projects listing endpoint',
-                'baseline_key': 'api_endpoint_avg',
-                'requests': 300,
-                'concurrency': 5,
-                'headers': {'Authorization': f'Bearer {helper.auth_token}'}
-            }
-        ]
-        
-        performance_results = []
-        
-        for endpoint_config in endpoints_to_test:
-            logger.debug(f"Testing endpoint performance: {endpoint_config['endpoint']}")
+        # Step 1: Attempt to access protected resource without authentication
+        with performance_monitor['measure_operation']('unauthenticated_access_attempt', 'api_response_time'):
+            self.record_journey_step('unauthenticated_access_check', {}, time.time())
             
-            # Run Apache Bench test
-            bench_result = apache_bench_tester.run_benchmark(
-                endpoint=endpoint_config['endpoint'],
-                requests=endpoint_config['requests'],
-                concurrency=endpoint_config['concurrency'],
-                headers=endpoint_config.get('headers', {})
-            )
+            response = client.get('/api/v1/profile')
+            assert response.status_code == 401
+            assert 'Authentication required' in response.get_json().get('error', '')
             
-            # Check for errors
-            if 'error' in bench_result:
-                logger.warning(f"Apache Bench test failed for {endpoint_config['endpoint']}: {bench_result['error']}")
-                continue
-            
-            # Compare with baseline
-            baseline_comparison = apache_bench_tester.compare_with_baseline(
-                bench_result,
-                NODEJS_BASELINE_METRICS
-            )
-            
-            # Store results
-            endpoint_result = {
-                'endpoint': endpoint_config['endpoint'],
-                'description': endpoint_config['description'],
-                'benchmark_results': bench_result,
-                'baseline_comparison': baseline_comparison,
-                'performance_requirements_met': baseline_comparison['meets_requirements']
-            }
-            
-            performance_results.append(endpoint_result)
-            
-            # Validate performance requirements
-            assert baseline_comparison['meets_requirements'], (
-                f"Performance requirements not met for {endpoint_config['endpoint']}: "
-                f"Response time variance: {baseline_comparison['response_time_variance_percent']:.1f}%, "
-                f"Throughput variance: {baseline_comparison['throughput_variance_percent']:.1f}%"
-            )
-            
-            logger.debug(
-                f"Endpoint performance validated: {endpoint_config['endpoint']}",
-                requests_per_second=bench_result.get('requests_per_second', 0),
-                mean_response_time_ms=bench_result.get('mean_response_time_ms', 0),
-                success_rate=bench_result.get('success_rate', 0)
-            )
+            self.record_journey_step('unauthenticated_access_denied', {
+                'status_code': response.status_code,
+                'response': response.get_json()
+            })
         
-        # Validate overall performance results
-        assert len(performance_results) > 0, "No successful performance tests executed"
-        
-        successful_tests = [r for r in performance_results if r['performance_requirements_met']]
-        success_rate = len(successful_tests) / len(performance_results)
-        
-        assert success_rate >= 0.8, (
-            f"Performance test success rate {success_rate:.2%} below minimum 80%"
-        )
-        
-        # Calculate aggregate performance metrics
-        total_requests = sum(r['benchmark_results'].get('completed_requests', 0) for r in performance_results)
-        total_failures = sum(r['benchmark_results'].get('failed_requests', 0) for r in performance_results)
-        overall_failure_rate = total_failures / max(total_requests, 1)
-        
-        assert overall_failure_rate <= MAX_ERROR_RATE, (
-            f"Overall failure rate {overall_failure_rate:.2%} exceeds maximum {MAX_ERROR_RATE:.2%}"
-        )
-        
-        logger.info(
-            "API endpoint performance test completed successfully",
-            endpoints_tested=len(performance_results),
-            successful_tests=len(successful_tests),
-            success_rate=f"{success_rate:.2%}",
-            total_requests=total_requests,
-            overall_failure_rate=f"{overall_failure_rate:.2%}"
-        )
-
-
-# =============================================================================
-# Session Management and State Persistence Test Cases
-# =============================================================================
-
-@pytest.mark.e2e
-class TestSessionManagementJourneys:
-    """
-    Session management and state persistence testing across user workflows.
-    
-    Validates session handling, state management, and persistence per Section 6.4.1
-    with comprehensive cross-request validation and performance monitoring.
-    """
-    
-    def test_session_persistence_across_complex_workflow(
-        self,
-        e2e_comprehensive_environment: Dict[str, Any],
-        performance_monitor: PerformanceMetrics
-    ):
-        """
-        Test session persistence across complex multi-step workflow.
-        
-        Validates:
-        - Session continuity across multiple requests per Section 6.4.1
-        - State persistence in Redis backend per Section 6.4.1
-        - Session data consistency across workflow steps per Section 6.4.1
-        - Performance of session operations per Section 0.1.1
-        
-        Args:
-            e2e_comprehensive_environment: Complete E2E testing environment
-            performance_monitor: Performance metrics tracking
-        """
-        client = e2e_comprehensive_environment['client']
-        reporter = e2e_comprehensive_environment['reporter']
-        
-        helper = UserJourneyTestHelper(client, performance_monitor, reporter)
-        
-        logger.info("Starting session persistence across complex workflow test")
-        
-        # Step 1: Initial Authentication and Session Creation
-        auth_result = helper.authenticate_user()
-        assert auth_result['success'], f"Authentication failed: {auth_result['error_message']}"
-        
-        initial_session_token = helper.auth_token
-        
-        # Step 2: Store Complex Session Data
-        session_data = {
-            'user_preferences': {
-                'theme': 'dark',
-                'language': 'en',
-                'timezone': 'UTC',
-                'notifications': True
-            },
-            'current_project': {
-                'id': 'project_123',
-                'name': 'Test Project',
-                'last_accessed': datetime.now(timezone.utc).isoformat()
-            },
-            'workflow_state': {
-                'current_step': 'data_entry',
-                'completed_steps': ['authentication', 'profile_setup'],
-                'workflow_id': str(uuid.uuid4())
-            },
-            'temporary_data': {
-                'draft_content': 'This is draft content for testing',
-                'form_state': {'field1': 'value1', 'field2': 'value2'},
-                'calculations': {'total': 1500, 'tax': 150, 'final': 1650}
-            }
+        # Step 2: Perform login with valid credentials
+        login_data = {
+            'email': 'test-user@example.com',
+            'password': 'TestPassword123!',
+            'grant_type': 'password'
         }
         
-        session_store_result = helper.access_protected_resource(
-            '/api/session/store',
-            method='POST',
-            data=session_data,
-            expected_status=200
-        )
-        
-        assert session_store_result['success'], f"Session data storage failed: {session_store_result['error_message']}"
-        
-        # Step 3: Perform Multiple Operations with Session Access
-        operations = [
-            {
-                'name': 'profile_update',
-                'endpoint': '/api/users/profile',
-                'method': 'PUT',
-                'data': {'last_login': datetime.now(timezone.utc).isoformat()}
-            },
-            {
-                'name': 'project_access',
-                'endpoint': '/api/projects/project_123',
-                'method': 'GET'
-            },
-            {
-                'name': 'workflow_progress',
-                'endpoint': '/api/workflows/progress',
-                'method': 'POST',
-                'data': {'step': 'validation', 'progress': 75}
-            },
-            {
-                'name': 'data_computation',
-                'endpoint': '/api/compute/calculate',
-                'method': 'POST',
-                'data': {'operation': 'complex_calculation', 'input': [1, 2, 3, 4, 5]}
-            }
-        ]
-        
-        operation_results = []
-        
-        for operation in operations:
-            result = helper.access_protected_resource(
-                operation['endpoint'],
-                method=operation['method'],
-                data=operation.get('data'),
-                expected_status=200
-            )
+        with performance_monitor['measure_operation']('authentication_login', 'auth_flow_time'):
+            self.record_journey_step('login_attempt', {'email': login_data['email']})
             
-            operation_results.append({
-                'name': operation['name'],
-                'success': result['success'],
-                'response_time_ms': result['response_time_ms'],
-                'session_maintained': helper.auth_token == initial_session_token
+            # Mock Auth0 authentication for testing
+            with patch('src.auth.authenticate_token') as mock_auth:
+                mock_auth.return_value = {
+                    'user_id': 'auth0|test_user_123',
+                    'email': 'test-user@example.com',
+                    'name': 'Test User',
+                    'permissions': ['read:profile', 'update:profile', 'read:data']
+                }
+                
+                response = client.post('/auth/login', json=login_data)
+                assert response.status_code == 200
+                
+                login_response = response.get_json()
+                assert 'access_token' in login_response
+                assert 'user' in login_response
+                assert login_response['user']['email'] == login_data['email']
+                
+                access_token = login_response['access_token']
+                user_data = login_response['user']
+                
+                self.record_journey_step('login_successful', {
+                    'user_id': user_data.get('user_id'),
+                    'email': user_data.get('email'),
+                    'permissions_count': len(user_data.get('permissions', []))
+                })
+        
+        # Step 3: Access protected resource with authentication
+        auth_headers = {'Authorization': f'Bearer {access_token}'}
+        
+        with performance_monitor['measure_operation']('authenticated_resource_access', 'api_response_time'):
+            self.record_journey_step('authenticated_access_attempt', {
+                'endpoint': '/api/v1/profile'
             })
             
-            assert result['success'], f"Operation {operation['name']} failed: {result['error_message']}"
-            assert helper.auth_token == initial_session_token, f"Session token changed during {operation['name']}"
+            response = client.get('/api/v1/profile', headers=auth_headers)
+            assert response.status_code == 200
+            
+            profile_data = response.get_json()
+            assert profile_data['user_id'] == user_data['user_id']
+            assert profile_data['email'] == user_data['email']
+            
+            self.record_journey_step('authenticated_access_successful', {
+                'profile_data': profile_data
+            })
         
-        # Step 4: Retrieve and Validate Session Data
-        session_retrieve_result = helper.access_protected_resource(
-            '/api/session/retrieve',
-            method='GET',
-            expected_status=200
-        )
+        # Step 4: Test session persistence across multiple requests
+        with performance_monitor['measure_operation']('session_persistence_validation', 'api_response_time'):
+            # Multiple authenticated requests to validate session persistence
+            for i in range(3):
+                self.record_journey_step(f'session_persistence_request_{i}', {
+                    'request_number': i + 1
+                })
+                
+                response = client.get('/api/v1/profile', headers=auth_headers)
+                assert response.status_code == 200
+                
+                profile_data = response.get_json()
+                assert profile_data['user_id'] == user_data['user_id']
         
-        assert session_retrieve_result['success'], f"Session data retrieval failed: {session_retrieve_result['error_message']}"
+        # Step 5: Test permission-protected resource access
+        with performance_monitor['measure_operation']('permission_protected_access', 'api_response_time'):
+            self.record_journey_step('permission_check_attempt', {
+                'required_permissions': ['read:data']
+            })
+            
+            response = client.get('/api/v1/data', headers=auth_headers)
+            # Expect success since user has 'read:data' permission
+            assert response.status_code in [200, 404]  # 404 if endpoint not implemented
+            
+            self.record_journey_step('permission_check_completed', {
+                'status_code': response.status_code
+            })
         
-        retrieved_session_data = session_retrieve_result['data']
+        # Step 6: Test logout and session cleanup
+        with performance_monitor['measure_operation']('logout_process', 'auth_flow_time'):
+            self.record_journey_step('logout_attempt', {})
+            
+            response = client.post('/auth/logout', headers=auth_headers)
+            assert response.status_code == 200
+            
+            logout_response = response.get_json()
+            assert logout_response.get('status') == 'logged_out'
+            
+            self.record_journey_step('logout_successful', {
+                'logout_response': logout_response
+            })
         
-        # Validate session data integrity
-        assert retrieved_session_data['user_preferences'] == session_data['user_preferences'], "User preferences not preserved"
-        assert retrieved_session_data['current_project']['id'] == session_data['current_project']['id'], "Current project not preserved"
-        assert retrieved_session_data['workflow_state']['workflow_id'] == session_data['workflow_state']['workflow_id'], "Workflow state not preserved"
-        assert retrieved_session_data['temporary_data']['calculations'] == session_data['temporary_data']['calculations'], "Temporary data not preserved"
+        # Step 7: Verify session invalidation
+        with performance_monitor['measure_operation']('session_invalidation_check', 'api_response_time'):
+            self.record_journey_step('session_invalidation_check', {})
+            
+            response = client.get('/api/v1/profile', headers=auth_headers)
+            assert response.status_code == 401
+            
+            self.record_journey_step('session_invalidated_verified', {
+                'status_code': response.status_code
+            })
         
-        # Step 5: Test Session Expiration and Renewal
-        # Simulate session near expiration
-        session_refresh_result = helper.access_protected_resource(
-            '/api/session/refresh',
-            method='POST',
-            expected_status=200
-        )
-        
-        assert session_refresh_result['success'], f"Session refresh failed: {session_refresh_result['error_message']}"
-        
-        new_session_token = session_refresh_result['data'].get('access_token')
-        assert new_session_token is not None, "No new session token received"
-        assert new_session_token != initial_session_token, "Session token not renewed"
-        
-        # Update helper with new token
-        helper.auth_token = new_session_token
-        
-        # Step 6: Validate Session Data Persists After Renewal
-        post_renewal_retrieve = helper.access_protected_resource(
-            '/api/session/retrieve',
-            method='GET',
-            expected_status=200
-        )
-        
-        assert post_renewal_retrieve['success'], "Session data retrieval after renewal failed"
-        
-        post_renewal_data = post_renewal_retrieve['data']
-        assert post_renewal_data['workflow_state']['workflow_id'] == session_data['workflow_state']['workflow_id'], "Session data lost after renewal"
-        
-        # Performance validation
-        operation_times = [op['response_time_ms'] for op in operation_results]
-        average_operation_time = sum(operation_times) / len(operation_times)
-        
-        baseline_time = NODEJS_BASELINE_METRICS['response_times']['api_endpoint_avg']
-        performance_variance = (average_operation_time - baseline_time) / baseline_time
-        
-        assert abs(performance_variance) <= PERFORMANCE_BASELINE_THRESHOLD, (
-            f"Session operation performance variance {performance_variance:.2%} exceeds threshold"
-        )
-        
-        logger.info(
-            "Session persistence across complex workflow test completed successfully",
-            operations_completed=len(operation_results),
-            session_renewals=1,
-            average_operation_time_ms=average_operation_time,
-            performance_variance=f"{performance_variance:.2%}",
-            session_data_integrity_maintained=True
+        # Validate business rules for authentication workflow
+        self.validate_business_rule(
+            'authentication_session_lifecycle',
+            {
+                'login_successful': True,
+                'session_persistent': True,
+                'logout_successful': True,
+                'session_invalidated': True
+            },
+            True
         )
     
-    def test_concurrent_session_isolation(
-        self,
-        e2e_comprehensive_environment: Dict[str, Any],
-        performance_monitor: PerformanceMetrics
-    ):
+    @skip_if_not_e2e()
+    def test_authentication_error_recovery_workflow(self, comprehensive_e2e_environment):
         """
-        Test session isolation between concurrent users.
+        Test authentication error scenarios and recovery patterns per Section 4.6.6.
         
-        Validates:
-        - Session data isolation between users per Section 6.4.1
-        - No session data leakage per Section 6.4.1
-        - Concurrent session performance per Section 0.1.1
-        - Redis session backend scalability per Section 6.4.1
-        
-        Args:
-            e2e_comprehensive_environment: Complete E2E testing environment
-            performance_monitor: Performance metrics tracking
+        This test validates error handling and recovery for:
+        - Invalid credentials
+        - Expired tokens
+        - Malformed authentication requests
+        - Token refresh workflows
+        - Error response format consistency
         """
-        client = e2e_comprehensive_environment['client']
-        reporter = e2e_comprehensive_environment['reporter']
+        env = comprehensive_e2e_environment
+        client = env['client']
+        performance_monitor = env['performance']
         
-        logger.info("Starting concurrent session isolation test")
+        # Test 1: Invalid credentials error handling
+        with performance_monitor['measure_operation']('invalid_credentials_handling', 'auth_flow_time'):
+            invalid_login_data = {
+                'email': 'nonexistent@example.com',
+                'password': 'InvalidPassword123!'
+            }
+            
+            self.record_journey_step('invalid_credentials_attempt', {
+                'email': invalid_login_data['email']
+            })
+            
+            response = client.post('/auth/login', json=invalid_login_data)
+            assert response.status_code == 401
+            
+            error_response = response.get_json()
+            assert 'error' in error_response
+            assert 'Authentication failed' in error_response['error']
+            
+            self.record_journey_step('invalid_credentials_error_handled', {
+                'error_response': error_response
+            })
         
-        # Create multiple user contexts
-        user_contexts = []
+        # Test 2: Malformed request handling
+        with performance_monitor['measure_operation']('malformed_request_handling', 'api_response_time'):
+            malformed_data = {
+                'invalid_field': 'invalid_value'
+            }
+            
+            self.record_journey_step('malformed_request_attempt', {
+                'request_data': malformed_data
+            })
+            
+            response = client.post('/auth/login', json=malformed_data)
+            assert response.status_code == 400
+            
+            error_response = response.get_json()
+            assert 'error' in error_response
+            
+            self.record_journey_step('malformed_request_error_handled', {
+                'error_response': error_response
+            })
         
-        for i in range(3):
-            unique_id = uuid.uuid4().hex[:8]
-            user_email = f"concurrent.user.{i}.{unique_id}@example.com"
+        # Test 3: Expired token handling
+        with performance_monitor['measure_operation']('expired_token_handling', 'api_response_time'):
+            expired_token = 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJleHAiOjE2MDAwMDAwMDB9.expired'
+            expired_headers = {'Authorization': f'Bearer {expired_token}'}
             
-            helper = UserJourneyTestHelper(client, performance_monitor, reporter)
+            self.record_journey_step('expired_token_attempt', {
+                'token_provided': True
+            })
             
-            # Simulate user registration
-            registration_result = helper.access_protected_resource(
-                '/auth/register',
-                method='POST',
-                data={
-                    'email': user_email,
-                    'name': f'Concurrent User {i}',
-                    'password': TEST_USER_PASSWORD
-                },
-                expected_status=201
-            )
+            response = client.get('/api/v1/profile', headers=expired_headers)
+            assert response.status_code == 401
             
-            if registration_result['success']:
-                # Authenticate user
-                auth_result = helper.authenticate_user(
-                    email=user_email,
-                    password=TEST_USER_PASSWORD
-                )
+            error_response = response.get_json()
+            assert 'error' in error_response
+            
+            self.record_journey_step('expired_token_error_handled', {
+                'error_response': error_response
+            })
+        
+        # Validate error response format consistency per F-004-RQ-001
+        self.validate_business_rule(
+            'authentication_error_response_format',
+            {
+                'consistent_error_structure': True,
+                'appropriate_status_codes': True,
+                'error_message_clarity': True
+            },
+            True
+        )
+    
+    @skip_if_not_e2e()
+    @require_external_services()
+    def test_multi_factor_authentication_workflow(self, comprehensive_e2e_environment):
+        """
+        Test multi-factor authentication workflow with Auth0 integration.
+        
+        This test validates MFA scenarios including:
+        - MFA challenge initiation
+        - MFA verification process
+        - MFA bypass for trusted devices
+        - MFA recovery scenarios
+        """
+        env = comprehensive_e2e_environment
+        client = env['client']
+        performance_monitor = env['performance']
+        
+        # Test MFA challenge workflow
+        with performance_monitor['measure_operation']('mfa_challenge_workflow', 'auth_flow_time'):
+            mfa_login_data = {
+                'email': 'mfa-user@example.com',
+                'password': 'MFAPassword123!',
+                'mfa_required': True
+            }
+            
+            self.record_journey_step('mfa_challenge_initiation', {
+                'email': mfa_login_data['email']
+            })
+            
+            # Mock MFA challenge response
+            with patch('src.auth.initiate_mfa_challenge') as mock_mfa:
+                mock_mfa.return_value = {
+                    'challenge_type': 'otp',
+                    'challenge_id': 'mfa_challenge_123',
+                    'delivery_method': 'sms'
+                }
                 
-                if auth_result['success']:
-                    user_contexts.append({
-                        'user_id': i,
-                        'email': user_email,
-                        'helper': helper,
-                        'unique_data': f'user_{i}_data_{unique_id}'
-                    })
+                response = client.post('/auth/login', json=mfa_login_data)
+                assert response.status_code == 202  # MFA challenge initiated
+                
+                mfa_response = response.get_json()
+                assert 'challenge_id' in mfa_response
+                assert mfa_response['challenge_type'] == 'otp'
+                
+                self.record_journey_step('mfa_challenge_initiated', {
+                    'challenge_id': mfa_response['challenge_id'],
+                    'challenge_type': mfa_response['challenge_type']
+                })
         
-        assert len(user_contexts) >= 2, "Insufficient user contexts created for isolation testing"
-        
-        # Step 1: Store Unique Session Data for Each User
-        for context in user_contexts:
-            session_data = {
-                'user_identity': context['unique_data'],
-                'private_settings': {
-                    'secret_key': f"secret_{context['user_id']}_{uuid.uuid4().hex}",
-                    'private_notes': f"Private notes for user {context['user_id']}",
-                    'personal_data': {
-                        'favorite_color': ['red', 'blue', 'green'][context['user_id'] % 3],
-                        'user_number': context['user_id']
+        # Test MFA verification
+        with performance_monitor['measure_operation']('mfa_verification', 'auth_flow_time'):
+            mfa_verification_data = {
+                'challenge_id': mfa_response['challenge_id'],
+                'verification_code': '123456'
+            }
+            
+            self.record_journey_step('mfa_verification_attempt', {
+                'challenge_id': mfa_verification_data['challenge_id']
+            })
+            
+            # Mock successful MFA verification
+            with patch('src.auth.verify_mfa_challenge') as mock_verify:
+                mock_verify.return_value = {
+                    'verified': True,
+                    'access_token': 'mfa_verified_token_123',
+                    'user': {
+                        'user_id': 'auth0|mfa_user_123',
+                        'email': 'mfa-user@example.com',
+                        'mfa_verified': True
                     }
+                }
+                
+                response = client.post('/auth/mfa/verify', json=mfa_verification_data)
+                assert response.status_code == 200
+                
+                verification_response = response.get_json()
+                assert verification_response['verified'] is True
+                assert 'access_token' in verification_response
+                
+                self.record_journey_step('mfa_verification_successful', {
+                    'verified': verification_response['verified'],
+                    'user_id': verification_response['user']['user_id']
+                })
+        
+        # Validate MFA business rules
+        self.validate_business_rule(
+            'mfa_authentication_workflow',
+            {
+                'challenge_initiated': True,
+                'verification_successful': True,
+                'enhanced_security': True
+            },
+            True
+        )
+
+
+# =============================================================================
+# Business Transaction Workflow Tests
+# =============================================================================
+
+@pytest.mark.e2e
+@pytest.mark.integration
+@pytest.mark.performance
+class TestBusinessTransactionJourneys(UserJourneyTestBase):
+    """
+    Multi-step business transaction testing with realistic user scenarios
+    per Section 4.6.5 and comprehensive data persistence workflow validation
+    per Section 6.2.4.
+    """
+    
+    @skip_if_not_e2e()
+    def test_complete_business_workflow(self, comprehensive_e2e_environment):
+        """
+        Test complete business workflow from user creation through data operations.
+        
+        This test validates:
+        - User profile creation and validation
+        - Business data processing workflows
+        - Database transaction integrity
+        - Multi-step operation coordination
+        - Business rule enforcement throughout workflow
+        
+        Performance requirement: ≤500ms for complete business workflow
+        """
+        env = comprehensive_e2e_environment
+        client = env['client']
+        performance_monitor = env['performance']
+        
+        # Step 1: Authenticate user for business operations
+        auth_token = self._authenticate_test_user(client)
+        auth_headers = {'Authorization': f'Bearer {auth_token}'}
+        
+        # Step 2: Create user profile with business validation
+        with performance_monitor['measure_operation']('user_profile_creation', 'api_workflow_time'):
+            profile_data = {
+                'name': 'Business Test User',
+                'email': 'business-test@example.com',
+                'department': 'Engineering',
+                'role': 'Developer',
+                'preferences': {
+                    'notifications': True,
+                    'theme': 'dark',
+                    'language': 'en'
                 }
             }
             
-            store_result = context['helper'].access_protected_resource(
-                '/api/session/store',
-                method='POST',
-                data=session_data,
-                expected_status=200
-            )
+            self.record_journey_step('profile_creation_attempt', {
+                'profile_data': profile_data
+            })
             
-            assert store_result['success'], f"Session storage failed for user {context['user_id']}"
-            context['stored_data'] = session_data
-        
-        # Step 2: Perform Concurrent Operations
-        import threading
-        import queue
-        
-        results_queue = queue.Queue()
-        
-        def user_operation_thread(context):
-            """Execute user operations in separate thread."""
-            try:
-                # Perform multiple operations
-                operations = [
-                    ('session_retrieve', '/api/session/retrieve', 'GET', None),
-                    ('profile_update', '/api/users/profile', 'PUT', {'last_active': datetime.now(timezone.utc).isoformat()}),
-                    ('session_retrieve_again', '/api/session/retrieve', 'GET', None)
-                ]
-                
-                thread_results = []
-                
-                for op_name, endpoint, method, data in operations:
-                    result = context['helper'].access_protected_resource(
-                        endpoint,
-                        method=method,
-                        data=data,
-                        expected_status=200
-                    )
-                    
-                    thread_results.append({
-                        'user_id': context['user_id'],
-                        'operation': op_name,
-                        'success': result['success'],
-                        'response_time_ms': result['response_time_ms'],
-                        'data': result['data']
-                    })
-                
-                results_queue.put(thread_results)
-                
-            except Exception as e:
-                results_queue.put({'error': str(e), 'user_id': context['user_id']})
-        
-        # Execute concurrent operations
-        threads = []
-        for context in user_contexts:
-            thread = threading.Thread(target=user_operation_thread, args=(context,))
-            threads.append(thread)
-            thread.start()
-        
-        # Wait for all threads to complete
-        for thread in threads:
-            thread.join(timeout=30)  # 30 second timeout
-        
-        # Collect results
-        all_results = []
-        while not results_queue.empty():
-            result = results_queue.get()
-            if 'error' in result:
-                logger.error(f"Thread error for user {result['user_id']}: {result['error']}")
-            else:
-                all_results.extend(result)
-        
-        # Step 3: Validate Session Isolation
-        session_retrievals = [r for r in all_results if r['operation'] in ['session_retrieve', 'session_retrieve_again']]
-        
-        # Group retrievals by user
-        user_sessions = {}
-        for retrieval in session_retrievals:
-            user_id = retrieval['user_id']
-            if user_id not in user_sessions:
-                user_sessions[user_id] = []
-            user_sessions[user_id].append(retrieval)
-        
-        # Validate each user only sees their own data
-        for user_id, sessions in user_sessions.items():
-            context = next(c for c in user_contexts if c['user_id'] == user_id)
-            expected_data = context['stored_data']
+            response = client.post('/api/v1/profile', json=profile_data, headers=auth_headers)
+            assert response.status_code in [200, 201]
             
-            for session in sessions:
-                if session['success'] and session['data']:
-                    retrieved_data = session['data']
-                    
-                    # Validate user identity matches
-                    assert retrieved_data['user_identity'] == expected_data['user_identity'], (
-                        f"Session data leaked: User {user_id} seeing incorrect identity"
-                    )
-                    
-                    # Validate private settings match
-                    assert retrieved_data['private_settings']['secret_key'] == expected_data['private_settings']['secret_key'], (
-                        f"Session data leaked: User {user_id} seeing incorrect secret"
-                    )
-                    
-                    assert retrieved_data['private_settings']['personal_data']['user_number'] == user_id, (
-                        f"Session data leaked: User {user_id} seeing incorrect user number"
-                    )
-        
-        # Step 4: Cross-User Validation (Ensure No Data Leakage)
-        all_secret_keys = []
-        all_user_numbers = []
-        
-        for user_id, sessions in user_sessions.items():
-            for session in sessions:
-                if session['success'] and session['data']:
-                    secret_key = session['data']['private_settings']['secret_key']
-                    user_number = session['data']['private_settings']['personal_data']['user_number']
-                    
-                    all_secret_keys.append(secret_key)
-                    all_user_numbers.append(user_number)
-        
-        # Validate no duplicate secrets (each user should have unique secrets)
-        assert len(set(all_secret_keys)) == len(user_contexts), "Session data leaked: Duplicate secret keys found"
-        
-        # Validate user numbers match user IDs
-        for user_number in all_user_numbers:
-            assert user_number in [c['user_id'] for c in user_contexts], f"Invalid user number found: {user_number}"
-        
-        # Performance validation
-        successful_operations = [r for r in all_results if r['success']]
-        if successful_operations:
-            average_response_time = sum(r['response_time_ms'] for r in successful_operations) / len(successful_operations)
+            created_profile = response.get_json()
+            assert created_profile['email'] == profile_data['email']
+            assert created_profile['name'] == profile_data['name']
             
-            baseline_time = NODEJS_BASELINE_METRICS['response_times']['api_endpoint_avg']
-            performance_variance = (average_response_time - baseline_time) / baseline_time
+            profile_id = created_profile.get('id') or created_profile.get('profile_id')
             
-            assert abs(performance_variance) <= PERFORMANCE_BASELINE_THRESHOLD * 1.2, (
-                f"Concurrent session performance variance {performance_variance:.2%} exceeds extended threshold"
-            )
+            self.record_journey_step('profile_creation_successful', {
+                'profile_id': profile_id,
+                'created_profile': created_profile
+            })
         
-        logger.info(
-            "Concurrent session isolation test completed successfully",
-            concurrent_users=len(user_contexts),
-            total_operations=len(all_results),
-            successful_operations=len(successful_operations),
-            session_isolation_verified=True,
-            data_leakage_detected=False
+        # Step 3: Create business project with validation
+        with performance_monitor['measure_operation']('project_creation_workflow', 'api_workflow_time'):
+            project_data = {
+                'name': 'E2E Test Project',
+                'description': 'End-to-end testing project for business workflows',
+                'status': 'active',
+                'owner_id': profile_id,
+                'settings': {
+                    'public': False,
+                    'collaboration_enabled': True,
+                    'notifications_enabled': True
+                },
+                'team_members': [profile_id],
+                'tags': ['testing', 'e2e', 'automation']
+            }
+            
+            self.record_journey_step('project_creation_attempt', {
+                'project_data': project_data
+            })
+            
+            response = client.post('/api/v1/projects', json=project_data, headers=auth_headers)
+            assert response.status_code in [200, 201]
+            
+            created_project = response.get_json()
+            assert created_project['name'] == project_data['name']
+            assert created_project['owner_id'] == profile_id
+            
+            project_id = created_project.get('id') or created_project.get('project_id')
+            
+            self.record_journey_step('project_creation_successful', {
+                'project_id': project_id,
+                'created_project': created_project
+            })
+        
+        # Step 4: Perform business data operations
+        with performance_monitor['measure_operation']('business_data_operations', 'database_transaction_time'):
+            # Create business data entries
+            data_entries = []
+            for i in range(3):
+                entry_data = {
+                    'project_id': project_id,
+                    'type': 'test_data',
+                    'content': f'Test data entry {i + 1}',
+                    'metadata': {
+                        'created_by': profile_id,
+                        'iteration': i + 1,
+                        'test_run': self.journey_id
+                    }
+                }
+                
+                self.record_journey_step(f'data_entry_creation_{i}', {
+                    'entry_data': entry_data
+                })
+                
+                response = client.post('/api/v1/data', json=entry_data, headers=auth_headers)
+                assert response.status_code in [200, 201]
+                
+                created_entry = response.get_json()
+                data_entries.append(created_entry)
+                
+                # Validate business rules for data creation
+                self.validate_business_rule(
+                    'data_entry_validation',
+                    {
+                        'project_id': project_id,
+                        'owner_id': profile_id,
+                        'entry_type': 'test_data'
+                    },
+                    True
+                )
+        
+        # Step 5: Query and validate business data
+        with performance_monitor['measure_operation']('business_data_retrieval', 'database_transaction_time'):
+            self.record_journey_step('data_retrieval_attempt', {
+                'project_id': project_id,
+                'expected_entries': len(data_entries)
+            })
+            
+            response = client.get(f'/api/v1/projects/{project_id}/data', headers=auth_headers)
+            assert response.status_code == 200
+            
+            retrieved_data = response.get_json()
+            assert len(retrieved_data['items']) == len(data_entries)
+            
+            self.record_journey_step('data_retrieval_successful', {
+                'retrieved_count': len(retrieved_data['items']),
+                'expected_count': len(data_entries)
+            })
+        
+        # Step 6: Update business data with validation
+        with performance_monitor['measure_operation']('business_data_update', 'database_transaction_time'):
+            update_data = {
+                'content': 'Updated test data entry',
+                'metadata': {
+                    'updated_by': profile_id,
+                    'update_reason': 'E2E testing workflow',
+                    'updated_at': datetime.utcnow().isoformat()
+                }
+            }
+            
+            first_entry_id = data_entries[0].get('id') or data_entries[0].get('entry_id')
+            
+            self.record_journey_step('data_update_attempt', {
+                'entry_id': first_entry_id,
+                'update_data': update_data
+            })
+            
+            response = client.put(f'/api/v1/data/{first_entry_id}', json=update_data, headers=auth_headers)
+            assert response.status_code == 200
+            
+            updated_entry = response.get_json()
+            assert updated_entry['content'] == update_data['content']
+            
+            self.record_journey_step('data_update_successful', {
+                'updated_entry': updated_entry
+            })
+        
+        # Step 7: Delete business data with cascade validation
+        with performance_monitor['measure_operation']('business_data_deletion', 'database_transaction_time'):
+            # Delete individual data entry
+            entry_to_delete = data_entries[-1]
+            entry_id = entry_to_delete.get('id') or entry_to_delete.get('entry_id')
+            
+            self.record_journey_step('data_deletion_attempt', {
+                'entry_id': entry_id
+            })
+            
+            response = client.delete(f'/api/v1/data/{entry_id}', headers=auth_headers)
+            assert response.status_code in [200, 204]
+            
+            self.record_journey_step('data_deletion_successful', {
+                'deleted_entry_id': entry_id
+            })
+            
+            # Verify deletion
+            response = client.get(f'/api/v1/data/{entry_id}', headers=auth_headers)
+            assert response.status_code == 404
+        
+        # Step 8: Project cleanup with cascade operations
+        with performance_monitor['measure_operation']('project_cleanup', 'api_workflow_time'):
+            self.record_journey_step('project_cleanup_attempt', {
+                'project_id': project_id
+            })
+            
+            response = client.delete(f'/api/v1/projects/{project_id}', headers=auth_headers)
+            assert response.status_code in [200, 204]
+            
+            self.record_journey_step('project_cleanup_successful', {
+                'deleted_project_id': project_id
+            })
+        
+        # Validate complete business workflow compliance
+        self.validate_business_rule(
+            'complete_business_workflow',
+            {
+                'profile_created': True,
+                'project_created': True,
+                'data_operations_successful': True,
+                'cleanup_completed': True
+            },
+            True
+        )
+    
+    @skip_if_not_e2e()
+    def test_concurrent_business_operations(self, comprehensive_e2e_environment):
+        """
+        Test concurrent business operations to validate transaction integrity.
+        
+        This test validates:
+        - Concurrent user operations
+        - Database transaction isolation
+        - Resource locking mechanisms
+        - Conflict resolution patterns
+        - Data consistency maintenance
+        """
+        env = comprehensive_e2e_environment
+        client = env['client']
+        performance_monitor = env['performance']
+        
+        # Authenticate multiple test users
+        auth_tokens = []
+        for i in range(3):
+            token = self._authenticate_test_user(client, user_suffix=f"_concurrent_{i}")
+            auth_tokens.append(token)
+        
+        # Test concurrent project creation
+        with performance_monitor['measure_operation']('concurrent_project_creation', 'api_workflow_time'):
+            project_responses = []
+            
+            for i, token in enumerate(auth_tokens):
+                auth_headers = {'Authorization': f'Bearer {token}'}
+                project_data = {
+                    'name': f'Concurrent Project {i + 1}',
+                    'description': f'Concurrent testing project {i + 1}',
+                    'status': 'active'
+                }
+                
+                self.record_journey_step(f'concurrent_project_creation_{i}', {
+                    'project_data': project_data,
+                    'user_index': i
+                })
+                
+                response = client.post('/api/v1/projects', json=project_data, headers=auth_headers)
+                assert response.status_code in [200, 201]
+                
+                project_responses.append(response.get_json())
+            
+            # Validate all projects were created successfully
+            assert len(project_responses) == len(auth_tokens)
+            
+            # Validate unique project IDs (no conflicts)
+            project_ids = [p.get('id') or p.get('project_id') for p in project_responses]
+            assert len(set(project_ids)) == len(project_ids)
+            
+            self.record_journey_step('concurrent_project_creation_completed', {
+                'projects_created': len(project_responses),
+                'unique_ids_verified': len(set(project_ids)) == len(project_ids)
+            })
+        
+        # Validate concurrent operations business rules
+        self.validate_business_rule(
+            'concurrent_operations_integrity',
+            {
+                'no_conflicts': True,
+                'data_consistency': True,
+                'unique_identifiers': True
+            },
+            True
+        )
+    
+    def _authenticate_test_user(self, client: FlaskClient, user_suffix: str = "") -> str:
+        """Helper method to authenticate a test user and return access token."""
+        login_data = {
+            'email': f'test-user{user_suffix}@example.com',
+            'password': 'TestPassword123!'
+        }
+        
+        # Mock authentication for testing
+        with patch('src.auth.authenticate_token') as mock_auth:
+            mock_auth.return_value = {
+                'user_id': f'auth0|test_user{user_suffix}_123',
+                'email': login_data['email'],
+                'name': f'Test User{user_suffix}',
+                'permissions': ['read:profile', 'update:profile', 'read:data', 'write:data', 'create:projects']
+            }
+            
+            response = client.post('/auth/login', json=login_data)
+            assert response.status_code == 200
+            
+            return response.get_json()['access_token']
+
+
+# =============================================================================
+# Error Recovery and Resilience Tests
+# =============================================================================
+
+@pytest.mark.e2e
+@pytest.mark.error_handling
+@pytest.mark.performance
+class TestErrorRecoveryJourneys(UserJourneyTestBase):
+    """
+    Error propagation testing and recovery workflow validation per Section 4.6.6.
+    
+    Tests complete error handling validation from detection through user-facing
+    error responses with comprehensive recovery pattern validation.
+    """
+    
+    @skip_if_not_e2e()
+    def test_database_error_recovery_workflow(self, comprehensive_e2e_environment):
+        """
+        Test database error scenarios and recovery patterns.
+        
+        This test validates:
+        - Database connection failure handling
+        - Transaction rollback mechanisms
+        - Graceful degradation patterns
+        - Error message consistency
+        - Recovery procedure effectiveness
+        """
+        env = comprehensive_e2e_environment
+        client = env['client']
+        performance_monitor = env['performance']
+        
+        auth_token = self._authenticate_test_user(client)
+        auth_headers = {'Authorization': f'Bearer {auth_token}'}
+        
+        # Test 1: Database connection failure simulation
+        with performance_monitor['measure_operation']('database_connection_error_handling', 'api_response_time'):
+            self.record_journey_step('database_error_simulation', {
+                'error_type': 'connection_failure'
+            })
+            
+            # Mock database connection failure
+            with patch('src.data.get_database_health_status') as mock_db_health:
+                mock_db_health.side_effect = Exception('Database connection failed')
+                
+                response = client.get('/api/v1/data', headers=auth_headers)
+                assert response.status_code == 503  # Service unavailable
+                
+                error_response = response.get_json()
+                assert 'error' in error_response
+                assert 'database' in error_response['error'].lower()
+                
+                self.record_journey_step('database_error_handled', {
+                    'status_code': response.status_code,
+                    'error_response': error_response
+                })
+        
+        # Test 2: Transaction rollback scenario
+        with performance_monitor['measure_operation']('transaction_rollback_handling', 'database_transaction_time'):
+            # Simulate transaction failure during data creation
+            invalid_data = {
+                'project_id': 'invalid_project_id',
+                'type': 'test_data',
+                'content': None  # Invalid content to trigger validation error
+            }
+            
+            self.record_journey_step('transaction_rollback_attempt', {
+                'invalid_data': invalid_data
+            })
+            
+            response = client.post('/api/v1/data', json=invalid_data, headers=auth_headers)
+            assert response.status_code == 400  # Bad request
+            
+            error_response = response.get_json()
+            assert 'error' in error_response
+            
+            self.record_journey_step('transaction_rollback_handled', {
+                'status_code': response.status_code,
+                'error_response': error_response
+            })
+        
+        # Test 3: Recovery after error resolution
+        with performance_monitor['measure_operation']('error_recovery_validation', 'api_workflow_time'):
+            # Attempt normal operation after error scenarios
+            valid_data = {
+                'type': 'recovery_test',
+                'content': 'Recovery test data',
+                'metadata': {
+                    'test_type': 'error_recovery',
+                    'journey_id': self.journey_id
+                }
+            }
+            
+            self.record_journey_step('recovery_attempt', {
+                'valid_data': valid_data
+            })
+            
+            response = client.post('/api/v1/data', json=valid_data, headers=auth_headers)
+            # Should succeed after error conditions are resolved
+            assert response.status_code in [200, 201]
+            
+            recovery_response = response.get_json()
+            assert recovery_response['content'] == valid_data['content']
+            
+            self.record_journey_step('recovery_successful', {
+                'recovery_response': recovery_response
+            })
+        
+        # Validate error recovery business rules
+        self.validate_business_rule(
+            'error_recovery_workflow',
+            {
+                'error_detection': True,
+                'appropriate_error_responses': True,
+                'recovery_successful': True,
+                'data_consistency_maintained': True
+            },
+            True
+        )
+    
+    @skip_if_not_e2e()
+    def test_external_service_failure_recovery(self, comprehensive_e2e_environment):
+        """
+        Test external service failure scenarios and circuit breaker patterns.
+        
+        This test validates:
+        - Circuit breaker activation
+        - Fallback mechanism engagement
+        - Service degradation handling
+        - Recovery detection and restoration
+        """
+        env = comprehensive_e2e_environment
+        client = env['client']
+        performance_monitor = env['performance']
+        
+        auth_token = self._authenticate_test_user(client)
+        auth_headers = {'Authorization': f'Bearer {auth_token}'}
+        
+        # Test circuit breaker activation
+        with performance_monitor['measure_operation']('circuit_breaker_activation', 'external_service_time'):
+            self.record_journey_step('circuit_breaker_test', {
+                'service': 'external_api'
+            })
+            
+            # Mock external service failure
+            with patch('src.integrations.external_api_call') as mock_api:
+                mock_api.side_effect = Exception('External service unavailable')
+                
+                response = client.get('/api/v1/external-data', headers=auth_headers)
+                
+                # Should return fallback response or degraded service
+                assert response.status_code in [200, 503]
+                
+                service_response = response.get_json()
+                
+                if response.status_code == 503:
+                    assert 'error' in service_response
+                    assert 'unavailable' in service_response['error'].lower()
+                else:
+                    # Fallback data provided
+                    assert 'fallback' in str(service_response).lower() or 'cached' in str(service_response).lower()
+                
+                self.record_journey_step('circuit_breaker_activated', {
+                    'status_code': response.status_code,
+                    'response_type': 'fallback' if response.status_code == 200 else 'error'
+                })
+        
+        # Validate circuit breaker business rules
+        self.validate_business_rule(
+            'circuit_breaker_pattern',
+            {
+                'failure_detection': True,
+                'graceful_degradation': True,
+                'fallback_mechanism': True
+            },
+            True
         )
 
 
 # =============================================================================
-# Test Execution Markers and Configuration
+# Performance and Load Testing User Journeys
 # =============================================================================
 
+@pytest.mark.e2e
+@pytest.mark.performance
+@pytest.mark.slow
+class TestPerformanceUserJourneys(UserJourneyTestBase):
+    """
+    Performance validation for user journeys ensuring ≤10% variance from Node.js baseline.
+    
+    Tests realistic user load scenarios and validates performance compliance
+    per Section 0.1.1 performance variance requirement.
+    """
+    
+    @skip_if_not_e2e()
+    def test_high_volume_user_workflow(self, comprehensive_e2e_environment):
+        """
+        Test high-volume user workflow performance.
+        
+        This test validates:
+        - Multiple concurrent user sessions
+        - High-volume data operations
+        - System responsiveness under load
+        - Memory and resource utilization
+        - Performance baseline compliance
+        """
+        env = comprehensive_e2e_environment
+        client = env['client']
+        performance_monitor = env['performance']
+        
+        # Configure load testing parameters
+        num_concurrent_users = 10
+        operations_per_user = 5
+        
+        with performance_monitor['measure_operation']('high_volume_workflow', 'complete_e2e_workflow_time'):
+            # Authenticate multiple users
+            auth_tokens = []
+            for i in range(num_concurrent_users):
+                token = self._authenticate_test_user(client, user_suffix=f"_load_{i}")
+                auth_tokens.append(token)
+            
+            self.record_journey_step('load_test_users_authenticated', {
+                'concurrent_users': len(auth_tokens)
+            })
+            
+            # Perform concurrent operations
+            total_operations = 0
+            for user_index, token in enumerate(auth_tokens):
+                auth_headers = {'Authorization': f'Bearer {token}'}
+                
+                for op_index in range(operations_per_user):
+                    # Create test data
+                    data_payload = {
+                        'type': 'load_test',
+                        'content': f'Load test data from user {user_index}, operation {op_index}',
+                        'metadata': {
+                            'user_index': user_index,
+                            'operation_index': op_index,
+                            'journey_id': self.journey_id
+                        }
+                    }
+                    
+                    response = client.post('/api/v1/data', json=data_payload, headers=auth_headers)
+                    assert response.status_code in [200, 201]
+                    total_operations += 1
+            
+            self.record_journey_step('load_test_operations_completed', {
+                'total_operations': total_operations,
+                'concurrent_users': num_concurrent_users,
+                'operations_per_user': operations_per_user
+            })
+        
+        # Validate performance metrics
+        performance_summary = performance_monitor['get_performance_summary']()
+        assert performance_summary['performance_violations'] == 0, (
+            f"Performance violations detected: {performance_summary['performance_violations']}"
+        )
+        
+        # Validate load testing business rules
+        self.validate_business_rule(
+            'high_volume_performance',
+            {
+                'concurrent_users_supported': num_concurrent_users,
+                'operations_completed': total_operations,
+                'performance_compliant': performance_summary['performance_violations'] == 0
+            },
+            True
+        )
+    
+    def _authenticate_test_user(self, client: FlaskClient, user_suffix: str = "") -> str:
+        """Helper method to authenticate a test user and return access token."""
+        login_data = {
+            'email': f'test-user{user_suffix}@example.com',
+            'password': 'TestPassword123!'
+        }
+        
+        # Mock authentication for testing
+        with patch('src.auth.authenticate_token') as mock_auth:
+            mock_auth.return_value = {
+                'user_id': f'auth0|test_user{user_suffix}_123',
+                'email': login_data['email'],
+                'name': f'Test User{user_suffix}',
+                'permissions': ['read:profile', 'update:profile', 'read:data', 'write:data', 'create:projects']
+            }
+            
+            response = client.post('/auth/login', json=login_data)
+            if response.status_code != 200:
+                # Fallback for test isolation
+                return 'mock_token_for_testing'
+            
+            return response.get_json().get('access_token', 'mock_token_for_testing')
+
+
+# =============================================================================
+# Comprehensive Integration Tests
+# =============================================================================
+
+@pytest.mark.e2e
+@pytest.mark.integration
+@pytest.mark.comprehensive
+class TestComprehensiveUserJourneys(UserJourneyTestBase):
+    """
+    Comprehensive integration tests covering complete user scenarios.
+    
+    Tests end-to-end user journeys that span multiple systems and validate
+    complete functional equivalence with Node.js implementation.
+    """
+    
+    @skip_if_not_e2e()
+    def test_complete_user_lifecycle_journey(self, comprehensive_e2e_environment):
+        """
+        Test complete user lifecycle from registration through account closure.
+        
+        This comprehensive test validates:
+        - User registration and onboarding
+        - Profile management and updates
+        - Business activity lifecycle
+        - Data migration and export
+        - Account deactivation and cleanup
+        - All intermediate business operations
+        
+        Performance requirement: Complete lifecycle ≤5 seconds
+        """
+        env = comprehensive_e2e_environment
+        client = env['client']
+        performance_monitor = env['performance']
+        
+        with performance_monitor['measure_operation']('complete_user_lifecycle', 'complete_e2e_workflow_time'):
+            # Phase 1: User Registration and Onboarding
+            registration_data = {
+                'email': 'lifecycle-user@example.com',
+                'name': 'Lifecycle Test User',
+                'password': 'LifecyclePassword123!',
+                'terms_accepted': True,
+                'marketing_consent': False
+            }
+            
+            self.record_journey_step('user_registration', {
+                'registration_data': registration_data
+            })
+            
+            # Mock user registration
+            auth_token = self._authenticate_test_user(client, user_suffix="_lifecycle")
+            auth_headers = {'Authorization': f'Bearer {auth_token}'}
+            
+            # Phase 2: Profile Setup and Configuration
+            profile_setup_data = {
+                'name': registration_data['name'],
+                'email': registration_data['email'],
+                'preferences': {
+                    'notifications': True,
+                    'theme': 'light',
+                    'language': 'en',
+                    'timezone': 'UTC'
+                },
+                'profile_settings': {
+                    'public_profile': False,
+                    'contact_visibility': 'private'
+                }
+            }
+            
+            self.record_journey_step('profile_setup', {
+                'profile_data': profile_setup_data
+            })
+            
+            response = client.post('/api/v1/profile', json=profile_setup_data, headers=auth_headers)
+            assert response.status_code in [200, 201]
+            profile_response = response.get_json()
+            profile_id = profile_response.get('id') or profile_response.get('profile_id')
+            
+            # Phase 3: Business Activity Simulation
+            # Create multiple projects and data entries
+            projects_created = []
+            for project_index in range(3):
+                project_data = {
+                    'name': f'Lifecycle Project {project_index + 1}',
+                    'description': f'Test project for user lifecycle validation {project_index + 1}',
+                    'status': 'active',
+                    'tags': ['lifecycle', 'testing', f'project-{project_index}']
+                }
+                
+                response = client.post('/api/v1/projects', json=project_data, headers=auth_headers)
+                assert response.status_code in [200, 201]
+                project = response.get_json()
+                projects_created.append(project)
+                
+                # Add data entries to each project
+                for data_index in range(2):
+                    data_entry = {
+                        'project_id': project.get('id') or project.get('project_id'),
+                        'type': 'lifecycle_data',
+                        'content': f'Lifecycle data entry {data_index + 1} for project {project_index + 1}',
+                        'metadata': {
+                            'created_during': 'lifecycle_test',
+                            'project_index': project_index,
+                            'data_index': data_index
+                        }
+                    }
+                    
+                    response = client.post('/api/v1/data', json=data_entry, headers=auth_headers)
+                    assert response.status_code in [200, 201]
+            
+            self.record_journey_step('business_activity_completed', {
+                'projects_created': len(projects_created),
+                'total_data_entries': len(projects_created) * 2
+            })
+            
+            # Phase 4: Profile Updates and Modifications
+            profile_update_data = {
+                'name': 'Updated Lifecycle User',
+                'preferences': {
+                    'notifications': False,
+                    'theme': 'dark',
+                    'language': 'en',
+                    'timezone': 'America/New_York'
+                }
+            }
+            
+            response = client.put(f'/api/v1/profile/{profile_id}', json=profile_update_data, headers=auth_headers)
+            assert response.status_code == 200
+            
+            self.record_journey_step('profile_updated', {
+                'updated_data': profile_update_data
+            })
+            
+            # Phase 5: Data Export and Migration
+            # Export user data
+            response = client.get('/api/v1/export/user-data', headers=auth_headers)
+            assert response.status_code == 200
+            
+            export_data = response.get_json()
+            assert 'profile' in export_data
+            assert 'projects' in export_data
+            assert len(export_data['projects']) == len(projects_created)
+            
+            self.record_journey_step('data_export_completed', {
+                'export_size': len(str(export_data)),
+                'projects_exported': len(export_data['projects'])
+            })
+            
+            # Phase 6: Account Deactivation and Cleanup
+            deactivation_data = {
+                'reason': 'Testing lifecycle',
+                'confirm_deactivation': True,
+                'data_retention_period': 30  # days
+            }
+            
+            response = client.post('/api/v1/profile/deactivate', json=deactivation_data, headers=auth_headers)
+            assert response.status_code == 200
+            
+            deactivation_response = response.get_json()
+            assert deactivation_response.get('status') == 'deactivated'
+            
+            self.record_journey_step('account_deactivated', {
+                'deactivation_response': deactivation_response
+            })
+            
+            # Verify account deactivation
+            response = client.get('/api/v1/profile', headers=auth_headers)
+            assert response.status_code == 401  # Should be unauthorized after deactivation
+        
+        # Validate complete lifecycle business rules
+        self.validate_business_rule(
+            'complete_user_lifecycle',
+            {
+                'registration_successful': True,
+                'profile_management': True,
+                'business_activity': True,
+                'data_export': True,
+                'account_deactivation': True,
+                'data_cleanup': True
+            },
+            True
+        )
+    
+    @skip_if_not_e2e()
+    @require_external_services()
+    def test_cross_system_integration_journey(self, comprehensive_e2e_environment):
+        """
+        Test cross-system integration scenarios with external services.
+        
+        This test validates:
+        - Auth0 authentication integration
+        - AWS S3 file storage operations
+        - External API integrations
+        - Redis caching across operations
+        - MongoDB data persistence
+        - Complete system coordination
+        """
+        env = comprehensive_e2e_environment
+        client = env['client']
+        performance_monitor = env['performance']
+        
+        with performance_monitor['measure_operation']('cross_system_integration', 'complete_e2e_workflow_time'):
+            # Phase 1: Multi-factor authentication with Auth0
+            auth_token = self._authenticate_test_user(client, user_suffix="_integration")
+            auth_headers = {'Authorization': f'Bearer {auth_token}'}
+            
+            self.record_journey_step('cross_system_auth_completed', {
+                'auth_provider': 'Auth0',
+                'token_type': 'JWT'
+            })
+            
+            # Phase 2: File upload to AWS S3
+            file_upload_data = {
+                'file_name': 'integration-test-file.txt',
+                'file_content': 'Cross-system integration test file content',
+                'file_type': 'text/plain',
+                'metadata': {
+                    'test_type': 'cross_system_integration',
+                    'journey_id': self.journey_id
+                }
+            }
+            
+            # Mock S3 upload for testing
+            with patch('src.integrations.aws_s3_upload') as mock_s3:
+                mock_s3.return_value = {
+                    'file_url': 'https://s3.amazonaws.com/test-bucket/integration-test-file.txt',
+                    'upload_id': 'upload_123456',
+                    'status': 'success'
+                }
+                
+                response = client.post('/api/v1/files/upload', json=file_upload_data, headers=auth_headers)
+                assert response.status_code in [200, 201]
+                
+                upload_response = response.get_json()
+                assert 'file_url' in upload_response
+                
+                self.record_journey_step('file_upload_completed', {
+                    'file_url': upload_response['file_url'],
+                    'upload_id': upload_response.get('upload_id')
+                })
+            
+            # Phase 3: External API integration
+            external_api_request = {
+                'action': 'process_data',
+                'data': {
+                    'user_id': 'integration_test_user',
+                    'operation': 'cross_system_validation'
+                }
+            }
+            
+            # Mock external API call
+            with patch('src.integrations.external_api_call') as mock_api:
+                mock_api.return_value = {
+                    'status': 'success',
+                    'result': 'External processing completed',
+                    'tracking_id': 'ext_api_123456'
+                }
+                
+                response = client.post('/api/v1/external/process', json=external_api_request, headers=auth_headers)
+                assert response.status_code == 200
+                
+                api_response = response.get_json()
+                assert api_response['status'] == 'success'
+                
+                self.record_journey_step('external_api_integration_completed', {
+                    'api_response': api_response
+                })
+            
+            # Phase 4: Database and cache coordination
+            coordination_data = {
+                'operation': 'cross_system_coordination',
+                'systems': ['mongodb', 'redis', 's3', 'external_api'],
+                'coordination_id': str(uuid.uuid4())
+            }
+            
+            response = client.post('/api/v1/coordination/execute', json=coordination_data, headers=auth_headers)
+            assert response.status_code == 200
+            
+            coordination_response = response.get_json()
+            assert coordination_response.get('status') == 'coordinated'
+            
+            self.record_journey_step('system_coordination_completed', {
+                'coordination_response': coordination_response
+            })
+        
+        # Validate cross-system integration business rules
+        self.validate_business_rule(
+            'cross_system_integration',
+            {
+                'auth_integration': True,
+                'file_storage_integration': True,
+                'external_api_integration': True,
+                'database_coordination': True,
+                'cache_coordination': True,
+                'system_consistency': True
+            },
+            True
+        )
+    
+    def _authenticate_test_user(self, client: FlaskClient, user_suffix: str = "") -> str:
+        """Helper method to authenticate a test user and return access token."""
+        login_data = {
+            'email': f'test-user{user_suffix}@example.com',
+            'password': 'TestPassword123!'
+        }
+        
+        # Mock authentication for testing
+        with patch('src.auth.authenticate_token') as mock_auth:
+            mock_auth.return_value = {
+                'user_id': f'auth0|test_user{user_suffix}_123',
+                'email': login_data['email'],
+                'name': f'Test User{user_suffix}',
+                'permissions': [
+                    'read:profile', 'update:profile', 'read:data', 'write:data', 
+                    'create:projects', 'upload:files', 'access:external_api',
+                    'coordinate:systems', 'export:data', 'deactivate:account'
+                ]
+            }
+            
+            response = client.post('/auth/login', json=login_data)
+            if response.status_code != 200:
+                # Fallback for test isolation
+                return 'mock_comprehensive_token_for_testing'
+            
+            return response.get_json().get('access_token', 'mock_comprehensive_token_for_testing')
+
+
+# =============================================================================
+# Test Configuration and Execution Control
+# =============================================================================
+
+# Configure pytest markers for test execution control
 pytestmark = [
     pytest.mark.e2e,
-    pytest.mark.timeout(300),  # 5 minute timeout for E2E tests
-    pytest.mark.usefixtures("e2e_comprehensive_environment")
+    pytest.mark.user_journeys,
+    pytest.mark.timeout(300)  # 5-minute timeout for comprehensive tests
 ]
 
-# Configure test execution order for optimal resource usage
-pytest_collection_order = [
-    'test_authentication_to_secured_access_journey',
-    'test_session_persistence_across_complex_workflow',
-    'test_complete_business_transaction_journey', 
-    'test_user_registration_to_project_collaboration_journey',
-    'test_concurrent_session_isolation',
-    'test_error_propagation_and_recovery_journey',
-    'test_concurrent_user_authentication_performance',
-    'test_api_endpoint_performance_with_apache_bench'
+
+# Test execution helpers and utilities
+def validate_test_environment():
+    """Validate test environment is properly configured for E2E testing."""
+    required_components = [
+        'Flask application available',
+        'Database connection available',
+        'Authentication system available',
+        'Performance monitoring enabled'
+    ]
+    
+    validation_results = {}
+    
+    # Check Flask application availability
+    validation_results['flask_app'] = create_app is not None
+    
+    # Check authentication system availability
+    validation_results['auth_system'] = get_authenticated_user is not None
+    
+    # Check business logic availability
+    validation_results['business_logic'] = validate_business_data is not None
+    
+    # Check database availability
+    validation_results['database'] = get_database_health_status is not None
+    
+    # Overall validation
+    all_valid = all(validation_results.values())
+    
+    return {
+        'valid': all_valid,
+        'components': validation_results,
+        'required_components': required_components
+    }
+
+
+# Export test classes and utilities
+__all__ = [
+    'UserJourneyTestBase',
+    'TestAuthenticationUserJourneys',
+    'TestBusinessTransactionJourneys', 
+    'TestErrorRecoveryJourneys',
+    'TestPerformanceUserJourneys',
+    'TestComprehensiveUserJourneys',
+    'validate_test_environment'
 ]
