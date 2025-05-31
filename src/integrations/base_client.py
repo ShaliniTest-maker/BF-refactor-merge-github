@@ -1,66 +1,66 @@
 """
 Base class for external service clients implementing comprehensive HTTP client patterns.
 
-This module provides a standardized foundation for all third-party API integrations with 
-enterprise-grade resilience patterns including circuit breaker integration, retry logic 
-with exponential backoff, comprehensive monitoring instrumentation, and dual HTTP client 
-support (requests/httpx). Implements performance optimization and fault tolerance patterns 
-aligned with Section 0.1.2, 6.3.3, and 6.3.5 specifications.
+This module provides the foundational infrastructure for all third-party API integrations with
+enterprise-grade resilience patterns, monitoring instrumentation, and standardized error handling.
+It serves as the base class for Auth0, AWS S3, and other external service integrations.
 
 Key Features:
 - Dual HTTP client support (requests 2.31+ and httpx 0.24+) per Section 0.1.2
-- Circuit breaker integration with pybreaker for service protection per Section 6.3.3
-- Tenacity exponential backoff retry strategies per Section 4.2.3
-- Comprehensive monitoring with prometheus-client per Section 6.3.5
+- Circuit breaker integration for external service protection per Section 6.3.3
+- Exponential backoff retry logic with intelligent error classification per Section 4.2.3
+- Comprehensive monitoring with Prometheus metrics collection per Section 6.3.3
 - Connection pooling optimization for performance per Section 6.3.5
-- Structured logging with enterprise integration per Section 6.3.3
-- Graceful degradation and fallback mechanisms per Section 6.3.3
+- Structured logging with correlation ID tracking per Section 6.3.3
 
-Performance Requirements:
-- Maintains ≤10% variance from Node.js baseline per Section 0.3.2
-- Enterprise-grade monitoring integration per Section 6.5.1.1
-- Optimized connection pooling for external service calls per Section 6.3.5
+Aligned with:
+- Section 0.1.2: External Integration Components - HTTP client library replacement
+- Section 6.3.3: External Systems - Resilience patterns and monitoring
+- Section 6.3.5: Performance and Scalability - Connection pooling and metrics
+- Section 4.2.3: Error Handling and Recovery - Comprehensive exception management
+- Section 3.2.3: HTTP Client & Integration Libraries specifications
 """
 
 import asyncio
-import json
-import logging
 import time
 import uuid
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Union, Callable, Type, Tuple
+from typing import Any, Dict, List, Optional, Union, Callable, Type, TypeVar
 from urllib.parse import urljoin, urlparse
 
 import structlog
+import requests
+import httpx
 from prometheus_client import Counter, Histogram, Gauge
 
-# Import dependency modules for comprehensive integration
+# HTTP client management per Section 3.2.3
 from .http_client import (
     HTTPClientManager,
     SynchronousHTTPClient,
     AsynchronousHTTPClient,
-    create_sync_client,
-    create_async_client,
     create_client_manager
 )
+
+# Circuit breaker integration per Section 6.3.3
 from .circuit_breaker import (
-    ExternalServiceCircuitBreaker,
-    CircuitBreakerManager,
-    create_circuit_breaker,
-    circuit_breaker,
-    get_circuit_breaker_health,
-    circuit_breaker_manager
+    EnhancedCircuitBreaker,
+    CircuitBreakerConfig,
+    CircuitBreakerPolicy,
+    global_circuit_breaker_manager
 )
+
+# Retry logic with exponential backoff per Section 4.2.3
 from .retry import (
     RetryManager,
-    with_retry,
-    with_retry_async,
+    RetryConfiguration,
     retry_manager,
-    get_retry_metrics,
-    reset_circuit_breaker as reset_retry_circuit_breaker
+    with_retry,
+    with_retry_async
 )
+
+# Comprehensive exception handling per Section 4.2.3
 from .exceptions import (
     IntegrationError,
     HTTPClientError,
@@ -68,124 +68,153 @@ from .exceptions import (
     TimeoutError,
     HTTPResponseError,
     CircuitBreakerOpenError,
-    CircuitBreakerHalfOpenError,
     RetryExhaustedError,
-    Auth0Error,
-    AWSServiceError,
-    MongoDBError,
-    RedisError,
     IntegrationExceptionFactory
 )
+
+# Monitoring and metrics integration per Section 6.3.3
 from .monitoring import (
+    ExternalServiceMonitor,
     external_service_monitor,
-    ServiceType,
-    CircuitBreakerState,
-    HealthStatus,
-    ExternalServiceMonitoring
+    ExternalServiceType,
+    ServiceMetrics,
+    ServiceHealthState
 )
 
-# Initialize structured logger for enterprise integration
+# Type variables for generic typing
+T = TypeVar('T')
+ResponseType = TypeVar('ResponseType', requests.Response, httpx.Response)
+
+# Initialize structured logger for base client operations
 logger = structlog.get_logger(__name__)
+
+# Base client metrics per Section 6.3.3
+base_client_operations = Counter(
+    'base_client_operations_total',
+    'Total operations performed by base clients',
+    ['client_name', 'service_type', 'operation', 'client_mode']
+)
+
+base_client_duration = Histogram(
+    'base_client_operation_duration_seconds',
+    'Duration of base client operations',
+    ['client_name', 'service_type', 'operation', 'client_mode'],
+    buckets=[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0]
+)
+
+base_client_errors = Counter(
+    'base_client_errors_total',
+    'Total errors in base client operations',
+    ['client_name', 'service_type', 'operation', 'error_type', 'client_mode']
+)
+
+base_client_active_requests = Gauge(
+    'base_client_active_requests',
+    'Number of active requests per client',
+    ['client_name', 'service_type', 'client_mode']
+)
 
 
 class BaseClientConfiguration:
     """
-    Configuration class for base external service client patterns.
+    Comprehensive configuration for base external service clients.
     
-    Provides comprehensive configuration management for HTTP client settings,
-    circuit breaker parameters, retry strategies, and monitoring configuration
-    with service-specific optimization per Section 6.3.5 requirements.
+    Provides centralized configuration management for HTTP clients, circuit breakers,
+    retry strategies, and monitoring settings per Section 6.3.5 requirements.
     """
     
     def __init__(
         self,
         service_name: str,
-        service_type: ServiceType,
-        base_url: str,
+        service_type: ExternalServiceType,
+        base_url: Optional[str] = None,
         
-        # HTTP client configuration per Section 0.1.2
-        timeout: Union[float, Tuple[float, float]] = 30.0,
+        # HTTP client configuration per Section 3.2.3
+        timeout: Union[float, tuple] = 30.0,
         verify_ssl: bool = True,
-        enable_http2: bool = True,
+        default_headers: Optional[Dict[str, str]] = None,
         
-        # Connection pooling optimization per Section 6.3.5
+        # Connection pooling configuration per Section 6.3.5
         sync_pool_connections: int = 20,
         sync_pool_maxsize: int = 50,
         async_max_connections: int = 100,
         async_max_keepalive_connections: int = 50,
         keepalive_expiry: float = 30.0,
+        enable_http2: bool = True,
         
         # Circuit breaker configuration per Section 6.3.3
-        enable_circuit_breaker: bool = True,
-        circuit_breaker_failure_threshold: Optional[int] = None,
-        circuit_breaker_reset_timeout: Optional[int] = None,
-        circuit_breaker_fallback: Optional[Callable] = None,
+        circuit_breaker_enabled: bool = True,
+        circuit_breaker_policy: CircuitBreakerPolicy = CircuitBreakerPolicy.MODERATE,
+        circuit_breaker_fail_max: int = 5,
+        circuit_breaker_recovery_timeout: int = 60,
+        circuit_breaker_fallback_enabled: bool = True,
         
         # Retry configuration per Section 4.2.3
-        enable_retry: bool = True,
-        max_retry_attempts: Optional[int] = None,
-        retry_min_wait: Optional[float] = None,
-        retry_max_wait: Optional[float] = None,
-        retry_jitter_max: Optional[float] = None,
+        retry_enabled: bool = True,
+        retry_max_attempts: int = 3,
+        retry_min_wait: float = 1.0,
+        retry_max_wait: float = 30.0,
+        retry_jitter_max: float = 2.0,
+        retry_exponential_base: float = 2.0,
         
-        # Monitoring and observability per Section 6.3.5
-        enable_monitoring: bool = True,
-        enable_detailed_logging: bool = True,
-        correlation_id_header: str = "X-Correlation-ID",
+        # Monitoring configuration per Section 6.3.3
+        monitoring_enabled: bool = True,
+        health_check_enabled: bool = True,
+        metrics_collection_enabled: bool = True,
+        performance_tracking_enabled: bool = True,
         
-        # Authentication and headers
-        default_headers: Optional[Dict[str, str]] = None,
-        auth_token_header: str = "Authorization",
-        
-        # Service-specific metadata
-        service_version: Optional[str] = None,
-        service_description: Optional[str] = None,
-        health_check_endpoint: Optional[str] = None,
-        
+        # Advanced configuration
+        request_id_header: str = 'X-Request-ID',
+        correlation_id_header: str = 'X-Correlation-ID',
+        rate_limit_respect: bool = True,
+        custom_error_handlers: Optional[Dict[Type[Exception], Callable]] = None,
         **kwargs
     ):
         """
-        Initialize base client configuration with comprehensive settings.
+        Initialize base client configuration with enterprise-grade defaults.
         
         Args:
-            service_name: Unique service identifier for monitoring and logging
-            service_type: Service type classification for configuration defaults
+            service_name: Unique identifier for the external service
+            service_type: Type of external service (auth, storage, api, etc.)
             base_url: Base URL for all service requests
-            timeout: Request timeout configuration (connect, read) or single value
-            verify_ssl: Enable SSL certificate verification
-            enable_http2: Enable HTTP/2 support for async client
+            timeout: Request timeout configuration
+            verify_ssl: SSL certificate verification flag
+            default_headers: Default headers for all requests
             sync_pool_connections: Synchronous client connection pool size
             sync_pool_maxsize: Maximum synchronous connections per pool
-            async_max_connections: Maximum async client connections
-            async_max_keepalive_connections: Maximum async keepalive connections
-            keepalive_expiry: Async connection keepalive expiry time
-            enable_circuit_breaker: Enable circuit breaker protection
-            circuit_breaker_failure_threshold: Circuit breaker failure threshold
-            circuit_breaker_reset_timeout: Circuit breaker reset timeout
-            circuit_breaker_fallback: Fallback function for circuit breaker
-            enable_retry: Enable retry logic with exponential backoff
-            max_retry_attempts: Maximum retry attempts
-            retry_min_wait: Minimum retry wait time
-            retry_max_wait: Maximum retry wait time
-            retry_jitter_max: Maximum jitter for retry timing
-            enable_monitoring: Enable Prometheus metrics collection
-            enable_detailed_logging: Enable detailed request/response logging
-            correlation_id_header: Header name for correlation ID tracking
-            default_headers: Default headers for all requests
-            auth_token_header: Header name for authentication tokens
-            service_version: Service version for monitoring labels
-            service_description: Service description for documentation
-            health_check_endpoint: Endpoint for service health checks
+            async_max_connections: Maximum asynchronous connections
+            async_max_keepalive_connections: Maximum keepalive connections
+            keepalive_expiry: Keepalive connection expiry time
+            enable_http2: Enable HTTP/2 support for async client
+            circuit_breaker_enabled: Enable circuit breaker protection
+            circuit_breaker_policy: Circuit breaker policy type
+            circuit_breaker_fail_max: Maximum failures before circuit opens
+            circuit_breaker_recovery_timeout: Recovery timeout in seconds
+            circuit_breaker_fallback_enabled: Enable fallback responses
+            retry_enabled: Enable retry logic
+            retry_max_attempts: Maximum retry attempts
+            retry_min_wait: Minimum wait time between retries
+            retry_max_wait: Maximum wait time between retries
+            retry_jitter_max: Maximum jitter for retry backoff
+            retry_exponential_base: Exponential backoff base
+            monitoring_enabled: Enable comprehensive monitoring
+            health_check_enabled: Enable health check functionality
+            metrics_collection_enabled: Enable Prometheus metrics
+            performance_tracking_enabled: Enable performance monitoring
+            request_id_header: Header name for request ID
+            correlation_id_header: Header name for correlation ID
+            rate_limit_respect: Respect rate limit headers from service
+            custom_error_handlers: Custom exception handlers
             **kwargs: Additional configuration parameters
         """
         self.service_name = service_name
         self.service_type = service_type
-        self.base_url = base_url.rstrip('/')
+        self.base_url = base_url.rstrip('/') if base_url else None
         
         # HTTP client settings
         self.timeout = timeout
         self.verify_ssl = verify_ssl
-        self.enable_http2 = enable_http2
+        self.default_headers = default_headers or {}
         
         # Connection pooling settings per Section 6.3.5
         self.sync_pool_connections = sync_pool_connections
@@ -193,124 +222,60 @@ class BaseClientConfiguration:
         self.async_max_connections = async_max_connections
         self.async_max_keepalive_connections = async_max_keepalive_connections
         self.keepalive_expiry = keepalive_expiry
+        self.enable_http2 = enable_http2
         
         # Circuit breaker settings per Section 6.3.3
-        self.enable_circuit_breaker = enable_circuit_breaker
-        self.circuit_breaker_failure_threshold = circuit_breaker_failure_threshold
-        self.circuit_breaker_reset_timeout = circuit_breaker_reset_timeout
-        self.circuit_breaker_fallback = circuit_breaker_fallback
+        self.circuit_breaker_enabled = circuit_breaker_enabled
+        self.circuit_breaker_policy = circuit_breaker_policy
+        self.circuit_breaker_fail_max = circuit_breaker_fail_max
+        self.circuit_breaker_recovery_timeout = circuit_breaker_recovery_timeout
+        self.circuit_breaker_fallback_enabled = circuit_breaker_fallback_enabled
         
         # Retry settings per Section 4.2.3
-        self.enable_retry = enable_retry
-        self.max_retry_attempts = max_retry_attempts
+        self.retry_enabled = retry_enabled
+        self.retry_max_attempts = retry_max_attempts
         self.retry_min_wait = retry_min_wait
         self.retry_max_wait = retry_max_wait
         self.retry_jitter_max = retry_jitter_max
+        self.retry_exponential_base = retry_exponential_base
         
-        # Monitoring and observability settings
-        self.enable_monitoring = enable_monitoring
-        self.enable_detailed_logging = enable_detailed_logging
+        # Monitoring settings per Section 6.3.3
+        self.monitoring_enabled = monitoring_enabled
+        self.health_check_enabled = health_check_enabled
+        self.metrics_collection_enabled = metrics_collection_enabled
+        self.performance_tracking_enabled = performance_tracking_enabled
+        
+        # Advanced settings
+        self.request_id_header = request_id_header
         self.correlation_id_header = correlation_id_header
-        
-        # Authentication and headers
-        self.default_headers = default_headers or {}
-        self.auth_token_header = auth_token_header
-        
-        # Service metadata
-        self.service_version = service_version
-        self.service_description = service_description
-        self.health_check_endpoint = health_check_endpoint or "/health"
+        self.rate_limit_respect = rate_limit_respect
+        self.custom_error_handlers = custom_error_handlers or {}
         
         # Store additional configuration
-        self.additional_config = kwargs
+        for key, value in kwargs.items():
+            setattr(self, key, value)
         
         logger.info(
-            "base_client_configuration_initialized",
+            "Base client configuration initialized",
             service_name=service_name,
             service_type=service_type.value,
             base_url=base_url,
-            timeout=timeout,
-            enable_circuit_breaker=enable_circuit_breaker,
-            enable_retry=enable_retry,
-            enable_monitoring=enable_monitoring,
-            component="integrations.base_client"
+            circuit_breaker_enabled=circuit_breaker_enabled,
+            retry_enabled=retry_enabled,
+            monitoring_enabled=monitoring_enabled
         )
-    
-    def get_circuit_breaker_config(self) -> Dict[str, Any]:
-        """
-        Get circuit breaker configuration with service-specific defaults.
-        
-        Returns:
-            Circuit breaker configuration dictionary
-        """
-        config = {}
-        
-        if self.circuit_breaker_failure_threshold is not None:
-            config['fail_max'] = self.circuit_breaker_failure_threshold
-        
-        if self.circuit_breaker_reset_timeout is not None:
-            config['reset_timeout'] = self.circuit_breaker_reset_timeout
-        
-        return config
-    
-    def get_retry_config(self) -> Dict[str, Any]:
-        """
-        Get retry configuration with service-specific defaults.
-        
-        Returns:
-            Retry configuration dictionary
-        """
-        config = {}
-        
-        if self.max_retry_attempts is not None:
-            config['max_attempts'] = self.max_retry_attempts
-        
-        if self.retry_min_wait is not None:
-            config['min_wait'] = self.retry_min_wait
-        
-        if self.retry_max_wait is not None:
-            config['max_wait'] = self.retry_max_wait
-        
-        if self.retry_jitter_max is not None:
-            config['jitter_max'] = self.retry_jitter_max
-        
-        return config
-    
-    def get_http_client_config(self) -> Dict[str, Any]:
-        """
-        Get HTTP client configuration for both sync and async clients.
-        
-        Returns:
-            HTTP client configuration dictionary
-        """
-        return {
-            'base_url': self.base_url,
-            'timeout': self.timeout,
-            'headers': self.default_headers,
-            'verify_ssl': self.verify_ssl,
-            'sync_pool_connections': self.sync_pool_connections,
-            'sync_pool_maxsize': self.sync_pool_maxsize,
-            'async_max_connections': self.async_max_connections,
-            'async_max_keepalive_connections': self.async_max_keepalive_connections,
-            'enable_http2': self.enable_http2
-        }
 
 
 class BaseExternalServiceClient(ABC):
     """
-    Abstract base class for external service clients with comprehensive integration patterns.
+    Abstract base class for all external service clients implementing enterprise-grade patterns.
     
-    Provides enterprise-grade foundation for third-party API integrations including:
-    - Dual HTTP client support (requests 2.31+ and httpx 0.24+) per Section 0.1.2
-    - Circuit breaker integration with pybreaker per Section 6.3.3
-    - Tenacity exponential backoff retry logic per Section 4.2.3
-    - Prometheus metrics collection per Section 6.3.5
-    - Structured logging with correlation tracking per Section 6.3.3
-    - Connection pooling optimization per Section 6.3.5
-    - Graceful degradation and fallback mechanisms per Section 6.3.3
+    Provides comprehensive foundation for external service integration with standardized
+    HTTP client patterns, circuit breaker protection, retry logic, and monitoring
+    instrumentation per Section 6.3.3 and Section 6.3.5 requirements.
     
-    Subclasses must implement service-specific methods while inheriting
-    comprehensive resilience patterns and monitoring capabilities.
+    This class serves as the foundation for all third-party API integrations including
+    Auth0, AWS S3, external APIs, and other enterprise services.
     """
     
     def __init__(self, config: BaseClientConfiguration):
@@ -318,1172 +283,1146 @@ class BaseExternalServiceClient(ABC):
         Initialize base external service client with comprehensive configuration.
         
         Args:
-            config: BaseClientConfiguration instance with service settings
+            config: Base client configuration containing all operational parameters
         """
         self.config = config
-        self.service_name = config.service_name
-        self.service_type = config.service_type
-        self.base_url = config.base_url
+        self.client_id = f"{config.service_name}_{uuid.uuid4().hex[:8]}"
         
-        # Initialize correlation tracking
-        self._correlation_context: Dict[str, str] = {}
+        # Initialize HTTP client manager per Section 3.2.3
+        self.http_manager = self._initialize_http_client_manager()
         
-        # Initialize HTTP client manager with dual-client support per Section 0.1.2
-        self._initialize_http_clients()
+        # Initialize circuit breaker per Section 6.3.3
+        self.circuit_breaker = self._initialize_circuit_breaker() if config.circuit_breaker_enabled else None
         
-        # Initialize circuit breaker with pybreaker integration per Section 6.3.3
-        self._initialize_circuit_breaker()
+        # Initialize retry manager per Section 4.2.3
+        self.retry_config = self._initialize_retry_configuration() if config.retry_enabled else None
         
-        # Initialize monitoring with prometheus-client per Section 6.3.5
-        self._initialize_monitoring()
+        # Initialize monitoring per Section 6.3.3
+        if config.monitoring_enabled:
+            self._initialize_monitoring()
         
-        # Register service for health monitoring
-        self._register_service_monitoring()
+        # Request context tracking
+        self._active_requests: Dict[str, Dict[str, Any]] = {}
+        self._request_history: List[Dict[str, Any]] = []
+        
+        # Performance baseline tracking per Section 0.3.2
+        self._performance_baselines: Dict[str, float] = {}
         
         logger.info(
-            "base_external_service_client_initialized",
-            service_name=self.service_name,
-            service_type=self.service_type.value,
-            base_url=self.base_url,
-            circuit_breaker_enabled=self.config.enable_circuit_breaker,
-            retry_enabled=self.config.enable_retry,
-            monitoring_enabled=self.config.enable_monitoring,
-            component="integrations.base_client"
+            "Base external service client initialized",
+            client_id=self.client_id,
+            service_name=config.service_name,
+            service_type=config.service_type.value,
+            circuit_breaker_enabled=config.circuit_breaker_enabled,
+            retry_enabled=config.retry_enabled,
+            monitoring_enabled=config.monitoring_enabled
         )
     
-    def _initialize_http_clients(self) -> None:
+    def _initialize_http_client_manager(self) -> HTTPClientManager:
         """
-        Initialize HTTP client manager with dual-client support.
+        Initialize HTTP client manager with optimized configuration per Section 6.3.5.
         
-        Implements requests 2.31+ and httpx 0.24+ integration per Section 0.1.2
-        with optimized connection pooling per Section 6.3.5.
+        Returns:
+            Configured HTTP client manager with dual-client support
         """
-        try:
-            client_config = self.config.get_http_client_config()
-            
-            self.http_client_manager = create_client_manager(**client_config)
-            self.sync_client = self.http_client_manager.get_sync_client()
-            self.async_client = self.http_client_manager.get_async_client()
-            
-            # Add request/response interceptors for monitoring and correlation
-            self._setup_client_interceptors()
-            
-            logger.info(
-                "http_clients_initialized",
-                service_name=self.service_name,
-                sync_pool_maxsize=self.config.sync_pool_maxsize,
-                async_max_connections=self.config.async_max_connections,
-                component="integrations.base_client"
-            )
-            
-        except Exception as e:
-            logger.error(
-                "http_clients_initialization_failed",
-                service_name=self.service_name,
-                error=str(e),
-                component="integrations.base_client",
-                exc_info=e
-            )
-            raise IntegrationError(
-                message=f"Failed to initialize HTTP clients for {self.service_name}",
-                service_name=self.service_name,
-                operation="client_initialization",
-                error_context={'initialization_error': str(e)}
-            ) from e
+        return create_client_manager(
+            base_url=self.config.base_url,
+            timeout=self.config.timeout,
+            headers=self.config.default_headers,
+            sync_pool_connections=self.config.sync_pool_connections,
+            sync_pool_maxsize=self.config.sync_pool_maxsize,
+            async_max_connections=self.config.async_max_connections,
+            async_max_keepalive_connections=self.config.async_max_keepalive_connections,
+            verify_ssl=self.config.verify_ssl,
+            enable_http2=self.config.enable_http2
+        )
     
-    def _initialize_circuit_breaker(self) -> None:
+    def _initialize_circuit_breaker(self) -> EnhancedCircuitBreaker:
         """
-        Initialize circuit breaker with pybreaker integration per Section 6.3.3.
+        Initialize circuit breaker with service-specific configuration per Section 6.3.3.
         
-        Implements service-specific failure thresholds and recovery patterns
-        with fallback mechanisms for graceful degradation.
+        Returns:
+            Configured enhanced circuit breaker instance
         """
-        if not self.config.enable_circuit_breaker:
-            self.circuit_breaker = None
-            return
+        circuit_config = CircuitBreakerConfig(
+            service_name=self.config.service_name,
+            service_type=self.config.service_type,
+            fail_max=self.config.circuit_breaker_fail_max,
+            recovery_timeout=self.config.circuit_breaker_recovery_timeout,
+            policy=self.config.circuit_breaker_policy,
+            timeout_seconds=self._get_timeout_seconds(),
+            fallback_enabled=self.config.circuit_breaker_fallback_enabled,
+            enable_metrics=self.config.metrics_collection_enabled,
+            enable_health_monitoring=self.config.health_check_enabled
+        )
         
-        try:
-            circuit_config = self.config.get_circuit_breaker_config()
-            
-            self.circuit_breaker = create_circuit_breaker(
-                service_name=self.service_name,
-                service_type=self.service_type,
-                fallback_function=self.config.circuit_breaker_fallback,
-                custom_config=circuit_config
-            )
-            
-            logger.info(
-                "circuit_breaker_initialized",
-                service_name=self.service_name,
-                failure_threshold=circuit_config.get('fail_max'),
-                reset_timeout=circuit_config.get('reset_timeout'),
-                component="integrations.base_client"
-            )
-            
-        except Exception as e:
-            logger.error(
-                "circuit_breaker_initialization_failed",
-                service_name=self.service_name,
-                error=str(e),
-                component="integrations.base_client",
-                exc_info=e
-            )
-            self.circuit_breaker = None
+        return global_circuit_breaker_manager.register_circuit_breaker(
+            service_name=self.config.service_name,
+            config=circuit_config
+        )
+    
+    def _initialize_retry_configuration(self) -> RetryConfiguration:
+        """
+        Initialize retry configuration with intelligent error classification per Section 4.2.3.
+        
+        Returns:
+            Configured retry strategy for the service
+        """
+        return RetryConfiguration(
+            service_name=self.config.service_name,
+            operation='base_operation',
+            max_attempts=self.config.retry_max_attempts,
+            min_wait=self.config.retry_min_wait,
+            max_wait=self.config.retry_max_wait,
+            jitter_max=self.config.retry_jitter_max,
+            exponential_base=self.config.retry_exponential_base,
+            custom_error_classifier=self._custom_error_classifier
+        )
     
     def _initialize_monitoring(self) -> None:
         """
-        Initialize monitoring with prometheus-client integration per Section 6.3.5.
-        
-        Implements comprehensive metrics collection for response times, error rates,
-        and circuit breaker states with enterprise monitoring integration.
+        Initialize comprehensive monitoring and metrics collection per Section 6.3.3.
         """
-        if not self.config.enable_monitoring:
-            return
+        if self.config.metrics_collection_enabled:
+            # Register service with external service monitor
+            service_metrics = ServiceMetrics(
+                service_name=self.config.service_name,
+                service_type=self.config.service_type,
+                health_endpoint=self._get_health_check_endpoint(),
+                timeout_seconds=self._get_timeout_seconds(),
+                critical_threshold_ms=self._get_timeout_seconds() * 1000 * 0.8,
+                warning_threshold_ms=self._get_timeout_seconds() * 1000 * 0.5
+            )
+            external_service_monitor.register_service(service_metrics)
         
-        try:
-            # Register with external service monitor
-            external_service_monitor.register_service(
-                service_name=self.service_name,
-                service_type=self.service_type,
-                endpoint_url=self.base_url,
-                health_check_path=self.config.health_check_endpoint,
-                metadata={
-                    'service_version': self.config.service_version,
-                    'service_description': self.config.service_description,
-                    'circuit_breaker_enabled': self.config.enable_circuit_breaker,
-                    'retry_enabled': self.config.enable_retry
-                }
-            )
-            
-            logger.info(
-                "monitoring_initialized",
-                service_name=self.service_name,
-                health_check_endpoint=self.config.health_check_endpoint,
-                component="integrations.base_client"
-            )
-            
-        except Exception as e:
-            logger.warning(
-                "monitoring_initialization_failed",
-                service_name=self.service_name,
-                error=str(e),
-                component="integrations.base_client"
-            )
+        logger.debug(
+            "Monitoring initialized for base client",
+            service_name=self.config.service_name,
+            metrics_enabled=self.config.metrics_collection_enabled,
+            health_checks_enabled=self.config.health_check_enabled
+        )
     
-    def _register_service_monitoring(self) -> None:
-        """Register service with comprehensive monitoring system."""
-        try:
-            external_service_monitor.register_service(
-                service_name=self.service_name,
-                service_type=self.service_type,
-                endpoint_url=self.base_url,
-                health_check_path=self.config.health_check_endpoint,
-                metadata={
-                    'base_url': self.base_url,
-                    'service_version': self.config.service_version,
-                    'timeout': str(self.config.timeout),
-                    'circuit_breaker_enabled': self.config.enable_circuit_breaker,
-                    'retry_enabled': self.config.enable_retry
-                }
-            )
-        except Exception as e:
-            logger.warning(
-                "service_monitoring_registration_failed",
-                service_name=self.service_name,
-                error=str(e),
-                component="integrations.base_client"
-            )
+    def _get_timeout_seconds(self) -> float:
+        """Extract timeout value in seconds from configuration."""
+        if isinstance(self.config.timeout, (int, float)):
+            return float(self.config.timeout)
+        elif isinstance(self.config.timeout, tuple):
+            return float(max(self.config.timeout))
+        else:
+            return 30.0  # Default timeout
     
-    def _setup_client_interceptors(self) -> None:
+    def _get_health_check_endpoint(self) -> Optional[str]:
         """
-        Setup request/response interceptors for monitoring and correlation tracking.
+        Get health check endpoint for the service.
         
-        Implements structured logging and correlation ID injection per Section 6.3.3
-        with comprehensive request/response monitoring.
-        """
-        def request_interceptor(**kwargs):
-            """Add correlation ID and monitoring headers to requests."""
-            headers = kwargs.get('headers', {})
-            
-            # Add correlation ID if not present
-            if self.config.correlation_id_header not in headers:
-                correlation_id = self._get_or_create_correlation_id()
-                headers[self.config.correlation_id_header] = correlation_id
-            
-            # Add service metadata headers
-            headers.setdefault('User-Agent', f"{self.service_name}-client")
-            if self.config.service_version:
-                headers.setdefault('X-Service-Version', self.config.service_version)
-            
-            kwargs['headers'] = headers
-            return kwargs
-        
-        def response_interceptor(response):
-            """Log response details and update monitoring metrics."""
-            if self.config.enable_detailed_logging:
-                correlation_id = response.request.headers.get(self.config.correlation_id_header)
-                
-                logger.info(
-                    "external_service_response",
-                    service_name=self.service_name,
-                    method=response.request.method,
-                    url=str(response.url),
-                    status_code=response.status_code,
-                    correlation_id=correlation_id,
-                    response_time_ms=getattr(response, 'elapsed', None),
-                    component="integrations.base_client"
-                )
-            
-            return response
-        
-        # Add interceptors to both clients
-        self.http_client_manager.add_request_interceptor(request_interceptor)
-        self.http_client_manager.add_response_interceptor(response_interceptor)
-    
-    def _get_or_create_correlation_id(self) -> str:
-        """
-        Get existing correlation ID from context or create new one.
+        Subclasses should override this method to provide service-specific health endpoints.
         
         Returns:
-            Correlation ID for request tracking
+            Health check endpoint path or None
         """
-        correlation_id = self._correlation_context.get('correlation_id')
-        if not correlation_id:
-            correlation_id = str(uuid.uuid4())
-            self._correlation_context['correlation_id'] = correlation_id
-        
-        return correlation_id
+        return None
     
-    @contextmanager
-    def correlation_context(self, correlation_id: Optional[str] = None):
+    def _custom_error_classifier(self, exception: Exception) -> Optional[bool]:
         """
-        Context manager for correlation ID tracking across requests.
+        Custom error classification for retry decisions.
+        
+        Implements intelligent error classification per Section 6.3.3 with
+        service-specific logic for retry decision making.
         
         Args:
-            correlation_id: Optional correlation ID, generates new if not provided
+            exception: Exception to classify
             
-        Yields:
-            Correlation ID for the context
+        Returns:
+            True if retryable, False if not retryable, None for default handling
         """
-        if correlation_id is None:
-            correlation_id = str(uuid.uuid4())
+        # Check for custom error handlers
+        for error_type, handler in self.config.custom_error_handlers.items():
+            if isinstance(exception, error_type):
+                try:
+                    return handler(exception)
+                except Exception as handler_error:
+                    logger.warning(
+                        "Custom error handler failed",
+                        service_name=self.config.service_name,
+                        error_type=error_type.__name__,
+                        handler_error=str(handler_error)
+                    )
         
-        previous_id = self._correlation_context.get('correlation_id')
-        self._correlation_context['correlation_id'] = correlation_id
+        # Default classification logic
+        if isinstance(exception, (ConnectionError, TimeoutError)):
+            return True  # Always retry connection and timeout errors
+        elif isinstance(exception, HTTPResponseError):
+            status_code = getattr(exception, 'status_code', None)
+            if status_code:
+                # Retry on server errors and rate limits
+                return status_code in [429, 502, 503, 504, 408]
+        elif isinstance(exception, CircuitBreakerOpenError):
+            return False  # Never retry when circuit breaker is open
         
-        try:
-            yield correlation_id
-        finally:
-            if previous_id:
-                self._correlation_context['correlation_id'] = previous_id
-            else:
-                self._correlation_context.pop('correlation_id', None)
+        return None  # Use default classification
+    
+    def _generate_request_id(self) -> str:
+        """
+        Generate unique request ID for correlation tracking.
+        
+        Returns:
+            Unique request identifier
+        """
+        return f"{self.config.service_name}_{uuid.uuid4().hex}"
+    
+    def _generate_correlation_id(self) -> str:
+        """
+        Generate correlation ID for distributed tracing.
+        
+        Returns:
+            Unique correlation identifier
+        """
+        return f"corr_{uuid.uuid4().hex}"
+    
+    def _prepare_request_headers(
+        self, 
+        additional_headers: Optional[Dict[str, str]] = None
+    ) -> Dict[str, str]:
+        """
+        Prepare comprehensive request headers with tracking identifiers.
+        
+        Args:
+            additional_headers: Additional headers to include
+            
+        Returns:
+            Complete headers dictionary with tracking information
+        """
+        headers = self.config.default_headers.copy()
+        
+        # Add request tracking headers
+        headers[self.config.request_id_header] = self._generate_request_id()
+        headers[self.config.correlation_id_header] = self._generate_correlation_id()
+        
+        # Add standard headers
+        if 'User-Agent' not in headers:
+            headers['User-Agent'] = f"BaseClient/{self.config.service_name}"
+        if 'Accept' not in headers:
+            headers['Accept'] = 'application/json'
+        if 'Content-Type' not in headers:
+            headers['Content-Type'] = 'application/json'
+        
+        # Merge additional headers
+        if additional_headers:
+            headers.update(additional_headers)
+        
+        return headers
+    
+    def _track_request_start(self, operation: str, **context) -> str:
+        """
+        Track request start for monitoring and metrics.
+        
+        Args:
+            operation: Operation being performed
+            **context: Additional context information
+            
+        Returns:
+            Request tracking ID
+        """
+        request_id = self._generate_request_id()
+        
+        request_context = {
+            'request_id': request_id,
+            'operation': operation,
+            'start_time': time.time(),
+            'service_name': self.config.service_name,
+            'service_type': self.config.service_type.value,
+            'client_mode': 'sync',  # Default, can be overridden
+            **context
+        }
+        
+        self._active_requests[request_id] = request_context
+        
+        # Update active requests metric
+        if self.config.metrics_collection_enabled:
+            base_client_active_requests.labels(
+                client_name=self.config.service_name,
+                service_type=self.config.service_type.value,
+                client_mode=request_context['client_mode']
+            ).inc()
+        
+        return request_id
+    
+    def _track_request_completion(
+        self, 
+        request_id: str, 
+        success: bool = True, 
+        error_type: Optional[str] = None
+    ) -> None:
+        """
+        Track request completion for monitoring and metrics.
+        
+        Args:
+            request_id: Request tracking ID
+            success: Whether the request was successful
+            error_type: Type of error if unsuccessful
+        """
+        if request_id not in self._active_requests:
+            return
+        
+        request_context = self._active_requests.pop(request_id)
+        duration = time.time() - request_context['start_time']
+        
+        # Update metrics if enabled
+        if self.config.metrics_collection_enabled:
+            # Update operation counter
+            base_client_operations.labels(
+                client_name=self.config.service_name,
+                service_type=self.config.service_type.value,
+                operation=request_context['operation'],
+                client_mode=request_context['client_mode']
+            ).inc()
+            
+            # Update duration histogram
+            base_client_duration.labels(
+                client_name=self.config.service_name,
+                service_type=self.config.service_type.value,
+                operation=request_context['operation'],
+                client_mode=request_context['client_mode']
+            ).observe(duration)
+            
+            # Update error counter if failed
+            if not success and error_type:
+                base_client_errors.labels(
+                    client_name=self.config.service_name,
+                    service_type=self.config.service_type.value,
+                    operation=request_context['operation'],
+                    error_type=error_type,
+                    client_mode=request_context['client_mode']
+                ).inc()
+            
+            # Update active requests gauge
+            base_client_active_requests.labels(
+                client_name=self.config.service_name,
+                service_type=self.config.service_type.value,
+                client_mode=request_context['client_mode']
+            ).dec()
+        
+        # Add to request history for debugging
+        request_context.update({
+            'end_time': time.time(),
+            'duration': duration,
+            'success': success,
+            'error_type': error_type
+        })
+        self._request_history.append(request_context)
+        
+        # Keep only last 100 requests in history
+        if len(self._request_history) > 100:
+            self._request_history = self._request_history[-100:]
+        
+        logger.debug(
+            "Request tracking completed",
+            request_id=request_id,
+            operation=request_context['operation'],
+            duration=duration,
+            success=success,
+            error_type=error_type
+        )
     
     def _execute_with_resilience(
-        self,
-        func: Callable,
-        operation: str,
-        *args,
+        self, 
+        operation: str, 
+        func: Callable, 
+        *args, 
         **kwargs
     ) -> Any:
         """
-        Execute function with comprehensive resilience patterns.
+        Execute operation with comprehensive resilience patterns.
         
-        Implements circuit breaker protection and retry logic with exponential
-        backoff per Section 6.3.3 and 4.2.3 specifications.
+        Implements circuit breaker protection, retry logic, and monitoring
+        per Section 6.3.3 and Section 4.2.3 requirements.
         
         Args:
+            operation: Name of the operation being performed
             func: Function to execute with resilience patterns
-            operation: Operation name for monitoring and logging
-            *args: Function arguments
-            **kwargs: Function keyword arguments
+            *args: Arguments for the function
+            **kwargs: Keyword arguments for the function
             
         Returns:
-            Function result with resilience protection
+            Result of successful function execution
             
         Raises:
-            CircuitBreakerOpenError: When circuit breaker is open
-            RetryExhaustedError: When retry attempts are exhausted
-            IntegrationError: For other integration failures
+            IntegrationError: For various integration failures
         """
-        start_time = time.time()
-        correlation_id = self._get_or_create_correlation_id()
+        request_id = self._track_request_start(operation)
         
         try:
-            # Track request start in monitoring
-            if self.config.enable_monitoring:
-                external_service_monitor.track_request_start(
-                    service_name=self.service_name,
-                    service_type=self.service_type,
-                    method=kwargs.get('method', 'CALL'),
-                    endpoint=operation
-                )
-            
-            # Execute with circuit breaker protection
-            if self.circuit_breaker and self.config.enable_circuit_breaker:
-                if self.config.enable_retry:
+            if self.circuit_breaker and self.config.circuit_breaker_enabled:
+                # Execute with circuit breaker protection
+                if self.retry_config and self.config.retry_enabled:
                     # Execute with both circuit breaker and retry
-                    result = retry_manager.execute_with_retry(
-                        lambda: self.circuit_breaker.call_with_circuit_breaker(func, *args, **kwargs),
-                        service_name=self.service_name,
-                        operation=operation
+                    result = self.circuit_breaker.call(
+                        lambda: retry_manager.execute_with_retry(
+                            func, 
+                            self.config.service_name, 
+                            operation, 
+                            *args, 
+                            **kwargs
+                        )
                     )
                 else:
                     # Execute with circuit breaker only
-                    result = self.circuit_breaker.call_with_circuit_breaker(func, *args, **kwargs)
-            
-            elif self.config.enable_retry:
+                    result = self.circuit_breaker.call(func, *args, **kwargs)
+            elif self.retry_config and self.config.retry_enabled:
                 # Execute with retry only
                 result = retry_manager.execute_with_retry(
-                    func, self.service_name, operation, *args, **kwargs
+                    func, 
+                    self.config.service_name, 
+                    operation, 
+                    *args, 
+                    **kwargs
                 )
-            
             else:
                 # Execute without resilience patterns
                 result = func(*args, **kwargs)
             
-            # Record successful execution
-            duration = time.time() - start_time
-            
-            if self.config.enable_monitoring:
-                external_service_monitor.record_request_success(
-                    service_name=self.service_name,
-                    service_type=self.service_type,
-                    method=kwargs.get('method', 'CALL'),
-                    endpoint=operation,
-                    duration=duration
-                )
-            
-            logger.info(
-                "resilient_execution_success",
-                service_name=self.service_name,
-                operation=operation,
-                duration_ms=round(duration * 1000, 2),
-                correlation_id=correlation_id,
-                component="integrations.base_client"
-            )
-            
+            self._track_request_completion(request_id, success=True)
             return result
             
-        except (CircuitBreakerOpenError, CircuitBreakerHalfOpenError) as e:
-            duration = time.time() - start_time
-            
-            if self.config.enable_monitoring:
-                external_service_monitor.record_circuit_breaker_event(
-                    service_name=self.service_name,
-                    service_type=self.service_type,
-                    state=CircuitBreakerState.OPEN,
-                    failure_reason=type(e).__name__
-                )
-            
-            logger.warning(
-                "circuit_breaker_triggered",
-                service_name=self.service_name,
-                operation=operation,
-                duration_ms=round(duration * 1000, 2),
-                correlation_id=correlation_id,
-                error_type=type(e).__name__,
-                component="integrations.base_client"
-            )
-            
-            raise
-            
-        except RetryExhaustedError as e:
-            duration = time.time() - start_time
-            
-            if self.config.enable_monitoring:
-                external_service_monitor.record_request_failure(
-                    service_name=self.service_name,
-                    service_type=self.service_type,
-                    method=kwargs.get('method', 'CALL'),
-                    endpoint=operation,
-                    error_type='RetryExhausted',
-                    duration=duration
-                )
-            
-            logger.error(
-                "retry_exhausted",
-                service_name=self.service_name,
-                operation=operation,
-                duration_ms=round(duration * 1000, 2),
-                correlation_id=correlation_id,
-                max_retries=e.max_retries,
-                component="integrations.base_client"
-            )
-            
-            raise
-            
         except Exception as e:
-            duration = time.time() - start_time
-            
-            if self.config.enable_monitoring:
-                external_service_monitor.record_request_failure(
-                    service_name=self.service_name,
-                    service_type=self.service_type,
-                    method=kwargs.get('method', 'CALL'),
-                    endpoint=operation,
-                    error_type=type(e).__name__,
-                    duration=duration
-                )
+            error_type = type(e).__name__
+            self._track_request_completion(request_id, success=False, error_type=error_type)
             
             logger.error(
-                "resilient_execution_failed",
-                service_name=self.service_name,
+                "Operation failed with resilience patterns",
                 operation=operation,
-                duration_ms=round(duration * 1000, 2),
-                correlation_id=correlation_id,
-                error=str(e),
-                error_type=type(e).__name__,
-                component="integrations.base_client",
-                exc_info=e
+                service_name=self.config.service_name,
+                error_type=error_type,
+                error_message=str(e),
+                request_id=request_id
             )
             
-            # Convert unknown exceptions to IntegrationError
-            if not isinstance(e, IntegrationError):
-                raise IntegrationError(
-                    message=f"Unexpected error in {self.service_name}.{operation}: {str(e)}",
-                    service_name=self.service_name,
-                    operation=operation,
-                    error_context={'original_exception': str(e)},
-                    correlation_id=correlation_id
-                ) from e
-            
+            # Re-raise the exception
             raise
     
     async def _execute_with_resilience_async(
-        self,
-        func: Callable,
-        operation: str,
-        *args,
+        self, 
+        operation: str, 
+        func: Callable, 
+        *args, 
         **kwargs
     ) -> Any:
         """
-        Execute async function with comprehensive resilience patterns.
+        Execute async operation with comprehensive resilience patterns.
         
-        Implements async circuit breaker protection and retry logic with exponential
-        backoff for async operations per Section 6.3.3 and 4.2.3 specifications.
+        Implements circuit breaker protection, retry logic, and monitoring
+        for asynchronous operations per Section 6.3.3 requirements.
         
         Args:
+            operation: Name of the operation being performed
             func: Async function to execute with resilience patterns
-            operation: Operation name for monitoring and logging
-            *args: Function arguments
-            **kwargs: Function keyword arguments
+            *args: Arguments for the function
+            **kwargs: Keyword arguments for the function
             
         Returns:
-            Function result with resilience protection
+            Result of successful async function execution
             
         Raises:
-            CircuitBreakerOpenError: When circuit breaker is open
-            RetryExhaustedError: When retry attempts are exhausted
-            IntegrationError: For other integration failures
+            IntegrationError: For various integration failures
         """
-        start_time = time.time()
-        correlation_id = self._get_or_create_correlation_id()
+        request_id = self._track_request_start(operation, client_mode='async')
         
         try:
-            # Track request start in monitoring
-            if self.config.enable_monitoring:
-                external_service_monitor.track_request_start(
-                    service_name=self.service_name,
-                    service_type=self.service_type,
-                    method=kwargs.get('method', 'ASYNC_CALL'),
-                    endpoint=operation
-                )
-            
-            # Execute with circuit breaker protection
-            if self.circuit_breaker and self.config.enable_circuit_breaker:
-                if self.config.enable_retry:
+            if self.circuit_breaker and self.config.circuit_breaker_enabled:
+                # Execute with circuit breaker protection
+                if self.retry_config and self.config.retry_enabled:
                     # Execute with both circuit breaker and retry
-                    result = await retry_manager.execute_with_retry_async(
-                        lambda: self.circuit_breaker.call_with_circuit_breaker_async(func, *args, **kwargs),
-                        service_name=self.service_name,
-                        operation=operation
+                    result = await self.circuit_breaker.call_async(
+                        lambda: retry_manager.execute_with_retry_async(
+                            func, 
+                            self.config.service_name, 
+                            operation, 
+                            *args, 
+                            **kwargs
+                        )
                     )
                 else:
                     # Execute with circuit breaker only
-                    result = await self.circuit_breaker.call_with_circuit_breaker_async(func, *args, **kwargs)
-            
-            elif self.config.enable_retry:
+                    result = await self.circuit_breaker.call_async(func, *args, **kwargs)
+            elif self.retry_config and self.config.retry_enabled:
                 # Execute with retry only
                 result = await retry_manager.execute_with_retry_async(
-                    func, self.service_name, operation, *args, **kwargs
+                    func, 
+                    self.config.service_name, 
+                    operation, 
+                    *args, 
+                    **kwargs
                 )
-            
             else:
                 # Execute without resilience patterns
                 result = await func(*args, **kwargs)
             
-            # Record successful execution
-            duration = time.time() - start_time
-            
-            if self.config.enable_monitoring:
-                external_service_monitor.record_request_success(
-                    service_name=self.service_name,
-                    service_type=self.service_type,
-                    method=kwargs.get('method', 'ASYNC_CALL'),
-                    endpoint=operation,
-                    duration=duration
-                )
-            
-            logger.info(
-                "async_resilient_execution_success",
-                service_name=self.service_name,
-                operation=operation,
-                duration_ms=round(duration * 1000, 2),
-                correlation_id=correlation_id,
-                component="integrations.base_client"
-            )
-            
+            self._track_request_completion(request_id, success=True)
             return result
             
-        except (CircuitBreakerOpenError, CircuitBreakerHalfOpenError) as e:
-            duration = time.time() - start_time
-            
-            if self.config.enable_monitoring:
-                external_service_monitor.record_circuit_breaker_event(
-                    service_name=self.service_name,
-                    service_type=self.service_type,
-                    state=CircuitBreakerState.OPEN,
-                    failure_reason=type(e).__name__
-                )
-            
-            logger.warning(
-                "async_circuit_breaker_triggered",
-                service_name=self.service_name,
-                operation=operation,
-                duration_ms=round(duration * 1000, 2),
-                correlation_id=correlation_id,
-                error_type=type(e).__name__,
-                component="integrations.base_client"
-            )
-            
-            raise
-            
-        except RetryExhaustedError as e:
-            duration = time.time() - start_time
-            
-            if self.config.enable_monitoring:
-                external_service_monitor.record_request_failure(
-                    service_name=self.service_name,
-                    service_type=self.service_type,
-                    method=kwargs.get('method', 'ASYNC_CALL'),
-                    endpoint=operation,
-                    error_type='RetryExhausted',
-                    duration=duration
-                )
-            
-            logger.error(
-                "async_retry_exhausted",
-                service_name=self.service_name,
-                operation=operation,
-                duration_ms=round(duration * 1000, 2),
-                correlation_id=correlation_id,
-                max_retries=e.max_retries,
-                component="integrations.base_client"
-            )
-            
-            raise
-            
         except Exception as e:
-            duration = time.time() - start_time
-            
-            if self.config.enable_monitoring:
-                external_service_monitor.record_request_failure(
-                    service_name=self.service_name,
-                    service_type=self.service_type,
-                    method=kwargs.get('method', 'ASYNC_CALL'),
-                    endpoint=operation,
-                    error_type=type(e).__name__,
-                    duration=duration
-                )
+            error_type = type(e).__name__
+            self._track_request_completion(request_id, success=False, error_type=error_type)
             
             logger.error(
-                "async_resilient_execution_failed",
-                service_name=self.service_name,
+                "Async operation failed with resilience patterns",
                 operation=operation,
-                duration_ms=round(duration * 1000, 2),
-                correlation_id=correlation_id,
-                error=str(e),
-                error_type=type(e).__name__,
-                component="integrations.base_client",
-                exc_info=e
+                service_name=self.config.service_name,
+                error_type=error_type,
+                error_message=str(e),
+                request_id=request_id
             )
             
-            # Convert unknown exceptions to IntegrationError
-            if not isinstance(e, IntegrationError):
-                raise IntegrationError(
-                    message=f"Unexpected error in {self.service_name}.{operation}: {str(e)}",
-                    service_name=self.service_name,
-                    operation=operation,
-                    error_context={'original_exception': str(e)},
-                    correlation_id=correlation_id
-                ) from e
-            
+            # Re-raise the exception
             raise
     
     def make_request(
         self,
         method: str,
-        endpoint: str,
+        path: str,
         params: Optional[Dict[str, Any]] = None,
         headers: Optional[Dict[str, str]] = None,
         json_data: Optional[Dict[str, Any]] = None,
         data: Optional[Union[Dict[str, Any], str, bytes]] = None,
-        timeout: Optional[Union[float, Tuple[float, float]]] = None,
+        timeout: Optional[Union[float, tuple]] = None,
         **kwargs
-    ) -> Any:
+    ) -> requests.Response:
         """
         Make synchronous HTTP request with comprehensive resilience patterns.
         
-        Implements requests 2.31+ client with circuit breaker protection,
-        retry logic, and monitoring per Section 0.1.2, 6.3.3, and 6.3.5.
+        Implements the complete enterprise-grade request processing pipeline
+        with circuit breaker protection, retry logic, and monitoring integration
+        per Section 6.3.3 and Section 6.3.5 requirements.
         
         Args:
             method: HTTP method (GET, POST, PUT, DELETE, etc.)
-            endpoint: API endpoint path
+            path: Request path or complete URL
             params: Query parameters
-            headers: Request headers
+            headers: Additional request headers
             json_data: JSON payload for request body
             data: Raw data for request body
             timeout: Request timeout override
             **kwargs: Additional request parameters
             
         Returns:
-            Response object from external service
+            HTTP response object
             
         Raises:
+            HTTPClientError: For various HTTP client failures
             CircuitBreakerOpenError: When circuit breaker is open
             RetryExhaustedError: When retry attempts are exhausted
-            HTTPClientError: For HTTP client failures
-            IntegrationError: For other integration failures
         """
-        def _make_request():
-            return self.sync_client.request(
-                method=method,
-                path=endpoint,
-                params=params,
-                headers=headers,
-                json_data=json_data,
-                data=data,
-                timeout=timeout,
-                **kwargs
-            )
+        operation = f"{method.upper()}_{path}"
         
-        return self._execute_with_resilience(
-            _make_request,
-            f"{method.upper()}_{endpoint}",
-            method=method
-        )
+        # Prepare comprehensive headers
+        request_headers = self._prepare_request_headers(headers)
+        
+        # Override timeout if specified
+        request_timeout = timeout or self.config.timeout
+        
+        def execute_request():
+            """Internal function for request execution with monitoring."""
+            if self.config.monitoring_enabled:
+                return external_service_monitor.monitor_request(
+                    service_name=self.config.service_name,
+                    service_type=self.config.service_type,
+                    method=method
+                )(lambda: self.http_manager.get_sync_client().request(
+                    method=method,
+                    path=path,
+                    params=params,
+                    headers=request_headers,
+                    json_data=json_data,
+                    data=data,
+                    timeout=request_timeout,
+                    **kwargs
+                ))()
+            else:
+                return self.http_manager.get_sync_client().request(
+                    method=method,
+                    path=path,
+                    params=params,
+                    headers=request_headers,
+                    json_data=json_data,
+                    data=data,
+                    timeout=request_timeout,
+                    **kwargs
+                )
+        
+        return self._execute_with_resilience(operation, execute_request)
     
     async def make_request_async(
         self,
         method: str,
-        endpoint: str,
+        path: str,
         params: Optional[Dict[str, Any]] = None,
         headers: Optional[Dict[str, str]] = None,
         json_data: Optional[Dict[str, Any]] = None,
         data: Optional[Union[Dict[str, Any], str, bytes]] = None,
-        timeout: Optional[Union[float, Tuple[float, float]]] = None,
+        timeout: Optional[Union[float, httpx.Timeout]] = None,
         **kwargs
-    ) -> Any:
+    ) -> httpx.Response:
         """
         Make asynchronous HTTP request with comprehensive resilience patterns.
         
-        Implements httpx 0.24+ client with circuit breaker protection,
-        retry logic, and monitoring per Section 0.1.2, 6.3.3, and 6.3.5.
+        Implements the complete enterprise-grade async request processing pipeline
+        with circuit breaker protection, retry logic, and monitoring integration
+        per Section 6.3.3 and Section 6.3.5 requirements.
         
         Args:
             method: HTTP method (GET, POST, PUT, DELETE, etc.)
-            endpoint: API endpoint path
+            path: Request path or complete URL
             params: Query parameters
-            headers: Request headers
+            headers: Additional request headers
             json_data: JSON payload for request body
             data: Raw data for request body
             timeout: Request timeout override
             **kwargs: Additional request parameters
             
         Returns:
-            Response object from external service
+            HTTP response object
             
         Raises:
+            HTTPClientError: For various HTTP client failures
             CircuitBreakerOpenError: When circuit breaker is open
             RetryExhaustedError: When retry attempts are exhausted
-            HTTPClientError: For HTTP client failures
-            IntegrationError: For other integration failures
         """
-        async def _make_request():
-            return await self.async_client.request(
-                method=method,
-                path=endpoint,
-                params=params,
-                headers=headers,
-                json_data=json_data,
-                data=data,
-                timeout=timeout,
-                **kwargs
-            )
+        operation = f"{method.upper()}_{path}"
         
-        return await self._execute_with_resilience_async(
-            _make_request,
-            f"{method.upper()}_{endpoint}",
-            method=method
-        )
-    
-    # Convenience methods for common HTTP operations
-    
-    def get(self, endpoint: str, **kwargs) -> Any:
-        """Make synchronous GET request with resilience patterns."""
-        return self.make_request('GET', endpoint, **kwargs)
-    
-    def post(self, endpoint: str, **kwargs) -> Any:
-        """Make synchronous POST request with resilience patterns."""
-        return self.make_request('POST', endpoint, **kwargs)
-    
-    def put(self, endpoint: str, **kwargs) -> Any:
-        """Make synchronous PUT request with resilience patterns."""
-        return self.make_request('PUT', endpoint, **kwargs)
-    
-    def patch(self, endpoint: str, **kwargs) -> Any:
-        """Make synchronous PATCH request with resilience patterns."""
-        return self.make_request('PATCH', endpoint, **kwargs)
-    
-    def delete(self, endpoint: str, **kwargs) -> Any:
-        """Make synchronous DELETE request with resilience patterns."""
-        return self.make_request('DELETE', endpoint, **kwargs)
-    
-    async def get_async(self, endpoint: str, **kwargs) -> Any:
-        """Make asynchronous GET request with resilience patterns."""
-        return await self.make_request_async('GET', endpoint, **kwargs)
-    
-    async def post_async(self, endpoint: str, **kwargs) -> Any:
-        """Make asynchronous POST request with resilience patterns."""
-        return await self.make_request_async('POST', endpoint, **kwargs)
-    
-    async def put_async(self, endpoint: str, **kwargs) -> Any:
-        """Make asynchronous PUT request with resilience patterns."""
-        return await self.make_request_async('PUT', endpoint, **kwargs)
-    
-    async def patch_async(self, endpoint: str, **kwargs) -> Any:
-        """Make asynchronous PATCH request with resilience patterns."""
-        return await self.make_request_async('PATCH', endpoint, **kwargs)
-    
-    async def delete_async(self, endpoint: str, **kwargs) -> Any:
-        """Make asynchronous DELETE request with resilience patterns."""
-        return await self.make_request_async('DELETE', endpoint, **kwargs)
-    
-    def health_check(self, timeout: Optional[float] = 5.0) -> Dict[str, Any]:
-        """
-        Perform synchronous health check for the external service.
+        # Prepare comprehensive headers
+        request_headers = self._prepare_request_headers(headers)
         
-        Args:
-            timeout: Health check timeout in seconds
-            
-        Returns:
-            Health check result with service status and metrics
-        """
-        start_time = time.time()
+        # Override timeout if specified
+        request_timeout = timeout or self.config.timeout
         
-        try:
-            response = self.get(
-                self.config.health_check_endpoint,
-                timeout=timeout
-            )
-            
-            duration = time.time() - start_time
-            is_healthy = 200 <= response.status_code < 300
-            
-            health_result = {
-                'service_name': self.service_name,
-                'service_type': self.service_type.value,
-                'status': 'healthy' if is_healthy else 'unhealthy',
-                'status_code': response.status_code,
-                'response_time_ms': round(duration * 1000, 2),
-                'timestamp': datetime.utcnow().isoformat(),
-                'endpoint': self.config.health_check_endpoint
-            }
-            
-            if self.config.enable_monitoring:
-                external_service_monitor.update_service_health(
-                    service_name=self.service_name,
-                    service_type=self.service_type,
-                    status=HealthStatus.HEALTHY if is_healthy else HealthStatus.UNHEALTHY,
-                    duration=duration,
-                    metadata={'health_check_result': health_result}
+        async def execute_request():
+            """Internal async function for request execution with monitoring."""
+            if self.config.monitoring_enabled:
+                return await external_service_monitor.monitor_request(
+                    service_name=self.config.service_name,
+                    service_type=self.config.service_type,
+                    method=method
+                )(lambda: self.http_manager.get_async_client().request(
+                    method=method,
+                    path=path,
+                    params=params,
+                    headers=request_headers,
+                    json_data=json_data,
+                    data=data,
+                    timeout=request_timeout,
+                    **kwargs
+                ))()
+            else:
+                return await self.http_manager.get_async_client().request(
+                    method=method,
+                    path=path,
+                    params=params,
+                    headers=request_headers,
+                    json_data=json_data,
+                    data=data,
+                    timeout=request_timeout,
+                    **kwargs
                 )
-            
-            logger.info(
-                "health_check_completed",
-                service_name=self.service_name,
-                status=health_result['status'],
-                duration_ms=health_result['response_time_ms'],
-                component="integrations.base_client"
-            )
-            
-            return health_result
-            
-        except Exception as e:
-            duration = time.time() - start_time
-            
-            health_result = {
-                'service_name': self.service_name,
-                'service_type': self.service_type.value,
-                'status': 'unhealthy',
-                'error': str(e),
-                'response_time_ms': round(duration * 1000, 2),
-                'timestamp': datetime.utcnow().isoformat(),
-                'endpoint': self.config.health_check_endpoint
-            }
-            
-            if self.config.enable_monitoring:
-                external_service_monitor.update_service_health(
-                    service_name=self.service_name,
-                    service_type=self.service_type,
-                    status=HealthStatus.UNHEALTHY,
-                    duration=duration,
-                    metadata={'health_check_error': str(e)}
-                )
-            
-            logger.error(
-                "health_check_failed",
-                service_name=self.service_name,
-                error=str(e),
-                duration_ms=health_result['response_time_ms'],
-                component="integrations.base_client",
-                exc_info=e
-            )
-            
-            return health_result
-    
-    async def health_check_async(self, timeout: Optional[float] = 5.0) -> Dict[str, Any]:
-        """
-        Perform asynchronous health check for the external service.
         
-        Args:
-            timeout: Health check timeout in seconds
-            
-        Returns:
-            Health check result with service status and metrics
-        """
-        start_time = time.time()
-        
-        try:
-            response = await self.get_async(
-                self.config.health_check_endpoint,
-                timeout=timeout
-            )
-            
-            duration = time.time() - start_time
-            is_healthy = 200 <= response.status_code < 300
-            
-            health_result = {
-                'service_name': self.service_name,
-                'service_type': self.service_type.value,
-                'status': 'healthy' if is_healthy else 'unhealthy',
-                'status_code': response.status_code,
-                'response_time_ms': round(duration * 1000, 2),
-                'timestamp': datetime.utcnow().isoformat(),
-                'endpoint': self.config.health_check_endpoint
-            }
-            
-            if self.config.enable_monitoring:
-                external_service_monitor.update_service_health(
-                    service_name=self.service_name,
-                    service_type=self.service_type,
-                    status=HealthStatus.HEALTHY if is_healthy else HealthStatus.UNHEALTHY,
-                    duration=duration,
-                    metadata={'health_check_result': health_result}
-                )
-            
-            logger.info(
-                "async_health_check_completed",
-                service_name=self.service_name,
-                status=health_result['status'],
-                duration_ms=health_result['response_time_ms'],
-                component="integrations.base_client"
-            )
-            
-            return health_result
-            
-        except Exception as e:
-            duration = time.time() - start_time
-            
-            health_result = {
-                'service_name': self.service_name,
-                'service_type': self.service_type.value,
-                'status': 'unhealthy',
-                'error': str(e),
-                'response_time_ms': round(duration * 1000, 2),
-                'timestamp': datetime.utcnow().isoformat(),
-                'endpoint': self.config.health_check_endpoint
-            }
-            
-            if self.config.enable_monitoring:
-                external_service_monitor.update_service_health(
-                    service_name=self.service_name,
-                    service_type=self.service_type,
-                    status=HealthStatus.UNHEALTHY,
-                    duration=duration,
-                    metadata={'health_check_error': str(e)}
-                )
-            
-            logger.error(
-                "async_health_check_failed",
-                service_name=self.service_name,
-                error=str(e),
-                duration_ms=health_result['response_time_ms'],
-                component="integrations.base_client",
-                exc_info=e
-            )
-            
-            return health_result
+        return await self._execute_with_resilience_async(operation, execute_request)
     
-    def get_service_status(self) -> Dict[str, Any]:
+    # Convenience methods for common HTTP methods
+    
+    def get(self, path: str, **kwargs) -> requests.Response:
+        """Make synchronous GET request."""
+        return self.make_request('GET', path, **kwargs)
+    
+    def post(self, path: str, **kwargs) -> requests.Response:
+        """Make synchronous POST request."""
+        return self.make_request('POST', path, **kwargs)
+    
+    def put(self, path: str, **kwargs) -> requests.Response:
+        """Make synchronous PUT request."""
+        return self.make_request('PUT', path, **kwargs)
+    
+    def patch(self, path: str, **kwargs) -> requests.Response:
+        """Make synchronous PATCH request."""
+        return self.make_request('PATCH', path, **kwargs)
+    
+    def delete(self, path: str, **kwargs) -> requests.Response:
+        """Make synchronous DELETE request."""
+        return self.make_request('DELETE', path, **kwargs)
+    
+    async def get_async(self, path: str, **kwargs) -> httpx.Response:
+        """Make asynchronous GET request."""
+        return await self.make_request_async('GET', path, **kwargs)
+    
+    async def post_async(self, path: str, **kwargs) -> httpx.Response:
+        """Make asynchronous POST request."""
+        return await self.make_request_async('POST', path, **kwargs)
+    
+    async def put_async(self, path: str, **kwargs) -> httpx.Response:
+        """Make asynchronous PUT request."""
+        return await self.make_request_async('PUT', path, **kwargs)
+    
+    async def patch_async(self, path: str, **kwargs) -> httpx.Response:
+        """Make asynchronous PATCH request."""
+        return await self.make_request_async('PATCH', path, **kwargs)
+    
+    async def delete_async(self, path: str, **kwargs) -> httpx.Response:
+        """Make asynchronous DELETE request."""
+        return await self.make_request_async('DELETE', path, **kwargs)
+    
+    # Health monitoring and diagnostics
+    
+    def check_health(self) -> Dict[str, Any]:
         """
-        Get comprehensive service status including circuit breaker and monitoring info.
+        Perform comprehensive health check for the external service.
+        
+        Implements health verification per Section 6.3.3 service health monitoring
+        with circuit breaker status, connection pool metrics, and performance data.
         
         Returns:
-            Complete service status with resilience pattern states
+            Dictionary containing comprehensive health status
         """
-        status = {
-            'service_name': self.service_name,
-            'service_type': self.service_type.value,
-            'base_url': self.base_url,
+        health_status = {
+            'service_name': self.config.service_name,
+            'service_type': self.config.service_type.value,
+            'client_id': self.client_id,
             'timestamp': datetime.utcnow().isoformat(),
-            'configuration': {
-                'circuit_breaker_enabled': self.config.enable_circuit_breaker,
-                'retry_enabled': self.config.enable_retry,
-                'monitoring_enabled': self.config.enable_monitoring,
-                'timeout': str(self.config.timeout),
-                'verify_ssl': self.config.verify_ssl
-            }
+            'overall_status': 'healthy',
+            'components': {}
         }
         
-        # Add circuit breaker status
+        try:
+            # Check circuit breaker status
+            if self.circuit_breaker:
+                cb_health = self.circuit_breaker.get_health_status()
+                health_status['components']['circuit_breaker'] = cb_health
+                
+                if cb_health['circuit_state'] == 'OPEN':
+                    health_status['overall_status'] = 'degraded'
+            
+            # Check active requests
+            active_count = len(self._active_requests)
+            health_status['components']['active_requests'] = {
+                'count': active_count,
+                'status': 'healthy' if active_count < 50 else 'warning'
+            }
+            
+            # Check recent request history
+            recent_requests = [
+                req for req in self._request_history 
+                if req.get('end_time', 0) > time.time() - 300  # Last 5 minutes
+            ]
+            
+            failed_requests = [req for req in recent_requests if not req.get('success', True)]
+            error_rate = len(failed_requests) / len(recent_requests) if recent_requests else 0
+            
+            health_status['components']['error_rate'] = {
+                'rate': error_rate,
+                'recent_requests': len(recent_requests),
+                'failed_requests': len(failed_requests),
+                'status': 'healthy' if error_rate < 0.05 else 'degraded' if error_rate < 0.2 else 'unhealthy'
+            }
+            
+            # Determine overall status
+            component_statuses = [comp.get('status', 'healthy') for comp in health_status['components'].values()]
+            if 'unhealthy' in component_statuses:
+                health_status['overall_status'] = 'unhealthy'
+            elif 'degraded' in component_statuses or 'warning' in component_statuses:
+                health_status['overall_status'] = 'degraded'
+            
+            # Perform service-specific health check
+            service_health = self._perform_service_health_check()
+            if service_health:
+                health_status['components']['service_specific'] = service_health
+                if service_health.get('status') != 'healthy':
+                    health_status['overall_status'] = service_health.get('status', 'degraded')
+            
+        except Exception as e:
+            health_status['overall_status'] = 'error'
+            health_status['error'] = str(e)
+            
+            logger.error(
+                "Health check failed",
+                service_name=self.config.service_name,
+                error=str(e)
+            )
+        
+        return health_status
+    
+    def _perform_service_health_check(self) -> Optional[Dict[str, Any]]:
+        """
+        Perform service-specific health check.
+        
+        Subclasses should override this method to implement service-specific
+        health verification logic.
+        
+        Returns:
+            Service-specific health status or None
+        """
+        return None
+    
+    def get_performance_metrics(self) -> Dict[str, Any]:
+        """
+        Get comprehensive performance metrics for monitoring and analysis.
+        
+        Returns:
+            Dictionary containing performance metrics and statistics
+        """
+        current_time = time.time()
+        recent_requests = [
+            req for req in self._request_history 
+            if req.get('end_time', 0) > current_time - 3600  # Last hour
+        ]
+        
+        if not recent_requests:
+            return {
+                'service_name': self.config.service_name,
+                'timestamp': datetime.utcnow().isoformat(),
+                'no_recent_requests': True
+            }
+        
+        # Calculate performance statistics
+        durations = [req.get('duration', 0) for req in recent_requests]
+        successful_requests = [req for req in recent_requests if req.get('success', True)]
+        
+        metrics = {
+            'service_name': self.config.service_name,
+            'service_type': self.config.service_type.value,
+            'timestamp': datetime.utcnow().isoformat(),
+            'time_window': '1_hour',
+            'total_requests': len(recent_requests),
+            'successful_requests': len(successful_requests),
+            'failed_requests': len(recent_requests) - len(successful_requests),
+            'success_rate': len(successful_requests) / len(recent_requests),
+            'performance': {
+                'avg_duration': sum(durations) / len(durations),
+                'min_duration': min(durations),
+                'max_duration': max(durations),
+                'p95_duration': sorted(durations)[int(len(durations) * 0.95)] if durations else 0,
+                'p99_duration': sorted(durations)[int(len(durations) * 0.99)] if durations else 0
+            },
+            'active_requests': len(self._active_requests),
+            'circuit_breaker': {}
+        }
+        
+        # Add circuit breaker metrics
         if self.circuit_breaker:
-            status['circuit_breaker'] = self.circuit_breaker.get_state()
+            cb_metrics = self.circuit_breaker.get_metrics()
+            metrics['circuit_breaker'] = {
+                'state': self.circuit_breaker.state.name,
+                'failure_count': self.circuit_breaker.failure_count,
+                'total_calls': cb_metrics.total_calls,
+                'successful_calls': cb_metrics.successful_calls,
+                'failed_calls': cb_metrics.failed_calls,
+                'fallback_calls': cb_metrics.fallback_calls,
+                'success_rate': cb_metrics.successful_calls / cb_metrics.total_calls if cb_metrics.total_calls > 0 else 0
+            }
         
-        # Add retry metrics
-        if self.config.enable_retry:
-            status['retry_metrics'] = get_retry_metrics()
-        
-        # Add monitoring status
-        if self.config.enable_monitoring:
-            try:
-                health_summary = get_circuit_breaker_health()
-                status['monitoring'] = {
-                    'circuit_breaker_health': health_summary,
-                    'service_registered': self.service_name in external_service_monitor._registered_services
-                }
-            except Exception as e:
-                status['monitoring'] = {'error': str(e)}
-        
-        return status
+        return metrics
     
     def reset_circuit_breaker(self) -> bool:
         """
-        Reset circuit breaker to closed state for emergency recovery.
+        Manually reset circuit breaker to CLOSED state.
         
         Returns:
-            True if circuit breaker was reset successfully
+            True if circuit breaker was reset, False if not available
         """
         if self.circuit_breaker:
-            try:
-                self.circuit_breaker.force_close()
-                
-                logger.warning(
-                    "circuit_breaker_manually_reset",
-                    service_name=self.service_name,
-                    component="integrations.base_client"
-                )
-                
-                return True
-                
-            except Exception as e:
-                logger.error(
-                    "circuit_breaker_reset_failed",
-                    service_name=self.service_name,
-                    error=str(e),
-                    component="integrations.base_client"
-                )
-                return False
+            self.circuit_breaker.reset_circuit()
+            
+            logger.info(
+                "Circuit breaker manually reset",
+                service_name=self.config.service_name,
+                client_id=self.client_id
+            )
+            
+            return True
         
         return False
     
+    def set_performance_baseline(self, operation: str, baseline_duration: float) -> None:
+        """
+        Set performance baseline for comparison per Section 0.3.2.
+        
+        Args:
+            operation: Operation name
+            baseline_duration: Baseline duration in seconds
+        """
+        self._performance_baselines[operation] = baseline_duration
+        
+        if self.config.monitoring_enabled:
+            external_service_monitor.set_performance_baseline(
+                service_name=self.config.service_name,
+                service_type=self.config.service_type,
+                method=operation,
+                baseline_duration=baseline_duration
+            )
+        
+        logger.info(
+            "Performance baseline set",
+            service_name=self.config.service_name,
+            operation=operation,
+            baseline_duration=baseline_duration
+        )
+    
+    @contextmanager
+    def circuit_breaker_context(self):
+        """
+        Context manager for circuit breaker operations.
+        
+        Yields:
+            Circuit breaker instance or None if not enabled
+        """
+        try:
+            yield self.circuit_breaker
+        except Exception as e:
+            logger.error(
+                "Circuit breaker context error",
+                service_name=self.config.service_name,
+                error=str(e)
+            )
+            raise
+    
+    @asynccontextmanager
+    async def async_circuit_breaker_context(self):
+        """
+        Async context manager for circuit breaker operations.
+        
+        Yields:
+            Circuit breaker instance or None if not enabled
+        """
+        try:
+            yield self.circuit_breaker
+        except Exception as e:
+            logger.error(
+                "Async circuit breaker context error",
+                service_name=self.config.service_name,
+                error=str(e)
+            )
+            raise
+    
     async def close(self) -> None:
         """
-        Close client connections and cleanup resources.
+        Close all client resources and cleanup.
         
-        Performs graceful shutdown of HTTP clients and releases resources
-        for proper application shutdown procedures.
+        Performs comprehensive cleanup of HTTP clients, monitoring resources,
+        and internal state per enterprise resource management practices.
         """
         try:
             # Close HTTP client manager
-            if hasattr(self, 'http_client_manager'):
-                await self.http_client_manager.close_all()
+            await self.http_manager.close_all()
+            
+            # Clear active request tracking
+            self._active_requests.clear()
+            
+            # Clear request history (keep for debugging)
+            # self._request_history.clear()
             
             logger.info(
-                "base_client_closed",
-                service_name=self.service_name,
-                component="integrations.base_client"
+                "Base external service client closed",
+                service_name=self.config.service_name,
+                client_id=self.client_id
             )
             
         except Exception as e:
             logger.error(
-                "base_client_close_failed",
-                service_name=self.service_name,
-                error=str(e),
-                component="integrations.base_client",
-                exc_info=e
+                "Error during client cleanup",
+                service_name=self.config.service_name,
+                client_id=self.client_id,
+                error=str(e)
             )
+            raise
+    
+    def __enter__(self):
+        """Context manager entry."""
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit with cleanup."""
+        # Run async cleanup in sync context
+        try:
+            asyncio.run(self.close())
+        except RuntimeError:
+            # If we're already in an event loop, schedule cleanup
+            loop = asyncio.get_event_loop()
+            loop.create_task(self.close())
+    
+    async def __aenter__(self):
+        """Async context manager entry."""
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit with cleanup."""
+        await self.close()
     
     # Abstract methods for subclass implementation
     
     @abstractmethod
-    def authenticate(self, credentials: Dict[str, Any]) -> Dict[str, Any]:
+    def authenticate(self, **kwargs) -> Dict[str, Any]:
         """
-        Authenticate with the external service.
+        Perform authentication with the external service.
+        
+        Subclasses must implement service-specific authentication logic.
         
         Args:
-            credentials: Authentication credentials
+            **kwargs: Authentication parameters
             
         Returns:
-            Authentication result with tokens/session info
+            Authentication result
         """
         pass
     
     @abstractmethod
-    def validate_response(self, response: Any) -> bool:
+    async def authenticate_async(self, **kwargs) -> Dict[str, Any]:
         """
-        Validate external service response format and content.
+        Perform async authentication with the external service.
+        
+        Subclasses must implement service-specific async authentication logic.
         
         Args:
-            response: Response object from external service
+            **kwargs: Authentication parameters
             
         Returns:
-            True if response is valid, False otherwise
-        """
-        pass
-    
-    @abstractmethod
-    def get_service_endpoints(self) -> List[str]:
-        """
-        Get list of available service endpoints.
-        
-        Returns:
-            List of endpoint paths for the external service
+            Authentication result
         """
         pass
 
 
-# Factory functions for common service types
+# Factory functions for convenient base client creation
 
-def create_auth_service_client(
+def create_base_client_config(
     service_name: str,
-    base_url: str,
+    service_type: ExternalServiceType,
+    base_url: Optional[str] = None,
     **kwargs
 ) -> BaseClientConfiguration:
     """
-    Factory function for creating Auth0/authentication service client configuration.
+    Factory function to create base client configuration with enterprise defaults.
     
     Args:
-        service_name: Service identifier
-        base_url: Authentication service base URL
+        service_name: Unique identifier for the external service
+        service_type: Type of external service
+        base_url: Base URL for the service
         **kwargs: Additional configuration parameters
         
     Returns:
-        Configured BaseClientConfiguration for authentication services
+        Configured base client configuration
     """
     return BaseClientConfiguration(
         service_name=service_name,
-        service_type=ServiceType.AUTH,
+        service_type=service_type,
         base_url=base_url,
-        max_retry_attempts=3,
-        circuit_breaker_failure_threshold=5,
-        circuit_breaker_reset_timeout=60,
-        health_check_endpoint="/health",
         **kwargs
     )
 
 
-def create_aws_service_client(
-    service_name: str,
-    base_url: str,
-    **kwargs
-) -> BaseClientConfiguration:
+def create_auth0_config(base_url: str, **kwargs) -> BaseClientConfiguration:
     """
-    Factory function for creating AWS service client configuration.
+    Create Auth0-specific configuration with optimized settings.
     
     Args:
-        service_name: Service identifier
-        base_url: AWS service base URL
-        **kwargs: Additional configuration parameters
+        base_url: Auth0 domain URL
+        **kwargs: Additional configuration overrides
         
     Returns:
-        Configured BaseClientConfiguration for AWS services
+        Auth0-optimized configuration
     """
-    return BaseClientConfiguration(
-        service_name=service_name,
-        service_type=ServiceType.AWS,
+    auth0_defaults = {
+        'circuit_breaker_policy': CircuitBreakerPolicy.STRICT,
+        'circuit_breaker_fail_max': 5,
+        'circuit_breaker_recovery_timeout': 60,
+        'retry_max_attempts': 3,
+        'retry_min_wait': 1.0,
+        'retry_max_wait': 30.0,
+        'timeout': 5.0
+    }
+    auth0_defaults.update(kwargs)
+    
+    return create_base_client_config(
+        service_name='auth0',
+        service_type=ExternalServiceType.AUTH_PROVIDER,
         base_url=base_url,
-        max_retry_attempts=4,
-        circuit_breaker_failure_threshold=3,
-        circuit_breaker_reset_timeout=60,
-        retry_min_wait=0.5,
-        retry_max_wait=60.0,
-        health_check_endpoint="/health",
-        **kwargs
+        **auth0_defaults
     )
 
 
-def create_api_service_client(
+def create_aws_s3_config(region: str = 'us-east-1', **kwargs) -> BaseClientConfiguration:
+    """
+    Create AWS S3-specific configuration with optimized settings.
+    
+    Args:
+        region: AWS region
+        **kwargs: Additional configuration overrides
+        
+    Returns:
+        AWS S3-optimized configuration
+    """
+    s3_defaults = {
+        'circuit_breaker_policy': CircuitBreakerPolicy.MODERATE,
+        'circuit_breaker_fail_max': 5,
+        'circuit_breaker_recovery_timeout': 60,
+        'retry_max_attempts': 4,
+        'retry_min_wait': 0.5,
+        'retry_max_wait': 60.0,
+        'timeout': 10.0
+    }
+    s3_defaults.update(kwargs)
+    
+    return create_base_client_config(
+        service_name='aws_s3',
+        service_type=ExternalServiceType.CLOUD_STORAGE,
+        base_url=f'https://s3.{region}.amazonaws.com',
+        **s3_defaults
+    )
+
+
+def create_external_api_config(
     service_name: str,
     base_url: str,
     **kwargs
 ) -> BaseClientConfiguration:
     """
-    Factory function for creating external API service client configuration.
+    Create external API configuration with balanced settings.
     
     Args:
-        service_name: Service identifier
-        base_url: External API base URL
-        **kwargs: Additional configuration parameters
+        service_name: Name of the external API
+        base_url: Base URL for the API
+        **kwargs: Additional configuration overrides
         
     Returns:
-        Configured BaseClientConfiguration for external APIs
+        External API-optimized configuration
     """
-    return BaseClientConfiguration(
+    api_defaults = {
+        'circuit_breaker_policy': CircuitBreakerPolicy.MODERATE,
+        'circuit_breaker_fail_max': 5,
+        'circuit_breaker_recovery_timeout': 60,
+        'retry_max_attempts': 3,
+        'retry_min_wait': 2.0,
+        'retry_max_wait': 60.0,
+        'timeout': 30.0
+    }
+    api_defaults.update(kwargs)
+    
+    return create_base_client_config(
         service_name=service_name,
-        service_type=ServiceType.API,
+        service_type=ExternalServiceType.HTTP_API,
         base_url=base_url,
-        max_retry_attempts=3,
-        circuit_breaker_failure_threshold=5,
-        circuit_breaker_reset_timeout=60,
-        retry_min_wait=2.0,
-        retry_max_wait=60.0,
-        health_check_endpoint="/health",
-        **kwargs
+        **api_defaults
     )
 
 
 # Export public interface
 __all__ = [
     # Main classes
-    'BaseClientConfiguration',
     'BaseExternalServiceClient',
+    'BaseClientConfiguration',
     
     # Factory functions
-    'create_auth_service_client',
-    'create_aws_service_client',
-    'create_api_service_client',
+    'create_base_client_config',
+    'create_auth0_config',
+    'create_aws_s3_config',
+    'create_external_api_config',
     
-    # Service types for configuration
-    'ServiceType',
-    'HealthStatus',
-    'CircuitBreakerState',
-    
-    # Exception classes
-    'IntegrationError',
-    'HTTPClientError',
-    'CircuitBreakerOpenError',
-    'RetryExhaustedError',
+    # Type exports from dependencies for convenience
+    'ExternalServiceType',
+    'CircuitBreakerPolicy',
+    'ServiceHealthState'
 ]
