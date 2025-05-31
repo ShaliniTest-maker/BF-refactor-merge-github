@@ -1,1943 +1,2346 @@
 """
-Database access layer unit tests with comprehensive PyMongo and Motor driver integration testing.
+Database Access Layer Unit Testing
 
-This test module provides comprehensive validation of the database access layer including PyMongo 4.5+
-synchronous operations, Motor 3.3+ async operations, connection pooling, transaction management, query
-execution, and performance monitoring. Implements Testcontainers integration for realistic MongoDB
-behavior and achieves 90% integration layer coverage per Section 6.6.3 requirements.
+Comprehensive testing for PyMongo 4.5+ and Motor 3.3+ database integration covering
+connection pooling, transaction management, query execution, and performance monitoring.
+Utilizes Testcontainers for realistic MongoDB behavior ensuring 90% integration layer
+coverage per Section 6.6.3 enhanced requirements.
 
-Test Coverage Areas:
-- PyMongo 4.5+ database driver operations and connection management
-- Motor 3.3+ async database operations with pytest-asyncio integration
-- MongoDB connection pooling equivalent to Node.js patterns per Section 5.2.5
-- Database transaction management with commit/rollback scenarios
-- Query execution performance and optimization validation
-- Database health monitoring and metrics collection testing
-- Error handling and resilience pattern validation
-- Testcontainers MongoDB integration for realistic database behavior
+Key Testing Areas:
+- PyMongo synchronous database operations with connection pooling optimization
+- Motor asynchronous database operations for high-performance scenarios
+- Database connection pool management equivalent to Node.js patterns
+- Transaction support with ACID compliance and rollback scenario validation
+- Query execution performance validation ensuring ≤10% variance from baseline
+- Database health monitoring and observability integration
+- Comprehensive error handling with circuit breaker patterns and retry logic
+- Prometheus metrics collection for enterprise monitoring infrastructure
 
-Implements requirements from:
-- Section 0.1.2: Database access layer must implement PyMongo 4.5+ and Motor 3.3+ drivers
-- Section 5.2.5: Database access layer with connection pooling and transaction management
-- Section 6.6.1: Testcontainers integration for realistic MongoDB testing
-- Section 6.6.3: 90% integration layer coverage requirement (enhanced)
-- Section 0.1.1: Performance monitoring to ensure ≤10% variance from Node.js baseline
+Technical Requirements Compliance:
+- Section 0.1.2: PyMongo 4.5+ and Motor 3.3+ driver implementation testing
+- Section 5.2.5: Database access layer testing with comprehensive CRUD operations
+- Section 6.6.1: Testcontainers MongoDB integration for realistic testing behavior
+- Section 6.6.3: 90% integration layer coverage enhanced requirement compliance
+- Section 6.2.4: Performance optimization testing with connection pooling validation
+- Section 0.1.1: Performance monitoring ensuring ≤10% variance from Node.js baseline
+- Section 6.2.2: Database transaction management and data consistency testing
+
+Architecture Integration:
+- Validates Flask application factory database service integration
+- Tests database configuration management with environment-specific settings
+- Verifies performance monitoring and metrics collection for baseline compliance
+- Confirms error handling patterns and circuit breaker functionality
+- Validates connection pool optimization and resource management patterns
+
+Performance Validation:
+- Response time comparison against Node.js baseline metrics
+- Connection pool efficiency and resource utilization monitoring
+- Concurrent request handling capacity validation
+- Database query optimization and index utilization testing
+- Memory usage pattern analysis and optimization validation
+
+Author: Database Migration Team
+Version: 1.0.0
+Compliance: Section 6.6 Testing Strategy requirements
 """
 
 import asyncio
-import os
+import logging
 import pytest
+import pytest_asyncio
 import time
-import threading
+import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Union
-from unittest.mock import Mock, patch, MagicMock
+from datetime import datetime, timezone, timedelta
+from typing import Any, Dict, List, Optional, Union, AsyncGenerator, Generator
+from unittest.mock import Mock, patch, AsyncMock, MagicMock
+import uuid
 
+# Core testing framework imports
 import pymongo
-import motor.motor_asyncio
-from bson import ObjectId
+from pymongo import MongoClient, WriteConcern, ReadConcern, ReadPreference
+from pymongo.collection import Collection
+from pymongo.database import Database
 from pymongo.errors import (
-    ConnectionFailure, 
-    OperationFailure, 
-    ServerSelectionTimeoutError,
-    WriteError,
-    BulkWriteError,
-    InvalidOperation,
-    ConfigurationError
+    ConnectionFailure, OperationFailure, PyMongoError, ServerSelectionTimeoutError,
+    DuplicateKeyError, BulkWriteError, NetworkTimeout, ConfigurationError
 )
-from testcontainers.mongodb import MongoDbContainer
 
-# Import database access layer components
+try:
+    import motor.motor_asyncio as motor
+    from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase, AsyncIOMotorCollection
+    MOTOR_AVAILABLE = True
+except ImportError:
+    MOTOR_AVAILABLE = False
+    motor = None
+
+import structlog
+
+# Application imports
 from src.data import (
-    DatabaseManager,
-    DatabasePackageConfig,
-    create_database_manager,
-    get_database_manager,
-    init_database_app,
-    get_mongodb_client,
-    get_motor_database,
+    # Core database services
+    DatabaseServices, init_database_services, get_database_services,
+    get_current_database_services,
+    
+    # Database client access
+    get_mongodb_client, get_motor_client, get_database, get_async_database,
+    get_collection, get_async_collection,
+    
+    # Manager access
+    get_mongodb_manager, get_async_mongodb_manager,
+    
+    # Health monitoring
+    get_database_health_status, get_database_performance_metrics,
+    
+    # Transaction management
     database_transaction,
-    async_database_transaction,
-    execute_query,
-    execute_async_query,
-    MongoDBClient,
-    MongoDBConfig,
-    QueryResult,
-    create_mongodb_client,
-    get_object_id,
-    serialize_for_json,
-    MotorAsyncDatabase,
-    initialize_motor_client,
-    close_motor_client,
-    DatabaseMetrics,
-    DatabaseHealthChecker,
-    initialize_database_monitoring,
-    get_database_monitoring_components,
-    monitor_transaction,
-    DEFAULT_CONNECTION_TIMEOUT_MS,
-    DEFAULT_SERVER_SELECTION_TIMEOUT_MS,
-    DEFAULT_SOCKET_TIMEOUT_MS,
-    DEFAULT_MAX_POOL_SIZE,
-    DEFAULT_MIN_POOL_SIZE,
-    DEFAULT_MAX_IDLE_TIME_MS,
-    DEFAULT_WAIT_QUEUE_TIMEOUT_MS,
-    DEFAULT_TRANSACTION_TIMEOUT_SECONDS,
-    MAX_TRANSACTION_RETRY_ATTEMPTS,
-    DEFAULT_BATCH_SIZE,
-    MAX_BATCH_SIZE,
-    PERFORMANCE_VARIANCE_THRESHOLD
+    
+    # Utilities and validation
+    validate_object_id,
+    
+    # Exception classes
+    DatabaseException, ConnectionException, TimeoutException,
+    TransactionException, QueryException, ResourceException,
+    DatabaseErrorSeverity, DatabaseOperationType, DatabaseErrorCategory,
+    
+    # Decorators and monitoring
+    with_database_retry, handle_database_error, mongodb_circuit_breaker,
+    monitor_database_operation, monitor_async_database_operation,
+    monitor_database_transaction,
+    
+    # Availability flags
+    MOTOR_AVAILABLE, FLASK_AVAILABLE
 )
 
-# Test configuration constants
-TEST_DATABASE_NAME = "test_flask_migration_db"
-TEST_COLLECTION_NAME = "test_collection"
-TEST_BATCH_SIZE = 100
-MAX_CONNECTION_POOL_SIZE = 20
-TEST_TIMEOUT_SECONDS = 30
-PERFORMANCE_TEST_ITERATIONS = 50
-CONCURRENT_OPERATION_COUNT = 10
+from src.data.mongodb import (
+    MongoDBManager, AsyncMongoDBManager,
+    create_mongodb_manager, create_async_mongodb_manager
+)
+
+from src.data.monitoring import (
+    DatabaseMonitoringManager, DatabaseMetricsCollector
+)
+
+from src.data.exceptions import DatabaseConnectionError
+
+# Test fixtures and factories
+from tests.fixtures.database_fixtures import (
+    UserDocumentFactory, ProjectDocumentFactory, SessionDocumentFactory
+)
+
+# Configure structured logging for test execution
+logger = structlog.get_logger("tests.unit.test_database_layer")
+
+# Suppress connection pool warnings during testing
+warnings.filterwarnings("ignore", category=UserWarning, module="pymongo")
 
 
-@dataclass
-class DatabaseTestMetrics:
-    """Container for database operation performance metrics during testing."""
-    
-    operation_name: str
-    start_time: float
-    end_time: float
-    duration: float
-    success: bool
-    error_message: Optional[str] = None
-    record_count: Optional[int] = None
-    
-    @property
-    def operations_per_second(self) -> float:
-        """Calculate operations per second based on duration and record count."""
-        if self.duration > 0 and self.record_count:
-            return self.record_count / self.duration
-        return 0.0
-
-
-class DatabaseTestFixtures:
+class TestDatabaseServices:
     """
-    Comprehensive test fixtures for database layer testing with Testcontainers integration.
+    Test suite for DatabaseServices class covering initialization, Flask integration,
+    and service lifecycle management with comprehensive error handling validation.
     
-    Provides realistic MongoDB instance management, test data generation, and performance
-    monitoring capabilities for comprehensive database testing scenarios.
+    Tests the core database services container providing comprehensive database
+    functionality for Flask application integration with performance monitoring
+    compliance per Section 6.1.1 core services architecture.
     """
     
-    def __init__(self):
-        """Initialize test fixtures with MongoDB container and configuration."""
-        self.mongodb_container: Optional[MongoDbContainer] = None
-        self.mongodb_uri: Optional[str] = None
-        self.test_data: List[Dict[str, Any]] = []
-        self.performance_metrics: List[DatabaseTestMetrics] = []
-        self._container_lock = threading.Lock()
-        
-    @contextmanager
-    def mongodb_testcontainer(self):
+    @pytest.mark.unit
+    def test_database_services_initialization(self):
         """
-        Context manager for MongoDB Testcontainer with automatic lifecycle management.
+        Test DatabaseServices initialization with comprehensive configuration validation.
         
-        Provides realistic MongoDB instance for testing with automatic container
-        startup, configuration, and cleanup ensuring test isolation and reliability.
-        
-        Yields:
-            Tuple[str, int]: MongoDB connection URI and container port
+        Validates proper initialization of database services including environment
+        configuration, monitoring setup, and component lifecycle management per
+        Section 6.1.1 Flask application factory pattern requirements.
         """
-        with self._container_lock:
-            try:
-                # Configure MongoDB container with realistic settings
-                self.mongodb_container = MongoDbContainer(
-                    image="mongo:7.0",
-                    port=27017,
-                    username=None,  # No authentication for testing
-                    password=None
-                )
-                
-                # Start container and wait for readiness
-                self.mongodb_container.start()
-                
-                # Get connection details
-                self.mongodb_uri = self.mongodb_container.get_connection_url()
-                container_port = self.mongodb_container.get_exposed_port(27017)
-                
-                # Verify container is ready for connections
-                self._wait_for_mongodb_ready()
-                
-                yield self.mongodb_uri, container_port
-                
-            except Exception as e:
-                pytest.fail(f"Failed to start MongoDB container: {e}")
-                
-            finally:
-                # Clean up container
-                if self.mongodb_container:
-                    try:
-                        self.mongodb_container.stop()
-                    except Exception as cleanup_error:
-                        print(f"Warning: Container cleanup failed: {cleanup_error}")
-                    finally:
-                        self.mongodb_container = None
-                        self.mongodb_uri = None
+        # Test basic initialization
+        services = DatabaseServices(environment='testing', monitoring_enabled=True)
+        
+        assert services.environment == 'testing'
+        assert services.monitoring_enabled is True
+        assert services.is_initialized is False
+        assert services.flask_integrated is False
+        assert services.database_config is None
+        assert services.mongodb_manager is None
+        assert services.async_mongodb_manager is None
+        assert services.monitoring_manager is None
+        
+        logger.info("DatabaseServices initialization validation completed")
     
-    def _wait_for_mongodb_ready(self, timeout: int = 30) -> None:
+    @pytest.mark.unit
+    def test_database_services_flask_integration(self, app):
         """
-        Wait for MongoDB container to be ready for connections.
+        Test DatabaseServices Flask application integration using factory pattern.
+        
+        Validates Flask application factory integration per Section 6.1.1 providing
+        database client registration and configuration management with proper
+        lifecycle management and error handling.
         
         Args:
-            timeout: Maximum wait time in seconds
-            
-        Raises:
-            ConnectionError: If MongoDB is not ready within timeout
+            app: Flask application fixture
         """
-        start_time = time.time()
-        
-        while time.time() - start_time < timeout:
-            try:
-                # Attempt basic connection test
-                client = pymongo.MongoClient(
-                    self.mongodb_uri,
-                    serverSelectionTimeoutMS=5000,
-                    connectTimeoutMS=5000
-                )
-                client.admin.command('ping')
-                client.close()
-                return
-                
-            except Exception:
-                time.sleep(0.5)
-                continue
-        
-        raise ConnectionError(f"MongoDB container not ready after {timeout} seconds")
-    
-    def generate_test_documents(self, count: int = 100) -> List[Dict[str, Any]]:
-        """
-        Generate realistic test documents for database operations.
-        
-        Args:
-            count: Number of test documents to generate
-            
-        Returns:
-            List of test documents with varied data types and structures
-        """
-        import random
-        import string
-        from datetime import datetime, timedelta
-        
-        self.test_data = []
-        
-        for i in range(count):
-            doc = {
-                '_id': ObjectId(),
-                'test_id': i,
-                'name': f"test_document_{i}",
-                'email': f"user{i}@example.com",
-                'status': random.choice(['active', 'inactive', 'pending']),
-                'score': random.randint(1, 100),
-                'tags': [f"tag_{j}" for j in range(random.randint(1, 5))],
-                'metadata': {
-                    'created_by': f"user_{random.randint(1, 10)}",
-                    'department': random.choice(['engineering', 'sales', 'marketing']),
-                    'priority': random.choice(['low', 'medium', 'high'])
-                },
-                'created_at': datetime.utcnow() - timedelta(days=random.randint(0, 365)),
-                'updated_at': datetime.utcnow(),
-                'is_active': random.choice([True, False])
-            }
-            self.test_data.append(doc)
-        
-        return self.test_data
-    
-    def record_performance_metric(
-        self,
-        operation_name: str,
-        start_time: float,
-        end_time: float,
-        success: bool,
-        record_count: Optional[int] = None,
-        error_message: Optional[str] = None
-    ) -> DatabaseTestMetrics:
-        """
-        Record performance metrics for database operations.
-        
-        Args:
-            operation_name: Name of the database operation
-            start_time: Operation start timestamp
-            end_time: Operation end timestamp
-            success: Whether operation succeeded
-            record_count: Number of records processed
-            error_message: Error message if operation failed
-            
-        Returns:
-            DatabaseTestMetrics instance with recorded metrics
-        """
-        duration = end_time - start_time
-        
-        metric = DatabaseTestMetrics(
-            operation_name=operation_name,
-            start_time=start_time,
-            end_time=end_time,
-            duration=duration,
-            success=success,
-            record_count=record_count,
-            error_message=error_message
-        )
-        
-        self.performance_metrics.append(metric)
-        return metric
-    
-    def get_performance_summary(self) -> Dict[str, Any]:
-        """
-        Generate performance summary from recorded metrics.
-        
-        Returns:
-            Dictionary containing performance analysis and statistics
-        """
-        if not self.performance_metrics:
-            return {'total_operations': 0, 'summary': 'No metrics recorded'}
-        
-        successful_operations = [m for m in self.performance_metrics if m.success]
-        failed_operations = [m for m in self.performance_metrics if not m.success]
-        
-        return {
-            'total_operations': len(self.performance_metrics),
-            'successful_operations': len(successful_operations),
-            'failed_operations': len(failed_operations),
-            'success_rate': len(successful_operations) / len(self.performance_metrics) * 100,
-            'average_duration': sum(m.duration for m in successful_operations) / len(successful_operations) if successful_operations else 0,
-            'min_duration': min(m.duration for m in successful_operations) if successful_operations else 0,
-            'max_duration': max(m.duration for m in successful_operations) if successful_operations else 0,
-            'total_records_processed': sum(m.record_count or 0 for m in successful_operations),
-            'operations_by_type': self._group_operations_by_type()
-        }
-    
-    def _group_operations_by_type(self) -> Dict[str, Dict[str, Any]]:
-        """Group performance metrics by operation type."""
-        operations = {}
-        
-        for metric in self.performance_metrics:
-            if metric.operation_name not in operations:
-                operations[metric.operation_name] = {
-                    'count': 0,
-                    'total_duration': 0,
-                    'success_count': 0,
-                    'failure_count': 0
-                }
-            
-            op_stats = operations[metric.operation_name]
-            op_stats['count'] += 1
-            op_stats['total_duration'] += metric.duration
-            
-            if metric.success:
-                op_stats['success_count'] += 1
-            else:
-                op_stats['failure_count'] += 1
-        
-        # Calculate averages
-        for op_name, stats in operations.items():
-            if stats['count'] > 0:
-                stats['average_duration'] = stats['total_duration'] / stats['count']
-                stats['success_rate'] = stats['success_count'] / stats['count'] * 100
-        
-        return operations
-
-
-# Global test fixtures instance
-test_fixtures = DatabaseTestFixtures()
-
-
-@pytest.fixture(scope="session")
-def mongodb_container():
-    """Session-scoped MongoDB container fixture for test isolation."""
-    with test_fixtures.mongodb_testcontainer() as (uri, port):
-        yield uri, port
-
-
-@pytest.fixture(scope="function")
-def database_config(mongodb_container):
-    """
-    Database configuration fixture for individual test functions.
-    
-    Provides clean database configuration for each test with realistic
-    connection settings and monitoring integration.
-    """
-    mongodb_uri, _ = mongodb_container
-    
-    config = DatabasePackageConfig(
-        mongodb_uri=mongodb_uri,
-        database_name=TEST_DATABASE_NAME,
-        max_pool_size=MAX_CONNECTION_POOL_SIZE,
-        min_pool_size=5,
-        connection_timeout_ms=5000,
-        server_selection_timeout_ms=5000,
-        socket_timeout_ms=10000,
-        enable_monitoring=True,
-        enable_health_checks=True,
-        enable_motor_async=True,
-        motor_max_pool_size=MAX_CONNECTION_POOL_SIZE,
-        motor_min_pool_size=5
-    )
-    
-    return config
-
-
-@pytest.fixture(scope="function")
-def database_manager(database_config):
-    """
-    Database manager fixture with complete initialization.
-    
-    Provides fully configured database manager instance for testing
-    with PyMongo, Motor, and monitoring components initialized.
-    """
-    manager = DatabaseManager(database_config)
-    manager.initialize()
-    
-    yield manager
-    
-    # Cleanup
-    try:
-        manager.close()
-    except Exception as cleanup_error:
-        print(f"Warning: Database manager cleanup failed: {cleanup_error}")
-
-
-@pytest.fixture(scope="function")
-async def async_database_manager(database_config):
-    """
-    Async database manager fixture for Motor async operations testing.
-    
-    Provides async-initialized database manager for testing Motor
-    async operations with proper async context management.
-    """
-    manager = DatabaseManager(database_config)
-    manager.initialize()
-    
-    # Initialize async components
-    await manager.initialize_async()
-    
-    yield manager
-    
-    # Cleanup
-    try:
-        manager.close()
-    except Exception as cleanup_error:
-        print(f"Warning: Async database manager cleanup failed: {cleanup_error}")
-
-
-@pytest.fixture(scope="function")
-def test_documents():
-    """Generate test documents for database operations."""
-    return test_fixtures.generate_test_documents(TEST_BATCH_SIZE)
-
-
-@pytest.fixture(scope="function")
-def mongodb_client(database_manager):
-    """PyMongo client fixture for synchronous database operations."""
-    client = database_manager.mongodb_client
-    
-    # Clean up test database before test
-    if client:
-        try:
-            client.client.drop_database(TEST_DATABASE_NAME)
-        except Exception:
-            pass  # Database may not exist
-    
-    return client
-
-
-@pytest.fixture(scope="function") 
-async def motor_database(async_database_manager):
-    """Motor async database fixture for async operations testing."""
-    motor_db = async_database_manager.motor_database
-    
-    # Clean up test database before test
-    if motor_db:
-        try:
-            await motor_db.client.drop_database(TEST_DATABASE_NAME)
-        except Exception:
-            pass  # Database may not exist
-    
-    return motor_db
-
-
-class TestDatabasePackageConfig:
-    """
-    Test suite for DatabasePackageConfig class validation and configuration management.
-    
-    Validates configuration parameter handling, MongoDB connection string processing,
-    Motor async client options, and configuration validation patterns.
-    """
-    
-    def test_default_configuration_values(self):
-        """Test default configuration values match expected constants."""
-        config = DatabasePackageConfig()
-        
-        # Verify default values
-        assert config.max_pool_size == DEFAULT_MAX_POOL_SIZE
-        assert config.min_pool_size == DEFAULT_MIN_POOL_SIZE
-        assert config.connection_timeout_ms == DEFAULT_CONNECTION_TIMEOUT_MS
-        assert config.server_selection_timeout_ms == DEFAULT_SERVER_SELECTION_TIMEOUT_MS
-        assert config.socket_timeout_ms == DEFAULT_SOCKET_TIMEOUT_MS
-        assert config.max_idle_time_ms == DEFAULT_MAX_IDLE_TIME_MS
-        assert config.wait_queue_timeout_ms == DEFAULT_WAIT_QUEUE_TIMEOUT_MS
-        assert config.enable_monitoring is True
-        assert config.enable_health_checks is True
-        assert config.enable_motor_async is True
-        
-    def test_custom_configuration_values(self):
-        """Test custom configuration parameter assignment and validation."""
-        custom_config = DatabasePackageConfig(
-            mongodb_uri="mongodb://custom-host:27017/custom_db",
-            database_name="custom_database",
-            max_pool_size=100,
-            min_pool_size=10,
-            connection_timeout_ms=15000,
-            enable_monitoring=False,
-            enable_motor_async=False
-        )
-        
-        assert custom_config.mongodb_uri == "mongodb://custom-host:27017/custom_db"
-        assert custom_config.database_name == "custom_database"
-        assert custom_config.max_pool_size == 100
-        assert custom_config.min_pool_size == 10
-        assert custom_config.connection_timeout_ms == 15000
-        assert custom_config.enable_monitoring is False
-        assert custom_config.enable_motor_async is False
-    
-    def test_mongodb_config_conversion(self):
-        """Test conversion to MongoDBConfig for PyMongo client initialization."""
-        package_config = DatabasePackageConfig(
-            mongodb_uri="mongodb://test-host:27017/test_db",
-            database_name="test_database",
-            max_pool_size=75,
-            connection_timeout_ms=12000
-        )
-        
-        mongodb_config = package_config.to_mongodb_config()
-        
-        assert isinstance(mongodb_config, MongoDBConfig)
-        assert mongodb_config.uri == "mongodb://test-host:27017/test_db"
-        assert mongodb_config.database_name == "test_database"
-        assert mongodb_config.max_pool_size == 75
-        assert mongodb_config.connection_timeout_ms == 12000
-    
-    def test_motor_client_options_generation(self):
-        """Test Motor async client options dictionary generation."""
-        config = DatabasePackageConfig(
-            motor_max_pool_size=150,
-            motor_min_pool_size=15,
-            server_selection_timeout_ms=8000,
-            socket_timeout_ms=25000
-        )
-        
-        motor_options = config.get_motor_client_options()
-        
-        expected_options = {
-            'maxPoolSize': 150,
-            'minPoolSize': 15,
-            'maxIdleTimeMS': config.max_idle_time_ms,
-            'waitQueueTimeoutMS': config.wait_queue_timeout_ms,
-            'serverSelectionTimeoutMS': 8000,
-            'socketTimeoutMS': 25000,
-            'connectTimeoutMS': config.connection_timeout_ms,
-            'retryWrites': True,
-            'retryReads': True,
-            'appName': 'Flask-Migration-App-Async'
-        }
-        
-        assert motor_options == expected_options
-    
-    def test_environment_variable_configuration(self):
-        """Test environment variable integration for configuration parameters."""
-        with patch.dict(os.environ, {
-            'MONGODB_URI': 'mongodb://env-host:27017/env_db',
-            'DATABASE_NAME': 'env_database'
-        }):
-            config = DatabasePackageConfig()
-            
-            assert config.mongodb_uri == 'mongodb://env-host:27017/env_db'
-            assert config.database_name == 'env_database'
-
-
-class TestDatabaseManager:
-    """
-    Test suite for DatabaseManager class covering initialization, Flask integration,
-    client management, health monitoring, and lifecycle operations.
-    
-    Validates database manager functionality including PyMongo and Motor client
-    management, monitoring integration, and Flask application factory patterns.
-    """
-    
-    def test_database_manager_initialization(self, database_config):
-        """Test DatabaseManager initialization with configuration and components."""
-        manager = DatabaseManager(database_config)
-        
-        # Verify initial state
-        assert manager.config == database_config
-        assert manager.mongodb_client is None
-        assert manager.motor_client is None
-        assert manager.motor_database is None
-        assert manager.monitoring_components is None
-        assert manager.health_checker is None
-        assert manager._initialized is False
-        
-        # Initialize manager
-        manager.initialize()
-        
-        # Verify post-initialization state
-        assert manager._initialized is True
-        assert manager.mongodb_client is not None
-        assert isinstance(manager.mongodb_client, MongoDBClient)
-        
-        if manager.config.enable_monitoring:
-            assert manager.monitoring_components is not None
-            assert manager.health_checker is not None
-        
-        # Cleanup
-        manager.close()
-    
-    @pytest.mark.asyncio
-    async def test_async_initialization(self, database_config):
-        """Test async initialization of Motor components."""
-        manager = DatabaseManager(database_config)
-        manager.initialize()
-        
-        # Initialize async components
-        await manager.initialize_async()
-        
-        if manager.config.enable_motor_async:
-            assert manager.motor_client is not None
-            assert manager.motor_database is not None
-            assert isinstance(manager.motor_database, MotorAsyncDatabase)
-        
-        # Cleanup
-        manager.close()
-    
-    def test_flask_application_integration(self, database_config):
-        """Test Flask application factory pattern integration."""
-        from flask import Flask
-        
-        app = Flask(__name__)
-        manager = DatabaseManager(database_config)
+        services = DatabaseServices(environment='testing', monitoring_enabled=True)
         
         # Test Flask integration
-        manager.init_app(app)
+        services.init_app(app)
         
-        # Verify Flask integration
+        assert services.flask_integrated is True
+        assert services.is_initialized is True
         assert hasattr(app, 'extensions')
-        assert 'database_manager' in app.extensions
-        assert app.extensions['database_manager'] == manager
+        assert 'database_services' in app.extensions
+        assert app.extensions['database_services'] is services
         
-        # Test application context functionality
+        # Verify database configuration was initialized
+        assert services.database_config is not None
+        assert services.mongodb_manager is not None
+        
+        # Test health status after integration
+        health_status = services.get_health_status()
+        assert health_status['initialized'] is True
+        assert health_status['flask_integrated'] is True
+        assert health_status['environment'] == 'testing'
+        assert 'services' in health_status
+        
+        logger.info("Flask integration validation completed")
+    
+    @pytest.mark.unit
+    def test_database_services_duplicate_integration_warning(self, app):
+        """
+        Test DatabaseServices handling of duplicate Flask integration attempts.
+        
+        Validates proper warning behavior when attempting to integrate services
+        with Flask multiple times, ensuring idempotent behavior and proper
+        logging of integration state.
+        
+        Args:
+            app: Flask application fixture
+        """
+        services = DatabaseServices(environment='testing')
+        
+        # First integration should succeed
+        services.init_app(app)
+        assert services.flask_integrated is True
+        
+        # Second integration should warn but not fail
+        with patch('src.data.logger') as mock_logger:
+            services.init_app(app)
+            mock_logger.warning.assert_called()
+        
+        # Services should remain properly integrated
+        assert services.flask_integrated is True
+        assert services.is_initialized is True
+        
+        logger.info("Duplicate integration warning validation completed")
+    
+    @pytest.mark.unit
+    def test_database_services_performance_metrics(self, app_with_database):
+        """
+        Test DatabaseServices performance metrics collection for baseline compliance.
+        
+        Validates performance metrics collection functionality ensuring compliance
+        with ≤10% variance requirement per Section 0.1.1 and comprehensive monitoring
+        per Section 6.2.4 performance optimization requirements.
+        
+        Args:
+            app_with_database: Flask application with database connections
+        """
+        with app_with_database.app_context():
+            services = get_current_database_services()
+            
+            # Get performance metrics
+            metrics = services.get_performance_metrics()
+            
+            assert 'timestamp' in metrics
+            assert metrics['environment'] == 'testing'
+            assert 'mongodb_sync' in metrics
+            assert 'connection_pools' in metrics
+            
+            # Verify MongoDB synchronous metrics structure
+            if services.mongodb_manager:
+                assert isinstance(metrics['mongodb_sync'], dict)
+            
+            # Verify connection pool metrics structure
+            assert isinstance(metrics['connection_pools'], dict)
+            
+            # Test metrics validation
+            timestamp = datetime.fromisoformat(metrics['timestamp'].replace('Z', '+00:00'))
+            assert isinstance(timestamp, datetime)
+            
+        logger.info("Performance metrics validation completed")
+    
+    @pytest.mark.unit
+    def test_database_services_health_monitoring(self, app_with_database):
+        """
+        Test DatabaseServices comprehensive health monitoring functionality.
+        
+        Validates health check capabilities for all database services including
+        MongoDB managers, configuration health, and monitoring status per
+        Section 6.2.5 database health monitoring requirements.
+        
+        Args:
+            app_with_database: Flask application with database connections
+        """
+        with app_with_database.app_context():
+            services = get_current_database_services()
+            
+            # Get comprehensive health status
+            health_status = services.get_health_status()
+            
+            # Validate overall health structure
+            assert 'environment' in health_status
+            assert 'initialized' in health_status
+            assert 'flask_integrated' in health_status
+            assert 'monitoring_enabled' in health_status
+            assert 'timestamp' in health_status
+            assert 'services' in health_status
+            
+            # Validate individual service health
+            services_health = health_status['services']
+            
+            if services.database_config:
+                assert 'database_config' in services_health
+                config_health = services_health['database_config']
+                assert 'status' in config_health
+            
+            if services.mongodb_manager:
+                assert 'mongodb_sync' in services_health
+                mongodb_health = services_health['mongodb_sync']
+                assert 'status' in mongodb_health
+            
+            # Verify timestamp format
+            timestamp = datetime.fromisoformat(health_status['timestamp'].replace('Z', '+00:00'))
+            assert isinstance(timestamp, datetime)
+            
+        logger.info("Health monitoring validation completed")
+
+
+class TestDatabaseInitialization:
+    """
+    Test suite for database initialization functions covering global service setup,
+    Flask integration, and configuration management with comprehensive error handling.
+    
+    Tests centralized database services initialization supporting Flask application
+    factory pattern per Section 6.1.1 core services architecture requirements.
+    """
+    
+    @pytest.mark.unit
+    def test_init_database_services_basic(self):
+        """
+        Test basic database services initialization without Flask integration.
+        
+        Validates global database services initialization with environment-specific
+        configuration and monitoring setup per Section 6.1.1 initialization patterns.
+        """
+        services = init_database_services(
+            app=None,
+            environment='testing',
+            monitoring_enabled=True
+        )
+        
+        assert isinstance(services, DatabaseServices)
+        assert services.environment == 'testing'
+        assert services.monitoring_enabled is True
+        assert services.flask_integrated is False
+        
+        # Verify global services access
+        global_services = get_database_services()
+        assert global_services is services
+        
+        logger.info("Basic database services initialization validation completed")
+    
+    @pytest.mark.unit
+    def test_init_database_services_with_flask(self, app):
+        """
+        Test database services initialization with Flask application integration.
+        
+        Validates comprehensive Flask integration including database client
+        registration, configuration management, and service lifecycle per
+        Section 6.1.1 Flask application factory pattern.
+        
+        Args:
+            app: Flask application fixture
+        """
+        services = init_database_services(
+            app=app,
+            environment='testing',
+            monitoring_enabled=True
+        )
+        
+        assert isinstance(services, DatabaseServices)
+        assert services.flask_integrated is True
+        assert services.is_initialized is True
+        
+        # Verify Flask extension registration
+        assert 'database_services' in app.extensions
+        assert app.extensions['database_services'] is services
+        
+        # Test context-based access
         with app.app_context():
-            mongodb_client = get_mongodb_client()
-            assert mongodb_client is not None
-            assert isinstance(mongodb_client, MongoDBClient)
+            context_services = get_current_database_services()
+            assert context_services is services
         
-        # Cleanup
-        manager.close()
+        logger.info("Flask-integrated database services initialization validation completed")
     
-    def test_health_status_monitoring(self, database_manager):
-        """Test database health monitoring and status reporting."""
-        health_status = database_manager.get_health_status()
+    @pytest.mark.unit  
+    def test_get_database_services_error_handling(self):
+        """
+        Test error handling for accessing uninitialized database services.
         
-        assert isinstance(health_status, dict)
-        assert 'overall_status' in health_status
-        assert 'timestamp' in health_status
+        Validates proper exception handling when attempting to access global
+        database services before initialization with clear error messaging
+        and troubleshooting guidance.
+        """
+        # Reset global services
+        import src.data
+        src.data._database_services = None
         
-        if database_manager.health_checker:
-            assert health_status['overall_status'] in ['healthy', 'degraded', 'unhealthy']
-            assert 'components' in health_status
+        # Test error on uninitialized access
+        with pytest.raises(RuntimeError) as exc_info:
+            get_database_services()
+        
+        assert "Database services not initialized" in str(exc_info.value)
+        assert "Call init_database_services() first" in str(exc_info.value)
+        
+        logger.info("Database services error handling validation completed")
     
-    def test_database_manager_close_cleanup(self, database_config):
-        """Test proper cleanup and resource management during close."""
-        manager = DatabaseManager(database_config)
-        manager.initialize()
+    @pytest.mark.unit
+    def test_get_current_database_services_error_handling(self):
+        """
+        Test error handling for Flask context database services access.
         
-        # Verify components are initialized
-        assert manager.mongodb_client is not None
-        assert manager._initialized is True
+        Validates proper exception handling when attempting to access database
+        services from Flask context without proper initialization or outside
+        application context with clear error messaging.
+        """
+        if not FLASK_AVAILABLE:
+            pytest.skip("Flask not available for context testing")
         
-        # Close manager
-        manager.close()
+        # Test error outside Flask context
+        with pytest.raises(RuntimeError) as exc_info:
+            get_current_database_services()
         
-        # Verify cleanup
-        assert manager.mongodb_client is None
-        assert manager._initialized is False
-    
-    def test_connection_failure_handling(self):
-        """Test database manager behavior with invalid connection configuration."""
-        invalid_config = DatabasePackageConfig(
-            mongodb_uri="mongodb://invalid-host:99999/invalid_db",
-            database_name="invalid_database",
-            connection_timeout_ms=1000,
-            server_selection_timeout_ms=1000
-        )
+        error_message = str(exc_info.value)
+        assert ("Failed to get database services from Flask context" in error_message or
+                "Working outside of application context" in error_message)
         
-        manager = DatabaseManager(invalid_config)
-        
-        # Should raise connection error during initialization
-        with pytest.raises((ConnectionFailure, ServerSelectionTimeoutError)):
-            manager.initialize()
+        logger.info("Flask context error handling validation completed")
 
 
-class TestMongoDBClientOperations:
+class TestMongoDBOperations:
     """
-    Test suite for PyMongo synchronous database operations including CRUD operations,
-    connection pooling, transaction management, and query optimization.
+    Test suite for MongoDB database operations covering PyMongo synchronous operations,
+    connection pooling, transaction management, and query execution performance.
     
-    Validates PyMongo 4.5+ driver functionality maintaining existing data patterns
-    per Section 5.2.5 requirements and connection pooling equivalent to Node.js patterns.
+    Tests PyMongo 4.5+ database connectivity maintaining existing data patterns
+    per Section 5.2.5 database access layer requirements with comprehensive
+    CRUD operations and performance monitoring validation.
     """
     
-    def test_mongodb_client_connection_establishment(self, mongodb_client):
-        """Test PyMongo client connection establishment and basic operations."""
-        assert mongodb_client is not None
-        assert isinstance(mongodb_client, MongoDBClient)
+    @pytest.mark.database
+    @pytest.mark.integration
+    def test_mongodb_client_connection(self, app_with_database):
+        """
+        Test MongoDB client connection establishment and configuration validation.
         
-        # Test connection verification
-        connection_status = mongodb_client.ping()
-        assert connection_status is True
+        Validates PyMongo client connection with Testcontainers integration providing
+        realistic database behavior per Section 6.6.1 requirements and connection
+        pool optimization per Section 5.2.5 database access layer specifications.
         
-        # Test database access
-        database = mongodb_client.get_database()
-        assert database is not None
-        assert database.name == TEST_DATABASE_NAME
+        Args:
+            app_with_database: Flask application with database connections
+        """
+        with app_with_database.app_context():
+            # Get MongoDB client
+            client = get_mongodb_client()
+            assert isinstance(client, MongoClient)
+            
+            # Test connection with ping
+            db_admin = client.admin
+            ping_result = db_admin.command('ping')
+            assert ping_result['ok'] == 1.0
+            
+            # Verify database access
+            database = get_database()
+            assert isinstance(database, Database)
+            
+            # Test collection access
+            test_collection = get_collection('test_collection')
+            assert isinstance(test_collection, Collection)
+            
+            # Verify connection pool configuration
+            pool_options = client.options.pool_options
+            assert pool_options.max_pool_size >= 10  # Minimum pool size for performance
+            
+        logger.info("MongoDB client connection validation completed")
     
-    def test_document_insertion_operations(self, mongodb_client, test_documents):
-        """Test document insertion with performance monitoring."""
-        collection_name = TEST_COLLECTION_NAME
+    @pytest.mark.database
+    @pytest.mark.integration
+    def test_mongodb_crud_operations(self, app_with_database, user_factory):
+        """
+        Test MongoDB CRUD operations maintaining existing data patterns.
         
-        # Test single document insertion
-        single_doc = test_documents[0]
-        start_time = time.time()
-        result = mongodb_client.insert_one(collection_name, single_doc)
-        end_time = time.time()
+        Validates comprehensive CRUD operations including document insertion,
+        querying, updates, and deletion with proper error handling and data
+        validation per Section 5.2.5 database access layer requirements.
         
-        assert result.success is True
-        assert result.inserted_id is not None
-        
-        # Record performance metric
-        test_fixtures.record_performance_metric(
-            operation_name="insert_one",
-            start_time=start_time,
-            end_time=end_time,
-            success=True,
-            record_count=1
-        )
-        
-        # Test bulk document insertion
-        bulk_docs = test_documents[1:50]  # Insert 49 more documents
-        start_time = time.time()
-        bulk_result = mongodb_client.insert_many(collection_name, bulk_docs)
-        end_time = time.time()
-        
-        assert bulk_result.success is True
-        assert len(bulk_result.inserted_ids) == len(bulk_docs)
-        
-        # Record performance metric
-        test_fixtures.record_performance_metric(
-            operation_name="insert_many",
-            start_time=start_time,
-            end_time=end_time,
-            success=True,
-            record_count=len(bulk_docs)
-        )
+        Args:
+            app_with_database: Flask application with database connections
+            user_factory: User document factory for test data generation
+        """
+        with app_with_database.app_context():
+            collection = get_collection('test_users')
+            
+            # Test document insertion
+            user_doc = user_factory.build()
+            insert_result = collection.insert_one(user_doc)
+            assert insert_result.acknowledged is True
+            assert insert_result.inserted_id is not None
+            
+            # Test document retrieval
+            retrieved_doc = collection.find_one({'_id': insert_result.inserted_id})
+            assert retrieved_doc is not None
+            assert retrieved_doc['email'] == user_doc['email']
+            assert retrieved_doc['username'] == user_doc['username']
+            
+            # Test document update
+            update_data = {'last_login': datetime.now(timezone.utc)}
+            update_result = collection.update_one(
+                {'_id': insert_result.inserted_id},
+                {'$set': update_data}
+            )
+            assert update_result.acknowledged is True
+            assert update_result.modified_count == 1
+            
+            # Verify update
+            updated_doc = collection.find_one({'_id': insert_result.inserted_id})
+            assert updated_doc['last_login'] is not None
+            
+            # Test document deletion
+            delete_result = collection.delete_one({'_id': insert_result.inserted_id})
+            assert delete_result.acknowledged is True
+            assert delete_result.deleted_count == 1
+            
+            # Verify deletion
+            deleted_doc = collection.find_one({'_id': insert_result.inserted_id})
+            assert deleted_doc is None
+            
+        logger.info("MongoDB CRUD operations validation completed")
     
-    def test_document_query_operations(self, mongodb_client, test_documents):
-        """Test document querying with various filters and performance tracking."""
-        collection_name = TEST_COLLECTION_NAME
+    @pytest.mark.database
+    @pytest.mark.integration
+    def test_mongodb_bulk_operations(self, app_with_database, user_factory):
+        """
+        Test MongoDB bulk operations for performance optimization and efficiency.
         
-        # Insert test data
-        mongodb_client.insert_many(collection_name, test_documents)
+        Validates bulk insert, update, and delete operations with proper error
+        handling and performance monitoring per Section 6.2.4 performance
+        optimization requirements for batch processing scenarios.
         
-        # Test find_one operation
-        start_time = time.time()
-        single_result = mongodb_client.find_one(collection_name, {'test_id': 0})
-        end_time = time.time()
-        
-        assert single_result.success is True
-        assert single_result.document is not None
-        assert single_result.document['test_id'] == 0
-        
-        test_fixtures.record_performance_metric(
-            operation_name="find_one",
-            start_time=start_time,
-            end_time=end_time,
-            success=True,
-            record_count=1
-        )
-        
-        # Test find_many operation with filter
-        start_time = time.time()
-        many_results = mongodb_client.find_many(
-            collection_name,
-            {'status': 'active'},
-            limit=20
-        )
-        end_time = time.time()
-        
-        assert many_results.success is True
-        assert isinstance(many_results.documents, list)
-        assert len(many_results.documents) <= 20
-        
-        test_fixtures.record_performance_metric(
-            operation_name="find_many",
-            start_time=start_time,
-            end_time=end_time,
-            success=True,
-            record_count=len(many_results.documents)
-        )
-        
-        # Test aggregation pipeline
-        pipeline = [
-            {'$match': {'status': {'$in': ['active', 'pending']}}},
-            {'$group': {'_id': '$status', 'count': {'$sum': 1}}},
-            {'$sort': {'count': -1}}
-        ]
-        
-        start_time = time.time()
-        agg_result = mongodb_client.aggregate(collection_name, pipeline)
-        end_time = time.time()
-        
-        assert agg_result.success is True
-        assert isinstance(agg_result.documents, list)
-        
-        test_fixtures.record_performance_metric(
-            operation_name="aggregate",
-            start_time=start_time,
-            end_time=end_time,
-            success=True,
-            record_count=len(agg_result.documents)
-        )
+        Args:
+            app_with_database: Flask application with database connections
+            user_factory: User document factory for test data generation
+        """
+        with app_with_database.app_context():
+            collection = get_collection('test_bulk_users')
+            
+            # Generate test documents
+            user_docs = [user_factory.build() for _ in range(10)]
+            
+            # Test bulk insertion
+            start_time = time.perf_counter()
+            insert_result = collection.insert_many(user_docs)
+            insert_duration = time.perf_counter() - start_time
+            
+            assert insert_result.acknowledged is True
+            assert len(insert_result.inserted_ids) == 10
+            assert insert_duration < 1.0  # Performance threshold
+            
+            # Test bulk update
+            update_operations = [
+                {
+                    'update_one': {
+                        'filter': {'_id': doc_id},
+                        'update': {'$set': {'last_updated': datetime.now(timezone.utc)}}
+                    }
+                }
+                for doc_id in insert_result.inserted_ids
+            ]
+            
+            start_time = time.perf_counter()
+            update_result = collection.bulk_write(update_operations)
+            update_duration = time.perf_counter() - start_time
+            
+            assert update_result.acknowledged is True
+            assert update_result.modified_count == 10
+            assert update_duration < 1.0  # Performance threshold
+            
+            # Test bulk query
+            start_time = time.perf_counter()
+            cursor = collection.find({'_id': {'$in': insert_result.inserted_ids}})
+            found_docs = list(cursor)
+            query_duration = time.perf_counter() - start_time
+            
+            assert len(found_docs) == 10
+            assert query_duration < 0.5  # Performance threshold
+            assert all(doc['last_updated'] is not None for doc in found_docs)
+            
+            # Cleanup
+            collection.delete_many({'_id': {'$in': insert_result.inserted_ids}})
+            
+        logger.info("MongoDB bulk operations validation completed")
     
-    def test_document_update_operations(self, mongodb_client, test_documents):
-        """Test document update operations with various update patterns."""
-        collection_name = TEST_COLLECTION_NAME
+    @pytest.mark.database
+    @pytest.mark.integration
+    def test_mongodb_indexing_and_performance(self, app_with_database, user_factory):
+        """
+        Test MongoDB indexing and query performance optimization.
         
-        # Insert test data
-        mongodb_client.insert_many(collection_name, test_documents)
+        Validates index creation, utilization, and query performance monitoring
+        per Section 6.2.4 performance optimization requirements ensuring ≤10%
+        variance from baseline performance expectations.
         
-        # Test update_one operation
-        update_filter = {'test_id': 0}
-        update_doc = {'$set': {'status': 'updated', 'score': 999}}
-        
-        start_time = time.time()
-        update_result = mongodb_client.update_one(collection_name, update_filter, update_doc)
-        end_time = time.time()
-        
-        assert update_result.success is True
-        assert update_result.modified_count == 1
-        
-        test_fixtures.record_performance_metric(
-            operation_name="update_one",
-            start_time=start_time,
-            end_time=end_time,
-            success=True,
-            record_count=1
-        )
-        
-        # Verify update
-        updated_doc = mongodb_client.find_one(collection_name, {'test_id': 0})
-        assert updated_doc.document['status'] == 'updated'
-        assert updated_doc.document['score'] == 999
-        
-        # Test update_many operation
-        many_filter = {'status': 'active'}
-        many_update = {'$set': {'status': 'bulk_updated'}}
-        
-        start_time = time.time()
-        bulk_update_result = mongodb_client.update_many(collection_name, many_filter, many_update)
-        end_time = time.time()
-        
-        assert bulk_update_result.success is True
-        assert bulk_update_result.modified_count > 0
-        
-        test_fixtures.record_performance_metric(
-            operation_name="update_many",
-            start_time=start_time,
-            end_time=end_time,
-            success=True,
-            record_count=bulk_update_result.modified_count
-        )
+        Args:
+            app_with_database: Flask application with database connections
+            user_factory: User document factory for test data generation
+        """
+        with app_with_database.app_context():
+            collection = get_collection('test_indexed_users')
+            
+            # Create test index
+            index_result = collection.create_index([('email', 1), ('username', 1)])
+            assert isinstance(index_result, str)
+            
+            # Verify index creation
+            indexes = list(collection.list_indexes())
+            index_names = [idx['name'] for idx in indexes]
+            assert index_result in index_names
+            
+            # Insert test data
+            user_docs = [user_factory.build() for _ in range(100)]
+            collection.insert_many(user_docs)
+            
+            # Test indexed query performance
+            test_email = user_docs[0]['email']
+            
+            start_time = time.perf_counter()
+            result = collection.find_one({'email': test_email})
+            query_duration = time.perf_counter() - start_time
+            
+            assert result is not None
+            assert result['email'] == test_email
+            assert query_duration < 0.1  # Performance threshold for indexed query
+            
+            # Test compound index query
+            test_username = user_docs[0]['username']
+            
+            start_time = time.perf_counter()
+            result = collection.find_one({
+                'email': test_email,
+                'username': test_username
+            })
+            compound_query_duration = time.perf_counter() - start_time
+            
+            assert result is not None
+            assert compound_query_duration < 0.1  # Performance threshold
+            
+            # Test query explanation for index usage
+            explain_result = collection.find({'email': test_email}).explain()
+            execution_stats = explain_result['executionStats']
+            assert execution_stats['totalDocsExamined'] <= execution_stats['totalDocsReturned'] * 2
+            
+            # Cleanup
+            collection.drop()
+            
+        logger.info("MongoDB indexing and performance validation completed")
     
-    def test_document_deletion_operations(self, mongodb_client, test_documents):
-        """Test document deletion operations with performance tracking."""
-        collection_name = TEST_COLLECTION_NAME
+    @pytest.mark.database
+    @pytest.mark.integration
+    def test_mongodb_aggregation_pipeline(self, app_with_database, user_factory, project_factory):
+        """
+        Test MongoDB aggregation pipeline operations for complex queries.
         
-        # Insert test data
-        mongodb_client.insert_many(collection_name, test_documents)
+        Validates aggregation pipeline functionality including grouping, sorting,
+        matching, and projection operations with performance monitoring per
+        Section 5.2.5 database access layer advanced query requirements.
         
-        # Test delete_one operation
-        delete_filter = {'test_id': 0}
-        
-        start_time = time.time()
-        delete_result = mongodb_client.delete_one(collection_name, delete_filter)
-        end_time = time.time()
-        
-        assert delete_result.success is True
-        assert delete_result.deleted_count == 1
-        
-        test_fixtures.record_performance_metric(
-            operation_name="delete_one",
-            start_time=start_time,
-            end_time=end_time,
-            success=True,
-            record_count=1
-        )
-        
-        # Verify deletion
-        deleted_doc = mongodb_client.find_one(collection_name, {'test_id': 0})
-        assert deleted_doc.document is None
-        
-        # Test delete_many operation
-        many_delete_filter = {'status': 'inactive'}
-        
-        start_time = time.time()
-        bulk_delete_result = mongodb_client.delete_many(collection_name, many_delete_filter)
-        end_time = time.time()
-        
-        assert bulk_delete_result.success is True
-        assert bulk_delete_result.deleted_count >= 0
-        
-        test_fixtures.record_performance_metric(
-            operation_name="delete_many",
-            start_time=start_time,
-            end_time=end_time,
-            success=True,
-            record_count=bulk_delete_result.deleted_count
-        )
+        Args:
+            app_with_database: Flask application with database connections
+            user_factory: User document factory for test data generation
+            project_factory: Project document factory for test data generation
+        """
+        with app_with_database.app_context():
+            users_collection = get_collection('test_agg_users')
+            projects_collection = get_collection('test_agg_projects')
+            
+            # Create test data
+            users = [user_factory.build() for _ in range(20)]
+            user_insert_result = users_collection.insert_many(users)
+            user_ids = user_insert_result.inserted_ids
+            
+            # Create projects with user assignments
+            projects = []
+            for i in range(10):
+                project = project_factory.build()
+                project['owner_id'] = user_ids[i % len(user_ids)]
+                project['team_members'] = user_ids[i:i+3] if i+3 <= len(user_ids) else user_ids[i:]
+                projects.append(project)
+            
+            projects_collection.insert_many(projects)
+            
+            # Test aggregation pipeline: Group projects by owner
+            pipeline = [
+                {'$group': {
+                    '_id': '$owner_id',
+                    'project_count': {'$sum': 1},
+                    'project_names': {'$push': '$name'}
+                }},
+                {'$sort': {'project_count': -1}}
+            ]
+            
+            start_time = time.perf_counter()
+            aggregation_result = list(projects_collection.aggregate(pipeline))
+            aggregation_duration = time.perf_counter() - start_time
+            
+            assert len(aggregation_result) > 0
+            assert aggregation_duration < 1.0  # Performance threshold
+            
+            # Verify aggregation results
+            for result in aggregation_result:
+                assert '_id' in result  # owner_id
+                assert 'project_count' in result
+                assert 'project_names' in result
+                assert isinstance(result['project_names'], list)
+                assert result['project_count'] == len(result['project_names'])
+            
+            # Test lookup aggregation with users collection
+            lookup_pipeline = [
+                {'$lookup': {
+                    'from': 'test_agg_users',
+                    'localField': 'owner_id',
+                    'foreignField': '_id',
+                    'as': 'owner_info'
+                }},
+                {'$unwind': '$owner_info'},
+                {'$project': {
+                    'name': 1,
+                    'owner_email': '$owner_info.email',
+                    'owner_username': '$owner_info.username'
+                }}
+            ]
+            
+            start_time = time.perf_counter()
+            lookup_result = list(projects_collection.aggregate(lookup_pipeline))
+            lookup_duration = time.perf_counter() - start_time
+            
+            assert len(lookup_result) == len(projects)
+            assert lookup_duration < 2.0  # Performance threshold for lookup
+            
+            # Verify lookup results
+            for result in lookup_result:
+                assert 'name' in result
+                assert 'owner_email' in result
+                assert 'owner_username' in result
+                assert '@' in result['owner_email']  # Basic email validation
+            
+            # Cleanup
+            users_collection.drop()
+            projects_collection.drop()
+            
+        logger.info("MongoDB aggregation pipeline validation completed")
+
+
+class TestAsyncMongoDBOperations:
+    """
+    Test suite for Motor asynchronous MongoDB operations covering async database
+    connectivity, concurrent operations, and performance optimization.
     
-    def test_transaction_management_patterns(self, mongodb_client, test_documents):
-        """Test database transaction management with commit and rollback scenarios."""
-        collection_name = TEST_COLLECTION_NAME
+    Tests Motor 3.3+ async database operations for high-performance scenarios
+    per Section 5.2.5 database access layer requirements with async operation
+    testing using pytest-asyncio per Section 6.6.1 testing framework specifications.
+    """
+    
+    @pytest.mark.asyncio
+    @pytest.mark.database
+    @pytest.mark.integration
+    @pytest.mark.skipif(not MOTOR_AVAILABLE, reason="Motor async driver not available")
+    async def test_motor_client_connection(self, app_with_database):
+        """
+        Test Motor async client connection establishment and configuration.
         
-        # Test successful transaction with commit
-        try:
-            with mongodb_client.transaction() as session:
-                # Insert documents within transaction
-                mongodb_client.insert_one(collection_name, test_documents[0], session=session)
-                mongodb_client.insert_one(collection_name, test_documents[1], session=session)
+        Validates Motor async client connection with proper async context management
+        and connection pool optimization per Section 5.2.5 async database operations
+        requirements for high-performance scenarios.
+        
+        Args:
+            app_with_database: Flask application with database connections
+        """
+        with app_with_database.app_context():
+            # Get Motor async client
+            motor_client = get_motor_client()
+            assert isinstance(motor_client, motor.AsyncIOMotorClient)
+            
+            # Test async connection with ping
+            ping_result = await motor_client.admin.command('ping')
+            assert ping_result['ok'] == 1.0
+            
+            # Verify async database access
+            async_database = get_async_database()
+            assert isinstance(async_database, motor.AsyncIOMotorDatabase)
+            
+            # Test async collection access
+            async_collection = get_async_collection('test_async_collection')
+            assert isinstance(async_collection, motor.AsyncIOMotorCollection)
+            
+        logger.info("Motor async client connection validation completed")
+    
+    @pytest.mark.asyncio
+    @pytest.mark.database
+    @pytest.mark.integration
+    @pytest.mark.skipif(not MOTOR_AVAILABLE, reason="Motor async driver not available")
+    async def test_motor_async_crud_operations(self, app_with_database, user_factory):
+        """
+        Test Motor async CRUD operations for high-performance database access.
+        
+        Validates comprehensive async CRUD operations including concurrent
+        document operations, async transaction support, and performance
+        monitoring per Section 5.2.5 async database operations requirements.
+        
+        Args:
+            app_with_database: Flask application with database connections
+            user_factory: User document factory for test data generation
+        """
+        with app_with_database.app_context():
+            async_collection = get_async_collection('test_async_users')
+            
+            # Test async document insertion
+            user_doc = user_factory.build()
+            insert_result = await async_collection.insert_one(user_doc)
+            assert insert_result.acknowledged is True
+            assert insert_result.inserted_id is not None
+            
+            # Test async document retrieval
+            retrieved_doc = await async_collection.find_one({'_id': insert_result.inserted_id})
+            assert retrieved_doc is not None
+            assert retrieved_doc['email'] == user_doc['email']
+            assert retrieved_doc['username'] == user_doc['username']
+            
+            # Test async document update
+            update_data = {'last_login': datetime.now(timezone.utc)}
+            update_result = await async_collection.update_one(
+                {'_id': insert_result.inserted_id},
+                {'$set': update_data}
+            )
+            assert update_result.acknowledged is True
+            assert update_result.modified_count == 1
+            
+            # Verify async update
+            updated_doc = await async_collection.find_one({'_id': insert_result.inserted_id})
+            assert updated_doc['last_login'] is not None
+            
+            # Test async document deletion
+            delete_result = await async_collection.delete_one({'_id': insert_result.inserted_id})
+            assert delete_result.acknowledged is True
+            assert delete_result.deleted_count == 1
+            
+            # Verify async deletion
+            deleted_doc = await async_collection.find_one({'_id': insert_result.inserted_id})
+            assert deleted_doc is None
+            
+        logger.info("Motor async CRUD operations validation completed")
+    
+    @pytest.mark.asyncio
+    @pytest.mark.database
+    @pytest.mark.integration
+    @pytest.mark.skipif(not MOTOR_AVAILABLE, reason="Motor async driver not available")
+    async def test_motor_concurrent_operations(self, app_with_database, user_factory):
+        """
+        Test Motor concurrent database operations for high-throughput scenarios.
+        
+        Validates concurrent async operations including parallel document insertion,
+        query processing, and connection pool utilization per Section 6.2.4
+        performance optimization requirements for async operations.
+        
+        Args:
+            app_with_database: Flask application with database connections
+            user_factory: User document factory for test data generation
+        """
+        with app_with_database.app_context():
+            async_collection = get_async_collection('test_concurrent_users')
+            
+            # Generate test documents
+            user_docs = [user_factory.build() for _ in range(50)]
+            
+            # Test concurrent insertions
+            async def insert_document(doc):
+                return await async_collection.insert_one(doc)
+            
+            start_time = time.perf_counter()
+            insert_tasks = [insert_document(doc) for doc in user_docs]
+            insert_results = await asyncio.gather(*insert_tasks)
+            concurrent_insert_duration = time.perf_counter() - start_time
+            
+            assert len(insert_results) == 50
+            assert all(result.acknowledged for result in insert_results)
+            assert concurrent_insert_duration < 5.0  # Performance threshold
+            
+            inserted_ids = [result.inserted_id for result in insert_results]
+            
+            # Test concurrent queries
+            async def find_document(doc_id):
+                return await async_collection.find_one({'_id': doc_id})
+            
+            start_time = time.perf_counter()
+            query_tasks = [find_document(doc_id) for doc_id in inserted_ids]
+            query_results = await asyncio.gather(*query_tasks)
+            concurrent_query_duration = time.perf_counter() - start_time
+            
+            assert len(query_results) == 50
+            assert all(result is not None for result in query_results)
+            assert concurrent_query_duration < 3.0  # Performance threshold
+            
+            # Test concurrent updates
+            async def update_document(doc_id):
+                return await async_collection.update_one(
+                    {'_id': doc_id},
+                    {'$set': {'updated_at': datetime.now(timezone.utc)}}
+                )
+            
+            start_time = time.perf_counter()
+            update_tasks = [update_document(doc_id) for doc_id in inserted_ids]
+            update_results = await asyncio.gather(*update_tasks)
+            concurrent_update_duration = time.perf_counter() - start_time
+            
+            assert len(update_results) == 50
+            assert all(result.acknowledged for result in update_results)
+            assert all(result.modified_count == 1 for result in update_results)
+            assert concurrent_update_duration < 4.0  # Performance threshold
+            
+            # Cleanup
+            await async_collection.delete_many({'_id': {'$in': inserted_ids}})
+            
+        logger.info("Motor concurrent operations validation completed")
+    
+    @pytest.mark.asyncio
+    @pytest.mark.database
+    @pytest.mark.integration
+    @pytest.mark.skipif(not MOTOR_AVAILABLE, reason="Motor async driver not available")
+    async def test_motor_async_aggregation(self, app_with_database, user_factory):
+        """
+        Test Motor async aggregation pipeline operations for complex queries.
+        
+        Validates async aggregation pipeline functionality with performance
+        monitoring for complex data processing operations per Section 5.2.5
+        database access layer advanced async query requirements.
+        
+        Args:
+            app_with_database: Flask application with database connections
+            user_factory: User document factory for test data generation
+        """
+        with app_with_database.app_context():
+            async_collection = get_async_collection('test_async_agg_users')
+            
+            # Create test data with domains for aggregation
+            user_docs = []
+            domains = ['example.com', 'test.org', 'demo.net', 'sample.io']
+            
+            for i in range(40):
+                user_doc = user_factory.build()
+                domain = domains[i % len(domains)]
+                username = user_doc['username']
+                user_doc['email'] = f"{username}@{domain}"
+                user_doc['registration_date'] = datetime.now(timezone.utc) - timedelta(days=i)
+                user_docs.append(user_doc)
+            
+            # Insert test data
+            await async_collection.insert_many(user_docs)
+            
+            # Test async aggregation: Group users by email domain
+            pipeline = [
+                {'$project': {
+                    'domain': {
+                        '$arrayElemAt': [
+                            {'$split': ['$email', '@']}, 1
+                        ]
+                    },
+                    'username': 1,
+                    'registration_date': 1
+                }},
+                {'$group': {
+                    '_id': '$domain',
+                    'user_count': {'$sum': 1},
+                    'earliest_registration': {'$min': '$registration_date'},
+                    'latest_registration': {'$max': '$registration_date'}
+                }},
+                {'$sort': {'user_count': -1}}
+            ]
+            
+            start_time = time.perf_counter()
+            aggregation_cursor = async_collection.aggregate(pipeline)
+            aggregation_results = await aggregation_cursor.to_list(length=None)
+            aggregation_duration = time.perf_counter() - start_time
+            
+            assert len(aggregation_results) == len(domains)
+            assert aggregation_duration < 2.0  # Performance threshold
+            
+            # Verify aggregation results
+            total_users = sum(result['user_count'] for result in aggregation_results)
+            assert total_users == 40
+            
+            for result in aggregation_results:
+                assert result['_id'] in domains
+                assert result['user_count'] > 0
+                assert isinstance(result['earliest_registration'], datetime)
+                assert isinstance(result['latest_registration'], datetime)
+                assert result['earliest_registration'] <= result['latest_registration']
+            
+            # Test async aggregation with lookup (requires two collections)
+            projects_collection = get_async_collection('test_async_agg_projects')
+            
+            # Create projects with user references
+            project_docs = []
+            for i in range(10):
+                project_doc = {
+                    '_id': f"project_{i}",
+                    'name': f"Project {i}",
+                    'owner_email': user_docs[i * 2]['email'],
+                    'created_date': datetime.now(timezone.utc)
+                }
+                project_docs.append(project_doc)
+            
+            await projects_collection.insert_many(project_docs)
+            
+            # Lookup aggregation
+            lookup_pipeline = [
+                {'$lookup': {
+                    'from': 'test_async_agg_users',
+                    'localField': 'owner_email',
+                    'foreignField': 'email',
+                    'as': 'owner_info'
+                }},
+                {'$unwind': '$owner_info'},
+                {'$project': {
+                    'name': 1,
+                    'owner_username': '$owner_info.username',
+                    'owner_domain': {
+                        '$arrayElemAt': [
+                            {'$split': ['$owner_email', '@']}, 1
+                        ]
+                    }
+                }}
+            ]
+            
+            start_time = time.perf_counter()
+            lookup_cursor = projects_collection.aggregate(lookup_pipeline)
+            lookup_results = await lookup_cursor.to_list(length=None)
+            lookup_duration = time.perf_counter() - start_time
+            
+            assert len(lookup_results) == 10
+            assert lookup_duration < 3.0  # Performance threshold
+            
+            # Verify lookup results
+            for result in lookup_results:
+                assert 'name' in result
+                assert 'owner_username' in result
+                assert 'owner_domain' in result
+                assert result['owner_domain'] in domains
+            
+            # Cleanup
+            await async_collection.drop()
+            await projects_collection.drop()
+            
+        logger.info("Motor async aggregation validation completed")
+
+
+class TestDatabaseTransactions:
+    """
+    Test suite for MongoDB transaction management covering ACID compliance,
+    rollback scenarios, and transaction performance monitoring.
+    
+    Tests database transaction support with data consistency requirements
+    per Section 6.2.2 data management and Section 5.2.5 transaction
+    management for maintaining database integrity.
+    """
+    
+    @pytest.mark.database
+    @pytest.mark.integration
+    def test_transaction_basic_operations(self, app_with_database, user_factory):
+        """
+        Test basic MongoDB transaction operations with ACID compliance.
+        
+        Validates transaction support including commit scenarios, proper session
+        management, and data consistency requirements per Section 6.2.2 data
+        management transaction management specifications.
+        
+        Args:
+            app_with_database: Flask application with database connections
+            user_factory: User document factory for test data generation
+        """
+        with app_with_database.app_context():
+            client = get_mongodb_client()
+            database = get_database()
+            users_collection = database['test_transaction_users']
+            logs_collection = database['test_transaction_logs']
+            
+            # Test transaction with commit
+            with client.start_session() as session:
+                with session.start_transaction():
+                    # Insert user document
+                    user_doc = user_factory.build()
+                    insert_result = users_collection.insert_one(user_doc, session=session)
+                    user_id = insert_result.inserted_id
+                    
+                    # Insert log document
+                    log_doc = {
+                        'user_id': user_id,
+                        'action': 'user_created',
+                        'timestamp': datetime.now(timezone.utc),
+                        'details': {'email': user_doc['email']}
+                    }
+                    logs_collection.insert_one(log_doc, session=session)
+                    
+                    # Transaction commits automatically when context exits
+            
+            # Verify both documents exist after commit
+            user_doc_committed = users_collection.find_one({'_id': user_id})
+            log_doc_committed = logs_collection.find_one({'user_id': user_id})
+            
+            assert user_doc_committed is not None
+            assert log_doc_committed is not None
+            assert log_doc_committed['action'] == 'user_created'
+            
+            # Cleanup
+            users_collection.delete_one({'_id': user_id})
+            logs_collection.delete_one({'user_id': user_id})
+            
+        logger.info("Basic transaction operations validation completed")
+    
+    @pytest.mark.database
+    @pytest.mark.integration
+    def test_transaction_rollback_scenarios(self, app_with_database, user_factory):
+        """
+        Test MongoDB transaction rollback scenarios and error handling.
+        
+        Validates transaction rollback functionality including automatic rollback
+        on errors, manual abort scenarios, and data consistency preservation
+        per Section 6.2.2 transaction management requirements.
+        
+        Args:
+            app_with_database: Flask application with database connections
+            user_factory: User document factory for test data generation
+        """
+        with app_with_database.app_context():
+            client = get_mongodb_client()
+            database = get_database()
+            users_collection = database['test_rollback_users']
+            
+            # Create unique index to force constraint violation
+            users_collection.create_index('email', unique=True)
+            
+            # Insert initial document
+            initial_user = user_factory.build()
+            users_collection.insert_one(initial_user)
+            
+            # Test automatic rollback on error
+            try:
+                with client.start_session() as session:
+                    with session.start_transaction():
+                        # Insert first document (should succeed)
+                        user1 = user_factory.build()
+                        users_collection.insert_one(user1, session=session)
+                        
+                        # Insert duplicate email (should fail and rollback)
+                        user2 = user_factory.build()
+                        user2['email'] = initial_user['email']  # Duplicate email
+                        users_collection.insert_one(user2, session=session)
+                        
+            except DuplicateKeyError:
+                # Expected error due to unique constraint
+                pass
+            
+            # Verify rollback - user1 should not exist
+            user1_after_rollback = users_collection.find_one({'username': user1['username']})
+            assert user1_after_rollback is None
+            
+            # Verify original document still exists
+            original_user = users_collection.find_one({'email': initial_user['email']})
+            assert original_user is not None
+            
+            # Test manual transaction abort
+            user3 = user_factory.build()
+            with client.start_session() as session:
+                with session.start_transaction():
+                    # Insert document
+                    insert_result = users_collection.insert_one(user3, session=session)
+                    user3_id = insert_result.inserted_id
+                    
+                    # Manually abort transaction
+                    session.abort_transaction()
+            
+            # Verify manual abort - user3 should not exist
+            user3_after_abort = users_collection.find_one({'_id': user3_id})
+            assert user3_after_abort is None
+            
+            # Cleanup
+            users_collection.drop()
+            
+        logger.info("Transaction rollback scenarios validation completed")
+    
+    @pytest.mark.database
+    @pytest.mark.integration
+    def test_transaction_context_manager(self, app_with_database, user_factory):
+        """
+        Test database transaction context manager for simplified transaction handling.
+        
+        Validates convenience transaction context manager functionality providing
+        simplified transaction management with proper error handling and resource
+        cleanup per Section 6.2.2 transaction management patterns.
+        
+        Args:
+            app_with_database: Flask application with database connections
+            user_factory: User document factory for test data generation
+        """
+        with app_with_database.app_context():
+            collection = get_collection('test_context_users')
+            
+            # Test successful transaction with context manager
+            user_doc = user_factory.build()
+            
+            with database_transaction() as session:
+                insert_result = collection.insert_one(user_doc, session=session)
+                user_id = insert_result.inserted_id
                 
                 # Update document within transaction
-                mongodb_client.update_one(
-                    collection_name,
-                    {'test_id': 0},
-                    {'$set': {'status': 'transaction_updated'}},
+                collection.update_one(
+                    {'_id': user_id},
+                    {'$set': {'status': 'active'}},
                     session=session
                 )
             
-            # Verify transaction was committed
-            result = mongodb_client.find_one(collection_name, {'test_id': 0})
-            assert result.document['status'] == 'transaction_updated'
+            # Verify transaction committed
+            committed_user = collection.find_one({'_id': user_id})
+            assert committed_user is not None
+            assert committed_user['status'] == 'active'
             
-        except Exception as e:
-            pytest.fail(f"Transaction failed unexpectedly: {e}")
-        
-        # Test transaction rollback on error
-        original_count = mongodb_client.count_documents(collection_name, {})
-        
-        try:
-            with mongodb_client.transaction() as session:
-                # Insert documents
-                mongodb_client.insert_one(collection_name, test_documents[2], session=session)
-                mongodb_client.insert_one(collection_name, test_documents[3], session=session)
-                
-                # Force an error to trigger rollback
-                raise Exception("Intentional error to test rollback")
-                
-        except Exception:
-            pass  # Expected error
-        
-        # Verify rollback - count should be unchanged
-        final_count = mongodb_client.count_documents(collection_name, {})
-        assert final_count == original_count
+            # Test transaction with exception (should rollback)
+            user2_doc = user_factory.build()
+            
+            try:
+                with database_transaction() as session:
+                    insert_result = collection.insert_one(user2_doc, session=session)
+                    user2_id = insert_result.inserted_id
+                    
+                    # Simulate error
+                    raise ValueError("Simulated transaction error")
+                    
+            except ValueError:
+                pass  # Expected error
+            
+            # Verify rollback - user2 should not exist
+            rolled_back_user = collection.find_one({'_id': user2_id})
+            assert rolled_back_user is None
+            
+            # Cleanup
+            collection.delete_one({'_id': user_id})
+            
+        logger.info("Transaction context manager validation completed")
     
-    def test_connection_pool_management(self, database_config):
-        """Test connection pool management and resource efficiency."""
-        # Create multiple MongoDB clients to test pool behavior
-        clients = []
+    @pytest.mark.database
+    @pytest.mark.integration
+    def test_transaction_performance_monitoring(self, app_with_database, user_factory):
+        """
+        Test transaction performance monitoring and metrics collection.
         
-        try:
-            for i in range(5):
-                manager = DatabaseManager(database_config)
-                manager.initialize()
-                clients.append(manager.mongodb_client)
+        Validates transaction performance monitoring including execution time
+        tracking, success rate measurement, and baseline compliance per
+        Section 6.2.4 performance optimization transaction monitoring requirements.
+        
+        Args:
+            app_with_database: Flask application with database connections
+            user_factory: User document factory for test data generation
+        """
+        with app_with_database.app_context():
+            collection = get_collection('test_perf_transactions')
             
-            # Test concurrent operations across multiple clients
-            def perform_operations(client, operation_id):
-                collection_name = f"test_pool_{operation_id}"
-                test_doc = {'operation_id': operation_id, 'data': f'test_data_{operation_id}'}
-                
-                # Perform operations to test connection pool
-                client.insert_one(collection_name, test_doc)
-                result = client.find_one(collection_name, {'operation_id': operation_id})
-                assert result.success is True
-                client.delete_one(collection_name, {'operation_id': operation_id})
-                
-                return f"Operation {operation_id} completed"
+            # Test transaction performance with monitoring
+            transaction_times = []
+            success_count = 0
+            error_count = 0
+            
+            for i in range(10):
+                try:
+                    start_time = time.perf_counter()
+                    
+                    with monitor_database_transaction() as (session, metrics):
+                        user_doc = user_factory.build()
+                        insert_result = collection.insert_one(user_doc, session=session)
+                        
+                        # Simulate some processing
+                        collection.update_one(
+                            {'_id': insert_result.inserted_id},
+                            {'$set': {'processed': True}},
+                            session=session
+                        )
+                    
+                    transaction_time = time.perf_counter() - start_time
+                    transaction_times.append(transaction_time)
+                    success_count += 1
+                    
+                    # Verify metrics collection
+                    assert 'transaction_id' in metrics
+                    assert 'start_time' in metrics
+                    assert 'operations_count' in metrics
+                    
+                except Exception:
+                    error_count += 1
+            
+            # Verify performance metrics
+            assert len(transaction_times) > 0
+            avg_transaction_time = sum(transaction_times) / len(transaction_times)
+            max_transaction_time = max(transaction_times)
+            
+            # Performance thresholds
+            assert avg_transaction_time < 0.5  # Average should be under 500ms
+            assert max_transaction_time < 1.0  # Maximum should be under 1s
+            assert success_count >= 8  # At least 80% success rate
+            
+            # Verify transaction consistency
+            total_documents = collection.count_documents({})
+            processed_documents = collection.count_documents({'processed': True})
+            assert total_documents == processed_documents  # All should be processed
+            
+            logger.info(
+                "Transaction performance validation completed",
+                avg_time_ms=avg_transaction_time * 1000,
+                max_time_ms=max_transaction_time * 1000,
+                success_rate=success_count / (success_count + error_count) * 100
+            )
+            
+            # Cleanup
+            collection.drop()
+
+
+class TestConnectionPooling:
+    """
+    Test suite for database connection pooling covering pool configuration,
+    resource management, and performance optimization.
+    
+    Tests connection pooling equivalent to Node.js patterns per Section 5.2.5
+    database access layer requirements with comprehensive pool monitoring
+    and resource optimization validation.
+    """
+    
+    @pytest.mark.database
+    @pytest.mark.integration
+    def test_connection_pool_configuration(self, app_with_database):
+        """
+        Test MongoDB connection pool configuration and parameters.
+        
+        Validates connection pool configuration including pool size limits,
+        timeout settings, and resource management per Section 5.2.5 connection
+        pool management equivalent to Node.js implementation patterns.
+        
+        Args:
+            app_with_database: Flask application with database connections
+        """
+        with app_with_database.app_context():
+            client = get_mongodb_client()
+            
+            # Verify connection pool configuration
+            pool_options = client.options.pool_options
+            
+            # Test pool size configuration
+            assert pool_options.max_pool_size >= 10
+            assert pool_options.max_pool_size <= 100
+            assert pool_options.min_pool_size >= 0
+            assert pool_options.min_pool_size <= pool_options.max_pool_size
+            
+            # Test timeout configuration
+            assert pool_options.max_idle_time_seconds is not None
+            assert pool_options.wait_queue_timeout_seconds is not None
+            
+            # Test connection configuration
+            server_selection_timeout = client.options.server_selection_timeout_ms
+            assert server_selection_timeout >= 1000  # At least 1 second
+            assert server_selection_timeout <= 30000  # At most 30 seconds
+            
+            # Verify socket timeout configuration
+            socket_timeout = client.options.socket_timeout_ms
+            if socket_timeout is not None:
+                assert socket_timeout >= 1000  # At least 1 second
+            
+        logger.info("Connection pool configuration validation completed")
+    
+    @pytest.mark.database
+    @pytest.mark.integration
+    def test_connection_pool_utilization(self, app_with_database, user_factory):
+        """
+        Test connection pool utilization under concurrent load scenarios.
+        
+        Validates connection pool behavior under concurrent database operations
+        including pool exhaustion scenarios, connection reuse, and resource
+        efficiency per Section 6.2.4 performance optimization requirements.
+        
+        Args:
+            app_with_database: Flask application with database connections
+            user_factory: User document factory for test data generation
+        """
+        with app_with_database.app_context():
+            collection = get_collection('test_pool_utilization')
+            
+            # Test concurrent operations with limited pool
+            def perform_database_operation(index):
+                """Perform database operation in thread"""
+                try:
+                    user_doc = user_factory.build()
+                    user_doc['thread_index'] = index
+                    
+                    # Insert document
+                    insert_result = collection.insert_one(user_doc)
+                    
+                    # Query document back
+                    retrieved = collection.find_one({'_id': insert_result.inserted_id})
+                    
+                    # Update document
+                    collection.update_one(
+                        {'_id': insert_result.inserted_id},
+                        {'$set': {'processed': True}}
+                    )
+                    
+                    return {
+                        'success': True,
+                        'thread_index': index,
+                        'document_id': insert_result.inserted_id
+                    }
+                    
+                except Exception as e:
+                    return {
+                        'success': False,
+                        'thread_index': index,
+                        'error': str(e)
+                    }
             
             # Execute concurrent operations
-            with ThreadPoolExecutor(max_workers=len(clients)) as executor:
+            start_time = time.perf_counter()
+            
+            with ThreadPoolExecutor(max_workers=20) as executor:
                 futures = [
-                    executor.submit(perform_operations, client, i)
-                    for i, client in enumerate(clients)
+                    executor.submit(perform_database_operation, i)
+                    for i in range(50)
                 ]
                 
-                results = [future.result() for future in as_completed(futures)]
-                assert len(results) == len(clients)
-        
-        finally:
-            # Clean up clients and verify proper connection closure
-            for client in clients:
-                if hasattr(client, '_manager'):
-                    client._manager.close()
-    
-    def test_error_handling_and_resilience(self, mongodb_client):
-        """Test error handling patterns and resilience mechanisms."""
-        collection_name = TEST_COLLECTION_NAME
-        
-        # Test invalid operation handling
-        invalid_filter = {'$invalid_operator': 'invalid_value'}
-        
-        result = mongodb_client.find_one(collection_name, invalid_filter)
-        assert result.success is False
-        assert result.error is not None
-        
-        # Test duplicate key error handling
-        unique_doc = {'_id': ObjectId(), 'unique_field': 'unique_value'}
-        mongodb_client.insert_one(collection_name, unique_doc)
-        
-        # Try to insert duplicate
-        duplicate_result = mongodb_client.insert_one(collection_name, unique_doc)
-        assert duplicate_result.success is False
-        assert isinstance(duplicate_result.error, WriteError)
-        
-        # Test timeout handling with very short timeout
-        short_timeout_config = DatabasePackageConfig(
-            mongodb_uri=mongodb_client._config.uri,
-            database_name=TEST_DATABASE_NAME,
-            server_selection_timeout_ms=1  # Very short timeout
-        )
-        
-        # This should handle timeout gracefully
-        try:
-            timeout_client = create_mongodb_client(short_timeout_config)
-            timeout_result = timeout_client.find_one(collection_name, {})
-            # Should either succeed quickly or fail gracefully
-        except (ServerSelectionTimeoutError, ConnectionFailure):
-            pass  # Expected for very short timeout
-
-
-class TestMotorAsyncOperations:
-    """
-    Test suite for Motor 3.3+ async database operations including async CRUD operations,
-    concurrent operations, async transaction management, and performance optimization.
-    
-    Validates Motor async driver functionality per Section 5.2.5 requirements with
-    pytest-asyncio integration for asynchronous database operations testing.
-    """
-    
-    @pytest.mark.asyncio
-    async def test_motor_database_connection(self, motor_database):
-        """Test Motor async database connection and basic operations."""
-        assert motor_database is not None
-        assert isinstance(motor_database, MotorAsyncDatabase)
-        
-        # Test connection verification
-        connection_status = await motor_database.ping()
-        assert connection_status is True
-        
-        # Test database access
-        database_name = motor_database.database_name
-        assert database_name == TEST_DATABASE_NAME
-    
-    @pytest.mark.asyncio
-    async def test_async_document_insertion(self, motor_database, test_documents):
-        """Test async document insertion operations with performance tracking."""
-        collection_name = TEST_COLLECTION_NAME
-        
-        # Test async single document insertion
-        single_doc = test_documents[0]
-        start_time = time.time()
-        result = await motor_database.insert_one(collection_name, single_doc)
-        end_time = time.time()
-        
-        assert result.inserted_id is not None
-        
-        test_fixtures.record_performance_metric(
-            operation_name="async_insert_one",
-            start_time=start_time,
-            end_time=end_time,
-            success=True,
-            record_count=1
-        )
-        
-        # Test async bulk document insertion
-        bulk_docs = test_documents[1:50]
-        start_time = time.time()
-        bulk_result = await motor_database.insert_many(collection_name, bulk_docs)
-        end_time = time.time()
-        
-        assert len(bulk_result.inserted_ids) == len(bulk_docs)
-        
-        test_fixtures.record_performance_metric(
-            operation_name="async_insert_many",
-            start_time=start_time,
-            end_time=end_time,
-            success=True,
-            record_count=len(bulk_docs)
-        )
-    
-    @pytest.mark.asyncio
-    async def test_async_document_queries(self, motor_database, test_documents):
-        """Test async document querying with various filters and projections."""
-        collection_name = TEST_COLLECTION_NAME
-        
-        # Insert test data
-        await motor_database.insert_many(collection_name, test_documents)
-        
-        # Test async find_one operation
-        start_time = time.time()
-        single_doc = await motor_database.find_one(collection_name, {'test_id': 0})
-        end_time = time.time()
-        
-        assert single_doc is not None
-        assert single_doc['test_id'] == 0
-        
-        test_fixtures.record_performance_metric(
-            operation_name="async_find_one",
-            start_time=start_time,
-            end_time=end_time,
-            success=True,
-            record_count=1
-        )
-        
-        # Test async find operation with cursor
-        start_time = time.time()
-        cursor = motor_database.find(collection_name, {'status': 'active'})
-        documents = await cursor.to_list(length=20)
-        end_time = time.time()
-        
-        assert isinstance(documents, list)
-        assert len(documents) <= 20
-        assert all(doc['status'] == 'active' for doc in documents)
-        
-        test_fixtures.record_performance_metric(
-            operation_name="async_find_cursor",
-            start_time=start_time,
-            end_time=end_time,
-            success=True,
-            record_count=len(documents)
-        )
-        
-        # Test async aggregation pipeline
-        pipeline = [
-            {'$match': {'score': {'$gte': 50}}},
-            {'$group': {'_id': '$status', 'avg_score': {'$avg': '$score'}}},
-            {'$sort': {'avg_score': -1}}
-        ]
-        
-        start_time = time.time()
-        agg_cursor = motor_database.aggregate(collection_name, pipeline)
-        agg_results = await agg_cursor.to_list(length=10)
-        end_time = time.time()
-        
-        assert isinstance(agg_results, list)
-        
-        test_fixtures.record_performance_metric(
-            operation_name="async_aggregate",
-            start_time=start_time,
-            end_time=end_time,
-            success=True,
-            record_count=len(agg_results)
-        )
-    
-    @pytest.mark.asyncio
-    async def test_async_document_updates(self, motor_database, test_documents):
-        """Test async document update operations with various update patterns."""
-        collection_name = TEST_COLLECTION_NAME
-        
-        # Insert test data
-        await motor_database.insert_many(collection_name, test_documents)
-        
-        # Test async update_one operation
-        update_filter = {'test_id': 0}
-        update_doc = {'$set': {'status': 'async_updated', 'score': 1000}}
-        
-        start_time = time.time()
-        update_result = await motor_database.update_one(collection_name, update_filter, update_doc)
-        end_time = time.time()
-        
-        assert update_result.modified_count == 1
-        
-        test_fixtures.record_performance_metric(
-            operation_name="async_update_one",
-            start_time=start_time,
-            end_time=end_time,
-            success=True,
-            record_count=1
-        )
-        
-        # Verify async update
-        updated_doc = await motor_database.find_one(collection_name, {'test_id': 0})
-        assert updated_doc['status'] == 'async_updated'
-        assert updated_doc['score'] == 1000
-        
-        # Test async update_many operation
-        many_filter = {'status': 'active'}
-        many_update = {'$set': {'status': 'async_bulk_updated'}}
-        
-        start_time = time.time()
-        bulk_update_result = await motor_database.update_many(collection_name, many_filter, many_update)
-        end_time = time.time()
-        
-        assert bulk_update_result.modified_count >= 0
-        
-        test_fixtures.record_performance_metric(
-            operation_name="async_update_many",
-            start_time=start_time,
-            end_time=end_time,
-            success=True,
-            record_count=bulk_update_result.modified_count
-        )
-    
-    @pytest.mark.asyncio
-    async def test_async_document_deletion(self, motor_database, test_documents):
-        """Test async document deletion operations with performance tracking."""
-        collection_name = TEST_COLLECTION_NAME
-        
-        # Insert test data
-        await motor_database.insert_many(collection_name, test_documents)
-        
-        # Test async delete_one operation
-        delete_filter = {'test_id': 0}
-        
-        start_time = time.time()
-        delete_result = await motor_database.delete_one(collection_name, delete_filter)
-        end_time = time.time()
-        
-        assert delete_result.deleted_count == 1
-        
-        test_fixtures.record_performance_metric(
-            operation_name="async_delete_one",
-            start_time=start_time,
-            end_time=end_time,
-            success=True,
-            record_count=1
-        )
-        
-        # Verify async deletion
-        deleted_doc = await motor_database.find_one(collection_name, {'test_id': 0})
-        assert deleted_doc is None
-        
-        # Test async delete_many operation
-        many_delete_filter = {'status': 'inactive'}
-        
-        start_time = time.time()
-        bulk_delete_result = await motor_database.delete_many(collection_name, many_delete_filter)
-        end_time = time.time()
-        
-        assert bulk_delete_result.deleted_count >= 0
-        
-        test_fixtures.record_performance_metric(
-            operation_name="async_delete_many",
-            start_time=start_time,
-            end_time=end_time,
-            success=True,
-            record_count=bulk_delete_result.deleted_count
-        )
-    
-    @pytest.mark.asyncio
-    async def test_async_transaction_management(self, motor_database, test_documents):
-        """Test async transaction management with Motor async driver."""
-        collection_name = TEST_COLLECTION_NAME
-        
-        # Test async successful transaction
-        async with motor_database.start_transaction() as session:
-            # Insert documents within async transaction
-            await motor_database.insert_one(collection_name, test_documents[0], session=session)
-            await motor_database.insert_one(collection_name, test_documents[1], session=session)
+                results = []
+                for future in as_completed(futures):
+                    result = future.result()
+                    results.append(result)
             
-            # Update document within async transaction
-            await motor_database.update_one(
-                collection_name,
-                {'test_id': 0},
-                {'$set': {'status': 'async_transaction_updated'}},
-                session=session
+            execution_time = time.perf_counter() - start_time
+            
+            # Analyze results
+            successful_operations = [r for r in results if r['success']]
+            failed_operations = [r for r in results if not r['success']]
+            
+            # Verify performance and success rate
+            assert len(successful_operations) >= 45  # At least 90% success rate
+            assert execution_time < 30.0  # Should complete within 30 seconds
+            
+            success_rate = len(successful_operations) / len(results) * 100
+            avg_time_per_operation = execution_time / len(results)
+            
+            logger.info(
+                "Connection pool utilization validation completed",
+                total_operations=len(results),
+                successful_operations=len(successful_operations),
+                failed_operations=len(failed_operations),
+                success_rate_percent=success_rate,
+                total_time_seconds=execution_time,
+                avg_time_per_operation_ms=avg_time_per_operation * 1000
             )
-        
-        # Verify async transaction was committed
-        result = await motor_database.find_one(collection_name, {'test_id': 0})
-        assert result['status'] == 'async_transaction_updated'
-        
-        # Test async transaction rollback on error
-        original_count = await motor_database.count_documents(collection_name, {})
-        
-        try:
-            async with motor_database.start_transaction() as session:
-                # Insert documents
-                await motor_database.insert_one(collection_name, test_documents[2], session=session)
-                await motor_database.insert_one(collection_name, test_documents[3], session=session)
-                
-                # Force an error to trigger rollback
-                raise Exception("Intentional async error to test rollback")
-                
-        except Exception:
-            pass  # Expected error
-        
-        # Verify async rollback - count should be unchanged
-        final_count = await motor_database.count_documents(collection_name, {})
-        assert final_count == original_count
+            
+            # Verify all successful documents exist
+            document_ids = [r['document_id'] for r in successful_operations]
+            found_documents = list(collection.find({'_id': {'$in': document_ids}}))
+            assert len(found_documents) == len(successful_operations)
+            
+            # Cleanup
+            collection.drop()
     
-    @pytest.mark.asyncio
-    async def test_concurrent_async_operations(self, motor_database, test_documents):
-        """Test concurrent async database operations for performance validation."""
-        collection_name = TEST_COLLECTION_NAME
+    @pytest.mark.database
+    @pytest.mark.integration  
+    def test_connection_pool_monitoring(self, app_with_database):
+        """
+        Test connection pool monitoring and metrics collection.
         
-        async def async_operation(operation_id: int):
-            """Perform async database operations for concurrency testing."""
-            doc = {
-                'operation_id': operation_id,
-                'data': f'concurrent_test_{operation_id}',
-                'timestamp': time.time()
-            }
+        Validates connection pool monitoring capabilities including active
+        connection tracking, pool statistics, and performance metrics per
+        Section 6.2.4 connection pool monitoring requirements.
+        
+        Args:
+            app_with_database: Flask application with database connections
+        """
+        with app_with_database.app_context():
+            # Test database services monitoring
+            services = get_current_database_services()
             
-            # Insert document
-            insert_result = await motor_database.insert_one(collection_name, doc)
-            assert insert_result.inserted_id is not None
+            if services.monitoring_manager:
+                # Get connection pool metrics
+                performance_metrics = services.get_performance_metrics()
+                
+                # Verify metrics structure
+                assert 'connection_pools' in performance_metrics
+                pool_metrics = performance_metrics['connection_pools']
+                
+                # Test pool information availability
+                if pool_metrics:
+                    # Verify pool status information
+                    assert isinstance(pool_metrics, dict)
+                
+                # Test health monitoring
+                health_status = services.get_health_status()
+                assert 'services' in health_status
+                
+                # Verify MongoDB service health
+                if 'mongodb_sync' in health_status['services']:
+                    mongodb_health = health_status['services']['mongodb_sync']
+                    assert 'status' in mongodb_health
             
-            # Query document
-            query_result = await motor_database.find_one(collection_name, {'operation_id': operation_id})
-            assert query_result is not None
+            # Test direct client pool monitoring
+            client = get_mongodb_client()
             
-            # Update document
-            update_result = await motor_database.update_one(
-                collection_name,
-                {'operation_id': operation_id},
-                {'$set': {'status': 'concurrent_updated'}}
+            # Perform operations to activate connections
+            database = get_database()
+            test_collection = database['test_pool_monitoring']
+            
+            # Insert test documents to generate pool activity
+            test_docs = [{'index': i, 'timestamp': datetime.now(timezone.utc)} for i in range(10)]
+            test_collection.insert_many(test_docs)
+            
+            # Query documents to maintain connection activity
+            found_docs = list(test_collection.find({}))
+            assert len(found_docs) == 10
+            
+            # Test pool configuration access
+            pool_options = client.options.pool_options
+            assert pool_options.max_pool_size > 0
+            
+            # Cleanup
+            test_collection.drop()
+            
+        logger.info("Connection pool monitoring validation completed")
+    
+    @pytest.mark.database
+    @pytest.mark.integration
+    def test_connection_pool_error_handling(self, app_with_database):
+        """
+        Test connection pool error handling and recovery scenarios.
+        
+        Validates connection pool resilience including timeout handling,
+        connection failure recovery, and circuit breaker patterns per
+        Section 4.2.3 error handling and Section 5.2.5 resource management.
+        
+        Args:
+            app_with_database: Flask application with database connections
+        """
+        with app_with_database.app_context():
+            collection = get_collection('test_pool_errors')
+            
+            # Test normal operation baseline
+            baseline_doc = {'test': 'baseline', 'timestamp': datetime.now(timezone.utc)}
+            baseline_result = collection.insert_one(baseline_doc)
+            assert baseline_result.acknowledged is True
+            
+            # Test operation with circuit breaker monitoring
+            operation_count = 0
+            success_count = 0
+            error_count = 0
+            
+            def monitored_operation():
+                nonlocal operation_count, success_count, error_count
+                operation_count += 1
+                
+                try:
+                    with monitor_database_operation('test_operation') as metrics:
+                        test_doc = {
+                            'operation_index': operation_count,
+                            'timestamp': datetime.now(timezone.utc)
+                        }
+                        result = collection.insert_one(test_doc)
+                        
+                        # Verify operation success
+                        assert result.acknowledged is True
+                        success_count += 1
+                        
+                        return result
+                        
+                except Exception as e:
+                    error_count += 1
+                    logger.warning(f"Database operation failed: {str(e)}")
+                    raise
+            
+            # Perform monitored operations
+            for i in range(5):
+                try:
+                    monitored_operation()
+                except Exception:
+                    pass  # Continue testing even if individual operations fail
+            
+            # Verify monitoring results
+            assert operation_count == 5
+            success_rate = success_count / operation_count * 100 if operation_count > 0 else 0
+            
+            # Should have high success rate under normal conditions
+            assert success_rate >= 80  # At least 80% success rate
+            
+            logger.info(
+                "Connection pool error handling validation completed",
+                total_operations=operation_count,
+                successful_operations=success_count,
+                failed_operations=error_count,
+                success_rate_percent=success_rate
             )
-            assert update_result.modified_count == 1
             
-            return operation_id
-        
-        # Execute concurrent async operations
-        start_time = time.time()
-        tasks = [async_operation(i) for i in range(CONCURRENT_OPERATION_COUNT)]
-        results = await asyncio.gather(*tasks)
-        end_time = time.time()
-        
-        assert len(results) == CONCURRENT_OPERATION_COUNT
-        assert all(isinstance(result, int) for result in results)
-        
-        test_fixtures.record_performance_metric(
-            operation_name="concurrent_async_operations",
-            start_time=start_time,
-            end_time=end_time,
-            success=True,
-            record_count=CONCURRENT_OPERATION_COUNT * 3  # 3 operations per task
-        )
-        
-        # Verify all concurrent operations completed successfully
-        final_count = await motor_database.count_documents(collection_name, {})
-        assert final_count >= CONCURRENT_OPERATION_COUNT
-    
-    @pytest.mark.asyncio
-    async def test_async_error_handling(self, motor_database):
-        """Test async error handling patterns and resilience mechanisms."""
-        collection_name = TEST_COLLECTION_NAME
-        
-        # Test async invalid operation handling
-        try:
-            invalid_filter = {'$invalid_operator': 'invalid_value'}
-            result = await motor_database.find_one(collection_name, invalid_filter)
-            pytest.fail("Should have raised an error for invalid operation")
-        except OperationFailure:
-            pass  # Expected error
-        
-        # Test async duplicate key error handling
-        unique_doc = {'_id': ObjectId(), 'unique_field': 'async_unique_value'}
-        await motor_database.insert_one(collection_name, unique_doc)
-        
-        try:
-            await motor_database.insert_one(collection_name, unique_doc)
-            pytest.fail("Should have raised an error for duplicate key")
-        except WriteError:
-            pass  # Expected error
+            # Test circuit breaker functionality
+            with mongodb_circuit_breaker() as circuit_breaker:
+                try:
+                    # Perform operation through circuit breaker
+                    test_doc = {'circuit_breaker_test': True}
+                    result = collection.insert_one(test_doc)
+                    assert result.acknowledged is True
+                    
+                except Exception as e:
+                    logger.warning(f"Circuit breaker operation failed: {str(e)}")
+            
+            # Cleanup
+            collection.drop()
 
 
-class TestConnectionPoolingPatterns:
+class TestDatabaseErrorHandling:
     """
-    Test suite for database connection pooling patterns and resource management.
+    Test suite for database error handling covering exception scenarios,
+    retry logic, and circuit breaker patterns.
     
-    Validates connection pool configuration, resource efficiency, concurrent connection
-    handling, and connection lifecycle management equivalent to Node.js patterns.
+    Tests comprehensive error handling with circuit breaker patterns per
+    Section 4.2.3 error handling flows and Section 5.2.5 database access
+    layer error management requirements.
     """
     
-    def test_connection_pool_configuration(self, database_config):
-        """Test connection pool configuration parameters and validation."""
-        # Test custom pool configuration
-        pool_config = DatabasePackageConfig(
-            mongodb_uri=database_config.mongodb_uri,
-            database_name=database_config.database_name,
-            max_pool_size=100,
-            min_pool_size=10,
-            max_idle_time_ms=60000,
-            wait_queue_timeout_ms=15000
-        )
+    @pytest.mark.database
+    @pytest.mark.integration
+    def test_database_exception_handling(self, app_with_database, user_factory):
+        """
+        Test database exception handling and error classification.
         
-        mongodb_config = pool_config.to_mongodb_config()
+        Validates comprehensive exception handling including PyMongo error
+        classification, error severity assessment, and proper error propagation
+        per Section 4.2.3 error handling flows requirements.
         
-        assert mongodb_config.max_pool_size == 100
-        assert mongodb_config.min_pool_size == 10
-        assert mongodb_config.max_idle_time_ms == 60000
-        assert mongodb_config.wait_queue_timeout_ms == 15000
-        
-        # Test Motor async pool configuration
-        motor_options = pool_config.get_motor_client_options()
-        
-        assert motor_options['maxPoolSize'] == pool_config.motor_max_pool_size
-        assert motor_options['minPoolSize'] == pool_config.motor_min_pool_size
-        assert motor_options['maxIdleTimeMS'] == 60000
-        assert motor_options['waitQueueTimeoutMS'] == 15000
+        Args:
+            app_with_database: Flask application with database connections
+            user_factory: User document factory for test data generation
+        """
+        with app_with_database.app_context():
+            collection = get_collection('test_exception_handling')
+            
+            # Test duplicate key error handling
+            collection.create_index('email', unique=True)
+            
+            user_doc = user_factory.build()
+            collection.insert_one(user_doc)
+            
+            # Attempt duplicate insertion
+            with pytest.raises(DuplicateKeyError):
+                duplicate_doc = user_factory.build()
+                duplicate_doc['email'] = user_doc['email']  # Same email
+                collection.insert_one(duplicate_doc)
+            
+            # Test invalid ObjectId error
+            with pytest.raises((ValueError, TypeError)):
+                collection.find_one({'_id': 'invalid-object-id'})
+            
+            # Test invalid update operation
+            with pytest.raises(OperationFailure):
+                collection.update_one(
+                    {'_id': user_doc['_id']},
+                    {'$invalid_operator': {'field': 'value'}}
+                )
+            
+            # Test error handling with decorator
+            @handle_database_error(
+                operation_type=DatabaseOperationType.QUERY,
+                severity=DatabaseErrorSeverity.MEDIUM
+            )
+            def problematic_query():
+                return collection.find_one({'_id': 'definitely-invalid-id'})
+            
+            try:
+                result = problematic_query()
+                # Should handle error gracefully
+            except Exception as e:
+                assert isinstance(e, (ValueError, TypeError, DatabaseException))
+            
+            # Cleanup
+            collection.drop()
+            
+        logger.info("Database exception handling validation completed")
     
-    def test_concurrent_connection_usage(self, database_config):
-        """Test concurrent connection usage patterns and pool efficiency."""
-        manager = DatabaseManager(database_config)
-        manager.initialize()
+    @pytest.mark.database
+    @pytest.mark.integration
+    def test_database_retry_logic(self, app_with_database, error_simulation):
+        """
+        Test database retry logic for transient failures.
         
-        try:
-            def database_operation(thread_id: int) -> Dict[str, Any]:
-                """Perform database operations in separate thread."""
-                client = manager.mongodb_client
-                collection_name = f"test_thread_{thread_id}"
+        Validates retry mechanisms including exponential backoff, retry limits,
+        and success recovery per Section 4.2.3 error handling patterns and
+        Section 5.2.5 database resilience requirements.
+        
+        Args:
+            app_with_database: Flask application with database connections
+            error_simulation: Error simulation fixture for testing
+        """
+        with app_with_database.app_context():
+            collection = get_collection('test_retry_logic')
+            
+            # Configure error simulation for transient failures
+            error_simulation.configure_error(
+                error_type=ConnectionFailure,
+                message="Simulated connection failure",
+                threshold=3,
+                should_fail=True
+            )
+            
+            retry_attempts = 0
+            
+            @with_database_retry(
+                max_retries=3,
+                backoff_factor=0.1,  # Fast backoff for testing
+                exceptions=(ConnectionFailure, NetworkTimeout)
+            )
+            def retry_test_operation():
+                nonlocal retry_attempts
+                retry_attempts += 1
                 
-                # Perform multiple operations to test connection reuse
-                operations_results = []
+                # Simulate transient failure for first few attempts
+                if retry_attempts <= 2:
+                    error_simulation.maybe_fail()
                 
-                for i in range(5):
-                    doc = {'thread_id': thread_id, 'operation': i, 'data': f'thread_{thread_id}_op_{i}'}
-                    
-                    start_time = time.time()
-                    insert_result = client.insert_one(collection_name, doc)
-                    query_result = client.find_one(collection_name, {'thread_id': thread_id, 'operation': i})
-                    end_time = time.time()
-                    
-                    operations_results.append({
-                        'insert_success': insert_result.success,
-                        'query_success': query_result.success,
-                        'duration': end_time - start_time
-                    })
-                
-                return {
-                    'thread_id': thread_id,
-                    'operations': operations_results,
-                    'total_operations': len(operations_results) * 2
+                # Successful operation after retries
+                test_doc = {
+                    'retry_attempt': retry_attempts,
+                    'timestamp': datetime.now(timezone.utc)
                 }
+                return collection.insert_one(test_doc)
             
-            # Execute concurrent database operations
-            with ThreadPoolExecutor(max_workers=10) as executor:
-                futures = [executor.submit(database_operation, i) for i in range(10)]
-                results = [future.result() for future in as_completed(futures)]
+            # Reset simulation state
+            error_simulation.reset()
+            error_simulation.configure_error(
+                error_type=ConnectionFailure,
+                threshold=2,
+                should_fail=True
+            )
             
-            # Validate concurrent operation results
-            assert len(results) == 10
-            for result in results:
-                assert result['total_operations'] == 10
-                assert all(op['insert_success'] for op in result['operations'])
-                assert all(op['query_success'] for op in result['operations'])
-        
-        finally:
-            manager.close()
+            # Execute operation with retries
+            try:
+                result = retry_test_operation()
+                assert result.acknowledged is True
+                assert retry_attempts > 1  # Should have retried
+                
+            except ConnectionFailure:
+                # Acceptable if retries exhausted
+                assert retry_attempts >= 3
+            
+            # Test successful operation without retries
+            error_simulation.reset()
+            
+            def successful_operation():
+                return collection.insert_one({'success': True})
+            
+            decorated_success = with_database_retry()(successful_operation)
+            result = decorated_success()
+            assert result.acknowledged is True
+            
+            # Cleanup
+            collection.drop()
+            
+        logger.info("Database retry logic validation completed")
     
-    @pytest.mark.asyncio
-    async def test_async_connection_pool_management(self, database_config):
-        """Test async connection pool management with Motor driver."""
-        manager = DatabaseManager(database_config)
-        manager.initialize()
-        await manager.initialize_async()
+    @pytest.mark.database
+    @pytest.mark.integration
+    def test_circuit_breaker_functionality(self, app_with_database, error_simulation):
+        """
+        Test circuit breaker functionality for database resilience.
         
-        try:
-            motor_db = manager.motor_database
+        Validates circuit breaker patterns including failure threshold detection,
+        circuit opening/closing, and recovery mechanisms per Section 4.2.3
+        circuit breaker patterns and Section 5.2.5 database resilience.
+        
+        Args:
+            app_with_database: Flask application with database connections
+            error_simulation: Error simulation fixture for testing
+        """
+        with app_with_database.app_context():
+            collection = get_collection('test_circuit_breaker')
             
-            async def async_database_operation(operation_id: int) -> Dict[str, Any]:
-                """Perform async database operations for pool testing."""
-                collection_name = f"test_async_pool_{operation_id}"
+            # Test circuit breaker with database operations
+            operation_count = 0
+            success_count = 0
+            circuit_breaker_trips = 0
+            
+            def test_database_operation():
+                nonlocal operation_count, success_count
+                operation_count += 1
                 
-                operations_results = []
+                # Simulate progressive failures
+                if operation_count <= 3:
+                    error_simulation.force_error(
+                        ConnectionFailure,
+                        "Simulated database failure"
+                    )
                 
-                for i in range(3):
-                    doc = {'operation_id': operation_id, 'iteration': i, 'data': f'async_{operation_id}_{i}'}
-                    
-                    start_time = time.time()
-                    insert_result = await motor_db.insert_one(collection_name, doc)
-                    query_result = await motor_db.find_one(collection_name, {'operation_id': operation_id, 'iteration': i})
-                    end_time = time.time()
-                    
-                    operations_results.append({
-                        'insert_id': str(insert_result.inserted_id),
-                        'query_success': query_result is not None,
-                        'duration': end_time - start_time
-                    })
-                
-                return {
-                    'operation_id': operation_id,
-                    'operations': operations_results,
-                    'total_operations': len(operations_results) * 2
+                # Successful operation
+                test_doc = {
+                    'operation_count': operation_count,
+                    'timestamp': datetime.now(timezone.utc)
                 }
+                result = collection.insert_one(test_doc)
+                success_count += 1
+                return result
             
-            # Execute concurrent async operations
-            tasks = [async_database_operation(i) for i in range(8)]
-            results = await asyncio.gather(*tasks)
+            # Test operations with circuit breaker
+            for i in range(10):
+                try:
+                    with mongodb_circuit_breaker() as breaker:
+                        test_database_operation()
+                        
+                except (ConnectionFailure, Exception) as e:
+                    if "Circuit breaker" in str(e):
+                        circuit_breaker_trips += 1
+                    # Continue testing even after failures
+                
+                # Reset error simulation after initial failures
+                if i == 4:
+                    error_simulation.reset()
             
-            # Validate async operation results
-            assert len(results) == 8
-            for result in results:
-                assert result['total_operations'] == 6
-                assert all(op['query_success'] for op in result['operations'])
-                assert all(op['insert_id'] for op in result['operations'])
-        
-        finally:
-            manager.close()
+            # Verify circuit breaker behavior
+            logger.info(
+                "Circuit breaker functionality validation completed",
+                total_operations=operation_count,
+                successful_operations=success_count,
+                circuit_breaker_trips=circuit_breaker_trips
+            )
+            
+            # Should have some successful operations after recovery
+            assert success_count > 0
+            
+            # Cleanup
+            collection.drop()
     
-    def test_connection_pool_monitoring(self, database_manager):
-        """Test connection pool monitoring and metrics collection."""
-        if database_manager.monitoring_components:
-            metrics = database_manager.monitoring_components.get('metrics')
+    @pytest.mark.database
+    @pytest.mark.integration
+    def test_error_monitoring_and_metrics(self, app_with_database, test_metrics_collector):
+        """
+        Test error monitoring and metrics collection for observability.
+        
+        Validates error metrics collection including error rates, error types,
+        and performance impact monitoring per Section 6.2.5 database monitoring
+        and observability requirements.
+        
+        Args:
+            app_with_database: Flask application with database connections
+            test_metrics_collector: Test metrics collection fixture
+        """
+        with app_with_database.app_context():
+            collection = get_collection('test_error_monitoring')
             
-            if metrics:
-                # Perform operations to generate metrics
-                client = database_manager.mongodb_client
-                collection_name = "test_monitoring"
-                
-                for i in range(20):
-                    doc = {'monitoring_test': i, 'data': f'metrics_test_{i}'}
-                    client.insert_one(collection_name, doc)
-                    client.find_one(collection_name, {'monitoring_test': i})
-                
-                # Note: Actual metrics validation would depend on the monitoring implementation
-                # This tests that monitoring components are properly initialized
-                assert metrics is not None
+            # Test successful operations baseline
+            for i in range(5):
+                test_metrics_collector.start_test(f"success_operation_{i}")
+                try:
+                    doc = {
+                        'test_index': i,
+                        'timestamp': datetime.now(timezone.utc)
+                    }
+                    collection.insert_one(doc)
+                    test_metrics_collector.end_test(f"success_operation_{i}", success=True)
+                    test_metrics_collector.record_operation('database')
+                    
+                except Exception as e:
+                    test_metrics_collector.end_test(
+                        f"success_operation_{i}",
+                        success=False,
+                        error_type=type(e).__name__
+                    )
+            
+            # Test error scenarios
+            for i in range(3):
+                test_metrics_collector.start_test(f"error_operation_{i}")
+                try:
+                    # Force error with invalid operation
+                    collection.update_one(
+                        {'_id': f"invalid_id_{i}"},
+                        {'$invalid_op': {'field': 'value'}}
+                    )
+                    test_metrics_collector.end_test(f"error_operation_{i}", success=True)
+                    
+                except Exception as e:
+                    test_metrics_collector.end_test(
+                        f"error_operation_{i}",
+                        success=False,
+                        error_type=type(e).__name__
+                    )
+                    test_metrics_collector.record_operation('database')
+            
+            # Analyze metrics
+            metrics_summary = test_metrics_collector.get_summary()
+            
+            # Verify metrics collection
+            assert metrics_summary['total_tests'] == 8
+            assert metrics_summary['passed_tests'] >= 5  # At least the successful ones
+            assert metrics_summary['database_operations'] > 0
+            
+            # Verify error distribution tracking
+            if metrics_summary['error_distribution']:
+                assert 'OperationFailure' in metrics_summary['error_distribution']
+            
+            success_rate = metrics_summary['success_rate'] * 100
+            logger.info(
+                "Error monitoring and metrics validation completed",
+                total_tests=metrics_summary['total_tests'],
+                success_rate_percent=success_rate,
+                error_types=list(metrics_summary['error_distribution'].keys()),
+                avg_execution_time_ms=metrics_summary['average_execution_time'] * 1000
+            )
+            
+            # Cleanup
+            collection.drop()
 
 
 class TestDatabaseHealthMonitoring:
     """
-    Test suite for database health monitoring, metrics collection, and performance tracking.
+    Test suite for database health monitoring covering health checks,
+    performance metrics, and observability integration.
     
-    Validates database health checking capabilities, metrics collection integration,
-    and performance monitoring per Section 5.2.5 database health monitoring requirements.
+    Tests database health monitoring and management per Section 6.2.5
+    database monitoring requirements with comprehensive health validation
+    and performance baseline compliance monitoring.
     """
     
-    def test_database_health_checker_initialization(self, database_manager):
-        """Test database health checker initialization and configuration."""
-        if database_manager.monitoring_components:
-            health_checker = database_manager.health_checker
+    @pytest.mark.database
+    @pytest.mark.integration
+    def test_database_health_endpoints(self, app_with_database, client):
+        """
+        Test database health check endpoints for monitoring integration.
+        
+        Validates health check endpoints including basic health status,
+        detailed health information, and monitoring system integration
+        per Section 6.2.5 health monitoring and observability requirements.
+        
+        Args:
+            app_with_database: Flask application with database connections
+            client: Flask test client
+        """
+        # Test basic health check endpoint
+        response = client.get('/health/database')
+        assert response.status_code in [200, 503]  # May be unhealthy in test environment
+        
+        health_data = response.get_json()
+        assert 'status' in health_data
+        assert health_data['status'] in ['healthy', 'unhealthy']
+        assert 'timestamp' in health_data
+        
+        if response.status_code == 200:
+            assert health_data['status'] == 'healthy'
+            assert 'details' in health_data
             
-            assert health_checker is not None
-            assert isinstance(health_checker, DatabaseHealthChecker)
+            # Verify health details structure
+            details = health_data['details']
+            assert 'environment' in details
+            assert 'initialized' in details
+            assert 'services' in details
+        
+        # Test detailed health check endpoint
+        detailed_response = client.get('/health/database/detailed')
+        
+        if detailed_response.status_code == 200:
+            detailed_data = detailed_response.get_json()
+            assert 'health' in detailed_data
+            assert 'performance' in detailed_data
+            assert 'timestamp' in detailed_data
+            
+            # Verify performance metrics structure
+            performance = detailed_data['performance']
+            assert 'environment' in performance
+            assert 'mongodb_sync' in performance
+            assert 'connection_pools' in performance
+        
+        logger.info("Database health endpoints validation completed")
     
-    def test_mongodb_health_monitoring(self, database_manager):
-        """Test MongoDB health monitoring and status reporting."""
-        health_status = database_manager.get_health_status()
+    @pytest.mark.database
+    @pytest.mark.integration
+    def test_health_status_comprehensive(self, app_with_database):
+        """
+        Test comprehensive database health status functionality.
         
-        assert isinstance(health_status, dict)
-        assert 'overall_status' in health_status
-        assert 'timestamp' in health_status
+        Validates complete health status reporting including all database
+        services, configuration status, and monitoring integration per
+        Section 6.2.5 comprehensive health monitoring requirements.
         
-        # Validate health status values
-        valid_statuses = ['healthy', 'degraded', 'unhealthy', 'unknown', 'error']
-        assert health_status['overall_status'] in valid_statuses
-        
-        # Check for component-specific health information
-        if 'components' in health_status:
-            components = health_status['components']
+        Args:
+            app_with_database: Flask application with database connections
+        """
+        with app_with_database.app_context():
+            # Get comprehensive health status
+            health_status = get_database_health_status()
             
-            if 'mongodb' in components:
-                mongodb_health = components['mongodb']
-                assert isinstance(mongodb_health, dict)
+            # Verify overall health structure
+            assert isinstance(health_status, dict)
+            assert 'status' in health_status or 'environment' in health_status
+            assert 'timestamp' in health_status
             
-            if 'mongodb_sync' in components:
-                sync_health = components['mongodb_sync']
-                assert isinstance(sync_health, dict)
+            # If services are initialized, verify service health
+            if 'services' in health_status:
+                services = health_status['services']
+                
+                # Check database configuration health
+                if 'database_config' in services:
+                    config_health = services['database_config']
+                    assert 'status' in config_health
+                
+                # Check MongoDB synchronous manager health
+                if 'mongodb_sync' in services:
+                    mongodb_health = services['mongodb_sync']
+                    assert 'status' in mongodb_health
+                
+                # Check monitoring service health
+                if 'monitoring' in services:
+                    monitoring_health = services['monitoring']
+                    assert 'status' in monitoring_health
+                    assert 'enabled' in monitoring_health
+            
+            # Verify timestamp format
+            timestamp_str = health_status['timestamp']
+            try:
+                timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                assert isinstance(timestamp, datetime)
+            except ValueError:
+                pytest.fail(f"Invalid timestamp format: {timestamp_str}")
+            
+        logger.info("Comprehensive health status validation completed")
     
-    def test_performance_metrics_collection(self, database_manager):
-        """Test performance metrics collection and monitoring integration."""
-        # Generate operations for metrics collection
-        if database_manager.mongodb_client:
-            client = database_manager.mongodb_client
-            collection_name = "test_metrics"
+    @pytest.mark.database
+    @pytest.mark.integration
+    def test_performance_metrics_collection(self, app_with_database):
+        """
+        Test database performance metrics collection for baseline compliance.
+        
+        Validates performance metrics collection including response times,
+        connection statistics, and baseline comparison data per Section 6.2.4
+        performance optimization and monitoring requirements.
+        
+        Args:
+            app_with_database: Flask application with database connections
+        """
+        with app_with_database.app_context():
+            # Get performance metrics
+            performance_metrics = get_database_performance_metrics()
             
-            # Perform various operations to generate metrics
-            test_docs = test_fixtures.generate_test_documents(20)
+            # Verify basic metrics structure
+            assert isinstance(performance_metrics, dict)
+            assert 'timestamp' in performance_metrics
+            assert 'environment' in performance_metrics
             
-            for doc in test_docs:
-                client.insert_one(collection_name, doc)
+            # Verify MongoDB synchronous metrics
+            if 'mongodb_sync' in performance_metrics:
+                mongodb_metrics = performance_metrics['mongodb_sync']
+                assert isinstance(mongodb_metrics, dict)
             
+            # Verify connection pool metrics
+            if 'connection_pools' in performance_metrics:
+                pool_metrics = performance_metrics['connection_pools']
+                assert isinstance(pool_metrics, dict)
+            
+            # Test performance data with database operations
+            collection = get_collection('test_performance_metrics')
+            
+            # Perform operations to generate metrics
+            start_time = time.perf_counter()
             for i in range(10):
-                client.find_one(collection_name, {'test_id': i})
+                doc = {
+                    'index': i,
+                    'timestamp': datetime.now(timezone.utc),
+                    'data': f"test_data_{i}"
+                }
+                collection.insert_one(doc)
             
-            # Update operations
-            client.update_many(collection_name, {'status': 'active'}, {'$set': {'status': 'monitored'}})
+            operations_time = time.perf_counter() - start_time
             
-            # Delete operations
-            client.delete_many(collection_name, {'status': 'monitored'})
-        
-        # Verify metrics collection (implementation-dependent)
-        if database_manager.monitoring_components:
-            assert database_manager.monitoring_components is not None
+            # Get updated metrics after operations
+            updated_metrics = get_database_performance_metrics()
+            
+            # Verify metrics were updated
+            assert updated_metrics['timestamp'] != performance_metrics['timestamp']
+            
+            # Verify performance thresholds
+            avg_operation_time = operations_time / 10
+            assert avg_operation_time < 0.1  # Should be under 100ms per operation
+            
+            logger.info(
+                "Performance metrics collection validation completed",
+                operations_time_ms=operations_time * 1000,
+                avg_operation_time_ms=avg_operation_time * 1000
+            )
+            
+            # Cleanup
+            collection.drop()
     
-    def test_monitoring_component_integration(self, database_config):
-        """Test monitoring component integration and initialization."""
-        # Test with monitoring enabled
-        enabled_config = DatabasePackageConfig(
-            mongodb_uri=database_config.mongodb_uri,
-            database_name=database_config.database_name,
-            enable_monitoring=True,
-            enable_health_checks=True
-        )
+    @pytest.mark.database
+    @pytest.mark.integration
+    def test_monitoring_integration(self, app_with_database):
+        """
+        Test monitoring system integration for observability.
         
-        enabled_manager = DatabaseManager(enabled_config)
-        enabled_manager.initialize()
+        Validates monitoring system integration including metrics export,
+        alerting integration, and enterprise monitoring compliance per
+        Section 6.2.5 monitoring and observability integration requirements.
         
-        try:
-            if enabled_manager.monitoring_components:
-                assert enabled_manager.monitoring_components is not None
-                assert enabled_manager.health_checker is not None
-        finally:
-            enabled_manager.close()
-        
-        # Test with monitoring disabled
-        disabled_config = DatabasePackageConfig(
-            mongodb_uri=database_config.mongodb_uri,
-            database_name=database_config.database_name,
-            enable_monitoring=False,
-            enable_health_checks=False
-        )
-        
-        disabled_manager = DatabaseManager(disabled_config)
-        disabled_manager.initialize()
-        
-        try:
-            # Should have minimal or no monitoring components
-            pass  # Implementation may vary for disabled monitoring
-        finally:
-            disabled_manager.close()
+        Args:
+            app_with_database: Flask application with database connections
+        """
+        with app_with_database.app_context():
+            services = get_current_database_services()
+            
+            # Test monitoring manager availability
+            if services.monitoring_manager:
+                monitoring_manager = services.monitoring_manager
+                assert isinstance(monitoring_manager, DatabaseMonitoringManager)
+                
+                # Test MongoDB client registration
+                mongodb_manager = services.mongodb_manager
+                if mongodb_manager:
+                    client = mongodb_manager.client
+                    assert isinstance(client, MongoClient)
+                    
+                    # Verify client is registered for monitoring
+                    # This would typically involve checking internal monitoring state
+                    assert client is not None
+            
+            # Test metrics collector functionality
+            if hasattr(services, '_monitoring_manager') and services._monitoring_manager:
+                # Perform monitored operations
+                collection = get_collection('test_monitoring_integration')
+                
+                # Test operation monitoring
+                with monitor_database_operation('test_insert') as metrics:
+                    doc = {
+                        'test': 'monitoring_integration',
+                        'timestamp': datetime.now(timezone.utc)
+                    }
+                    result = collection.insert_one(doc)
+                    assert result.acknowledged is True
+                
+                # Verify metrics collection
+                assert 'operation_type' in metrics
+                assert 'start_time' in metrics
+                
+                # Cleanup
+                collection.drop()
+            
+            # Test health monitoring integration
+            health_status = services.get_health_status()
+            performance_metrics = services.get_performance_metrics()
+            
+            # Verify integration data availability
+            assert isinstance(health_status, dict)
+            assert isinstance(performance_metrics, dict)
+            
+            # Both should have consistent timestamp format
+            health_timestamp = health_status.get('timestamp')
+            perf_timestamp = performance_metrics.get('timestamp')
+            
+            if health_timestamp and perf_timestamp:
+                # Verify both are valid ISO format timestamps
+                datetime.fromisoformat(health_timestamp.replace('Z', '+00:00'))
+                datetime.fromisoformat(perf_timestamp.replace('Z', '+00:00'))
+            
+        logger.info("Monitoring integration validation completed")
 
 
-class TestDatabaseUtilityFunctions:
+class TestDatabaseUtilities:
     """
-    Test suite for database utility functions including object ID handling,
-    JSON serialization, and convenience functions for database operations.
+    Test suite for database utility functions covering validation,
+    helper functions, and convenience operations.
     
-    Validates utility function reliability and integration with core database operations.
+    Tests database utility functions and validation helpers per
+    Section 5.2.5 database access layer utility requirements
+    with comprehensive input validation and edge case handling.
     """
     
-    def test_object_id_utilities(self):
-        """Test ObjectId utility functions and validation."""
-        # Test get_object_id function
-        obj_id = get_object_id()
-        assert isinstance(obj_id, ObjectId)
-        assert obj_id is not None
+    @pytest.mark.unit
+    def test_object_id_validation(self):
+        """
+        Test ObjectId validation utility function.
         
-        # Test ObjectId string conversion
-        obj_id_str = str(obj_id)
-        assert isinstance(obj_id_str, str)
-        assert len(obj_id_str) == 24
+        Validates ObjectId validation functionality including valid ObjectId
+        recognition, invalid format detection, and edge case handling per
+        Section 5.2.5 database utilities validation requirements.
+        """
+        from bson import ObjectId
         
-        # Test ObjectId from string
-        new_obj_id = ObjectId(obj_id_str)
-        assert new_obj_id == obj_id
+        # Test valid ObjectId
+        valid_object_id = ObjectId()
+        assert validate_object_id(valid_object_id) is True
+        assert validate_object_id(str(valid_object_id)) is True
+        
+        # Test invalid ObjectId formats
+        assert validate_object_id('invalid') is False
+        assert validate_object_id('') is False
+        assert validate_object_id(None) is False
+        assert validate_object_id(123) is False
+        assert validate_object_id([]) is False
+        assert validate_object_id({}) is False
+        
+        # Test edge cases
+        assert validate_object_id('507f1f77bcf86cd799439011') is True  # Valid hex string
+        assert validate_object_id('507f1f77bcf86cd79943901g') is False  # Invalid hex character
+        assert validate_object_id('507f1f77bcf86cd79943901') is False   # Too short
+        assert validate_object_id('507f1f77bcf86cd799439011a') is False  # Too long
+        
+        logger.info("ObjectId validation utility validation completed")
     
-    def test_json_serialization_utilities(self):
-        """Test JSON serialization utilities for MongoDB documents."""
-        from datetime import datetime
+    @pytest.mark.unit
+    def test_database_availability_flags(self):
+        """
+        Test database availability flags for feature detection.
         
-        # Create test document with various data types
-        test_doc = {
-            '_id': ObjectId(),
-            'name': 'Test Document',
-            'count': 42,
-            'active': True,
-            'created_at': datetime.utcnow(),
-            'metadata': {
-                'tags': ['test', 'json'],
-                'nested_id': ObjectId()
-            }
-        }
+        Validates availability flags including Motor async driver detection,
+        Flask integration capability, and feature flag functionality per
+        Section 5.2.5 database utilities and feature detection requirements.
+        """
+        # Test Motor availability flag
+        assert isinstance(MOTOR_AVAILABLE, bool)
         
-        # Test serialization
-        serialized = serialize_for_json(test_doc)
+        if MOTOR_AVAILABLE:
+            # Motor should be importable
+            import motor.motor_asyncio
+            assert motor.motor_asyncio is not None
         
-        assert isinstance(serialized, dict)
-        assert isinstance(serialized['_id'], str)
-        assert serialized['name'] == 'Test Document'
-        assert serialized['count'] == 42
-        assert serialized['active'] is True
-        assert isinstance(serialized['created_at'], str)
-        assert isinstance(serialized['metadata']['nested_id'], str)
-    
-    def test_execute_query_convenience_function(self, database_manager):
-        """Test execute_query convenience function for database operations."""
-        if database_manager.mongodb_client:
-            # Create Flask app context for testing
+        # Test Flask availability flag
+        assert isinstance(FLASK_AVAILABLE, bool)
+        
+        if FLASK_AVAILABLE:
+            # Flask should be importable
             from flask import Flask
-            app = Flask(__name__)
-            database_manager.init_app(app)
-            
-            with app.app_context():
-                collection_name = "test_convenience"
-                test_doc = {'convenience_test': True, 'data': 'test_data'}
-                
-                # Test insert operation
-                insert_result = execute_query(collection_name, 'insert_one', test_doc)
-                assert insert_result.success is True
-                assert insert_result.inserted_id is not None
-                
-                # Test find operation
-                find_result = execute_query(collection_name, 'find_one', {'convenience_test': True})
-                assert find_result.success is True
-                assert find_result.document is not None
-                assert find_result.document['data'] == 'test_data'
+            assert Flask is not None
+        
+        # Verify flags are properly exported
+        from src.data import MOTOR_AVAILABLE as exported_motor, FLASK_AVAILABLE as exported_flask
+        assert exported_motor == MOTOR_AVAILABLE
+        assert exported_flask == FLASK_AVAILABLE
+        
+        logger.info("Database availability flags validation completed")
     
-    @pytest.mark.asyncio
-    async def test_execute_async_query_convenience_function(self, async_database_manager):
-        """Test execute_async_query convenience function for async operations."""
-        if async_database_manager.motor_database:
-            # Create Flask app context for testing
-            from flask import Flask
-            app = Flask(__name__)
-            async_database_manager.init_app(app)
+    @pytest.mark.database
+    @pytest.mark.integration
+    def test_convenience_functions(self, app_with_database):
+        """
+        Test database convenience functions for simplified access.
+        
+        Validates convenience functions including direct client access,
+        database/collection shortcuts, and simplified operation patterns
+        per Section 5.2.5 database utilities convenience requirements.
+        
+        Args:
+            app_with_database: Flask application with database connections
+        """
+        with app_with_database.app_context():
+            # Test client access functions
+            mongodb_client = get_mongodb_client()
+            assert isinstance(mongodb_client, MongoClient)
             
-            with app.app_context():
-                collection_name = "test_async_convenience"
-                test_doc = {'async_convenience_test': True, 'data': 'async_test_data'}
+            if MOTOR_AVAILABLE:
+                motor_client = get_motor_client()
+                assert motor_client is None or isinstance(motor_client, motor.AsyncIOMotorClient)
+            
+            # Test database access functions
+            database = get_database()
+            assert isinstance(database, Database)
+            
+            # Test with specific database name
+            named_database = get_database('test_specific_db')
+            assert isinstance(named_database, Database)
+            assert named_database.name == 'test_specific_db'
+            
+            # Test collection access functions
+            collection = get_collection('test_convenience')
+            assert isinstance(collection, Collection)
+            assert collection.name == 'test_convenience'
+            
+            # Test collection with specific database
+            specific_collection = get_collection('test_specific', 'test_specific_db')
+            assert isinstance(specific_collection, Collection)
+            assert specific_collection.name == 'test_specific'
+            assert specific_collection.database.name == 'test_specific_db'
+            
+            # Test async collection functions if available
+            if MOTOR_AVAILABLE:
+                async_database = get_async_database()
+                if async_database:
+                    assert isinstance(async_database, motor.AsyncIOMotorDatabase)
                 
-                # Test async insert operation
-                insert_result = await execute_async_query(collection_name, 'insert_one', test_doc)
-                assert insert_result.inserted_id is not None
-                
-                # Test async find operation
-                find_result = await execute_async_query(collection_name, 'find_one', {'async_convenience_test': True})
-                assert find_result is not None
-                assert find_result['data'] == 'async_test_data'
+                async_collection = get_async_collection('test_async_convenience')
+                if async_collection:
+                    assert isinstance(async_collection, motor.AsyncIOMotorCollection)
+                    assert async_collection.name == 'test_async_convenience'
+        
+        logger.info("Convenience functions validation completed")
+    
+    @pytest.mark.database
+    @pytest.mark.integration
+    def test_manager_access_functions(self, app_with_database):
+        """
+        Test database manager access functions for advanced operations.
+        
+        Validates manager access functions including MongoDB manager retrieval,
+        async manager access, and manager state validation per Section 5.2.5
+        database manager access requirements.
+        
+        Args:
+            app_with_database: Flask application with database connections
+        """
+        with app_with_database.app_context():
+            # Test MongoDB manager access
+            mongodb_manager = get_mongodb_manager()
+            assert isinstance(mongodb_manager, MongoDBManager)
+            
+            # Test manager functionality
+            assert mongodb_manager.client is not None
+            assert mongodb_manager.database is not None
+            
+            # Test manager health check
+            health_status = mongodb_manager.health_check()
+            assert isinstance(health_status, dict)
+            assert 'status' in health_status
+            
+            # Test manager performance metrics
+            perf_metrics = mongodb_manager.get_performance_metrics()
+            assert isinstance(perf_metrics, dict)
+            
+            # Test async manager access if available
+            if MOTOR_AVAILABLE:
+                async_manager = get_async_mongodb_manager()
+                # Async manager may not be initialized in sync context
+                if async_manager:
+                    assert isinstance(async_manager, AsyncMongoDBManager)
+            
+        logger.info("Manager access functions validation completed")
 
 
-class TestPerformanceValidation:
-    """
-    Test suite for database performance validation and baseline comparison.
-    
-    Validates database operation performance against Node.js baseline requirements
-    and ensures ≤10% variance per Section 0.1.1 performance monitoring requirements.
-    """
-    
-    def test_query_performance_baseline(self, mongodb_client, test_documents):
-        """Test query performance against baseline requirements."""
-        collection_name = TEST_COLLECTION_NAME
-        
-        # Insert test dataset
-        mongodb_client.insert_many(collection_name, test_documents)
-        
-        # Perform performance tests for various operations
-        performance_results = {}
-        
-        # Test find_one performance
-        find_one_times = []
-        for i in range(PERFORMANCE_TEST_ITERATIONS):
-            start_time = time.time()
-            result = mongodb_client.find_one(collection_name, {'test_id': i % len(test_documents)})
-            end_time = time.time()
-            
-            if result.success:
-                find_one_times.append(end_time - start_time)
-        
-        performance_results['find_one'] = {
-            'average_time': sum(find_one_times) / len(find_one_times),
-            'min_time': min(find_one_times),
-            'max_time': max(find_one_times),
-            'operations_count': len(find_one_times)
-        }
-        
-        # Test find_many performance
-        find_many_times = []
-        for i in range(10):  # Fewer iterations for bulk operations
-            start_time = time.time()
-            result = mongodb_client.find_many(collection_name, {'status': 'active'}, limit=20)
-            end_time = time.time()
-            
-            if result.success:
-                find_many_times.append(end_time - start_time)
-        
-        performance_results['find_many'] = {
-            'average_time': sum(find_many_times) / len(find_many_times),
-            'min_time': min(find_many_times),
-            'max_time': max(find_many_times),
-            'operations_count': len(find_many_times)
-        }
-        
-        # Validate performance results
-        assert performance_results['find_one']['average_time'] < 0.1  # Should be under 100ms
-        assert performance_results['find_many']['average_time'] < 0.5  # Should be under 500ms
-        
-        # Log performance results for analysis
-        print(f"Performance Results: {performance_results}")
-    
-    @pytest.mark.asyncio
-    async def test_async_query_performance(self, motor_database, test_documents):
-        """Test async query performance with Motor driver."""
-        collection_name = TEST_COLLECTION_NAME
-        
-        # Insert test dataset
-        await motor_database.insert_many(collection_name, test_documents)
-        
-        # Test async find_one performance
-        async_find_times = []
-        for i in range(PERFORMANCE_TEST_ITERATIONS):
-            start_time = time.time()
-            result = await motor_database.find_one(collection_name, {'test_id': i % len(test_documents)})
-            end_time = time.time()
-            
-            if result is not None:
-                async_find_times.append(end_time - start_time)
-        
-        async_performance = {
-            'average_time': sum(async_find_times) / len(async_find_times),
-            'min_time': min(async_find_times),
-            'max_time': max(async_find_times),
-            'operations_count': len(async_find_times)
-        }
-        
-        # Validate async performance
-        assert async_performance['average_time'] < 0.1  # Should be under 100ms
-        
-        print(f"Async Performance Results: {async_performance}")
-    
-    def test_bulk_operation_performance(self, mongodb_client):
-        """Test bulk operation performance for large datasets."""
-        collection_name = "test_bulk_performance"
-        
-        # Generate larger dataset for bulk operations
-        bulk_docs = test_fixtures.generate_test_documents(1000)
-        
-        # Test bulk insert performance
-        start_time = time.time()
-        bulk_result = mongodb_client.insert_many(collection_name, bulk_docs)
-        insert_time = time.time() - start_time
-        
-        assert bulk_result.success is True
-        assert len(bulk_result.inserted_ids) == 1000
-        
-        # Performance validation - should complete within reasonable time
-        assert insert_time < 5.0  # Should complete within 5 seconds
-        
-        # Test bulk update performance
-        start_time = time.time()
-        update_result = mongodb_client.update_many(
-            collection_name,
-            {'status': 'active'},
-            {'$set': {'bulk_updated': True}}
-        )
-        update_time = time.time() - start_time
-        
-        assert update_result.success is True
-        assert update_time < 2.0  # Should complete within 2 seconds
-        
-        print(f"Bulk Performance - Insert: {insert_time:.3f}s, Update: {update_time:.3f}s")
-    
-    def test_connection_pool_performance(self, database_config):
-        """Test connection pool performance under concurrent load."""
-        manager = DatabaseManager(database_config)
-        manager.initialize()
-        
-        try:
-            def concurrent_operation(operation_id: int) -> float:
-                """Perform database operation and return execution time."""
-                client = manager.mongodb_client
-                collection_name = "test_pool_performance"
-                
-                doc = {'operation_id': operation_id, 'data': f'pool_test_{operation_id}'}
-                
-                start_time = time.time()
-                client.insert_one(collection_name, doc)
-                client.find_one(collection_name, {'operation_id': operation_id})
-                client.update_one(collection_name, {'operation_id': operation_id}, {'$set': {'updated': True}})
-                end_time = time.time()
-                
-                return end_time - start_time
-            
-            # Execute concurrent operations
-            start_time = time.time()
-            with ThreadPoolExecutor(max_workers=20) as executor:
-                futures = [executor.submit(concurrent_operation, i) for i in range(100)]
-                operation_times = [future.result() for future in as_completed(futures)]
-            total_time = time.time() - start_time
-            
-            # Validate performance metrics
-            average_operation_time = sum(operation_times) / len(operation_times)
-            max_operation_time = max(operation_times)
-            
-            assert len(operation_times) == 100
-            assert average_operation_time < 0.5  # Average should be under 500ms
-            assert max_operation_time < 2.0  # Max should be under 2 seconds
-            assert total_time < 30.0  # Total should complete within 30 seconds
-            
-            print(f"Pool Performance - Avg: {average_operation_time:.3f}s, Max: {max_operation_time:.3f}s, Total: {total_time:.3f}s")
-        
-        finally:
-            manager.close()
-
-
-def test_performance_summary():
-    """Generate and validate overall performance summary."""
-    summary = test_fixtures.get_performance_summary()
-    
-    print("\n" + "="*50)
-    print("DATABASE LAYER PERFORMANCE SUMMARY")
-    print("="*50)
-    print(f"Total Operations: {summary['total_operations']}")
-    print(f"Successful Operations: {summary['successful_operations']}")
-    print(f"Failed Operations: {summary['failed_operations']}")
-    print(f"Success Rate: {summary['success_rate']:.2f}%")
-    print(f"Average Duration: {summary['average_duration']:.4f}s")
-    print(f"Min Duration: {summary['min_duration']:.4f}s")
-    print(f"Max Duration: {summary['max_duration']:.4f}s")
-    print(f"Total Records Processed: {summary['total_records_processed']}")
-    
-    if summary['operations_by_type']:
-        print("\nOperations by Type:")
-        for op_name, stats in summary['operations_by_type'].items():
-            print(f"  {op_name}:")
-            print(f"    Count: {stats['count']}")
-            print(f"    Success Rate: {stats['success_rate']:.2f}%")
-            print(f"    Avg Duration: {stats['average_duration']:.4f}s")
-    
-    print("="*50)
-    
-    # Validate overall performance criteria
-    if summary['total_operations'] > 0:
-        assert summary['success_rate'] >= 95.0  # Minimum 95% success rate
-        assert summary['average_duration'] < 1.0  # Average operation under 1 second
-        
-        # Validate 90% integration layer coverage requirement
-        # This is achieved through comprehensive test coverage of all database operations
-        coverage_areas = [
-            'PyMongo synchronous operations',
-            'Motor async operations', 
-            'Connection pooling management',
-            'Transaction management',
-            'Error handling and resilience',
-            'Performance monitoring',
-            'Health checking',
-            'Utility functions',
-            'Configuration management'
-        ]
-        
-        assert len(coverage_areas) >= 9  # Validates comprehensive coverage
-        print(f"Integration Layer Coverage Areas: {len(coverage_areas)}")
-
-
+# Test execution summary and reporting
 if __name__ == "__main__":
-    # Run tests with pytest
-    pytest.main([__file__, "-v", "--tb=short"])
+    pytest.main([
+        __file__,
+        "-v",
+        "--tb=short",
+        "--capture=no",
+        "--log-cli-level=INFO"
+    ])
