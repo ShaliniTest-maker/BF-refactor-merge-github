@@ -1,572 +1,477 @@
 # BF-refactor-merge: Node.js to Python/Flask Migration
 
-A comprehensive technology migration project converting an existing Node.js/Express.js server application to Python 3 using the Flask 2.3+ framework. This migration maintains 100% API compatibility while achieving ≤10% performance variance from the original Node.js baseline.
+## 🚀 Project Overview
 
-## Table of Contents
+**BF-refactor-merge** is a comprehensive technology migration project that converts an existing Node.js server application to Python 3 using the Flask framework. This migration maintains 100% API compatibility while implementing enterprise-grade Python patterns and achieving performance parity within 10% variance of the original Node.js baseline.
 
-- [Overview](#overview)
-- [Architecture](#architecture)
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [Development Setup](#development-setup)
-- [Testing](#testing)
-- [Docker Deployment](#docker-deployment)
-- [Performance Monitoring](#performance-monitoring)
-- [API Documentation](#api-documentation)
-- [Migration Notes](#migration-notes)
-- [Contributing](#contributing)
-
-## Overview
-
-### Migration Objectives
-
-This project represents a complete runtime migration from Node.js to Python 3.8+ with the following key objectives:
+### Migration Highlights
 
 - **Framework Migration**: Express.js → Flask 2.3+ with Blueprint architecture
-- **Language Conversion**: JavaScript → Python 3.8+ with type hints and modern patterns
-- **Performance Maintenance**: ≤10% variance from Node.js baseline performance
-- **API Compatibility**: 100% backward compatibility for all REST endpoints
-- **Database Preservation**: Unchanged MongoDB schema using PyMongo 4.5+ and Motor 3.3+
-- **Authentication Continuity**: JWT token validation using PyJWT 2.8+ maintaining existing flows
+- **Runtime Migration**: Node.js → Python 3.8+ with WSGI deployment
+- **Package Management**: NPM → pip with requirements.txt
+- **Database Integration**: Node.js MongoDB drivers → PyMongo 4.5+ and Motor 3.3+
+- **Authentication**: jsonwebtoken → PyJWT 2.8+ with Flask security ecosystem
+- **Production Server**: Node.js HTTP server → Gunicorn WSGI server
+- **Performance Target**: ≤10% variance from Node.js baseline
 
-### Key Technology Stack
+## 🏗️ Architecture
 
-| Component | Node.js (Original) | Python (Migrated) |
-|-----------|-------------------|-------------------|
-| **Runtime** | Node.js 16+ | Python 3.8+ |
-| **Web Framework** | Express.js 4.x | Flask 2.3+ |
-| **Database Driver** | mongodb 4.x | PyMongo 4.5+, Motor 3.3+ |
-| **Authentication** | jsonwebtoken 9.x | PyJWT 2.8+ |
-| **HTTP Client** | axios/fetch | requests 2.31+, httpx 0.24+ |
-| **Testing** | Jest/Mocha | pytest 7.4+ |
-| **WSGI Server** | Node.js HTTP | Gunicorn 21.2+ |
-| **Containerization** | node:alpine | python:3.11-slim |
+### Flask Framework Architecture
 
-## Architecture
+The application implements a modern Flask 2.3+ architecture with the following components:
 
-### Flask Application Structure
+- **Application Factory Pattern**: Centralized app creation with environment-specific configuration
+- **Blueprint Modular Architecture**: Organized route management replacing Express.js routing patterns
+- **WSGI Deployment**: Production-ready Gunicorn server for high-performance serving
+- **Enterprise Security**: Flask-Talisman, Flask-Login, and PyJWT for comprehensive security
+- **Database Integration**: PyMongo and Motor for MongoDB with connection pooling
+- **Caching Layer**: Redis-py 5.0+ for session management and application caching
 
-The application follows a modular Blueprint architecture for maintainable code organization:
+### Technology Stack
 
-```
-src/
-├── app.py                 # Flask application factory
-├── blueprints/           # Modular route organization
-│   ├── auth/            # Authentication endpoints
-│   ├── api/             # Main API routes
-│   └── health/          # Health check endpoints
-├── auth/                # Authentication middleware
-├── business/            # Business logic modules
-├── data/                # Data access layer
-├── integrations/        # External service clients
-├── config/              # Configuration management
-├── utils/               # Utility functions
-└── monitoring/          # Metrics and logging
-```
+| Component | Technology | Version | Purpose |
+|-----------|------------|---------|---------|
+| **Web Framework** | Flask | 2.3+ | Core web application framework |
+| **WSGI Server** | Gunicorn | 23.0+ | Production application server |
+| **Database** | MongoDB | 6.0+ | Primary data persistence |
+| **Cache/Sessions** | Redis | 7.0+ | Caching and session management |
+| **Authentication** | PyJWT | 2.8+ | JWT token processing |
+| **HTTP Client** | requests/httpx | 2.31+/0.24+ | External service integration |
+| **Testing** | pytest | 7.4+ | Comprehensive test framework |
+| **Validation** | marshmallow/pydantic | 3.20+/2.3+ | Data validation and modeling |
 
-### Core Components
-
-- **Flask Blueprints**: Modular routing replacing Express.js route organization
-- **Flask-CORS**: Cross-origin request handling preserving existing CORS policies
-- **Flask-Limiter**: Rate limiting for API protection
-- **Flask-Talisman**: Security headers replacing helmet middleware
-- **PyJWT**: JWT token validation maintaining existing authentication flows
-
-## Requirements
+## 🔧 Requirements
 
 ### Python Runtime
 
-- **Python 3.8+** (recommended: Python 3.11)
-- **Virtual Environment**: venv or virtualenv for dependency isolation
-- **Package Manager**: pip with requirements.txt specification
+- **Python Version**: 3.8+ (recommended: Python 3.11)
+- **Operating System**: Linux, macOS, or Windows with WSL2
+- **Memory**: Minimum 512MB RAM, recommended 2GB+
+- **CPU**: Minimum 1 core, recommended 2+ cores
 
 ### System Dependencies
 
 ```bash
 # Ubuntu/Debian
-sudo apt-get update
-sudo apt-get install python3 python3-pip python3-venv
+sudo apt update
+sudo apt install python3-dev python3-pip python3-venv curl build-essential
 
-# macOS with Homebrew
-brew install python3
+# macOS (with Homebrew)
+brew install python@3.11 curl
 
-# Windows
-# Download Python 3.11+ from python.org
+# Windows (with Chocolatey)
+choco install python3 curl
 ```
 
-### Core Dependencies
+## 🚀 Quick Start
 
-The migration maintains equivalent functionality with Python packages:
-
-```txt
-# Web Framework
-Flask==2.3.3
-Flask-CORS==4.0.0
-Flask-RESTful==0.3.10
-Flask-Limiter==3.5.0
-Flask-Talisman==1.1.0
-
-# Database & Caching
-PyMongo==4.5.0
-motor==3.3.0
-redis==5.0.0
-Flask-Session==0.5.0
-
-# Authentication & Security
-PyJWT==2.8.0
-cryptography==41.0.5
-email-validator==2.0.0
-bleach==6.0.0
-
-# Data Validation
-marshmallow==3.20.1
-pydantic==2.3.0
-
-# HTTP Clients
-requests==2.31.0
-httpx==0.24.0
-
-# AWS Integration
-boto3==1.28.0
-
-# Monitoring & Logging
-structlog==23.1.0
-prometheus-client==0.17.1
-
-# WSGI Server
-gunicorn==21.2.0
-
-# Testing
-pytest==7.4.0
-pytest-flask==1.3.0
-pytest-mock==3.11.1
-```
-
-## Installation
-
-### 1. Clone Repository
+### 1. Environment Setup
 
 ```bash
+# Clone the repository
 git clone <repository-url>
 cd BF-refactor-merge
-```
 
-### 2. Create Virtual Environment
-
-```bash
-# Create virtual environment
+# Create Python virtual environment
 python3 -m venv venv
 
 # Activate virtual environment
-# On macOS/Linux:
+# Linux/macOS:
 source venv/bin/activate
-# On Windows:
+# Windows:
 venv\Scripts\activate
+
+# Upgrade pip and install pip-tools
+pip install --upgrade pip pip-tools
 ```
 
-### 3. Install Dependencies
+### 2. Dependency Installation
 
 ```bash
 # Install production dependencies
 pip install -r requirements.txt
 
-# Install development dependencies (optional)
-pip install -r requirements-dev.txt
+# For development (includes testing and code quality tools)
+pip install -r requirements.txt pytest black flake8 isort mypy
 ```
 
-### 4. Environment Configuration
-
-Create a `.env` file in the project root:
+### 3. Configuration
 
 ```bash
-# Application Configuration
-FLASK_APP=app.py
-FLASK_ENV=development
-SECRET_KEY=your-secret-key-here
+# Copy environment template
+cp .env.example .env
 
-# Database Configuration
-MONGODB_URI=mongodb://localhost:27017/your-database
-REDIS_URL=redis://localhost:6379
-
-# Authentication
-JWT_SECRET_KEY=your-jwt-secret
-AUTH0_DOMAIN=your-auth0-domain
-AUTH0_CLIENT_ID=your-client-id
-
-# External Services
-AWS_ACCESS_KEY_ID=your-aws-key
-AWS_SECRET_ACCESS_KEY=your-aws-secret
-AWS_S3_BUCKET=your-s3-bucket
-
-# Monitoring
-LOG_LEVEL=INFO
-METRICS_ENABLED=true
+# Edit configuration for your environment
+# Required variables:
+# - MONGODB_URL=mongodb://localhost:27017/flask_app
+# - REDIS_URL=redis://localhost:6379/0
+# - SECRET_KEY=your-secret-key-here
+# - JWT_SECRET_KEY=your-jwt-secret-here
 ```
 
-## Development Setup
-
-### Local Development Server
+### 4. Database Setup
 
 ```bash
-# Activate virtual environment
-source venv/bin/activate
+# Start MongoDB (if running locally)
+sudo systemctl start mongod
 
-# Run Flask development server
-flask run
+# Start Redis (if running locally)
+sudo systemctl start redis-server
 
-# Or with debug mode
-flask run --debug
+# Initialize application database (if needed)
+python -c "from app import create_app; app = create_app(); app.app_context().push(); print('Database initialized')"
+```
 
-# Or using Python directly
+### 5. Development Server
+
+```bash
+# Start Flask development server
+export FLASK_APP=app.py
+export FLASK_ENV=development
+flask run --host=0.0.0.0 --port=5000
+
+# Alternative: Direct Python execution
 python app.py
 ```
 
-The development server will start on `http://localhost:5000` with auto-reload enabled.
+The application will be available at:
+- **Flask Dev Server**: http://localhost:5000
+- **Health Check**: http://localhost:5000/health
+- **API Documentation**: http://localhost:5000/docs (if enabled)
 
-### Local Production Testing
+## 🐳 Docker Deployment
 
-Test with Gunicorn WSGI server to mirror production behavior:
-
-```bash
-# Install Gunicorn (if not in requirements.txt)
-pip install gunicorn
-
-# Run with Gunicorn
-gunicorn app:app --workers 4 --bind 0.0.0.0:8000 --reload
-
-# With optimized configuration
-gunicorn app:app \
-  --workers $((2 * $(nproc) + 1)) \
-  --bind 0.0.0.0:8000 \
-  --timeout 120 \
-  --keepalive 5 \
-  --max-requests 1000
-```
-
-### Code Quality Tools
+### Development Environment
 
 ```bash
-# Install development tools
-pip install black isort flake8 mypy
-
-# Format code
-black src/
-isort src/
-
-# Lint code
-flake8 src/
-
-# Type checking
-mypy src/
-```
-
-## Testing
-
-### Test Framework
-
-The project uses pytest for comprehensive testing with ≥90% coverage requirement:
-
-```bash
-# Run all tests
-pytest
-
-# Run with coverage
-pytest --cov=src --cov-report=html
-
-# Run specific test categories
-pytest tests/unit/
-pytest tests/integration/
-pytest tests/e2e/
-
-# Run with verbose output
-pytest -v
-
-# Run performance tests
-pytest tests/performance/ -v
-```
-
-### Test Categories
-
-- **Unit Tests**: Individual component testing with mocks
-- **Integration Tests**: API endpoint and database integration
-- **Performance Tests**: Baseline comparison ensuring ≤10% variance
-- **Security Tests**: Authentication and authorization validation
-- **E2E Tests**: Complete workflow validation
-
-### Mock Testing
-
-```bash
-# Install pytest-mock for external service simulation
-pip install pytest-mock
-
-# Run tests with external service mocks
-pytest tests/integration/ --mock-external-services
-```
-
-## Docker Deployment
-
-### Docker Configuration
-
-The application uses a multi-stage Docker build with Gunicorn WSGI server:
-
-```dockerfile
-# Multi-stage build for optimization
-FROM python:3.11-slim as builder
-
-# Install pip-tools for dependency management
-RUN pip install pip-tools==7.3.0
-
-# Copy and compile requirements
-COPY requirements.in .
-RUN pip-compile requirements.in --output-file requirements.txt
-
-FROM python:3.11-slim as runtime
-
-# Copy compiled requirements and install
-COPY --from=builder requirements.txt .
-RUN pip install -r requirements.txt gunicorn==21.2.0
-
-# Copy application code
-COPY src/ /app
-WORKDIR /app
-
-# Configure health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:8000/health || exit 1
-
-# Gunicorn production entrypoint
-ENTRYPOINT ["gunicorn", "app:app", "--workers", "4", "--bind", "0.0.0.0:8000"]
-```
-
-### Docker Commands
-
-```bash
-# Build image
-docker build -t bf-refactor-merge .
-
-# Run container
-docker run -p 8000:8000 bf-refactor-merge
-
-# Run with environment variables
-docker run -p 8000:8000 --env-file .env bf-refactor-merge
-
-# Run with docker-compose
+# Start all services (Flask app, MongoDB, Redis)
 docker-compose up -d
-```
 
-### Docker Compose Configuration
+# View logs
+docker-compose logs -f app
 
-```yaml
-version: '3.8'
-services:
-  app:
-    build: .
-    ports:
-      - "8000:8000"
-    environment:
-      - FLASK_ENV=production
-      - MONGODB_URI=mongodb://mongo:27017/app
-      - REDIS_URL=redis://redis:6379
-    depends_on:
-      - mongo
-      - redis
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  mongo:
-    image: mongo:5.0
-    ports:
-      - "27017:27017"
-    volumes:
-      - mongo_data:/data/db
-
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-
-volumes:
-  mongo_data:
+# Stop services
+docker-compose down
 ```
 
 ### Production Deployment
 
 ```bash
 # Build production image
-docker build -t bf-refactor-merge:latest .
+docker build -t flask-app:latest .
 
-# Push to registry
-docker tag bf-refactor-merge:latest your-registry/bf-refactor-merge:latest
-docker push your-registry/bf-refactor-merge:latest
-
-# Deploy with optimized configuration
+# Run production container with Gunicorn
 docker run -d \
-  --name bf-refactor-merge \
-  --restart unless-stopped \
+  --name flask-production \
   -p 8000:8000 \
-  --env-file .env.production \
-  your-registry/bf-refactor-merge:latest
+  -e FLASK_ENV=production \
+  -e MONGODB_URL=mongodb://your-mongodb:27017/flask_app \
+  -e REDIS_URL=redis://your-redis:6379/0 \
+  flask-app:latest
+
+# Health check
+curl http://localhost:8000/health
 ```
 
-## Performance Monitoring
+### Gunicorn WSGI Configuration
+
+The production deployment uses Gunicorn with optimized settings:
+
+```bash
+# Production Gunicorn command (built into Docker image)
+gunicorn app:app \
+  --workers 4 \
+  --bind 0.0.0.0:8000 \
+  --timeout 120 \
+  --keepalive 5 \
+  --max-requests 1000 \
+  --access-logfile - \
+  --error-logfile -
+```
+
+**Key Configuration Features:**
+- **Worker Count**: Automatically calculated based on CPU cores (`2 * CPU + 1`)
+- **Request Timeout**: 120 seconds for long-running operations
+- **Connection Keepalive**: 5 seconds for HTTP/1.1 persistent connections
+- **Worker Recycling**: 1000 requests per worker before restart
+- **Logging**: Structured JSON logging to stdout/stderr
+
+## 🧪 Development Workflow
+
+### Testing with pytest
+
+The project uses pytest for comprehensive testing with 90%+ coverage requirement:
+
+```bash
+# Run all tests
+pytest
+
+# Run with coverage report
+pytest --cov=src --cov-report=html --cov-report=term
+
+# Run specific test categories
+pytest tests/unit/          # Unit tests
+pytest tests/integration/   # Integration tests
+pytest tests/e2e/          # End-to-end API tests
+
+# Run performance tests
+pytest tests/performance/ -v
+
+# Run with parallel execution
+pytest -n auto             # Requires pytest-xdist
+```
+
+### Code Quality
+
+```bash
+# Format code with Black
+black src/ tests/
+
+# Sort imports with isort
+isort src/ tests/
+
+# Lint with flake8
+flake8 src/ tests/
+
+# Type checking with mypy
+mypy src/
+
+# All quality checks together
+make lint  # If Makefile is configured
+```
+
+### Development Server Options
+
+```bash
+# Flask development server (hot reload)
+flask run --debug --reload
+
+# Local Gunicorn testing (production-like)
+gunicorn app:app --reload --workers 1 --bind 127.0.0.1:8000
+
+# Development with specific configuration
+FLASK_ENV=development python app.py
+```
+
+### Database Operations
+
+```bash
+# MongoDB shell access (if using Docker Compose)
+docker-compose exec mongodb mongosh
+
+# Redis CLI access (if using Docker Compose)
+docker-compose exec redis redis-cli
+
+# View application logs
+docker-compose logs -f app
+
+# Monitor performance metrics
+curl http://localhost:8000/metrics  # Prometheus metrics
+```
+
+## 📊 Performance Monitoring
 
 ### Performance Requirements
 
-The migration maintains strict performance standards:
+The application maintains strict performance standards with continuous monitoring:
 
-- **≤10% variance** from Node.js baseline performance
-- **Response time monitoring** for all API endpoints
-- **Memory usage tracking** to prevent regression
-- **Database query performance** validation
-- **Load testing** to ensure scalability
-
-### Monitoring Stack
-
-```python
-# Prometheus metrics collection
-from prometheus_client import Counter, Histogram, generate_latest
-
-# Structured logging
-import structlog
-
-# Configure monitoring
-logger = structlog.get_logger()
-request_count = Counter('http_requests_total', 'Total HTTP requests')
-request_duration = Histogram('http_request_duration_seconds', 'HTTP request duration')
-```
-
-### Health Endpoints
-
-```bash
-# Application health
-curl http://localhost:8000/health
-
-# Readiness check
-curl http://localhost:8000/health/ready
-
-# Liveness check
-curl http://localhost:8000/health/live
-
-# Metrics endpoint
-curl http://localhost:8000/metrics
-```
+- **Response Time Variance**: ≤10% compared to Node.js baseline
+- **Memory Usage**: Within 10% variance of original implementation
+- **Throughput**: Equivalent request handling capacity
+- **Error Rate**: Maintained below 0.1% for non-client errors
 
 ### Performance Testing
 
 ```bash
-# Install performance testing tools
+# Load testing with Locust
 pip install locust
+locust -f tests/performance/locustfile.py --host=http://localhost:8000
 
-# Run load test
-locust -f tests/performance/load_test.py --host http://localhost:8000
+# Simple performance baseline
+curl -w "@tests/performance/curl-format.txt" http://localhost:8000/health
 
-# Apache Bench baseline comparison
-ab -n 1000 -c 10 http://localhost:8000/api/endpoint
-
-# Memory profiling
-python -m memory_profiler app.py
+# Apache Bench testing
+ab -n 1000 -c 10 http://localhost:8000/api/health
 ```
 
-### Monitoring Integration
+### Monitoring Endpoints
 
-- **Prometheus**: Metrics collection and alerting
-- **Grafana**: Performance dashboard visualization
-- **Structlog**: JSON-formatted logging for aggregation
-- **APM Integration**: Enterprise monitoring system compatibility
+- **Health Check**: `GET /health` - Application health status
+- **Metrics**: `GET /metrics` - Prometheus metrics for monitoring
+- **Performance**: `GET /api/performance/stats` - Performance statistics
 
-## API Documentation
-
-### Endpoint Compatibility
-
-All REST endpoints maintain 100% backward compatibility:
+### Performance Baseline Tracking
 
 ```bash
-# Authentication endpoints
-POST /auth/login
-POST /auth/logout
-GET  /auth/profile
+# Run performance comparison tests
+python scripts/performance_comparison.py
 
-# Main API routes
-GET    /api/resource
-POST   /api/resource
-PUT    /api/resource/:id
-DELETE /api/resource/:id
-
-# Health and monitoring
-GET /health
-GET /health/ready
-GET /health/live
-GET /metrics
+# Generate performance report
+python scripts/generate_performance_report.py --baseline=nodejs --current=flask
 ```
 
-### Request/Response Format
+## 🔒 Security Features
 
-All request and response formats remain unchanged from the Node.js implementation:
+The Flask application implements comprehensive security measures:
 
-- **Content-Type**: `application/json`
-- **Authentication**: `Bearer <JWT-token>`
-- **Status Codes**: Identical HTTP status code usage
-- **Error Responses**: Consistent error format and messaging
+- **JWT Authentication**: PyJWT 2.8+ for secure token processing
+- **Security Headers**: Flask-Talisman for OWASP-compliant headers
+- **Input Validation**: Marshmallow and Pydantic for data validation
+- **Rate Limiting**: Flask-Limiter for API protection
+- **CORS Protection**: Flask-CORS with controlled origin policies
+- **Session Security**: Redis-backed sessions with secure configuration
+- **Password Security**: Werkzeug for secure password hashing
 
-## Migration Notes
+## 🔄 Migration from Node.js
 
-### Breaking Changes
+### API Compatibility
 
-**None** - This migration maintains 100% API compatibility.
+**Zero Breaking Changes**: All API endpoints maintain identical:
+- URL patterns and parameters
+- HTTP methods and status codes
+- Request/response formats
+- Authentication mechanisms
+- Error handling patterns
 
-### Performance Optimizations
+### Key Migration Benefits
 
-- **Connection Pooling**: Optimized MongoDB and Redis connection pools
-- **Async Operations**: Motor async driver for non-blocking database operations
-- **Caching Strategy**: Flask-Caching with Redis backend
-- **WSGI Server**: Gunicorn with optimized worker configuration
+1. **Performance**: Equivalent performance with Python ecosystem benefits
+2. **Maintainability**: Improved code organization and readability
+3. **Enterprise Integration**: Better enterprise tooling and monitoring
+4. **Security**: Enhanced security framework with Flask ecosystem
+5. **Scalability**: Improved horizontal scaling capabilities
+6. **Developer Experience**: Rich Python debugging and development tools
 
-### Security Enhancements
+### Migration Validation
 
-- **Flask-Talisman**: Security headers (replaces helmet.js)
-- **PyJWT**: Secure JWT token validation
-- **Input Validation**: marshmallow schema validation
-- **XSS Prevention**: bleach HTML sanitization
+```bash
+# API compatibility tests
+pytest tests/migration/api_compatibility_test.py
 
-### Monitoring Improvements
+# Performance regression tests
+python scripts/migration_performance_test.py
 
-- **Structured Logging**: JSON-formatted logs with structlog
-- **Metrics Collection**: Prometheus integration for detailed metrics
-- **Health Checks**: Comprehensive health monitoring endpoints
-- **Performance Tracking**: Continuous baseline comparison
+# Feature parity validation
+python scripts/validate_migration_completeness.py
+```
 
-## Contributing
+## 📁 Project Structure
 
-### Development Workflow
+```
+BF-refactor-merge/
+├── src/                    # Application source code
+│   ├── blueprints/        # Flask Blueprint modules
+│   ├── auth/              # Authentication and security
+│   ├── business/          # Business logic modules
+│   ├── data/              # Data access layer
+│   ├── integrations/      # External service integrations
+│   ├── monitoring/        # Observability and metrics
+│   ├── utils/             # Utility functions
+│   └── config/            # Configuration management
+├── tests/                 # Test suite
+│   ├── unit/              # Unit tests
+│   ├── integration/       # Integration tests
+│   ├── e2e/               # End-to-end tests
+│   ├── performance/       # Performance tests
+│   └── fixtures/          # Test data and fixtures
+├── config/                # Configuration files
+├── scripts/               # Development and deployment scripts
+├── app.py                 # Flask application entry point
+├── requirements.txt       # Python dependencies
+├── Dockerfile             # Container configuration
+├── docker-compose.yml     # Development environment
+├── gunicorn.conf.py       # Gunicorn configuration
+└── README.md              # This file
+```
 
-1. **Setup**: Follow installation and development setup instructions
-2. **Testing**: Ensure all tests pass with ≥90% coverage
-3. **Performance**: Validate ≤10% variance requirement
-4. **Code Quality**: Use black, isort, flake8, and mypy
-5. **Documentation**: Update relevant documentation
+## 🤝 Contributing
 
-### Deployment Process
+### Development Setup
 
-1. **Testing**: Comprehensive test suite validation
-2. **Performance**: Baseline comparison testing
-3. **Blue-Green**: Zero-downtime deployment strategy
-4. **Monitoring**: Performance metrics validation
-5. **Rollback**: Automated rollback on degradation
+1. Fork the repository
+2. Create a feature branch: `git checkout -b feature/your-feature`
+3. Set up development environment following Quick Start guide
+4. Run tests: `pytest`
+5. Ensure code quality: `black`, `flake8`, `mypy`
+6. Submit pull request with comprehensive tests
 
 ### Code Standards
 
-- **PEP 8**: Python code style compliance
-- **Type Hints**: Function signature type annotations
-- **Docstrings**: Comprehensive function documentation
-- **Error Handling**: Consistent exception handling patterns
-- **Testing**: Unit and integration test coverage
+- **Python Style**: PEP 8 compliance with Black formatting
+- **Type Hints**: Required for all function signatures
+- **Documentation**: Comprehensive docstrings for all modules
+- **Testing**: 90%+ code coverage requirement
+- **Performance**: Maintain ≤10% variance requirement
+
+### Performance Testing
+
+All contributions must include performance validation:
+
+```bash
+# Before changes
+python scripts/capture_baseline.py
+
+# After changes  
+python scripts/compare_performance.py --baseline=before --current=after
+```
+
+## 📖 Documentation
+
+- **API Documentation**: Available at `/docs` endpoint (development)
+- **Technical Specification**: See `docs/technical-specification.md`
+- **Migration Guide**: See `docs/migration-guide.md`
+- **Deployment Guide**: See `docs/deployment-guide.md`
+- **Performance Guide**: See `docs/performance-optimization.md`
+
+## 🐛 Troubleshooting
+
+### Common Issues
+
+**Connection Errors**:
+```bash
+# Check MongoDB connection
+python -c "import pymongo; client = pymongo.MongoClient('mongodb://localhost:27017'); print('MongoDB connected:', client.admin.command('ping'))"
+
+# Check Redis connection  
+python -c "import redis; r = redis.Redis(host='localhost', port=6379, db=0); print('Redis connected:', r.ping())"
+```
+
+**Import Errors**:
+```bash
+# Verify virtual environment activation
+which python
+pip list | grep Flask
+
+# Reinstall dependencies
+pip install --upgrade -r requirements.txt
+```
+
+**Performance Issues**:
+```bash
+# Check Gunicorn worker processes
+ps aux | grep gunicorn
+
+# Monitor resource usage
+docker stats flask-app  # If using Docker
+```
+
+### Support
+
+- **Issues**: Create GitHub issues for bugs and feature requests
+- **Documentation**: Check `docs/` directory for detailed guides
+- **Performance**: Run performance comparison tools for debugging
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🏷️ Version
+
+**Current Version**: 1.0.0  
+**Migration Phase**: Node.js to Python/Flask Migration Complete  
+**Performance Status**: ≤10% Variance Validated  
+**API Compatibility**: 100% Backward Compatible  
 
 ---
 
-**Migration Status**: ✅ Complete - Maintaining ≤10% performance variance from Node.js baseline
-**API Compatibility**: ✅ 100% backward compatible
-**Security**: ✅ Enhanced with Flask-Talisman and PyJWT
-**Monitoring**: ✅ Comprehensive observability stack
+*Successfully migrated from Node.js/Express.js to Python 3/Flask 2.3+ with zero breaking changes and maintained performance requirements.*
