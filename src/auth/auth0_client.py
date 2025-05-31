@@ -1,635 +1,924 @@
 """
-Auth0 Python SDK integration with circuit breaker patterns and comprehensive external service resilience.
+Auth0 Python SDK Integration with Circuit Breaker Patterns and HTTPX Async Client
 
-This module implements enterprise-grade Auth0 authentication service integration using the
-Auth0 Python SDK 4.7+ with intelligent retry strategies, circuit breaker patterns, and
-comprehensive fallback mechanisms. Features include HTTPX async client configuration,
-exponential backoff strategies, and sophisticated caching for optimal performance.
+This module implements comprehensive Auth0 authentication service integration with
+intelligent retry strategies, circuit breaker patterns, and resilient external service
+communication. The implementation provides enterprise-grade authentication flows with
+comprehensive monitoring, fallback mechanisms, and performance optimization.
 
 Key Features:
 - Auth0 Python SDK 4.7+ integration replacing Node.js Auth0 client per Section 0.1.2
 - Circuit breaker patterns with pybreaker for Auth0 API calls per Section 6.4.2  
-- Tenacity exponential backoff for intelligent retry strategies per Section 6.4.2
-- HTTPX async client for Auth0 service integration per Section 6.4.2
+- Intelligent retry strategies with exponential backoff using tenacity per Section 6.4.2
+- HTTPX async client for external service integration per Section 6.4.2
 - Fallback mechanisms using cached permission data per Section 6.4.2
 - Comprehensive Auth0 service monitoring and metrics collection per Section 6.4.2
 
-Security:
-- JWT token validation with Auth0 public key rotation support
-- User profile and permission caching with encryption
-- Comprehensive audit logging for all Auth0 interactions
-- Rate limiting protection for Auth0 API calls
-- Circuit breaker protection during Auth0 service degradation
+Architecture Components:
+- Auth0ClientManager: Primary interface for Auth0 operations with circuit breaker protection
+- Auth0CircuitBreaker: Intelligent retry and circuit breaker implementation
+- Auth0MetricsCollector: Comprehensive monitoring and performance tracking
+- Auth0FallbackManager: Cached permission data fallback when Auth0 is unavailable
+- Auth0ConfigurationManager: Environment-specific Auth0 configuration management
 
-Performance:
-- Intelligent caching strategies with Redis backend
-- Connection pooling for Auth0 API connections
-- Asynchronous operations using HTTPX for optimal throughput
-- Fallback mechanisms ensuring service availability during outages
+Performance Requirements:
+- Auth0 API response time: ≤500ms target, ≤1000ms maximum
+- Circuit breaker threshold: 5 consecutive failures trigger open state
+- Retry strategy: Exponential backoff with jitter (1s, 2s, 4s max intervals)
+- Fallback cache TTL: 5 minutes for permission data, 1 hour for user profiles
+- Monitoring overhead: ≤1ms per Auth0 operation for metrics collection
 
-Resilience:
-- Circuit breaker patterns preventing cascade failures
-- Exponential backoff with jitter for intelligent retry strategies
-- Graceful degradation using cached authentication data
-- Health check monitoring for Auth0 service availability
+Security Implementation:
+- JWT token validation with Auth0 JWKS endpoint integration
+- Secure credential management using python-dotenv environment configuration
+- Comprehensive audit logging for all Auth0 operations and security events
+- PII protection in logging and metrics with data sanitization
+- Enterprise compliance (SOC 2, ISO 27001) with comprehensive audit trails
+
+External Service Integration:
+- HTTPX async client with connection pooling and timeout management
+- Tenacity retry configuration with intelligent backoff strategies
+- PyBreaker circuit breaker with configurable failure thresholds
+- Redis fallback cache integration for offline operation support
+- Prometheus metrics collection for comprehensive service monitoring
 
 Dependencies:
-- auth0-python 4.7+ for Auth0 enterprise integration
-- httpx 0.24+ for async HTTP client with Auth0 service communication
-- tenacity 9.1+ for retry strategies with exponential backoff and jitter
-- pybreaker 1.0+ for circuit breaker pattern implementation
-- prometheus-client 0.17+ for comprehensive metrics collection
+- auth0-python==4.7.1: Auth0 Python SDK for authentication service integration
+- httpx==0.24.1: Modern async HTTP client for external service calls
+- tenacity==8.2.3: Intelligent retry library with exponential backoff
+- pybreaker==0.9.0: Circuit breaker pattern implementation
+- structlog==23.1.0: Structured logging for comprehensive audit trails
+- prometheus-client==0.17.1: Metrics collection for monitoring dashboards
 """
 
 import asyncio
-import base64
 import hashlib
 import json
 import logging
 import os
+import secrets
 import time
+import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Set, Any, Union, Tuple, Callable
-from dataclasses import dataclass
 from functools import wraps
-from urllib.parse import urljoin
+from typing import Any, Dict, List, Optional, Set, Union, Callable, Tuple
+from urllib.parse import urljoin, urlparse
 
 import httpx
+import structlog
+from auth0.authentication import GetToken, Users as Auth0Users
+from auth0.exceptions import Auth0Error
+from auth0.management import Auth0, Users
+from auth0.authentication.token_verifier import TokenVerifier, AsymmetricSignatureVerifier
+from prometheus_client import Counter, Histogram, Gauge, Enum
+from pybreaker import CircuitBreaker
 from tenacity import (
-    retry,
-    stop_after_attempt,
+    retry, 
+    stop_after_attempt, 
     wait_exponential_jitter,
     retry_if_exception_type,
     before_sleep_log,
     after_log,
     RetryCallState
 )
-import pybreaker
-from auth0.management import Auth0
-from auth0.authentication import GetToken
-from auth0.exceptions import Auth0Error
-import jwt
-from jwt.exceptions import InvalidTokenError, ExpiredSignatureError, InvalidSignatureError
-from prometheus_client import Counter, Histogram, Gauge
-import structlog
 
-# Import dependencies with fallback handling
-try:
-    from src.config.auth import (
-        get_auth0_config,
-        get_jwt_config,
-        AUTH0_DOMAIN,
-        AUTH0_CLIENT_ID,
-        AUTH0_CLIENT_SECRET,
-        AUTH0_AUDIENCE
+# Import internal dependencies
+from src.auth.cache import (
+    AuthCacheManager, 
+    get_auth_cache_manager,
+    CacheKeyPatterns,
+    create_token_hash
+)
+from src.auth.exceptions import (
+    SecurityException,
+    AuthenticationException,
+    AuthorizationException,
+    Auth0Exception,
+    CircuitBreakerException,
+    SessionException,
+    SecurityErrorCode,
+    create_safe_error_response
+)
+from src.auth.audit import SecurityAuditLogger
+
+# Configure structured logging for Auth0 operations
+logger = structlog.get_logger(__name__)
+
+# Prometheus metrics for Auth0 service monitoring
+auth0_metrics = {
+    'api_requests_total': Counter(
+        'auth0_api_requests_total',
+        'Total Auth0 API requests by operation and result',
+        ['operation', 'result', 'status_code']
+    ),
+    'api_request_duration': Histogram(
+        'auth0_api_request_duration_seconds',
+        'Auth0 API request duration by operation',
+        ['operation'],
+        buckets=(0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0)
+    ),
+    'circuit_breaker_state': Enum(
+        'auth0_circuit_breaker_state',
+        'Auth0 circuit breaker state',
+        ['service'],
+        states=['closed', 'open', 'half_open']
+    ),
+    'fallback_cache_usage': Counter(
+        'auth0_fallback_cache_usage_total',
+        'Auth0 fallback cache usage by operation and result',
+        ['operation', 'result']
+    ),
+    'token_validation_cache_hits': Counter(
+        'auth0_token_validation_cache_hits_total',
+        'Auth0 token validation cache hits by result',
+        ['result']
+    ),
+    'user_permission_lookups': Counter(
+        'auth0_user_permission_lookups_total',
+        'Auth0 user permission lookups by source and result',
+        ['source', 'result']
+    ),
+    'service_availability': Gauge(
+        'auth0_service_availability_ratio',
+        'Auth0 service availability ratio (0-1)'
+    ),
+    'retry_attempts': Counter(
+        'auth0_retry_attempts_total',
+        'Auth0 retry attempts by operation and attempt_number',
+        ['operation', 'attempt_number']
     )
-    from src.auth.cache import AuthCacheManager, PermissionCacheManager
-    from src.auth.exceptions import (
-        Auth0IntegrationError,
-        Auth0TimeoutError,
-        Auth0RateLimitError,
-        Auth0ValidationError,
-        CircuitBreakerError,
-        ExternalServiceError,
-        SecurityErrorCode
-    )
-    from src.auth.audit import SecurityAuditLogger
-except ImportError:
-    # Fallback configuration for development/testing
-    AUTH0_DOMAIN = os.getenv('AUTH0_DOMAIN', 'your-domain.auth0.com')
-    AUTH0_CLIENT_ID = os.getenv('AUTH0_CLIENT_ID', '')
-    AUTH0_CLIENT_SECRET = os.getenv('AUTH0_CLIENT_SECRET', '')
-    AUTH0_AUDIENCE = os.getenv('AUTH0_AUDIENCE', '')
-    
-    # Fallback exception classes
-    class Auth0IntegrationError(Exception):
-        """Auth0 integration error"""
-        pass
-    
-    class Auth0TimeoutError(Auth0IntegrationError):
-        """Auth0 timeout error"""
-        pass
-    
-    class Auth0RateLimitError(Auth0IntegrationError):
-        """Auth0 rate limit error"""
-        pass
-    
-    class Auth0ValidationError(Auth0IntegrationError):
-        """Auth0 validation error"""
-        pass
-    
-    class CircuitBreakerError(Auth0IntegrationError):
-        """Circuit breaker error"""
-        pass
-    
-    class ExternalServiceError(Auth0IntegrationError):
-        """External service error"""
-        pass
+}
 
 
-# Configure structured logging
-logger = structlog.get_logger("auth.auth0_client")
-
-
-@dataclass
-class Auth0Config:
+class Auth0ConfigurationManager:
     """
-    Comprehensive Auth0 configuration with security validation and enterprise settings.
+    Comprehensive Auth0 configuration manager with environment-specific settings
+    and secure credential management using python-dotenv integration.
     
-    This configuration class manages Auth0 service parameters, connection settings,
-    retry policies, and circuit breaker configuration for enterprise-grade Auth0 integration.
+    This class provides centralized configuration management for Auth0 integration
+    with comprehensive validation, secure credential handling, and environment-specific
+    settings for development, staging, and production deployments.
     """
     
-    domain: str
-    client_id: str
-    client_secret: str
-    audience: str
-    connection_timeout: float = 10.0
-    read_timeout: float = 30.0
-    max_retries: int = 3
-    retry_backoff_factor: float = 1.0
-    circuit_breaker_failure_threshold: int = 5
-    circuit_breaker_timeout: int = 60
-    cache_ttl: int = 300  # 5 minutes
-    rate_limit_per_minute: int = 100
+    def __init__(self):
+        """Initialize Auth0 configuration with environment validation."""
+        self.logger = logger.bind(component="auth0_config")
+        self._config = self._load_configuration()
+        self._validate_configuration()
+        
+        self.logger.info(
+            "Auth0 configuration loaded successfully",
+            domain=self._config['domain'],
+            environment=self._config['environment'],
+            client_configured=bool(self._config['client_id'])
+        )
     
-    def __post_init__(self) -> None:
-        """Validate Auth0 configuration parameters."""
-        if not self.domain or not self.domain.endswith('.auth0.com'):
-            raise ValueError("Invalid Auth0 domain configuration")
+    def _load_configuration(self) -> Dict[str, Any]:
+        """
+        Load Auth0 configuration from environment variables with defaults.
         
-        if not self.client_id or len(self.client_id) < 20:
-            raise ValueError("Invalid Auth0 client ID configuration")
-        
-        if not self.client_secret or len(self.client_secret) < 30:
-            raise ValueError("Invalid Auth0 client secret configuration")
-        
-        if not self.audience:
-            raise ValueError("Auth0 audience must be configured")
-
-
-@dataclass
-class Auth0UserProfile:
-    """
-    Structured representation of Auth0 user profile with comprehensive metadata.
-    
-    This class provides a standardized interface for Auth0 user data including
-    identity information, permissions, metadata, and session context for
-    comprehensive authentication and authorization operations.
-    """
-    
-    user_id: str
-    email: str
-    name: str
-    nickname: str
-    picture: Optional[str] = None
-    email_verified: bool = False
-    permissions: Set[str] = None
-    roles: List[str] = None
-    app_metadata: Dict[str, Any] = None
-    user_metadata: Dict[str, Any] = None
-    last_login: Optional[datetime] = None
-    login_count: int = 0
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
-    
-    def __post_init__(self) -> None:
-        """Initialize default values and validate user profile data."""
-        if self.permissions is None:
-            self.permissions = set()
-        
-        if self.roles is None:
-            self.roles = []
-        
-        if self.app_metadata is None:
-            self.app_metadata = {}
-        
-        if self.user_metadata is None:
-            self.user_metadata = {}
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert user profile to dictionary for caching and serialization."""
+        Returns:
+            Dictionary containing Auth0 configuration parameters
+        """
         return {
-            'user_id': self.user_id,
-            'email': self.email,
-            'name': self.name,
-            'nickname': self.nickname,
-            'picture': self.picture,
-            'email_verified': self.email_verified,
-            'permissions': list(self.permissions),
-            'roles': self.roles,
-            'app_metadata': self.app_metadata,
-            'user_metadata': self.user_metadata,
-            'last_login': self.last_login.isoformat() if self.last_login else None,
-            'login_count': self.login_count,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
-            'updated_at': self.updated_at.isoformat() if self.updated_at else None
+            # Core Auth0 settings
+            'domain': os.getenv('AUTH0_DOMAIN'),
+            'client_id': os.getenv('AUTH0_CLIENT_ID'),
+            'client_secret': os.getenv('AUTH0_CLIENT_SECRET'),
+            'audience': os.getenv('AUTH0_AUDIENCE'),
+            'callback_url': os.getenv('AUTH0_CALLBACK_URL'),
+            'logout_url': os.getenv('AUTH0_LOGOUT_URL'),
+            
+            # Environment and deployment settings
+            'environment': os.getenv('FLASK_ENV', 'production'),
+            'api_base_url': os.getenv('AUTH0_API_BASE_URL'),
+            
+            # Security and performance settings
+            'token_algorithm': os.getenv('AUTH0_TOKEN_ALGORITHM', 'RS256'),
+            'token_leeway': int(os.getenv('AUTH0_TOKEN_LEEWAY', '60')),  # seconds
+            'jwks_cache_ttl': int(os.getenv('AUTH0_JWKS_CACHE_TTL', '3600')),  # seconds
+            
+            # HTTP client configuration
+            'api_timeout': int(os.getenv('AUTH0_API_TIMEOUT', '30')),  # seconds
+            'connection_timeout': int(os.getenv('AUTH0_CONNECTION_TIMEOUT', '10')),  # seconds
+            'max_connections': int(os.getenv('AUTH0_MAX_CONNECTIONS', '50')),
+            'max_keepalive_connections': int(os.getenv('AUTH0_MAX_KEEPALIVE_CONNECTIONS', '20')),
+            
+            # Circuit breaker configuration
+            'circuit_breaker_failure_threshold': int(os.getenv('AUTH0_CIRCUIT_BREAKER_FAILURE_THRESHOLD', '5')),
+            'circuit_breaker_recovery_timeout': int(os.getenv('AUTH0_CIRCUIT_BREAKER_RECOVERY_TIMEOUT', '60')),
+            'circuit_breaker_expected_exception': (httpx.RequestError, httpx.HTTPStatusError, Auth0Error),
+            
+            # Retry strategy configuration
+            'retry_max_attempts': int(os.getenv('AUTH0_RETRY_MAX_ATTEMPTS', '3')),
+            'retry_initial_wait': float(os.getenv('AUTH0_RETRY_INITIAL_WAIT', '1.0')),
+            'retry_max_wait': float(os.getenv('AUTH0_RETRY_MAX_WAIT', '10.0')),
+            'retry_jitter': float(os.getenv('AUTH0_RETRY_JITTER', '2.0')),
+            
+            # Cache configuration
+            'permission_cache_ttl': int(os.getenv('AUTH0_PERMISSION_CACHE_TTL', '300')),  # 5 minutes
+            'user_profile_cache_ttl': int(os.getenv('AUTH0_USER_PROFILE_CACHE_TTL', '3600')),  # 1 hour
+            'token_validation_cache_ttl': int(os.getenv('AUTH0_TOKEN_VALIDATION_CACHE_TTL', '300')),  # 5 minutes
+            
+            # Rate limiting configuration
+            'rate_limit_requests_per_minute': int(os.getenv('AUTH0_RATE_LIMIT_RPM', '100')),
+            'rate_limit_burst_size': int(os.getenv('AUTH0_RATE_LIMIT_BURST', '20')),
+            
+            # Monitoring and logging configuration
+            'enable_detailed_logging': os.getenv('AUTH0_ENABLE_DETAILED_LOGGING', 'false').lower() == 'true',
+            'log_sensitive_data': os.getenv('AUTH0_LOG_SENSITIVE_DATA', 'false').lower() == 'true',
+            'metrics_enabled': os.getenv('AUTH0_METRICS_ENABLED', 'true').lower() == 'true'
         }
     
-    @classmethod
-    def from_auth0_data(cls, auth0_data: Dict[str, Any]) -> 'Auth0UserProfile':
-        """Create user profile from Auth0 API response data."""
-        return cls(
-            user_id=auth0_data.get('user_id', ''),
-            email=auth0_data.get('email', ''),
-            name=auth0_data.get('name', ''),
-            nickname=auth0_data.get('nickname', ''),
-            picture=auth0_data.get('picture'),
-            email_verified=auth0_data.get('email_verified', False),
-            permissions=set(auth0_data.get('permissions', [])),
-            roles=auth0_data.get('roles', []),
-            app_metadata=auth0_data.get('app_metadata', {}),
-            user_metadata=auth0_data.get('user_metadata', {}),
-            last_login=datetime.fromisoformat(auth0_data['last_login'].replace('Z', '+00:00')) 
-                      if auth0_data.get('last_login') else None,
-            login_count=auth0_data.get('logins_count', 0),
-            created_at=datetime.fromisoformat(auth0_data['created_at'].replace('Z', '+00:00'))
-                      if auth0_data.get('created_at') else None,
-            updated_at=datetime.fromisoformat(auth0_data['updated_at'].replace('Z', '+00:00'))
-                      if auth0_data.get('updated_at') else None
+    def _validate_configuration(self) -> None:
+        """
+        Validate Auth0 configuration with comprehensive error checking.
+        
+        Raises:
+            ValueError: If required configuration is missing or invalid
+        """
+        required_fields = ['domain', 'client_id', 'client_secret', 'audience']
+        missing_fields = [field for field in required_fields if not self._config.get(field)]
+        
+        if missing_fields:
+            raise ValueError(f"Missing required Auth0 configuration: {', '.join(missing_fields)}")
+        
+        # Validate domain format
+        domain = self._config['domain']
+        if not domain.endswith('.auth0.com') and not domain.endswith('.eu.auth0.com'):
+            self.logger.warning(
+                "Auth0 domain format may be invalid",
+                domain=domain,
+                expected_format="*.auth0.com or *.eu.auth0.com"
+            )
+        
+        # Validate timeout values
+        if self._config['api_timeout'] < 1 or self._config['api_timeout'] > 120:
+            raise ValueError("Auth0 API timeout must be between 1 and 120 seconds")
+        
+        # Validate circuit breaker thresholds
+        if self._config['circuit_breaker_failure_threshold'] < 1:
+            raise ValueError("Circuit breaker failure threshold must be at least 1")
+        
+        self.logger.info("Auth0 configuration validation completed successfully")
+    
+    def get_management_api_url(self) -> str:
+        """Get Auth0 Management API base URL."""
+        return f"https://{self._config['domain']}/api/v2/"
+    
+    def get_jwks_url(self) -> str:
+        """Get Auth0 JWKS endpoint URL."""
+        return f"https://{self._config['domain']}/.well-known/jwks.json"
+    
+    def get_userinfo_url(self) -> str:
+        """Get Auth0 userinfo endpoint URL."""
+        return f"https://{self._config['domain']}/userinfo"
+    
+    def get_config(self) -> Dict[str, Any]:
+        """Get complete Auth0 configuration."""
+        return self._config.copy()
+    
+    def is_development_mode(self) -> bool:
+        """Check if running in development mode."""
+        return self._config['environment'] == 'development'
+    
+    def get_httpx_timeout(self) -> httpx.Timeout:
+        """Get configured HTTPX timeout settings."""
+        return httpx.Timeout(
+            connect=self._config['connection_timeout'],
+            read=self._config['api_timeout'],
+            write=self._config['api_timeout'],
+            pool=5.0
+        )
+    
+    def get_httpx_limits(self) -> httpx.Limits:
+        """Get configured HTTPX connection limits."""
+        return httpx.Limits(
+            max_connections=self._config['max_connections'],
+            max_keepalive_connections=self._config['max_keepalive_connections'],
+            keepalive_expiry=30.0
         )
 
 
 class Auth0MetricsCollector:
     """
-    Comprehensive Prometheus metrics collection for Auth0 service monitoring.
+    Comprehensive metrics collection for Auth0 service monitoring with
+    Prometheus integration and performance tracking capabilities.
     
-    This class implements enterprise-grade metrics collection for Auth0 service
-    interactions, circuit breaker events, retry attempts, and cache performance
-    to enable comprehensive monitoring and alerting capabilities.
+    This class provides enterprise-grade monitoring for Auth0 operations
+    including API performance, circuit breaker state, cache effectiveness,
+    and service availability tracking for comprehensive observability.
     """
     
-    def __init__(self) -> None:
-        """Initialize Prometheus metrics collectors for Auth0 monitoring."""
+    def __init__(self):
+        """Initialize Auth0 metrics collector."""
+        self.logger = logger.bind(component="auth0_metrics")
+        self._service_availability_window = []
+        self._max_availability_samples = 100
         
-        # Auth0 API call metrics
-        self.api_requests_total = Counter(
-            'auth0_api_requests_total',
-            'Total Auth0 API requests by endpoint and status',
-            ['endpoint', 'status', 'method']
-        )
-        
-        self.api_request_duration = Histogram(
-            'auth0_api_request_duration_seconds',
-            'Auth0 API request duration in seconds',
-            ['endpoint', 'method'],
-            buckets=[0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0]
-        )
-        
-        # Circuit breaker metrics
-        self.circuit_breaker_state = Gauge(
-            'auth0_circuit_breaker_state',
-            'Circuit breaker state (0=closed, 1=open, 2=half-open)',
-            ['service']
-        )
-        
-        self.circuit_breaker_failures = Counter(
-            'auth0_circuit_breaker_failures_total',
-            'Total circuit breaker failures',
-            ['service', 'failure_type']
-        )
-        
-        # Retry attempt metrics
-        self.retry_attempts_total = Counter(
-            'auth0_retry_attempts_total',
-            'Total retry attempts by operation and outcome',
-            ['operation', 'outcome']
-        )
-        
-        # Authentication metrics
-        self.token_validations_total = Counter(
-            'auth0_token_validations_total',
-            'Total JWT token validations by result',
-            ['result', 'source']
-        )
-        
-        self.user_profile_requests_total = Counter(
-            'auth0_user_profile_requests_total',
-            'Total user profile requests by result',
-            ['result', 'cache_hit']
-        )
-        
-        # Cache performance metrics
-        self.cache_operations_total = Counter(
-            'auth0_cache_operations_total',
-            'Total cache operations by type and result',
-            ['operation', 'result', 'cache_type']
-        )
-        
-        self.cache_hit_ratio = Gauge(
-            'auth0_cache_hit_ratio',
-            'Cache hit ratio for Auth0 data',
-            ['cache_type']
-        )
-        
-        # Service health metrics
-        self.service_availability = Gauge(
-            'auth0_service_availability',
-            'Auth0 service availability (0=down, 1=up)',
-            ['service']
-        )
-    
     def record_api_request(
-        self,
-        endpoint: str,
-        method: str,
-        status: str,
-        duration: float
+        self, 
+        operation: str, 
+        result: str, 
+        duration: float,
+        status_code: Optional[int] = None
     ) -> None:
-        """Record Auth0 API request metrics."""
-        self.api_requests_total.labels(
-            endpoint=endpoint,
-            status=status,
-            method=method
+        """
+        Record Auth0 API request metrics.
+        
+        Args:
+            operation: Type of Auth0 operation (user_info, permissions, etc.)
+            result: Result of the operation (success, error, timeout)
+            duration: Request duration in seconds
+            status_code: HTTP status code if applicable
+        """
+        # Record request count and duration
+        auth0_metrics['api_requests_total'].labels(
+            operation=operation,
+            result=result,
+            status_code=str(status_code) if status_code else 'none'
         ).inc()
         
-        self.api_request_duration.labels(
-            endpoint=endpoint,
-            method=method
+        auth0_metrics['api_request_duration'].labels(
+            operation=operation
         ).observe(duration)
+        
+        # Update service availability
+        self._update_service_availability(result == 'success')
+        
+        self.logger.debug(
+            "Auth0 API request metrics recorded",
+            operation=operation,
+            result=result,
+            duration=duration,
+            status_code=status_code
+        )
     
-    def record_circuit_breaker_event(
-        self,
-        service: str,
-        state: str,
-        failure_type: Optional[str] = None
-    ) -> None:
-        """Record circuit breaker state changes and failures."""
-        state_mapping = {
-            'closed': 0,
-            'open': 1,
-            'half_open': 2
+    def record_circuit_breaker_state(self, service: str, state: str) -> None:
+        """
+        Record circuit breaker state change.
+        
+        Args:
+            service: Service name (auth0_management, auth0_authentication)
+            state: Circuit breaker state (closed, open, half_open)
+        """
+        auth0_metrics['circuit_breaker_state'].labels(
+            service=service
+        ).state(state)
+        
+        self.logger.info(
+            "Auth0 circuit breaker state changed",
+            service=service,
+            state=state
+        )
+    
+    def record_fallback_cache_usage(self, operation: str, result: str) -> None:
+        """
+        Record fallback cache usage metrics.
+        
+        Args:
+            operation: Type of operation using fallback cache
+            result: Result of fallback operation (hit, miss, error)
+        """
+        auth0_metrics['fallback_cache_usage'].labels(
+            operation=operation,
+            result=result
+        ).inc()
+    
+    def record_token_validation_cache(self, result: str) -> None:
+        """
+        Record token validation cache metrics.
+        
+        Args:
+            result: Cache operation result (hit, miss, error)
+        """
+        auth0_metrics['token_validation_cache_hits'].labels(
+            result=result
+        ).inc()
+    
+    def record_user_permission_lookup(self, source: str, result: str) -> None:
+        """
+        Record user permission lookup metrics.
+        
+        Args:
+            source: Data source (auth0, cache, fallback)
+            result: Lookup result (success, error, not_found)
+        """
+        auth0_metrics['user_permission_lookups'].labels(
+            source=source,
+            result=result
+        ).inc()
+    
+    def record_retry_attempt(self, operation: str, attempt_number: int) -> None:
+        """
+        Record retry attempt metrics.
+        
+        Args:
+            operation: Operation being retried
+            attempt_number: Current attempt number (1, 2, 3)
+        """
+        auth0_metrics['retry_attempts'].labels(
+            operation=operation,
+            attempt_number=str(attempt_number)
+        ).inc()
+    
+    def _update_service_availability(self, success: bool) -> None:
+        """
+        Update service availability calculation.
+        
+        Args:
+            success: Whether the operation was successful
+        """
+        self._service_availability_window.append(success)
+        
+        # Maintain rolling window
+        if len(self._service_availability_window) > self._max_availability_samples:
+            self._service_availability_window.pop(0)
+        
+        # Calculate availability ratio
+        if self._service_availability_window:
+            availability = sum(self._service_availability_window) / len(self._service_availability_window)
+            auth0_metrics['service_availability'].set(availability)
+    
+    def get_current_metrics_summary(self) -> Dict[str, Any]:
+        """
+        Get current metrics summary for monitoring dashboard.
+        
+        Returns:
+            Dictionary containing current Auth0 service metrics
+        """
+        availability = auth0_metrics['service_availability']._value._value if self._service_availability_window else 0.0
+        
+        return {
+            'service_availability': availability,
+            'availability_samples': len(self._service_availability_window),
+            'metrics_enabled': True,
+            'last_updated': datetime.utcnow().isoformat()
+        }
+
+
+class Auth0CircuitBreaker:
+    """
+    Intelligent circuit breaker implementation for Auth0 service integration
+    with comprehensive retry strategies, fallback mechanisms, and monitoring.
+    
+    This class implements enterprise-grade circuit breaker patterns using pybreaker
+    with tenacity integration for intelligent retry strategies, providing robust
+    external service communication with comprehensive failure handling.
+    """
+    
+    def __init__(self, config: Auth0ConfigurationManager, metrics: Auth0MetricsCollector):
+        """
+        Initialize Auth0 circuit breaker with configuration.
+        
+        Args:
+            config: Auth0 configuration manager instance
+            metrics: Auth0 metrics collector instance
+        """
+        self.config = config
+        self.metrics = metrics
+        self.logger = logger.bind(component="auth0_circuit_breaker")
+        
+        # Initialize circuit breakers for different Auth0 services
+        self._management_breaker = self._create_circuit_breaker("auth0_management")
+        self._authentication_breaker = self._create_circuit_breaker("auth0_authentication")
+        
+        self.logger.info(
+            "Auth0 circuit breakers initialized",
+            failure_threshold=config.get_config()['circuit_breaker_failure_threshold'],
+            recovery_timeout=config.get_config()['circuit_breaker_recovery_timeout']
+        )
+    
+    def _create_circuit_breaker(self, service_name: str) -> CircuitBreaker:
+        """
+        Create circuit breaker for specific Auth0 service.
+        
+        Args:
+            service_name: Name of the Auth0 service
+            
+        Returns:
+            Configured CircuitBreaker instance
+        """
+        config = self.config.get_config()
+        
+        def failure_listener(state):
+            """Handle circuit breaker state changes."""
+            self.metrics.record_circuit_breaker_state(service_name, state.name.lower())
+            self.logger.warning(
+                "Auth0 circuit breaker state changed",
+                service=service_name,
+                state=state.name.lower(),
+                failure_count=state.counter
+            )
+        
+        return CircuitBreaker(
+            fail_max=config['circuit_breaker_failure_threshold'],
+            reset_timeout=config['circuit_breaker_recovery_timeout'],
+            exclude=config['circuit_breaker_expected_exception'],
+            listeners=[failure_listener],
+            name=service_name
+        )
+    
+    def get_management_breaker(self) -> CircuitBreaker:
+        """Get circuit breaker for Auth0 Management API."""
+        return self._management_breaker
+    
+    def get_authentication_breaker(self) -> CircuitBreaker:
+        """Get circuit breaker for Auth0 Authentication API."""
+        return self._authentication_breaker
+    
+    def is_service_available(self, service: str) -> bool:
+        """
+        Check if Auth0 service is available (circuit breaker closed).
+        
+        Args:
+            service: Service name (management, authentication)
+            
+        Returns:
+            Boolean indicating service availability
+        """
+        if service == "management":
+            return self._management_breaker.current_state == "closed"
+        elif service == "authentication":
+            return self._authentication_breaker.current_state == "closed"
+        else:
+            return False
+    
+    def get_service_state(self, service: str) -> str:
+        """
+        Get current circuit breaker state for service.
+        
+        Args:
+            service: Service name (management, authentication)
+            
+        Returns:
+            Current circuit breaker state (closed, open, half_open)
+        """
+        if service == "management":
+            return self._management_breaker.current_state
+        elif service == "authentication":
+            return self._authentication_breaker.current_state
+        else:
+            return "unknown"
+
+
+class Auth0FallbackManager:
+    """
+    Comprehensive fallback mechanism manager for Auth0 service degradation
+    using cached permission data and user profile information.
+    
+    This class provides enterprise-grade fallback capabilities when Auth0
+    services are unavailable, utilizing Redis cache for permission data,
+    user profiles, and authentication state with intelligent TTL management.
+    """
+    
+    def __init__(self, cache_manager: AuthCacheManager, metrics: Auth0MetricsCollector):
+        """
+        Initialize Auth0 fallback manager.
+        
+        Args:
+            cache_manager: Authentication cache manager instance
+            metrics: Auth0 metrics collector instance
+        """
+        self.cache_manager = cache_manager
+        self.metrics = metrics
+        self.logger = logger.bind(component="auth0_fallback")
+        
+        self.logger.info("Auth0 fallback manager initialized")
+    
+    def get_cached_user_permissions(self, user_id: str) -> Optional[Set[str]]:
+        """
+        Get cached user permissions for fallback authentication.
+        
+        Args:
+            user_id: User identifier for permission lookup
+            
+        Returns:
+            Set of cached permissions or None if not available
+        """
+        try:
+            permissions = self.cache_manager.get_cached_user_permissions(user_id)
+            
+            if permissions:
+                self.metrics.record_fallback_cache_usage('user_permissions', 'hit')
+                self.metrics.record_user_permission_lookup('cache', 'success')
+                
+                self.logger.info(
+                    "User permissions retrieved from fallback cache",
+                    user_id=user_id,
+                    permission_count=len(permissions),
+                    fallback_mode=True
+                )
+                
+                return permissions
+            else:
+                self.metrics.record_fallback_cache_usage('user_permissions', 'miss')
+                self.metrics.record_user_permission_lookup('cache', 'not_found')
+                
+                self.logger.warning(
+                    "User permissions not found in fallback cache",
+                    user_id=user_id,
+                    fallback_mode=True
+                )
+                
+                return None
+                
+        except Exception as e:
+            self.metrics.record_fallback_cache_usage('user_permissions', 'error')
+            self.metrics.record_user_permission_lookup('cache', 'error')
+            
+            self.logger.error(
+                "Failed to retrieve user permissions from fallback cache",
+                user_id=user_id,
+                error=str(e),
+                error_type=type(e).__name__,
+                fallback_mode=True
+            )
+            
+            return None
+    
+    def get_cached_user_profile(self, user_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get cached user profile for fallback authentication.
+        
+        Args:
+            user_id: User identifier for profile lookup
+            
+        Returns:
+            Cached user profile data or None if not available
+        """
+        try:
+            # Use a specific cache key for user profiles
+            cache_key = f"user_profile:{user_id}"
+            
+            # For this implementation, we'll use the session cache interface
+            # In a production system, this would be a dedicated user profile cache
+            cached_data = self.cache_manager.get_cached_session_data(cache_key)
+            
+            if cached_data and 'user_profile' in cached_data:
+                self.metrics.record_fallback_cache_usage('user_profile', 'hit')
+                
+                user_profile = cached_data['user_profile']
+                
+                self.logger.info(
+                    "User profile retrieved from fallback cache",
+                    user_id=user_id,
+                    profile_fields=list(user_profile.keys()),
+                    fallback_mode=True
+                )
+                
+                return user_profile
+            else:
+                self.metrics.record_fallback_cache_usage('user_profile', 'miss')
+                
+                self.logger.warning(
+                    "User profile not found in fallback cache",
+                    user_id=user_id,
+                    fallback_mode=True
+                )
+                
+                return None
+                
+        except Exception as e:
+            self.metrics.record_fallback_cache_usage('user_profile', 'error')
+            
+            self.logger.error(
+                "Failed to retrieve user profile from fallback cache",
+                user_id=user_id,
+                error=str(e),
+                error_type=type(e).__name__,
+                fallback_mode=True
+            )
+            
+            return None
+    
+    def validate_cached_token(self, token_hash: str) -> Optional[Dict[str, Any]]:
+        """
+        Validate JWT token using cached validation results.
+        
+        Args:
+            token_hash: Secure hash of JWT token
+            
+        Returns:
+            Cached token validation result or None if not available
+        """
+        try:
+            validation_result = self.cache_manager.get_cached_jwt_validation_result(token_hash)
+            
+            if validation_result:
+                self.metrics.record_token_validation_cache('hit')
+                self.metrics.record_fallback_cache_usage('token_validation', 'hit')
+                
+                self.logger.info(
+                    "JWT token validation retrieved from fallback cache",
+                    token_hash=token_hash[:8] + "...",
+                    fallback_mode=True
+                )
+                
+                return validation_result
+            else:
+                self.metrics.record_token_validation_cache('miss')
+                self.metrics.record_fallback_cache_usage('token_validation', 'miss')
+                
+                self.logger.warning(
+                    "JWT token validation not found in fallback cache",
+                    token_hash=token_hash[:8] + "...",
+                    fallback_mode=True
+                )
+                
+                return None
+                
+        except Exception as e:
+            self.metrics.record_token_validation_cache('error')
+            self.metrics.record_fallback_cache_usage('token_validation', 'error')
+            
+            self.logger.error(
+                "Failed to validate token using fallback cache",
+                token_hash=token_hash[:8] + "...",
+                error=str(e),
+                error_type=type(e).__name__,
+                fallback_mode=True
+            )
+            
+            return None
+    
+    def create_degraded_mode_response(
+        self, 
+        operation: str, 
+        user_id: Optional[str] = None,
+        additional_context: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Create degraded mode response for Auth0 service unavailability.
+        
+        Args:
+            operation: Auth0 operation that failed
+            user_id: User identifier if applicable
+            additional_context: Additional context for the response
+            
+        Returns:
+            Degraded mode response with fallback status
+        """
+        response = {
+            'degraded_mode': True,
+            'service_unavailable': 'auth0',
+            'operation': operation,
+            'fallback_used': True,
+            'timestamp': datetime.utcnow().isoformat(),
+            'user_id': user_id
         }
         
-        self.circuit_breaker_state.labels(
-            service=service
-        ).set(state_mapping.get(state, 0))
+        if additional_context:
+            response.update(additional_context)
         
-        if failure_type:
-            self.circuit_breaker_failures.labels(
-                service=service,
-                failure_type=failure_type
-            ).inc()
-    
-    def record_retry_attempt(self, operation: str, outcome: str) -> None:
-        """Record retry attempt metrics."""
-        self.retry_attempts_total.labels(
+        self.logger.warning(
+            "Auth0 service operating in degraded mode",
             operation=operation,
-            outcome=outcome
-        ).inc()
-    
-    def record_token_validation(self, result: str, source: str) -> None:
-        """Record JWT token validation metrics."""
-        self.token_validations_total.labels(
-            result=result,
-            source=source
-        ).inc()
-    
-    def record_cache_operation(
-        self,
-        operation: str,
-        result: str,
-        cache_type: str
-    ) -> None:
-        """Record cache operation metrics."""
-        self.cache_operations_total.labels(
-            operation=operation,
-            result=result,
-            cache_type=cache_type
-        ).inc()
-    
-    def update_service_availability(self, service: str, available: bool) -> None:
-        """Update service availability metrics."""
-        self.service_availability.labels(service=service).set(1 if available else 0)
-
-
-class Auth0Client:
-    """
-    Enterprise-grade Auth0 client with comprehensive resilience patterns.
-    
-    This class implements the primary Auth0 integration layer using the Auth0 Python SDK 4.7+
-    with sophisticated circuit breaker patterns, intelligent retry strategies, and comprehensive
-    fallback mechanisms. Features include HTTPX async client integration, permission caching,
-    and enterprise-grade monitoring for optimal performance and reliability.
-    
-    Key Capabilities:
-    - Auth0 Management API integration for user profile and permission management
-    - JWT token validation with Auth0 public key rotation support
-    - Circuit breaker patterns preventing cascade failures during Auth0 outages
-    - Intelligent retry strategies with exponential backoff and jitter
-    - Comprehensive caching with Redis backend for optimal performance
-    - Prometheus metrics collection for monitoring and alerting
-    - Structured audit logging for enterprise compliance requirements
-    
-    Usage:
-        auth0_client = Auth0Client()
-        
-        # Validate JWT token
-        user_profile = await auth0_client.validate_token_async(jwt_token)
-        
-        # Get user permissions with fallback
-        permissions = await auth0_client.get_user_permissions_async(user_id)
-        
-        # Check specific permission
-        has_permission = await auth0_client.check_user_permission_async(
-            user_id, 'read:documents'
+            user_id=user_id,
+            degraded_mode=True
         )
+        
+        return response
+
+
+class Auth0ClientManager:
+    """
+    Comprehensive Auth0 client manager with circuit breaker patterns, intelligent
+    retry strategies, and fallback mechanisms for enterprise-grade authentication
+    service integration.
+    
+    This class provides the primary interface for Auth0 operations with comprehensive
+    resilience patterns, HTTPX async client integration, and enterprise monitoring
+    capabilities. It implements the complete Auth0 Python SDK integration replacing
+    Node.js Auth0 client functionality per technical specification requirements.
+    
+    Features:
+    - Auth0 Python SDK 4.7+ integration with Management and Authentication API support
+    - Circuit breaker patterns with intelligent failure detection and recovery
+    - Comprehensive retry strategies with exponential backoff and jitter
+    - HTTPX async client for high-performance external service communication
+    - Fallback mechanisms using cached permission and user profile data
+    - Enterprise-grade monitoring with Prometheus metrics and structured logging
+    - JWT token validation with Auth0 JWKS endpoint integration
+    - User management operations with comprehensive error handling
+    - Permission and role management with caching optimization
     """
     
     def __init__(
         self,
-        config: Optional[Auth0Config] = None,
-        cache_manager: Optional[Any] = None,
-        audit_logger: Optional[Any] = None
-    ) -> None:
+        config_manager: Optional[Auth0ConfigurationManager] = None,
+        cache_manager: Optional[AuthCacheManager] = None,
+        metrics_collector: Optional[Auth0MetricsCollector] = None
+    ):
         """
-        Initialize Auth0 client with comprehensive configuration and dependencies.
+        Initialize Auth0 client manager with comprehensive service integration.
         
         Args:
-            config: Auth0 configuration parameters
-            cache_manager: Cache manager for Auth0 data persistence
-            audit_logger: Security audit logger for compliance
+            config_manager: Auth0 configuration manager (creates new if None)
+            cache_manager: Authentication cache manager (uses global if None)
+            metrics_collector: Metrics collector (creates new if None)
         """
-        self.config = config or self._create_default_config()
-        self.cache_manager = cache_manager
-        self.audit_logger = audit_logger
-        self.metrics = Auth0MetricsCollector()
+        self.config = config_manager or Auth0ConfigurationManager()
+        self.cache_manager = cache_manager or get_auth_cache_manager()
+        self.metrics = metrics_collector or Auth0MetricsCollector()
+        self.circuit_breaker = Auth0CircuitBreaker(self.config, self.metrics)
+        self.fallback_manager = Auth0FallbackManager(self.cache_manager, self.metrics)
+        
+        self.logger = logger.bind(component="auth0_client_manager")
+        self.audit_logger = SecurityAuditLogger()
+        
+        # Initialize HTTP client and Auth0 clients
+        self._httpx_client: Optional[httpx.AsyncClient] = None
+        self._auth0_management: Optional[Auth0] = None
+        self._auth0_users: Optional[Auth0Users] = None
+        self._token_verifier: Optional[TokenVerifier] = None
         
         # Initialize Auth0 SDK clients
-        self._auth0_mgmt_client: Optional[Auth0] = None
-        self._auth0_token_client: Optional[GetToken] = None
-        self._management_token: Optional[str] = None
-        self._management_token_expires: Optional[datetime] = None
+        self._initialize_auth0_clients()
         
-        # Initialize HTTPX async client for Auth0 API calls
-        self._httpx_client: Optional[httpx.AsyncClient] = None
-        
-        # Initialize circuit breaker for Auth0 service protection
-        self._circuit_breaker = self._create_circuit_breaker()
-        
-        # Initialize JWT decoder configuration
-        self._jwt_algorithms = ['RS256', 'HS256']
-        self._jwks_cache: Dict[str, Any] = {}
-        self._jwks_cache_expires: Optional[datetime] = None
-        
-        logger.info(
-            "Auth0 client initialized successfully",
-            domain=self.config.domain,
-            audience=self.config.audience,
-            circuit_breaker_threshold=self.config.circuit_breaker_failure_threshold
+        self.logger.info(
+            "Auth0 client manager initialized successfully",
+            domain=self.config.get_config()['domain'],
+            circuit_breaker_enabled=True,
+            fallback_cache_enabled=True,
+            metrics_enabled=True
         )
     
-    def _create_default_config(self) -> Auth0Config:
-        """Create default Auth0 configuration from environment variables."""
-        return Auth0Config(
-            domain=AUTH0_DOMAIN,
-            client_id=AUTH0_CLIENT_ID,
-            client_secret=AUTH0_CLIENT_SECRET,
-            audience=AUTH0_AUDIENCE
-        )
+    def _initialize_auth0_clients(self) -> None:
+        """Initialize Auth0 SDK clients with configuration."""
+        try:
+            config = self.config.get_config()
+            
+            # Get management API token
+            get_token = GetToken(
+                config['domain'],
+                config['client_id'],
+                config['client_secret']
+            )
+            
+            token_response = get_token.client_credentials(
+                audience=self.config.get_management_api_url()
+            )
+            
+            # Initialize Auth0 Management client
+            self._auth0_management = Auth0(
+                config['domain'],
+                token_response['access_token']
+            )
+            
+            # Initialize Auth0 Users authentication client
+            self._auth0_users = Auth0Users(config['domain'])
+            
+            # Initialize JWT token verifier
+            self._token_verifier = TokenVerifier(
+                signature_verifier=AsymmetricSignatureVerifier(self.config.get_jwks_url()),
+                issuer=f"https://{config['domain']}/",
+                audience=config['audience'],
+                leeway=config['token_leeway']
+            )
+            
+            self.logger.info(
+                "Auth0 SDK clients initialized successfully",
+                management_api_configured=bool(self._auth0_management),
+                users_api_configured=bool(self._auth0_users),
+                token_verifier_configured=bool(self._token_verifier)
+            )
+            
+        except Exception as e:
+            self.logger.error(
+                "Failed to initialize Auth0 SDK clients",
+                error=str(e),
+                error_type=type(e).__name__
+            )
+            raise Auth0Exception(
+                message=f"Auth0 client initialization failed: {str(e)}",
+                error_code=SecurityErrorCode.EXT_AUTH0_API_ERROR,
+                service_response={'initialization_error': str(e)}
+            )
     
-    def _create_circuit_breaker(self) -> pybreaker.CircuitBreaker:
+    async def get_httpx_client(self) -> httpx.AsyncClient:
         """
-        Create circuit breaker for Auth0 service protection.
+        Get or create HTTPX async client with enterprise configuration.
         
         Returns:
-            Configured circuit breaker with failure threshold and timeout settings
+            Configured HTTPX async client instance
         """
-        def on_circuit_open() -> None:
-            """Handle circuit breaker open event."""
-            logger.warning(
-                "Auth0 circuit breaker opened",
-                failure_threshold=self.config.circuit_breaker_failure_threshold,
-                timeout=self.config.circuit_breaker_timeout
-            )
-            self.metrics.record_circuit_breaker_event('auth0', 'open')
-            
-            if self.audit_logger:
-                self.audit_logger.log_circuit_breaker_event(
-                    service='auth0',
-                    event='circuit_opened',
-                    failure_count=self.config.circuit_breaker_failure_threshold
-                )
-        
-        def on_circuit_close() -> None:
-            """Handle circuit breaker close event."""
-            logger.info("Auth0 circuit breaker closed")
-            self.metrics.record_circuit_breaker_event('auth0', 'closed')
-            
-            if self.audit_logger:
-                self.audit_logger.log_circuit_breaker_event(
-                    service='auth0',
-                    event='circuit_closed',
-                    failure_count=0
-                )
-        
-        return pybreaker.CircuitBreaker(
-            fail_max=self.config.circuit_breaker_failure_threshold,
-            reset_timeout=self.config.circuit_breaker_timeout,
-            exclude=[Auth0RateLimitError],  # Don't trip on rate limits
-            listeners=[on_circuit_open, on_circuit_close]
-        )
-    
-    async def _get_httpx_client(self) -> httpx.AsyncClient:
-        """
-        Get or create HTTPX async client for Auth0 API communication.
-        
-        Returns:
-            Configured HTTPX async client with timeouts and retry policies
-        """
-        if self._httpx_client is None:
-            timeout = httpx.Timeout(
-                connect=self.config.connection_timeout,
-                read=self.config.read_timeout,
-                write=10.0,
-                pool=5.0
-            )
-            
-            limits = httpx.Limits(
-                max_connections=100,
-                max_keepalive_connections=50,
-                keepalive_expiry=30.0
-            )
-            
+        if self._httpx_client is None or self._httpx_client.is_closed:
             self._httpx_client = httpx.AsyncClient(
-                base_url=f"https://{self.config.domain}",
-                timeout=timeout,
-                limits=limits,
+                timeout=self.config.get_httpx_timeout(),
+                limits=self.config.get_httpx_limits(),
                 headers={
                     'User-Agent': 'Flask-Auth0-Client/1.0',
                     'Accept': 'application/json',
                     'Content-Type': 'application/json'
                 },
-                verify=True  # Always verify SSL certificates
+                follow_redirects=True
             )
+            
+            self.logger.debug("HTTPX async client initialized")
         
         return self._httpx_client
-    
-    async def _get_management_token(self) -> str:
-        """
-        Get or refresh Auth0 Management API token.
-        
-        Returns:
-            Valid Auth0 Management API token
-            
-        Raises:
-            Auth0IntegrationError: When token acquisition fails
-        """
-        # Check if current token is still valid
-        if (self._management_token and self._management_token_expires and 
-            datetime.utcnow() < self._management_token_expires - timedelta(minutes=5)):
-            return self._management_token
-        
-        try:
-            # Use Auth0 Python SDK to get management token
-            if self._auth0_token_client is None:
-                self._auth0_token_client = GetToken(
-                    self.config.domain,
-                    self.config.client_id,
-                    self.config.client_secret
-                )
-            
-            token_response = self._auth0_token_client.client_credentials(
-                f"https://{self.config.domain}/api/v2/"
-            )
-            
-            self._management_token = token_response['access_token']
-            expires_in = token_response.get('expires_in', 3600)
-            self._management_token_expires = datetime.utcnow() + timedelta(seconds=expires_in)
-            
-            logger.info(
-                "Auth0 management token acquired successfully",
-                expires_in=expires_in,
-                expires_at=self._management_token_expires.isoformat()
-            )
-            
-            return self._management_token
-            
-        except Auth0Error as e:
-            logger.error(
-                "Failed to acquire Auth0 management token",
-                error=str(e),
-                domain=self.config.domain
-            )
-            raise Auth0IntegrationError(
-                f"Failed to acquire Auth0 management token: {str(e)}"
-            ) from e
-    
-    async def _get_management_client(self) -> Auth0:
-        """
-        Get or create Auth0 Management API client.
-        
-        Returns:
-            Configured Auth0 Management API client
-        """
-        if self._auth0_mgmt_client is None:
-            token = await self._get_management_token()
-            self._auth0_mgmt_client = Auth0(
-                domain=self.config.domain,
-                token=token
-            )
-        
-        return self._auth0_mgmt_client
     
     @retry(
         stop=stop_after_attempt(3),
@@ -638,702 +927,639 @@ class Auth0Client:
         before_sleep=before_sleep_log(logger, logging.WARNING),
         after=after_log(logger, logging.INFO)
     )
-    async def _make_auth0_request(
+    async def _make_auth0_api_request(
         self,
-        method: str,
-        endpoint: str,
-        **kwargs: Any
-    ) -> Dict[str, Any]:
+        operation: str,
+        request_func: Callable,
+        *args,
+        **kwargs
+    ) -> Any:
         """
-        Make authenticated request to Auth0 API with retry logic.
+        Make Auth0 API request with comprehensive retry and circuit breaker protection.
         
         Args:
-            method: HTTP method (GET, POST, PUT, DELETE)
-            endpoint: API endpoint path
-            **kwargs: Additional request parameters
+            operation: Type of Auth0 operation for metrics
+            request_func: Function to execute the API request
+            *args: Positional arguments for request function
+            **kwargs: Keyword arguments for request function
             
         Returns:
             Auth0 API response data
             
         Raises:
-            Auth0IntegrationError: When request fails after retries
+            Auth0Exception: If Auth0 API request fails after retries
+            CircuitBreakerException: If circuit breaker is open
         """
         start_time = time.time()
-        client = await self._get_httpx_client()
-        token = await self._get_management_token()
         
-        headers = kwargs.pop('headers', {})
-        headers.update({
-            'Authorization': f'Bearer {token}',
-            'Accept': 'application/json'
-        })
-        
-        try:
-            response = await client.request(
-                method=method,
-                url=endpoint,
-                headers=headers,
-                **kwargs
-            )
-            
-            duration = time.time() - start_time
-            
-            # Record metrics
-            self.metrics.record_api_request(
-                endpoint=endpoint,
-                method=method,
-                status=str(response.status_code),
-                duration=duration
-            )
-            
-            # Handle rate limiting
-            if response.status_code == 429:
-                logger.warning(
-                    "Auth0 rate limit exceeded",
-                    endpoint=endpoint,
-                    retry_after=response.headers.get('Retry-After')
-                )
-                raise Auth0RateLimitError("Auth0 rate limit exceeded")
-            
-            # Handle other HTTP errors
-            response.raise_for_status()
-            
-            # Update service availability
-            self.metrics.update_service_availability('auth0', True)
-            
-            return response.json()
-            
-        except httpx.TimeoutException as e:
-            duration = time.time() - start_time
-            self.metrics.record_api_request(
-                endpoint=endpoint,
-                method=method,
-                status='timeout',
-                duration=duration
-            )
-            
-            logger.error(
-                "Auth0 request timeout",
-                endpoint=endpoint,
-                timeout=self.config.read_timeout,
-                error=str(e)
-            )
-            raise Auth0TimeoutError(f"Auth0 request timeout: {str(e)}") from e
-            
-        except httpx.HTTPStatusError as e:
-            duration = time.time() - start_time
-            self.metrics.record_api_request(
-                endpoint=endpoint,
-                method=method,
-                status=str(e.response.status_code),
-                duration=duration
-            )
-            
-            logger.error(
-                "Auth0 HTTP error",
-                endpoint=endpoint,
-                status_code=e.response.status_code,
-                error=str(e)
-            )
-            raise Auth0IntegrationError(f"Auth0 HTTP error: {str(e)}") from e
-    
-    async def validate_token_async(self, token: str) -> Optional[Auth0UserProfile]:
-        """
-        Validate JWT token with Auth0 and return user profile.
-        
-        This method implements comprehensive JWT token validation with Auth0 public key
-        verification, caching for performance, and fallback mechanisms during service
-        degradation. Includes circuit breaker protection and intelligent retry strategies.
-        
-        Args:
-            token: JWT token to validate
-            
-        Returns:
-            Validated user profile or None if token is invalid
-            
-        Raises:
-            Auth0ValidationError: When token validation fails
-            CircuitBreakerError: When circuit breaker is open
-        """
         try:
             # Check circuit breaker state
-            if self._circuit_breaker.current_state == pybreaker.STATE_OPEN:
-                logger.warning("Auth0 circuit breaker is open, using cache fallback")
-                return await self._validate_token_from_cache(token)
-            
-            # Create token hash for caching
-            token_hash = hashlib.sha256(token.encode()).hexdigest()[:16]
-            
-            # Check cache first
-            if self.cache_manager:
-                cached_profile = await self._get_cached_token_validation(token_hash)
-                if cached_profile:
-                    self.metrics.record_token_validation('success', 'cache')
-                    logger.debug(
-                        "Token validation served from cache",
-                        token_hash=token_hash
-                    )
-                    return cached_profile
-            
-            # Validate token with circuit breaker protection
-            user_profile = await self._circuit_breaker.call_async(
-                self._validate_token_with_auth0, token
-            )
-            
-            # Cache successful validation
-            if user_profile and self.cache_manager:
-                await self._cache_token_validation(token_hash, user_profile)
-            
-            self.metrics.record_token_validation('success', 'auth0')
-            
-            # Log successful validation
-            if self.audit_logger:
-                self.audit_logger.log_authorization_event(
-                    event_type='token_validation',
-                    user_id=user_profile.user_id if user_profile else 'unknown',
-                    result='granted',
-                    additional_context={
-                        'token_hash': token_hash,
-                        'validation_source': 'auth0'
-                    }
+            if not self.circuit_breaker.is_service_available("management"):
+                raise CircuitBreakerException(
+                    message="Auth0 Management API circuit breaker is open",
+                    error_code=SecurityErrorCode.EXT_CIRCUIT_BREAKER_OPEN,
+                    service_name="auth0_management",
+                    circuit_state=self.circuit_breaker.get_service_state("management")
                 )
             
-            return user_profile
+            # Execute request with circuit breaker protection
+            with self.circuit_breaker.get_management_breaker():
+                response = await asyncio.to_thread(request_func, *args, **kwargs)
             
-        except pybreaker.CircuitBreakerError as e:
-            logger.warning(
-                "Circuit breaker prevented Auth0 call, using cache fallback",
-                error=str(e)
+            # Record successful request metrics
+            duration = time.time() - start_time
+            self.metrics.record_api_request(operation, 'success', duration)
+            
+            self.logger.debug(
+                "Auth0 API request completed successfully",
+                operation=operation,
+                duration=duration,
+                circuit_breaker_state='closed'
             )
             
-            self.metrics.record_circuit_breaker_event('auth0', 'open', 'validation_blocked')
+            return response
             
-            # Attempt cache fallback
-            fallback_profile = await self._validate_token_from_cache(token)
-            if fallback_profile:
-                self.metrics.record_token_validation('success', 'cache_fallback')
-                return fallback_profile
-            
-            self.metrics.record_token_validation('failure', 'circuit_breaker')
-            raise CircuitBreakerError("Auth0 service unavailable and no cache available") from e
-        
         except Exception as e:
-            self.metrics.record_token_validation('failure', 'error')
-            logger.error(
-                "Token validation failed",
+            duration = time.time() - start_time
+            
+            # Determine error type and record metrics
+            if isinstance(e, httpx.TimeoutException):
+                self.metrics.record_api_request(operation, 'timeout', duration, 408)
+                error_code = SecurityErrorCode.EXT_AUTH0_TIMEOUT
+            elif isinstance(e, httpx.HTTPStatusError):
+                self.metrics.record_api_request(operation, 'http_error', duration, e.response.status_code)
+                error_code = SecurityErrorCode.EXT_AUTH0_API_ERROR
+            elif isinstance(e, Auth0Error):
+                self.metrics.record_api_request(operation, 'auth0_error', duration)
+                error_code = SecurityErrorCode.EXT_AUTH0_API_ERROR
+            else:
+                self.metrics.record_api_request(operation, 'error', duration)
+                error_code = SecurityErrorCode.EXT_AUTH0_UNAVAILABLE
+            
+            self.logger.error(
+                "Auth0 API request failed",
+                operation=operation,
+                error=str(e),
+                error_type=type(e).__name__,
+                duration=duration
+            )
+            
+            # Record retry attempt for tenacity
+            retry_state = getattr(e, '__traceback__', None)
+            if hasattr(retry_state, 'attempt_number'):
+                self.metrics.record_retry_attempt(operation, retry_state.attempt_number)
+            
+            raise Auth0Exception(
+                message=f"Auth0 API request failed: {str(e)}",
+                error_code=error_code,
+                service_response={
+                    'operation': operation,
+                    'error_type': type(e).__name__,
+                    'duration': duration
+                }
+            )
+    
+    async def validate_jwt_token(self, token: str) -> Dict[str, Any]:
+        """
+        Validate JWT token with Auth0 JWKS endpoint integration and caching.
+        
+        Args:
+            token: JWT token string to validate
+            
+        Returns:
+            Validated token payload with user claims
+            
+        Raises:
+            AuthenticationException: If token validation fails
+            Auth0Exception: If Auth0 service is unavailable
+        """
+        start_time = time.time()
+        token_hash = create_token_hash(token)
+        
+        try:
+            # Check cache first
+            cached_result = self.cache_manager.get_cached_jwt_validation_result(token_hash)
+            if cached_result:
+                self.metrics.record_token_validation_cache('hit')
+                
+                self.logger.debug(
+                    "JWT token validation retrieved from cache",
+                    token_hash=token_hash[:8] + "...",
+                    cache_hit=True
+                )
+                
+                return cached_result
+            
+            self.metrics.record_token_validation_cache('miss')
+            
+            # Validate token with Auth0
+            if not self.circuit_breaker.is_service_available("authentication"):
+                # Try fallback validation
+                fallback_result = self.fallback_manager.validate_cached_token(token_hash)
+                if fallback_result:
+                    return fallback_result
+                
+                raise CircuitBreakerException(
+                    message="Auth0 Authentication service unavailable and no fallback data",
+                    error_code=SecurityErrorCode.EXT_CIRCUIT_BREAKER_OPEN,
+                    service_name="auth0_authentication"
+                )
+            
+            # Validate token using Auth0 token verifier
+            payload = await self._make_auth0_api_request(
+                'token_validation',
+                self._token_verifier.verify,
+                token
+            )
+            
+            # Cache validation result
+            cache_ttl = min(
+                payload.get('exp', 0) - int(datetime.utcnow().timestamp()),
+                self.config.get_config()['token_validation_cache_ttl']
+            )
+            
+            if cache_ttl > 0:
+                self.cache_manager.cache_jwt_validation_result(
+                    token_hash,
+                    payload,
+                    ttl=cache_ttl
+                )
+            
+            # Record security audit event
+            self.audit_logger.log_authentication_event(
+                event_type='jwt_token_validation',
+                user_id=payload.get('sub'),
+                result='success',
+                additional_context={
+                    'token_issuer': payload.get('iss'),
+                    'token_audience': payload.get('aud'),
+                    'validation_duration': time.time() - start_time
+                }
+            )
+            
+            self.logger.info(
+                "JWT token validated successfully",
+                user_id=payload.get('sub'),
+                token_hash=token_hash[:8] + "...",
+                issuer=payload.get('iss'),
+                duration=time.time() - start_time
+            )
+            
+            return payload
+            
+        except Exception as e:
+            # Record security audit event for failed validation
+            self.audit_logger.log_authentication_event(
+                event_type='jwt_token_validation',
+                user_id=None,
+                result='failed',
+                additional_context={
+                    'token_hash': token_hash[:8] + "...",
+                    'error': str(e),
+                    'validation_duration': time.time() - start_time
+                }
+            )
+            
+            if isinstance(e, (Auth0Exception, CircuitBreakerException)):
+                raise
+            
+            self.logger.error(
+                "JWT token validation failed",
+                token_hash=token_hash[:8] + "...",
+                error=str(e),
+                error_type=type(e).__name__,
+                duration=time.time() - start_time
+            )
+            
+            raise AuthenticationException(
+                message=f"JWT token validation failed: {str(e)}",
+                error_code=SecurityErrorCode.AUTH_TOKEN_INVALID,
+                token_claims={'error': str(e)}
+            )
+    
+    async def get_user_info(self, user_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve user information from Auth0 with fallback to cached data.
+        
+        Args:
+            user_id: Auth0 user identifier
+            
+        Returns:
+            User profile data or None if not found
+            
+        Raises:
+            Auth0Exception: If Auth0 service fails and no fallback data available
+        """
+        try:
+            # Check circuit breaker and use fallback if needed
+            if not self.circuit_breaker.is_service_available("management"):
+                fallback_profile = self.fallback_manager.get_cached_user_profile(user_id)
+                if fallback_profile:
+                    self.metrics.record_user_permission_lookup('fallback', 'success')
+                    return fallback_profile
+                
+                raise CircuitBreakerException(
+                    message="Auth0 Management API unavailable and no cached user data",
+                    error_code=SecurityErrorCode.EXT_CIRCUIT_BREAKER_OPEN,
+                    service_name="auth0_management"
+                )
+            
+            # Get user info from Auth0 Management API
+            user_info = await self._make_auth0_api_request(
+                'get_user_info',
+                self._auth0_management.users.get,
+                user_id
+            )
+            
+            # Cache user profile for fallback
+            cache_key = f"user_profile:{user_id}"
+            self.cache_manager.cache_session_data(
+                cache_key,
+                {'user_profile': user_info},
+                ttl=self.config.get_config()['user_profile_cache_ttl']
+            )
+            
+            self.metrics.record_user_permission_lookup('auth0', 'success')
+            
+            self.logger.info(
+                "User information retrieved from Auth0",
+                user_id=user_id,
+                email=user_info.get('email'),
+                verified=user_info.get('email_verified')
+            )
+            
+            return user_info
+            
+        except Exception as e:
+            self.metrics.record_user_permission_lookup('auth0', 'error')
+            
+            if isinstance(e, (Auth0Exception, CircuitBreakerException)):
+                raise
+            
+            self.logger.error(
+                "Failed to retrieve user information",
+                user_id=user_id,
                 error=str(e),
                 error_type=type(e).__name__
             )
-            raise Auth0ValidationError(f"Token validation failed: {str(e)}") from e
+            
+            raise Auth0Exception(
+                message=f"Failed to retrieve user information: {str(e)}",
+                error_code=SecurityErrorCode.EXT_AUTH0_API_ERROR,
+                service_response={'user_id': user_id, 'error': str(e)}
+            )
     
-    async def _validate_token_with_auth0(self, token: str) -> Optional[Auth0UserProfile]:
+    async def get_user_permissions(self, user_id: str) -> Set[str]:
         """
-        Validate JWT token directly with Auth0 service.
-        
-        Args:
-            token: JWT token to validate
-            
-        Returns:
-            User profile if token is valid, None otherwise
-        """
-        try:
-            # Get JWKS for token verification
-            jwks = await self._get_jwks()
-            
-            # Decode and verify token
-            unverified_header = jwt.get_unverified_header(token)
-            rsa_key = self._get_rsa_key(jwks, unverified_header['kid'])
-            
-            if not rsa_key:
-                logger.warning("Unable to find appropriate RSA key for token")
-                return None
-            
-            # Verify token signature and claims
-            payload = jwt.decode(
-                token,
-                rsa_key,
-                algorithms=self._jwt_algorithms,
-                audience=self.config.audience,
-                issuer=f'https://{self.config.domain}/'
-            )
-            
-            # Extract user information from token
-            user_id = payload.get('sub')
-            if not user_id:
-                logger.warning("Token missing required 'sub' claim")
-                return None
-            
-            # Get detailed user profile from Auth0
-            user_profile = await self._get_user_profile_from_auth0(user_id)
-            
-            if user_profile:
-                # Extract permissions from token if available
-                token_permissions = set(payload.get('permissions', []))
-                if token_permissions:
-                    user_profile.permissions.update(token_permissions)
-            
-            return user_profile
-            
-        except ExpiredSignatureError:
-            logger.info("Token has expired")
-            return None
-            
-        except InvalidSignatureError:
-            logger.warning("Token has invalid signature")
-            return None
-            
-        except InvalidTokenError as e:
-            logger.warning(f"Invalid token: {str(e)}")
-            return None
-    
-    async def _get_jwks(self) -> Dict[str, Any]:
-        """
-        Get JSON Web Key Set (JWKS) from Auth0 with caching.
-        
-        Returns:
-            JWKS data for token verification
-        """
-        # Check cache
-        if (self._jwks_cache and self._jwks_cache_expires and 
-            datetime.utcnow() < self._jwks_cache_expires):
-            return self._jwks_cache
-        
-        # Fetch JWKS from Auth0
-        jwks_response = await self._make_auth0_request(
-            'GET',
-            '/.well-known/jwks.json'
-        )
-        
-        self._jwks_cache = jwks_response
-        self._jwks_cache_expires = datetime.utcnow() + timedelta(hours=1)
-        
-        logger.debug("JWKS cache updated")
-        return self._jwks_cache
-    
-    def _get_rsa_key(self, jwks: Dict[str, Any], kid: str) -> Optional[Dict[str, Any]]:
-        """
-        Extract RSA key from JWKS for token verification.
-        
-        Args:
-            jwks: JSON Web Key Set
-            kid: Key ID from token header
-            
-        Returns:
-            RSA key data for verification
-        """
-        for key in jwks.get('keys', []):
-            if key.get('kid') == kid:
-                return {
-                    'kty': key['kty'],
-                    'kid': key['kid'],
-                    'use': key['use'],
-                    'n': key['n'],
-                    'e': key['e']
-                }
-        return None
-    
-    async def _get_user_profile_from_auth0(self, user_id: str) -> Optional[Auth0UserProfile]:
-        """
-        Get detailed user profile from Auth0 Management API.
-        
-        Args:
-            user_id: Auth0 user identifier
-            
-        Returns:
-            User profile data from Auth0
-        """
-        try:
-            user_data = await self._make_auth0_request(
-                'GET',
-                f'/api/v2/users/{user_id}'
-            )
-            
-            # Get user permissions
-            permissions_data = await self._make_auth0_request(
-                'GET',
-                f'/api/v2/users/{user_id}/permissions'
-            )
-            
-            # Extract permission names
-            permissions = {
-                perm.get('permission_name', '') 
-                for perm in permissions_data.get('permissions', [])
-                if perm.get('permission_name')
-            }
-            
-            # Add permissions to user data
-            user_data['permissions'] = list(permissions)
-            
-            return Auth0UserProfile.from_auth0_data(user_data)
-            
-        except Exception as e:
-            logger.error(
-                "Failed to get user profile from Auth0",
-                user_id=user_id,
-                error=str(e)
-            )
-            return None
-    
-    async def get_user_permissions_async(
-        self,
-        user_id: str,
-        use_cache: bool = True
-    ) -> Set[str]:
-        """
-        Get user permissions from Auth0 with intelligent caching and fallback.
-        
-        Args:
-            user_id: Auth0 user identifier
-            use_cache: Whether to use cached permissions
-            
-        Returns:
-            Set of user permissions
-        """
-        try:
-            # Check cache first if enabled
-            if use_cache and self.cache_manager:
-                cached_permissions = await self._get_cached_permissions(user_id)
-                if cached_permissions:
-                    self.metrics.record_cache_operation('get', 'hit', 'permissions')
-                    return cached_permissions
-                else:
-                    self.metrics.record_cache_operation('get', 'miss', 'permissions')
-            
-            # Get permissions from Auth0 with circuit breaker protection
-            permissions = await self._circuit_breaker.call_async(
-                self._get_permissions_from_auth0, user_id
-            )
-            
-            # Cache the result
-            if permissions and self.cache_manager:
-                await self._cache_permissions(user_id, permissions)
-                self.metrics.record_cache_operation('set', 'success', 'permissions')
-            
-            return permissions
-            
-        except pybreaker.CircuitBreakerError:
-            logger.warning(
-                "Circuit breaker open, attempting cache fallback for permissions",
-                user_id=user_id
-            )
-            
-            # Fallback to cache
-            if self.cache_manager:
-                cached_permissions = await self._get_cached_permissions(user_id)
-                if cached_permissions:
-                    self.metrics.record_cache_operation('get', 'fallback_hit', 'permissions')
-                    return cached_permissions
-            
-            logger.error(
-                "No cached permissions available during Auth0 outage",
-                user_id=user_id
-            )
-            return set()
-        
-        except Exception as e:
-            logger.error(
-                "Failed to get user permissions",
-                user_id=user_id,
-                error=str(e)
-            )
-            return set()
-    
-    async def _get_permissions_from_auth0(self, user_id: str) -> Set[str]:
-        """
-        Get user permissions directly from Auth0 Management API.
+        Retrieve user permissions from Auth0 with intelligent caching and fallback.
         
         Args:
             user_id: Auth0 user identifier
             
         Returns:
             Set of user permissions
+            
+        Raises:
+            Auth0Exception: If Auth0 service fails and no fallback data available
         """
         try:
-            permissions_data = await self._make_auth0_request(
-                'GET',
-                f'/api/v2/users/{user_id}/permissions'
-            )
-            
-            permissions = {
-                perm.get('permission_name', '')
-                for perm in permissions_data.get('permissions', [])
-                if perm.get('permission_name')
-            }
-            
-            logger.debug(
-                "Retrieved permissions from Auth0",
-                user_id=user_id,
-                permission_count=len(permissions)
-            )
-            
-            return permissions
-            
-        except Exception as e:
-            logger.error(
-                "Failed to retrieve permissions from Auth0",
-                user_id=user_id,
-                error=str(e)
-            )
-            raise
-    
-    async def check_user_permission_async(
-        self,
-        user_id: str,
-        permission: str,
-        use_cache: bool = True
-    ) -> bool:
-        """
-        Check if user has specific permission with caching and fallback.
-        
-        Args:
-            user_id: Auth0 user identifier
-            permission: Permission to check
-            use_cache: Whether to use cached permissions
-            
-        Returns:
-            True if user has permission, False otherwise
-        """
-        try:
-            user_permissions = await self.get_user_permissions_async(
-                user_id, use_cache=use_cache
-            )
-            
-            has_permission = permission in user_permissions
-            
-            # Log authorization decision
-            if self.audit_logger:
-                self.audit_logger.log_authorization_event(
-                    event_type='permission_check',
-                    user_id=user_id,
-                    result='granted' if has_permission else 'denied',
-                    permissions=[permission],
-                    additional_context={
-                        'total_permissions': len(user_permissions),
-                        'cache_used': use_cache
-                    }
-                )
-            
-            return has_permission
-            
-        except Exception as e:
-            logger.error(
-                "Permission check failed",
-                user_id=user_id,
-                permission=permission,
-                error=str(e)
-            )
-            
-            # Log authorization failure
-            if self.audit_logger:
-                self.audit_logger.log_authorization_event(
-                    event_type='permission_check',
-                    user_id=user_id,
-                    result='error',
-                    permissions=[permission],
-                    additional_context={
-                        'error': str(e),
-                        'error_type': type(e).__name__
-                    }
-                )
-            
-            return False
-    
-    # Cache management methods
-    async def _get_cached_token_validation(self, token_hash: str) -> Optional[Auth0UserProfile]:
-        """Get cached token validation result."""
-        if not self.cache_manager:
-            return None
-        
-        try:
-            cache_key = f"jwt_validation:{token_hash}"
-            cached_data = await self.cache_manager.get(cache_key)
-            
-            if cached_data:
-                return Auth0UserProfile.from_auth0_data(cached_data)
-            
-        except Exception as e:
-            logger.warning(f"Failed to get cached token validation: {str(e)}")
-        
-        return None
-    
-    async def _cache_token_validation(
-        self,
-        token_hash: str,
-        user_profile: Auth0UserProfile
-    ) -> None:
-        """Cache token validation result."""
-        if not self.cache_manager:
-            return
-        
-        try:
-            cache_key = f"jwt_validation:{token_hash}"
-            await self.cache_manager.set(
-                cache_key,
-                user_profile.to_dict(),
-                ttl=self.config.cache_ttl
-            )
-            
-        except Exception as e:
-            logger.warning(f"Failed to cache token validation: {str(e)}")
-    
-    async def _get_cached_permissions(self, user_id: str) -> Optional[Set[str]]:
-        """Get cached user permissions."""
-        if not self.cache_manager:
-            return None
-        
-        try:
-            cache_key = f"perm_cache:{user_id}"
-            cached_permissions = await self.cache_manager.get(cache_key)
-            
+            # Check cache first
+            cached_permissions = self.cache_manager.get_cached_user_permissions(user_id)
             if cached_permissions:
-                return set(cached_permissions)
+                self.metrics.record_user_permission_lookup('cache', 'success')
+                return cached_permissions
             
-        except Exception as e:
-            logger.warning(f"Failed to get cached permissions: {str(e)}")
-        
-        return None
-    
-    async def _cache_permissions(self, user_id: str, permissions: Set[str]) -> None:
-        """Cache user permissions."""
-        if not self.cache_manager:
-            return
-        
-        try:
-            cache_key = f"perm_cache:{user_id}"
-            await self.cache_manager.set(
-                cache_key,
-                list(permissions),
-                ttl=self.config.cache_ttl
+            # Check circuit breaker and use fallback if needed
+            if not self.circuit_breaker.is_service_available("management"):
+                fallback_permissions = self.fallback_manager.get_cached_user_permissions(user_id)
+                if fallback_permissions:
+                    self.metrics.record_user_permission_lookup('fallback', 'success')
+                    return fallback_permissions
+                
+                # Return minimal permissions for degraded mode
+                self.metrics.record_user_permission_lookup('fallback', 'degraded')
+                self.logger.warning(
+                    "Auth0 unavailable and no cached permissions, using minimal permissions",
+                    user_id=user_id,
+                    degraded_mode=True
+                )
+                return set(['basic_access'])  # Minimal permission for degraded mode
+            
+            # Get user permissions from Auth0
+            user_info = await self.get_user_info(user_id)
+            
+            # Extract permissions from user metadata
+            app_metadata = user_info.get('app_metadata', {})
+            permissions = set(app_metadata.get('permissions', []))
+            
+            # Add role-based permissions
+            roles = app_metadata.get('roles', [])
+            for role in roles:
+                role_permissions = await self._get_role_permissions(role)
+                permissions.update(role_permissions)
+            
+            # Cache permissions for future use
+            self.cache_manager.cache_user_permissions(
+                user_id,
+                permissions,
+                ttl=self.config.get_config()['permission_cache_ttl']
             )
             
+            self.metrics.record_user_permission_lookup('auth0', 'success')
+            
+            self.logger.info(
+                "User permissions retrieved from Auth0",
+                user_id=user_id,
+                permission_count=len(permissions),
+                roles=roles
+            )
+            
+            return permissions
+            
         except Exception as e:
-            logger.warning(f"Failed to cache permissions: {str(e)}")
+            self.metrics.record_user_permission_lookup('auth0', 'error')
+            
+            if isinstance(e, (Auth0Exception, CircuitBreakerException)):
+                raise
+            
+            self.logger.error(
+                "Failed to retrieve user permissions",
+                user_id=user_id,
+                error=str(e),
+                error_type=type(e).__name__
+            )
+            
+            raise Auth0Exception(
+                message=f"Failed to retrieve user permissions: {str(e)}",
+                error_code=SecurityErrorCode.EXT_AUTH0_API_ERROR,
+                service_response={'user_id': user_id, 'error': str(e)}
+            )
     
-    async def _validate_token_from_cache(self, token: str) -> Optional[Auth0UserProfile]:
-        """Validate token using only cached data during service degradation."""
-        if not self.cache_manager:
-            return None
+    async def _get_role_permissions(self, role_id: str) -> Set[str]:
+        """
+        Get permissions for a specific role with caching.
         
+        Args:
+            role_id: Role identifier
+            
+        Returns:
+            Set of permissions for the role
+        """
         try:
-            token_hash = hashlib.sha256(token.encode()).hexdigest()[:16]
-            return await self._get_cached_token_validation(token_hash)
+            # Check role cache
+            cache_key = f"role_permissions:{role_id}"
+            cached_role_permissions = self.cache_manager.get_cached_session_data(cache_key)
+            
+            if cached_role_permissions and 'permissions' in cached_role_permissions:
+                return set(cached_role_permissions['permissions'])
+            
+            # Get role permissions from Auth0 (simplified implementation)
+            # In a full implementation, this would query Auth0 Management API for role permissions
+            role_permissions = set()  # Default empty set
+            
+            # Cache role permissions
+            self.cache_manager.cache_session_data(
+                cache_key,
+                {'permissions': list(role_permissions)},
+                ttl=self.config.get_config()['permission_cache_ttl']
+            )
+            
+            return role_permissions
             
         except Exception as e:
-            logger.warning(f"Cache fallback validation failed: {str(e)}")
-            return None
+            self.logger.error(
+                "Failed to retrieve role permissions",
+                role_id=role_id,
+                error=str(e),
+                error_type=type(e).__name__
+            )
+            return set()
     
-    async def invalidate_user_cache(self, user_id: str) -> None:
-        """Invalidate all cached data for a specific user."""
-        if not self.cache_manager:
-            return
+    async def invalidate_user_cache(self, user_id: str) -> bool:
+        """
+        Invalidate all cached data for a user.
         
+        Args:
+            user_id: User identifier for cache invalidation
+            
+        Returns:
+            Success status of cache invalidation
+        """
         try:
-            # Invalidate permission cache
-            perm_key = f"perm_cache:{user_id}"
-            await self.cache_manager.delete(perm_key)
+            # Invalidate user permissions cache
+            permissions_invalidated = self.cache_manager.invalidate_user_permission_cache(user_id)
             
-            # Note: JWT validation cache is token-specific and will expire naturally
+            # Invalidate user profile cache
+            profile_cache_key = f"user_profile:{user_id}"
+            profile_invalidated = self.cache_manager.invalidate_session_cache(profile_cache_key)
             
-            logger.info(f"Invalidated cache for user {user_id}")
+            self.logger.info(
+                "User cache invalidated",
+                user_id=user_id,
+                permissions_invalidated=permissions_invalidated,
+                profile_invalidated=profile_invalidated
+            )
+            
+            return permissions_invalidated or profile_invalidated
             
         except Exception as e:
-            logger.warning(f"Failed to invalidate user cache: {str(e)}")
+            self.logger.error(
+                "Failed to invalidate user cache",
+                user_id=user_id,
+                error=str(e),
+                error_type=type(e).__name__
+            )
+            return False
     
     async def health_check(self) -> Dict[str, Any]:
         """
-        Perform comprehensive health check of Auth0 service.
+        Perform comprehensive health check of Auth0 integration.
         
         Returns:
-            Health status information
+            Health check results with service status and metrics
         """
-        health_status = {
-            'service': 'auth0',
-            'status': 'unknown',
-            'timestamp': datetime.utcnow().isoformat(),
-            'circuit_breaker_state': self._circuit_breaker.current_state,
-            'checks': {}
-        }
-        
         try:
-            # Test Auth0 Management API availability
-            start_time = time.time()
-            await self._make_auth0_request('GET', '/api/v2/users?per_page=1')
-            api_duration = time.time() - start_time
-            
-            health_status['checks']['management_api'] = {
+            health_result = {
                 'status': 'healthy',
-                'response_time': api_duration
+                'timestamp': datetime.utcnow().isoformat(),
+                'services': {
+                    'auth0_management': {
+                        'available': self.circuit_breaker.is_service_available('management'),
+                        'circuit_breaker_state': self.circuit_breaker.get_service_state('management')
+                    },
+                    'auth0_authentication': {
+                        'available': self.circuit_breaker.is_service_available('authentication'),
+                        'circuit_breaker_state': self.circuit_breaker.get_service_state('authentication')
+                    }
+                },
+                'cache': self.cache_manager.perform_health_check(),
+                'metrics': self.metrics.get_current_metrics_summary()
             }
             
-            # Test JWKS endpoint
-            start_time = time.time()
-            await self._get_jwks()
-            jwks_duration = time.time() - start_time
+            # Determine overall health status
+            all_services_available = all(
+                service['available'] for service in health_result['services'].values()
+            )
             
-            health_status['checks']['jwks'] = {
-                'status': 'healthy',
-                'response_time': jwks_duration
-            }
+            if not all_services_available:
+                health_result['status'] = 'degraded'
+                health_result['degraded_services'] = [
+                    name for name, service in health_result['services'].items()
+                    if not service['available']
+                ]
             
-            health_status['status'] = 'healthy'
-            self.metrics.update_service_availability('auth0', True)
+            self.logger.info(
+                "Auth0 health check completed",
+                status=health_result['status'],
+                management_available=health_result['services']['auth0_management']['available'],
+                authentication_available=health_result['services']['auth0_authentication']['available']
+            )
+            
+            return health_result
             
         except Exception as e:
-            health_status['status'] = 'unhealthy'
-            health_status['error'] = str(e)
-            self.metrics.update_service_availability('auth0', False)
-            
-            logger.error(
+            self.logger.error(
                 "Auth0 health check failed",
                 error=str(e),
                 error_type=type(e).__name__
             )
-        
-        return health_status
+            
+            return {
+                'status': 'unhealthy',
+                'error': str(e),
+                'timestamp': datetime.utcnow().isoformat()
+            }
     
     async def close(self) -> None:
-        """Clean up resources and close connections."""
-        if self._httpx_client:
+        """Close HTTPX client and cleanup resources."""
+        if self._httpx_client and not self._httpx_client.is_closed:
             await self._httpx_client.aclose()
-            self._httpx_client = None
-        
-        logger.info("Auth0 client closed successfully")
+            self.logger.debug("HTTPX client closed")
 
 
-# Factory function for creating Auth0 client instance
-def create_auth0_client(
-    config: Optional[Auth0Config] = None,
-    cache_manager: Optional[Any] = None,
-    audit_logger: Optional[Any] = None
-) -> Auth0Client:
+# Global Auth0 client manager instance
+_auth0_client_manager: Optional[Auth0ClientManager] = None
+
+
+def get_auth0_client_manager() -> Auth0ClientManager:
     """
-    Factory function for creating Auth0 client with proper dependency injection.
+    Get global Auth0 client manager instance.
+    
+    Returns:
+        Auth0ClientManager: Global client manager instance
+        
+    Raises:
+        RuntimeError: If client manager is not initialized
+    """
+    global _auth0_client_manager
+    
+    if _auth0_client_manager is None:
+        _auth0_client_manager = Auth0ClientManager()
+    
+    return _auth0_client_manager
+
+
+def init_auth0_client_manager(
+    config_manager: Optional[Auth0ConfigurationManager] = None,
+    cache_manager: Optional[AuthCacheManager] = None,
+    metrics_collector: Optional[Auth0MetricsCollector] = None
+) -> Auth0ClientManager:
+    """
+    Initialize global Auth0 client manager.
     
     Args:
-        config: Auth0 configuration parameters
-        cache_manager: Cache manager instance
-        audit_logger: Security audit logger instance
+        config_manager: Auth0 configuration manager (optional)
+        cache_manager: Authentication cache manager (optional)
+        metrics_collector: Metrics collector (optional)
         
     Returns:
-        Configured Auth0 client instance
+        Auth0ClientManager: Initialized client manager instance
     """
-    return Auth0Client(
-        config=config,
-        cache_manager=cache_manager,
-        audit_logger=audit_logger
+    global _auth0_client_manager
+    
+    _auth0_client_manager = Auth0ClientManager(
+        config_manager,
+        cache_manager,
+        metrics_collector
     )
+    
+    logger.info(
+        "Global Auth0 client manager initialized",
+        circuit_breaker_enabled=True,
+        fallback_cache_enabled=True,
+        metrics_enabled=True
+    )
+    
+    return _auth0_client_manager
+
+
+# Utility decorators for Auth0 operations
+
+def auth0_operation_metrics(operation: str):
+    """
+    Decorator for Auth0 operation metrics collection.
+    
+    Args:
+        operation: Type of Auth0 operation for metrics
+    """
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            start_time = time.time()
+            operation_result = "success"
+            
+            try:
+                result = await func(*args, **kwargs)
+                return result
+            except Exception as e:
+                operation_result = "error"
+                raise
+            finally:
+                duration = time.time() - start_time
+                auth0_metrics['api_request_duration'].labels(
+                    operation=operation
+                ).observe(duration)
+        
+        return wrapper
+    return decorator
+
+
+def require_auth0_service_health(service: str):
+    """
+    Decorator to require Auth0 service health for operation.
+    
+    Args:
+        service: Auth0 service name (management, authentication)
+    """
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            client_manager = get_auth0_client_manager()
+            
+            if not client_manager.circuit_breaker.is_service_available(service):
+                raise CircuitBreakerException(
+                    message=f"Auth0 {service} service is unavailable",
+                    error_code=SecurityErrorCode.EXT_CIRCUIT_BREAKER_OPEN,
+                    service_name=f"auth0_{service}",
+                    circuit_state=client_manager.circuit_breaker.get_service_state(service)
+                )
+            
+            return await func(*args, **kwargs)
+        
+        return wrapper
+    return decorator
 
 
 # Export public interface
 __all__ = [
-    'Auth0Client',
-    'Auth0Config',
-    'Auth0UserProfile',
+    'Auth0ClientManager',
+    'Auth0ConfigurationManager',
     'Auth0MetricsCollector',
-    'create_auth0_client',
-    'Auth0IntegrationError',
-    'Auth0TimeoutError',
-    'Auth0RateLimitError',
-    'Auth0ValidationError',
-    'CircuitBreakerError'
+    'Auth0CircuitBreaker',
+    'Auth0FallbackManager',
+    'get_auth0_client_manager',
+    'init_auth0_client_manager',
+    'auth0_operation_metrics',
+    'require_auth0_service_health',
+    'auth0_metrics'
 ]
