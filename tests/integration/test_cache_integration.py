@@ -1,1513 +1,1794 @@
 """
-Redis Caching Integration Testing with Testcontainers
+Redis Cache Integration Testing with Testcontainers - Enterprise-Grade Caching Validation
 
-Comprehensive integration testing for Redis caching functionality providing realistic
-caching behavior through Testcontainers Redis instances. Validates distributed caching
-patterns, session management across multiple Flask instances, cache invalidation strategies,
-and performance optimization patterns equivalent to Node.js baseline requirements.
+This module provides comprehensive integration testing for Redis distributed caching, session 
+management, cache invalidation patterns, and distributed caching scenarios using Testcontainers
+for production-equivalent behavior. Tests redis-py 5.0+ client integration, connection pooling,
+TTL management, and cache performance optimization across multiple Flask instances.
 
-This test suite validates:
+Key Test Coverage:
 - Redis distributed caching for session and permission management per Section 6.4.1
-- Cache integration testing with production-equivalent behavior per Section 6.6.1
-- Performance optimization testing equivalent to Node.js patterns per Section 5.2.7
+- Cache integration testing with production-equivalent behavior per Section 6.6.1 enhanced mocking strategy
+- Performance optimization testing equivalent to Node.js caching patterns per Section 5.2.7
 - Distributed session management across multiple Flask instances per Section 3.4.2
-- TTL management and cache invalidation patterns per Section 5.2.7
-- Connection pooling and resource efficiency per Section 6.1.3
+- Redis-py 5.0+ integration testing with Testcontainers Redis per Section 6.6.1
+- Session management and distributed caching testing per Section 5.2.7 caching layer
+- Cache invalidation and TTL management integration testing per Section 5.2.7 cache invalidation
+- Connection pooling and resource efficiency testing per Section 6.1.3 Redis connection pool settings
+- Flask-Caching integration with response caching patterns per Section 3.4.2 caching solutions
+- Cache performance monitoring integration with Prometheus metrics per Section 6.1.1 metrics collection
+- Circuit breaker testing for Redis connectivity resilience per Section 6.1.3 resilience mechanisms
+
+Technical Requirements:
+- Production-equivalent Redis behavior through Testcontainers per Section 6.6.1
+- Performance validation maintaining ≤10% variance from Node.js baseline per Section 0.1.1
+- Enterprise-grade connection pooling and resource optimization per Section 6.1.3
+- Comprehensive cache invalidation patterns and TTL management per Section 5.2.7
+- Distributed session management validation across multiple Flask instances per Section 3.4.2
 - Circuit breaker patterns for Redis connectivity resilience per Section 6.1.3
+- Cache performance monitoring with Prometheus metrics integration per Section 6.1.1
 
-Key Testing Features:
+Test Architecture:
 - Testcontainers Redis integration for realistic cache behavior
-- Multi-instance Flask deployment cache coordination testing
-- Performance baseline validation against ≤10% variance requirement
-- Comprehensive cache invalidation and TTL lifecycle testing
-- Redis connection pooling and circuit breaker pattern validation
-- Flask-Caching response caching integration testing
-- Prometheus metrics collection and cache monitoring validation
+- Multi-instance Flask application testing for distributed scenarios
+- Performance baseline comparison with Node.js cache implementation
+- Comprehensive error handling and circuit breaker validation
+- Cache effectiveness and hit ratio monitoring
+- Resource efficiency and connection pool optimization testing
 
-Dependencies:
-- testcontainers[redis] for realistic Redis instance provisioning
-- pytest-asyncio for async database operations testing
-- prometheus-client for metrics validation
-- redis-py 5.0+ integration testing
-- Flask-Caching 2.1+ response caching validation
+References:
+- Section 6.4.1: Redis distributed caching for session and permission management
+- Section 6.6.1: Enhanced mocking strategy with production-equivalent behavior
+- Section 5.2.7: Performance optimization and cache invalidation management
+- Section 3.4.2: Distributed session management across multiple Flask instances
+- Section 6.1.3: Redis connection pool settings and resilience mechanisms
+- Section 6.1.1: Metrics collection and performance monitoring integration
 """
 
 import asyncio
 import json
+import logging
 import os
-import time
+import random
 import threading
+import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any, Tuple
-from unittest.mock import patch, MagicMock, call
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Set, Tuple
+from unittest.mock import Mock, patch, MagicMock
+
 import pytest
-import pytest_asyncio
-from flask import Flask, jsonify, request, session, g
+from flask import Flask, request, jsonify, session, g
 from flask.testing import FlaskClient
 import redis
+from redis import ConnectionPool
 from redis.exceptions import ConnectionError, TimeoutError, ResponseError
 from testcontainers.redis import RedisContainer
-from prometheus_client import CollectorRegistry, generate_latest
-import structlog
+import requests
+import threading
+from prometheus_client import REGISTRY, CollectorRegistry
 
 # Import cache components for testing
 from src.cache import (
-    CacheManager, cache_manager, init_cache, get_cache_manager,
-    RedisClient, create_redis_client, get_redis_client,
-    ResponseCache, cache_for, cache_unless, invalidate_endpoint_cache,
-    CacheStrategiesManager, cache_strategies, invalidate_by_pattern,
-    CacheError, CacheConnectionError, CacheTimeoutError,
-    CacheCircuitBreakerError, cache_monitor
+    RedisClient, RedisConnectionManager, create_redis_client, 
+    init_redis_client, get_redis_client, close_redis_client,
+    FlaskResponseCache, CacheConfiguration, CachePolicy,
+    CompressionType, CachedResponse, ResponseCacheMetrics,
+    create_response_cache, get_response_cache, init_response_cache,
+    CacheInvalidationPattern, TTLPolicy, CacheWarmingStrategy,
+    CacheKeyPattern, TTLConfiguration, CacheStrategyMetrics,
+    CacheInvalidationStrategy, TTLManagementStrategy, CacheKeyPatternManager,
+    init_cache_extensions, get_cache_extensions, cached_response,
+    invalidate_cache, get_cache_health, get_cache_stats,
+    cleanup_cache_resources, MONITORING_AVAILABLE
 )
 
-# Import auth cache integration
-from src.auth.cache import AuthenticationCache, PermissionCache, SessionCache
+# Import authentication cache components
+from src.auth.cache import (
+    AuthenticationCache,
+    SessionManager,
+    PermissionCache,
+    cache_user_session,
+    get_cached_permissions,
+    invalidate_user_cache
+)
 
-# Import test fixtures and configuration
-from tests.conftest import create_test_app
-from tests.fixtures.cache_fixtures import (
-    cache_test_data, session_test_data, performance_test_data
+# Import configuration and exceptions
+from src.config.database import DatabaseConfig
+from src.cache.exceptions import (
+    CacheError, RedisConnectionError, CacheOperationTimeoutError,
+    CacheInvalidationError, CircuitBreakerOpenError,
+    CacheKeyError, CacheSerializationError, CachePoolExhaustedError
 )
 
 # Configure test logging
-logger = structlog.get_logger("tests.integration.cache")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
-class TestRedisIntegrationSetup:
+class TestRedisConnectionIntegration:
     """
-    Base class providing Redis Testcontainer setup and teardown for cache integration tests.
-    
-    Provides production-equivalent Redis instances for realistic cache behavior testing
-    per Section 6.6.1 enhanced mocking strategy with Testcontainers integration.
+    Test Redis connection integration with enterprise-grade connection pooling,
+    circuit breaker patterns, and distributed connection management.
     """
     
     @pytest.fixture(scope="class")
     def redis_container(self):
         """
-        Testcontainer Redis instance providing production-equivalent caching behavior.
-        
-        Yields:
-            RedisContainer: Configured Redis container with optimized settings
+        Testcontainers Redis instance for production-equivalent behavior.
         """
         with RedisContainer("redis:7.2-alpine") as redis_container:
-            # Configure Redis for testing with production-equivalent settings
-            redis_port = redis_container.get_exposed_port(6379)
-            redis_host = redis_container.get_container_host_ip()
+            # Configure Redis container for enterprise testing
+            redis_container.with_env("REDIS_MAXMEMORY", "512mb")
+            redis_container.with_env("REDIS_MAXMEMORY_POLICY", "allkeys-lru")
             
             # Wait for Redis to be ready
-            redis_client = redis.Redis(
-                host=redis_host,
-                port=redis_port,
-                decode_responses=True,
-                socket_timeout=10.0,
-                socket_connect_timeout=5.0
-            )
+            redis_container.get_connection_url()
             
-            # Verify Redis connectivity
-            for attempt in range(30):
-                try:
-                    redis_client.ping()
-                    break
-                except (ConnectionError, TimeoutError):
-                    if attempt == 29:
-                        raise
-                    time.sleep(0.1)
-            
-            # Configure Redis for optimal testing performance
-            redis_client.config_set('maxmemory-policy', 'allkeys-lru')
-            redis_client.config_set('timeout', '0')
-            redis_client.flushall()
+            # Validate Redis container health
+            test_client = redis.Redis.from_url(redis_container.get_connection_url())
+            test_client.ping()
+            test_client.close()
             
             logger.info(
-                "redis_testcontainer_ready",
-                host=redis_host,
-                port=redis_port,
-                container_id=redis_container.get_container_id()[:12]
+                "Redis container initialized successfully",
+                connection_url=redis_container.get_connection_url(),
+                container_id=redis_container.get_container_host_ip()
             )
             
-            yield {
-                'host': redis_host,
-                'port': redis_port,
-                'container': redis_container,
-                'client': redis_client
-            }
+            yield redis_container
     
-    @pytest.fixture(scope="function")
-    def cache_config(self, redis_container):
+    @pytest.fixture
+    def redis_config(self, redis_container):
         """
-        Cache configuration using Testcontainer Redis instance.
+        Redis configuration for testing with Testcontainers.
+        """
+        connection_url = redis_container.get_connection_url()
         
-        Args:
-            redis_container: Redis container fixture
-            
-        Returns:
-            Dict: Redis configuration for cache initialization
-        """
         return {
-            'host': redis_container['host'],
-            'port': redis_container['port'],
+            'host': redis_container.get_container_host_ip(),
+            'port': redis_container.get_exposed_port(6379),
             'db': 0,
-            'password': None,
-            'ssl': False,
-            'max_connections': 50,
+            'decode_responses': True,
             'socket_timeout': 30.0,
             'socket_connect_timeout': 10.0,
+            'max_connections': 50,
             'retry_on_timeout': True,
             'health_check_interval': 30,
-            'decode_responses': True,
-            'encoding': 'utf-8'
+            'connection_pool_class': ConnectionPool
         }
     
-    @pytest.fixture(scope="function")
-    def flask_app_with_cache(self, cache_config):
+    @pytest.fixture
+    def redis_client(self, redis_config):
         """
-        Flask application with integrated cache manager using Testcontainer Redis.
-        
-        Args:
-            cache_config: Redis configuration dictionary
-            
-        Returns:
-            Flask: Configured Flask application with cache integration
+        Redis client fixture with proper cleanup.
         """
-        app = create_test_app()
-        
-        # Configure Redis settings for testing
-        for key, value in cache_config.items():
-            config_key = f"REDIS_{key.upper()}"
-            app.config[config_key] = value
-        
-        # Additional cache configuration for testing
-        app.config.update({
-            'CACHE_DEFAULT_TIMEOUT': 300,
-            'CACHE_KEY_PREFIX': 'test_cache:',
-            'TESTING': True
-        })
-        
-        # Initialize cache manager with test configuration
-        with app.app_context():
-            cache_mgr = init_cache(app, cache_config)
-            
-            # Add test routes for cache testing
-            @app.route('/api/cached-endpoint')
-            @cache_for(timeout=300)
-            def cached_endpoint():
-                """Test endpoint with response caching."""
-                return jsonify({
-                    'data': 'cached_response',
-                    'timestamp': datetime.utcnow().isoformat(),
-                    'cache_test': True
-                })
-            
-            @app.route('/api/user-context/<user_id>')
-            @cache_for(timeout=600, key_prefix='user_data')
-            def user_context_endpoint(user_id):
-                """Test endpoint with user-specific caching."""
-                return jsonify({
-                    'user_id': user_id,
-                    'data': f'user_data_{user_id}',
-                    'timestamp': datetime.utcnow().isoformat()
-                })
-            
-            @app.route('/api/uncached-endpoint')
-            @cache_unless(lambda: request.args.get('nocache'))
-            def conditional_cache_endpoint():
-                """Test endpoint with conditional caching."""
-                return jsonify({
-                    'data': 'conditional_response',
-                    'timestamp': datetime.utcnow().isoformat(),
-                    'nocache': request.args.get('nocache')
-                })
-            
-            @app.route('/api/invalidate-cache')
-            def invalidate_cache_endpoint():
-                """Test endpoint for cache invalidation."""
-                invalidate_endpoint_cache('/api/cached-endpoint')
-                return jsonify({'status': 'cache_invalidated'})
-        
-        return app
-
-
-class TestRedisClientIntegration(TestRedisIntegrationSetup):
-    """
-    Redis client integration testing with connection pooling and circuit breaker patterns.
+        client = create_redis_client(config=redis_config)
+        yield client
+        if client:
+            client.close()
     
-    Tests redis-py 5.0+ integration with enterprise-grade connection management,
-    circuit breaker resilience patterns, and performance optimization per Section 6.1.3.
-    """
-    
-    def test_redis_client_initialization(self, cache_config):
+    def test_redis_connection_establishment(self, redis_client):
         """
-        Test Redis client initialization with optimized connection pooling.
+        Test Redis connection establishment with connection pooling.
         
         Validates:
-        - Redis client creation with enterprise configuration
-        - Connection pooling with max_connections=50 per Section 6.1.3
-        - Circuit breaker initialization for resilience patterns
+        - Successful connection to Testcontainers Redis instance
+        - Connection pool initialization per Section 6.1.3
+        - Health check endpoint functionality per Section 6.1.3
         """
-        # Initialize Redis client with test configuration
-        redis_client = create_redis_client(**cache_config)
-        
-        assert redis_client is not None
-        assert redis_client.host == cache_config['host']
-        assert redis_client.port == cache_config['port']
-        assert redis_client.max_connections == 50
-        assert redis_client.socket_timeout == 30.0
-        assert redis_client.socket_connect_timeout == 10.0
-        
-        # Test connection pool functionality
-        connection_pool = redis_client._connection_pool
-        assert connection_pool is not None
-        assert connection_pool.max_connections == 50
-        
-        # Test circuit breaker initialization
-        circuit_breaker = redis_client._circuit_breaker
-        assert circuit_breaker is not None
-        assert circuit_breaker.failure_threshold == 5
-        assert circuit_breaker.recovery_timeout == 60
-        
-        # Test Redis connectivity
+        # Test basic connectivity
         assert redis_client.ping() is True
         
-        # Cleanup
-        redis_client.close()
-        
-        logger.info("redis_client_initialization_validated")
-    
-    def test_redis_connection_pooling_efficiency(self, cache_config):
-        """
-        Test Redis connection pooling efficiency and resource management.
-        
-        Validates:
-        - Connection pool reuse across multiple operations
-        - Resource efficiency per Section 6.1.3 optimization
-        - Connection health check functionality
-        """
-        redis_client = create_redis_client(**cache_config)
-        
-        # Test connection pool efficiency with multiple operations
-        test_keys = [f"pool_test_{i}" for i in range(20)]
-        test_values = [f"value_{i}" for i in range(20)]
-        
-        # Perform multiple Redis operations to test connection pooling
-        start_time = time.time()
-        for key, value in zip(test_keys, test_values):
-            redis_client.set(key, value, ttl=300)
-            retrieved_value = redis_client.get(key)
-            assert retrieved_value == value
-        
-        operation_time = time.time() - start_time
-        
-        # Validate connection pool statistics
-        pool_stats = redis_client.get_pool_stats()
-        assert pool_stats['pool_size'] > 0
-        assert pool_stats['available_connections'] >= 0
-        assert pool_stats['in_use_connections'] >= 0
+        # Validate connection pool configuration
+        pool_info = redis_client.get_connection_info()
+        assert pool_info['max_connections'] == 50
+        assert pool_info['socket_timeout'] == 30.0
+        assert pool_info['socket_connect_timeout'] == 10.0
         
         # Test health check functionality
-        health_status = redis_client.health_check()
-        assert health_status['status'] == 'healthy'
-        assert health_status['connection_pool']['available'] > 0
-        
-        # Cleanup test data
-        redis_client.delete(*test_keys)
-        redis_client.close()
+        is_healthy, health_details = redis_client.health_check()
+        assert is_healthy is True
+        assert 'redis_version' in health_details
+        assert 'memory_usage' in health_details
+        assert 'connected_clients' in health_details
         
         logger.info(
-            "connection_pooling_efficiency_validated",
-            operation_time=operation_time,
-            test_operations=len(test_keys),
+            "Redis connection established successfully",
+            health_details=health_details,
+            pool_info=pool_info
+        )
+    
+    def test_connection_pool_efficiency(self, redis_client):
+        """
+        Test connection pool efficiency and resource optimization.
+        
+        Validates:
+        - Connection pool resource management per Section 6.1.3
+        - Concurrent connection handling efficiency
+        - Pool exhaustion protection and recovery
+        """
+        def perform_redis_operations(operation_id: int) -> Dict[str, Any]:
+            """Perform Redis operations to test connection pool."""
+            start_time = time.time()
+            
+            # Basic operations
+            redis_client.set(f'test_key_{operation_id}', f'test_value_{operation_id}', ttl=60)
+            retrieved_value = redis_client.get(f'test_key_{operation_id}')
+            redis_client.delete(f'test_key_{operation_id}')
+            
+            end_time = time.time()
+            operation_time = end_time - start_time
+            
+            return {
+                'operation_id': operation_id,
+                'operation_time': operation_time,
+                'value_match': retrieved_value == f'test_value_{operation_id}',
+                'success': True
+            }
+        
+        # Test concurrent operations
+        concurrent_operations = 20
+        with ThreadPoolExecutor(max_workers=concurrent_operations) as executor:
+            futures = [
+                executor.submit(perform_redis_operations, i) 
+                for i in range(concurrent_operations)
+            ]
+            
+            results = [future.result() for future in as_completed(futures)]
+        
+        # Validate all operations succeeded
+        assert len(results) == concurrent_operations
+        successful_operations = [r for r in results if r['success'] and r['value_match']]
+        assert len(successful_operations) == concurrent_operations
+        
+        # Validate performance metrics
+        operation_times = [r['operation_time'] for r in results]
+        avg_operation_time = sum(operation_times) / len(operation_times)
+        max_operation_time = max(operation_times)
+        
+        # Performance requirements: ≤10ms average, ≤50ms max
+        assert avg_operation_time <= 0.010, f"Average operation time {avg_operation_time:.3f}s exceeds 10ms"
+        assert max_operation_time <= 0.050, f"Max operation time {max_operation_time:.3f}s exceeds 50ms"
+        
+        # Validate connection pool statistics
+        pool_stats = redis_client.get_stats()
+        assert pool_stats['connection_pool']['created_connections'] >= 1
+        assert pool_stats['connection_pool']['available_connections'] >= 0
+        
+        logger.info(
+            "Connection pool efficiency validated",
+            concurrent_operations=concurrent_operations,
+            avg_operation_time=avg_operation_time,
+            max_operation_time=max_operation_time,
             pool_stats=pool_stats
         )
     
-    def test_redis_circuit_breaker_resilience(self, cache_config):
+    def test_circuit_breaker_functionality(self, redis_client):
         """
-        Test Redis circuit breaker patterns for connectivity resilience.
+        Test circuit breaker patterns for Redis connectivity resilience.
         
         Validates:
-        - Circuit breaker failure detection and recovery
+        - Circuit breaker activation on connection failures per Section 6.1.3
         - Graceful degradation during Redis unavailability
-        - Automatic recovery patterns per Section 6.1.3
+        - Circuit breaker recovery mechanisms
         """
-        redis_client = create_redis_client(**cache_config)
+        # Test normal operation first
+        assert redis_client.set('circuit_test', 'normal_operation', ttl=60) is True
+        assert redis_client.get('circuit_test') == 'normal_operation'
         
-        # Test normal operation
-        assert redis_client.set('circuit_test', 'initial_value', ttl=60)
-        assert redis_client.get('circuit_test') == 'initial_value'
+        # Simulate Redis connection failures by closing the connection
+        original_ping = redis_client._client.ping
         
-        # Get circuit breaker for testing
-        circuit_breaker = redis_client._circuit_breaker
-        initial_state = circuit_breaker.get_state()
-        assert initial_state['state'] == 'closed'
+        def failing_ping():
+            raise ConnectionError("Simulated Redis connection failure")
         
-        # Simulate Redis connection failures to trigger circuit breaker
-        with patch.object(redis_client._redis_client, 'get', side_effect=ConnectionError("Connection failed")):
+        # Test circuit breaker activation
+        with patch.object(redis_client._client, 'ping', side_effect=failing_ping):
+            with pytest.raises((CircuitBreakerOpenError, RedisConnectionError, CacheError)):
+                # Multiple failures should trigger circuit breaker
+                for _ in range(10):
+                    try:
+                        redis_client.set('failing_operation', 'should_fail')
+                    except Exception:
+                        pass
+                
+                # This should raise circuit breaker error
+                redis_client.set('circuit_breaker_test', 'should_fail')
+        
+        # Restore normal operation and test recovery
+        redis_client._client.ping = original_ping
+        
+        # Allow circuit breaker to reset (may need to wait)
+        time.sleep(1)
+        
+        # Test recovery
+        recovery_success = False
+        for attempt in range(5):
+            try:
+                redis_client.set('recovery_test', 'recovery_successful', ttl=60)
+                recovery_value = redis_client.get('recovery_test')
+                if recovery_value == 'recovery_successful':
+                    recovery_success = True
+                    break
+            except Exception as e:
+                logger.info(f"Recovery attempt {attempt + 1} failed: {e}")
+                time.sleep(0.5)
+        
+        assert recovery_success, "Circuit breaker failed to recover after connection restoration"
+        
+        logger.info("Circuit breaker functionality validated successfully")
+    
+    def test_distributed_connection_coordination(self, redis_config):
+        """
+        Test distributed connection coordination across multiple clients.
+        
+        Validates:
+        - Multiple Redis client coordination per Section 3.4.2
+        - Distributed cache coherence and consistency
+        - Multi-instance coordination patterns
+        """
+        # Create multiple Redis clients to simulate distributed deployment
+        clients = []
+        try:
+            for i in range(3):
+                client = create_redis_client(config=redis_config)
+                clients.append(client)
             
-            # Trigger multiple failures to open circuit breaker
-            for attempt in range(6):  # failure_threshold = 5
-                try:
-                    redis_client.get('circuit_test')
-                except (CacheConnectionError, CacheCircuitBreakerError):
-                    pass
+            # Test distributed coordination
+            coordination_key = f'distributed_test_{uuid.uuid4()}'
+            test_data = {'timestamp': time.time(), 'client_id': 'client_0'}
             
-            # Verify circuit breaker opened
-            breaker_state = circuit_breaker.get_state()
-            assert breaker_state['state'] == 'open'
-            assert breaker_state['failure_count'] >= 5
+            # Client 0 sets data
+            clients[0].set(coordination_key, json.dumps(test_data), ttl=300)
             
-            # Test circuit breaker blocks further operations
-            with pytest.raises(CacheCircuitBreakerError):
-                redis_client.get('circuit_test')
+            # All clients should read the same data
+            for i, client in enumerate(clients):
+                retrieved_data = client.get(coordination_key)
+                assert retrieved_data is not None
+                
+                parsed_data = json.loads(retrieved_data)
+                assert parsed_data['timestamp'] == test_data['timestamp']
+                assert parsed_data['client_id'] == test_data['client_id']
+            
+            # Test distributed invalidation
+            invalidation_pattern = f'distributed_test_*'
+            
+            # Set multiple keys from different clients
+            for i, client in enumerate(clients):
+                client.set(f'distributed_test_client_{i}', f'data_from_client_{i}', ttl=300)
+            
+            # Invalidate from one client
+            invalidated_keys = clients[0].delete_pattern(invalidation_pattern)
+            assert invalidated_keys >= 3  # At least 3 keys should be invalidated
+            
+            # Verify invalidation across all clients
+            for i, client in enumerate(clients):
+                assert client.get(f'distributed_test_client_{i}') is None
+            
+            logger.info(
+                "Distributed connection coordination validated",
+                client_count=len(clients),
+                invalidated_keys=invalidated_keys
+            )
+            
+        finally:
+            # Clean up clients
+            for client in clients:
+                if client:
+                    client.close()
+
+
+class TestSessionManagementIntegration:
+    """
+    Test distributed session management across multiple Flask instances
+    with comprehensive session security and performance validation.
+    """
+    
+    @pytest.fixture
+    def flask_app_with_cache(self, redis_client):
+        """
+        Flask application with cache extensions configured.
+        """
+        app = Flask(__name__)
+        app.config.update({
+            'SECRET_KEY': 'test-secret-key-for-session-testing',
+            'TESTING': True,
+            'SESSION_TYPE': 'redis',
+            'SESSION_PERMANENT': False,
+            'SESSION_USE_SIGNER': True,
+            'SESSION_KEY_PREFIX': 'test_session:',
+            'SESSION_COOKIE_SECURE': False,  # For testing
+            'SESSION_COOKIE_HTTPONLY': True,
+            'SESSION_COOKIE_SAMESITE': 'Lax',
+            'WTF_CSRF_ENABLED': False
+        })
         
-        # Test automatic recovery after timeout
-        # Fast-forward recovery timeout for testing
-        circuit_breaker.recovery_timeout = 0.1
-        time.sleep(0.2)
+        # Initialize cache extensions
+        cache_extensions = init_cache_extensions(
+            app=app,
+            redis_config=redis_client.get_connection_info(),
+            monitoring_enabled=True
+        )
         
-        # Circuit should transition to half-open and then closed on success
-        assert redis_client.get('circuit_test') == 'initial_value'
+        # Add test routes
+        @app.route('/set_session/<key>/<value>')
+        def set_session_value(key, value):
+            session[key] = value
+            return jsonify({'status': 'set', 'key': key, 'value': value})
         
-        final_state = circuit_breaker.get_state()
-        assert final_state['state'] == 'closed'
-        assert final_state['failure_count'] == 0
+        @app.route('/get_session/<key>')
+        def get_session_value(key):
+            value = session.get(key)
+            return jsonify({'key': key, 'value': value})
+        
+        @app.route('/clear_session')
+        def clear_session():
+            session.clear()
+            return jsonify({'status': 'cleared'})
+        
+        @app.route('/cached_data/<data_id>')
+        @cached_response(ttl=300, policy='public', tags=['test_data'])
+        def get_cached_data(data_id):
+            # Simulate data processing
+            return jsonify({
+                'data_id': data_id,
+                'timestamp': time.time(),
+                'processed': True
+            })
+        
+        yield app, cache_extensions
         
         # Cleanup
-        redis_client.delete('circuit_test')
-        redis_client.close()
-        
-        logger.info("circuit_breaker_resilience_validated")
+        cleanup_cache_resources()
     
-    def test_redis_performance_optimization(self, cache_config, performance_test_data):
+    def test_session_persistence_across_requests(self, flask_app_with_cache):
         """
-        Test Redis performance optimization patterns and baseline compliance.
+        Test session persistence across multiple requests.
         
         Validates:
-        - Performance optimization equivalent to Node.js patterns
-        - Operation latency within acceptable bounds
-        - Throughput optimization for high-volume operations
+        - Session data persistence in Redis per Section 6.4.1
+        - Session security and encryption per Section 6.4.3
+        - Cross-request session continuity
         """
-        redis_client = create_redis_client(**cache_config)
+        app, cache_extensions = flask_app_with_cache
+        redis_client = cache_extensions['redis_client']
         
-        # Performance test configuration
-        test_operations = 1000
-        test_data = performance_test_data['cache_operations']
-        
-        # Test SET operation performance
-        set_start_time = time.time()
-        set_operations = []
-        
-        for i in range(test_operations):
-            key = f"perf_test_{i}"
-            value = test_data[i % len(test_data)]
+        with app.test_client() as client:
+            # Set session data
+            response = client.get('/set_session/user_id/test_user_123')
+            assert response.status_code == 200
+            session_data = response.get_json()
+            assert session_data['status'] == 'set'
             
-            operation_start = time.time()
-            redis_client.set(key, json.dumps(value), ttl=300)
-            operation_time = time.time() - operation_start
-            set_operations.append(operation_time)
-        
-        total_set_time = time.time() - set_start_time
-        
-        # Test GET operation performance
-        get_start_time = time.time()
-        get_operations = []
-        
-        for i in range(test_operations):
-            key = f"perf_test_{i}"
+            # Verify session exists in Redis
+            redis_keys = redis_client.scan_pattern('test_session:*')
+            assert len(redis_keys) >= 1, "Session not found in Redis"
             
-            operation_start = time.time()
-            retrieved_value = redis_client.get(key)
-            operation_time = time.time() - operation_start
-            get_operations.append(operation_time)
+            # Retrieve session data in subsequent request
+            response = client.get('/get_session/user_id')
+            assert response.status_code == 200
+            retrieved_data = response.get_json()
+            assert retrieved_data['value'] == 'test_user_123'
             
-            # Validate data integrity
-            assert retrieved_value is not None
-            parsed_value = json.loads(retrieved_value)
-            expected_value = test_data[i % len(test_data)]
-            assert parsed_value == expected_value
-        
-        total_get_time = time.time() - get_start_time
-        
-        # Calculate performance metrics
-        avg_set_latency = sum(set_operations) / len(set_operations)
-        avg_get_latency = sum(get_operations) / len(get_operations)
-        set_throughput = test_operations / total_set_time
-        get_throughput = test_operations / total_get_time
-        
-        # Performance validation (should be well within Node.js ≤10% variance)
-        assert avg_set_latency < 0.01  # 10ms average latency threshold
-        assert avg_get_latency < 0.005  # 5ms average latency threshold
-        assert set_throughput > 500  # Minimum 500 ops/second
-        assert get_throughput > 1000  # Minimum 1000 ops/second
-        
-        # Test bulk operations performance
-        bulk_keys = [f"bulk_test_{i}" for i in range(100)]
-        bulk_values = {key: f"bulk_value_{i}" for i, key in enumerate(bulk_keys)}
-        
-        bulk_start_time = time.time()
-        redis_client.mset(bulk_values, ttl=300)
-        bulk_retrieved = redis_client.mget(bulk_keys)
-        bulk_operation_time = time.time() - bulk_start_time
-        
-        # Validate bulk operation efficiency
-        assert bulk_operation_time < 0.1  # 100ms for 100 operations
-        assert len(bulk_retrieved) == len(bulk_keys)
-        
-        # Cleanup performance test data
-        cleanup_keys = [f"perf_test_{i}" for i in range(test_operations)] + bulk_keys
-        redis_client.delete(*cleanup_keys)
-        redis_client.close()
-        
-        logger.info(
-            "redis_performance_optimization_validated",
-            avg_set_latency=avg_set_latency,
-            avg_get_latency=avg_get_latency,
-            set_throughput=set_throughput,
-            get_throughput=get_throughput,
-            bulk_operation_time=bulk_operation_time
-        )
-
-
-class TestDistributedCaching(TestRedisIntegrationSetup):
-    """
-    Distributed caching testing across multiple Flask instances.
+            # Test session data types
+            test_cases = [
+                ('string_data', 'test_string'),
+                ('number_data', 42),
+                ('boolean_data', True),
+                ('list_data', [1, 2, 3]),
+                ('dict_data', {'nested': 'value'})
+            ]
+            
+            for key, value in test_cases:
+                # Set complex data
+                response = client.get(f'/set_session/{key}/{json.dumps(value)}')
+                assert response.status_code == 200
+                
+                # Retrieve and validate
+                response = client.get(f'/get_session/{key}')
+                assert response.status_code == 200
+                retrieved = response.get_json()
+                
+                if isinstance(value, (dict, list)):
+                    assert json.loads(retrieved['value']) == value
+                else:
+                    assert retrieved['value'] == str(value)
+            
+            logger.info("Session persistence across requests validated successfully")
     
-    Tests distributed session management and cache coordination patterns
-    per Section 3.4.2 and Section 5.2.7 requirements.
-    """
-    
-    def test_distributed_session_management(self, flask_app_with_cache, cache_config):
+    def test_distributed_session_management(self, flask_app_with_cache):
         """
         Test distributed session management across multiple Flask instances.
         
         Validates:
-        - Session data sharing across Flask instances
-        - Session persistence in Redis backend
-        - Cross-instance session coordination per Section 3.4.2
+        - Session sharing across multiple Flask instances per Section 3.4.2
+        - Distributed session consistency and synchronization
+        - Multi-instance session coordination
         """
-        app1 = flask_app_with_cache
+        app, cache_extensions = flask_app_with_cache
         
-        # Create second Flask application instance
-        app2 = create_test_app()
-        for key, value in cache_config.items():
-            config_key = f"REDIS_{key.upper()}"
-            app2.config[config_key] = value
-        
-        with app2.app_context():
-            init_cache(app2, cache_config)
-        
-        # Test session creation in first instance
-        with app1.test_client() as client1:
-            with client1.session_transaction() as sess:
-                sess['user_id'] = 'test_user_123'
-                sess['permissions'] = ['read', 'write']
-                sess['login_time'] = datetime.utcnow().isoformat()
-        
-        # Retrieve session ID for cross-instance testing
-        session_id = None
-        with app1.test_client() as client1:
-            with client1.session_transaction() as sess:
-                session_id = sess.sid if hasattr(sess, 'sid') else 'test_session_id'
-        
-        # Test session access from second instance
-        with app2.test_client() as client2:
-            # Simulate session cookie from first instance
-            client2.set_cookie('localhost', 'session', session_id)
+        # Simulate multiple Flask instances
+        clients = []
+        try:
+            for i in range(3):
+                client = app.test_client()
+                clients.append(client)
             
-            with client2.session_transaction() as sess:
-                # Verify session data is accessible across instances
-                assert sess.get('user_id') == 'test_user_123'
-                assert sess.get('permissions') == ['read', 'write']
-                assert sess.get('login_time') is not None
-        
-        # Test session modification in second instance
-        with app2.test_client() as client2:
-            client2.set_cookie('localhost', 'session', session_id)
+            # Set session data from first client
+            session_key = f'distributed_session_{uuid.uuid4()}'
+            session_value = f'distributed_value_{time.time()}'
             
-            with client2.session_transaction() as sess:
-                sess['last_access'] = datetime.utcnow().isoformat()
-                sess['instance'] = 'app2'
-        
-        # Verify session changes are visible in first instance
-        with app1.test_client() as client1:
-            client1.set_cookie('localhost', 'session', session_id)
+            response = clients[0].get(f'/set_session/{session_key}/{session_value}')
+            assert response.status_code == 200
             
-            with client1.session_transaction() as sess:
-                assert sess.get('last_access') is not None
-                assert sess.get('instance') == 'app2'
-                assert sess.get('user_id') == 'test_user_123'  # Original data preserved
-        
-        logger.info(
-            "distributed_session_management_validated",
-            session_id=session_id,
-            app1_name=app1.name,
-            app2_name=app2.name
-        )
-    
-    def test_cache_coordination_patterns(self, flask_app_with_cache, cache_config):
-        """
-        Test cache coordination patterns across multiple Flask instances.
-        
-        Validates:
-        - Cache invalidation coordination
-        - Distributed cache warming strategies
-        - Multi-instance cache consistency
-        """
-        app1 = flask_app_with_cache
-        
-        # Create second Flask instance
-        app2 = create_test_app()
-        for key, value in cache_config.items():
-            config_key = f"REDIS_{key.upper()}"
-            app2.config[config_key] = value
-        
-        with app2.app_context():
-            cache_mgr2 = init_cache(app2, cache_config)
-        
-        # Test cache coordination between instances
-        with app1.app_context():
-            cache_mgr1 = get_cache_manager()
-            redis_client1 = cache_mgr1.get_client()
+            # Extract session cookie for sharing across instances
+            session_cookie = None
+            for cookie in clients[0].cookie_jar:
+                if cookie.name == 'session':
+                    session_cookie = cookie
+                    break
             
-            # Set cache data from first instance
-            test_data = {
-                'key1': 'value1_from_app1',
-                'key2': {'nested': 'data', 'timestamp': datetime.utcnow().isoformat()},
-                'key3': ['list', 'of', 'values']
-            }
+            assert session_cookie is not None, "Session cookie not found"
             
-            for key, value in test_data.items():
-                redis_client1.set(f"coordination_test:{key}", json.dumps(value), ttl=300)
-        
-        # Verify cache data accessibility from second instance
-        with app2.app_context():
-            cache_mgr2 = get_cache_manager()
-            redis_client2 = cache_mgr2.get_client()
+            # Share session cookie across all clients
+            for client in clients[1:]:
+                client.set_cookie('localhost', 'session', session_cookie.value)
             
-            for key, expected_value in test_data.items():
-                cached_value = redis_client2.get(f"coordination_test:{key}")
-                assert cached_value is not None
-                parsed_value = json.loads(cached_value)
-                assert parsed_value == expected_value
-        
-        # Test distributed cache invalidation
-        with app1.app_context():
-            # Invalidate cache pattern from first instance
-            invalidated_keys = invalidate_by_pattern("coordination_test:*")
-            assert len(invalidated_keys) >= 3
-        
-        # Verify invalidation effect on second instance
-        with app2.app_context():
-            redis_client2 = cache_mgr2.get_client()
-            
-            for key in test_data.keys():
-                cached_value = redis_client2.get(f"coordination_test:{key}")
-                assert cached_value is None  # Should be invalidated
-        
-        logger.info(
-            "cache_coordination_patterns_validated",
-            test_keys=list(test_data.keys()),
-            invalidated_keys=len(invalidated_keys)
-        )
-    
-    def test_distributed_cache_warming(self, flask_app_with_cache, cache_config, cache_test_data):
-        """
-        Test distributed cache warming strategies across instances.
-        
-        Validates:
-        - Coordinated cache warming across instances
-        - Priority-based warming strategies
-        - Cache warming performance optimization
-        """
-        app = flask_app_with_cache
-        
-        with app.app_context():
-            cache_mgr = get_cache_manager()
-            strategies_mgr = cache_mgr.strategies_manager
-            
-            # Test distributed cache warming with priority
-            warming_data = cache_test_data['warming_scenarios']
-            
-            # Schedule cache warming operations
-            warming_tasks = []
-            for scenario in warming_data:
-                task_result = strategies_mgr.schedule_warming_by_priority(
-                    cache_key=scenario['key'],
-                    data=scenario['data'],
-                    ttl=scenario['ttl'],
-                    priority=scenario['priority']
-                )
-                warming_tasks.append(task_result)
-            
-            # Verify cache warming completion
-            for task in warming_tasks:
-                assert task['status'] == 'scheduled'
-                assert task['priority'] in ['critical', 'high', 'medium', 'low']
-            
-            # Execute warming operations
-            warming_results = strategies_mgr.execute_warming_queue()
-            
-            # Validate warming effectiveness
-            redis_client = cache_mgr.get_client()
-            for scenario in warming_data:
-                cached_value = redis_client.get(scenario['key'])
-                assert cached_value is not None
-                parsed_value = json.loads(cached_value)
-                assert parsed_value == scenario['data']
-            
-            # Test warming performance metrics
-            warming_stats = strategies_mgr.get_warming_statistics()
-            assert warming_stats['total_warmed'] >= len(warming_data)
-            assert warming_stats['warming_time'] > 0
-            assert warming_stats['success_rate'] >= 0.95  # 95% success rate
-        
-        logger.info(
-            "distributed_cache_warming_validated",
-            warming_tasks=len(warming_tasks),
-            warming_results=warming_results,
-            warming_stats=warming_stats
-        )
-
-
-class TestCacheInvalidationPatterns(TestRedisIntegrationSetup):
-    """
-    Cache invalidation pattern testing with TTL management.
-    
-    Tests comprehensive cache invalidation strategies and TTL lifecycle
-    management per Section 5.2.7 cache invalidation requirements.
-    """
-    
-    def test_ttl_lifecycle_management(self, flask_app_with_cache):
-        """
-        Test TTL lifecycle management and expiration patterns.
-        
-        Validates:
-        - TTL-based cache expiration
-        - Dynamic TTL adjustment strategies
-        - Cache lifecycle optimization per Section 5.2.7
-        """
-        app = flask_app_with_cache
-        
-        with app.app_context():
-            cache_mgr = get_cache_manager()
-            redis_client = cache_mgr.get_client()
-            
-            # Test static TTL management
-            static_key = "ttl_test:static"
-            static_value = {"type": "static", "timestamp": datetime.utcnow().isoformat()}
-            
-            redis_client.set(static_key, json.dumps(static_value), ttl=2)  # 2 second TTL
-            
-            # Verify immediate availability
-            cached_value = redis_client.get(static_key)
-            assert cached_value is not None
-            assert json.loads(cached_value)['type'] == 'static'
-            
-            # Check TTL value
-            ttl_remaining = redis_client.ttl(static_key)
-            assert ttl_remaining > 0 and ttl_remaining <= 2
-            
-            # Wait for expiration
-            time.sleep(2.5)
-            
-            # Verify expiration
-            expired_value = redis_client.get(static_key)
-            assert expired_value is None
-            
-            # Test dynamic TTL adjustment
-            dynamic_key = "ttl_test:dynamic"
-            dynamic_value = {"type": "dynamic", "access_count": 0}
-            
-            # Initial TTL
-            redis_client.set(dynamic_key, json.dumps(dynamic_value), ttl=5)
-            
-            # Simulate access pattern that extends TTL
-            for access in range(3):
-                cached_value = redis_client.get(dynamic_key)
-                assert cached_value is not None
+            # Verify session access from all clients
+            for i, client in enumerate(clients):
+                response = client.get(f'/get_session/{session_key}')
+                assert response.status_code == 200
                 
-                # Extend TTL on access (sliding window pattern)
-                parsed_value = json.loads(cached_value)
-                parsed_value['access_count'] += 1
-                redis_client.set(dynamic_key, json.dumps(parsed_value), ttl=5)  # Reset TTL
-                
-                time.sleep(1)
+                retrieved_data = response.get_json()
+                assert retrieved_data['value'] == session_value
             
-            # Verify extended availability
-            final_value = redis_client.get(dynamic_key)
-            assert final_value is not None
-            parsed_final = json.loads(final_value)
-            assert parsed_final['access_count'] == 3
+            # Test session modification from different instances
+            modification_clients = random.sample(clients, 2)
             
-            # Cleanup
-            redis_client.delete(dynamic_key)
-        
-        logger.info("ttl_lifecycle_management_validated")
+            # Client A modifies session
+            new_value = f'modified_value_{time.time()}'
+            response = modification_clients[0].get(f'/set_session/modified_key/{new_value}')
+            assert response.status_code == 200
+            
+            # Client B reads modification
+            response = modification_clients[1].get('/get_session/modified_key')
+            assert response.status_code == 200
+            retrieved_data = response.get_json()
+            assert retrieved_data['value'] == new_value
+            
+            logger.info(
+                "Distributed session management validated",
+                client_count=len(clients),
+                session_key=session_key
+            )
+            
+        finally:
+            # Clear session data
+            if clients:
+                clients[0].get('/clear_session')
     
-    def test_pattern_based_invalidation(self, flask_app_with_cache):
+    def test_session_security_and_encryption(self, flask_app_with_cache):
         """
-        Test pattern-based cache invalidation strategies.
+        Test session security features and encryption validation.
         
         Validates:
-        - Wildcard pattern invalidation
-        - Namespace-based cache clearing
-        - Bulk invalidation performance
+        - Session data encryption in Redis per Section 6.4.3
+        - Session security headers and configuration
+        - Session tampering protection
         """
-        app = flask_app_with_cache
-        
-        with app.app_context():
-            cache_mgr = get_cache_manager()
-            redis_client = cache_mgr.get_client()
-            
-            # Set up test data with various patterns
-            test_patterns = {
-                'user:123:profile': {'user_id': '123', 'type': 'profile'},
-                'user:123:permissions': {'user_id': '123', 'type': 'permissions'},
-                'user:123:preferences': {'user_id': '123', 'type': 'preferences'},
-                'user:456:profile': {'user_id': '456', 'type': 'profile'},
-                'session:abc123': {'session_id': 'abc123', 'type': 'session'},
-                'session:def456': {'session_id': 'def456', 'type': 'session'},
-                'api_cache:endpoint1': {'endpoint': 'endpoint1', 'type': 'api_cache'},
-                'api_cache:endpoint2': {'endpoint': 'endpoint2', 'type': 'api_cache'}
-            }
-            
-            # Populate cache with test data
-            for key, value in test_patterns.items():
-                redis_client.set(key, json.dumps(value), ttl=300)
-            
-            # Verify all data is cached
-            for key in test_patterns.keys():
-                assert redis_client.get(key) is not None
-            
-            # Test user-specific invalidation (user:123:*)
-            user_invalidated = invalidate_by_pattern("user:123:*")
-            assert len(user_invalidated) == 3
-            
-            # Verify user:123 data is invalidated
-            for key in ['user:123:profile', 'user:123:permissions', 'user:123:preferences']:
-                assert redis_client.get(key) is None
-            
-            # Verify other user data remains
-            assert redis_client.get('user:456:profile') is not None
-            
-            # Test session invalidation (session:*)
-            session_invalidated = invalidate_by_pattern("session:*")
-            assert len(session_invalidated) == 2
-            
-            # Verify session data is invalidated
-            for key in ['session:abc123', 'session:def456']:
-                assert redis_client.get(key) is None
-            
-            # Test namespace invalidation (api_cache:*)
-            api_cache_invalidated = invalidate_by_pattern("api_cache:*")
-            assert len(api_cache_invalidated) == 2
-            
-            # Verify API cache data is invalidated
-            for key in ['api_cache:endpoint1', 'api_cache:endpoint2']:
-                assert redis_client.get(key) is None
-            
-            # Verify remaining data
-            assert redis_client.get('user:456:profile') is not None
-        
-        logger.info(
-            "pattern_based_invalidation_validated",
-            user_invalidated=len(user_invalidated),
-            session_invalidated=len(session_invalidated),
-            api_cache_invalidated=len(api_cache_invalidated)
-        )
-    
-    def test_dependency_based_invalidation(self, flask_app_with_cache):
-        """
-        Test dependency-based cache invalidation strategies.
-        
-        Validates:
-        - Cascading invalidation patterns
-        - Dependency graph invalidation
-        - Cache consistency maintenance
-        """
-        app = flask_app_with_cache
-        
-        with app.app_context():
-            cache_mgr = get_cache_manager()
-            strategies_mgr = cache_mgr.strategies_manager
-            redis_client = cache_mgr.get_client()
-            
-            # Set up dependency relationships
-            dependencies = {
-                'user:123:profile': ['user:123:dashboard', 'user:123:recommendations'],
-                'user:123:permissions': ['user:123:dashboard', 'user:123:menu'],
-                'organization:org1': ['user:123:dashboard', 'user:456:dashboard']
-            }
-            
-            # Register dependency relationships
-            for parent_key, dependent_keys in dependencies.items():
-                strategies_mgr.register_cache_dependencies(parent_key, dependent_keys)
-            
-            # Populate cache with test data
-            cache_data = {
-                'user:123:profile': {'name': 'Test User', 'email': 'test@example.com'},
-                'user:123:permissions': ['read', 'write'],
-                'user:123:dashboard': {'widgets': ['widget1', 'widget2']},
-                'user:123:recommendations': ['item1', 'item2'],
-                'user:123:menu': ['menu1', 'menu2'],
-                'organization:org1': {'name': 'Test Org'},
-                'user:456:dashboard': {'widgets': ['widget3']}
-            }
-            
-            for key, value in cache_data.items():
-                redis_client.set(key, json.dumps(value), ttl=300)
-            
-            # Test dependency invalidation
-            # Invalidating user:123:profile should cascade to dashboard and recommendations
-            invalidated_keys = strategies_mgr.invalidate_by_dependency('user:123:profile')
-            
-            expected_invalidated = {'user:123:profile', 'user:123:dashboard', 'user:123:recommendations'}
-            assert set(invalidated_keys) == expected_invalidated
-            
-            # Verify invalidated data
-            for key in expected_invalidated:
-                assert redis_client.get(key) is None
-            
-            # Verify unaffected data remains
-            assert redis_client.get('user:123:permissions') is not None
-            assert redis_client.get('user:123:menu') is not None
-            assert redis_client.get('user:456:dashboard') is not None
-            
-            # Test organization-level invalidation
-            org_invalidated = strategies_mgr.invalidate_by_dependency('organization:org1')
-            
-            # Should invalidate organization and user:456:dashboard (user:123:dashboard already invalidated)
-            expected_org_invalidated = {'organization:org1', 'user:456:dashboard'}
-            assert set(org_invalidated) == expected_org_invalidated
-            
-            # Verify organization invalidation
-            for key in expected_org_invalidated:
-                assert redis_client.get(key) is None
-        
-        logger.info(
-            "dependency_based_invalidation_validated",
-            dependencies=dependencies,
-            profile_invalidated=len(invalidated_keys),
-            org_invalidated=len(org_invalidated)
-        )
-
-
-class TestFlaskCachingIntegration(TestRedisIntegrationSetup):
-    """
-    Flask-Caching response caching integration testing.
-    
-    Tests Flask-Caching 2.1+ integration with response caching patterns,
-    HTTP cache headers, and cache decorator functionality per Section 3.4.2.
-    """
-    
-    def test_response_caching_decorators(self, flask_app_with_cache):
-        """
-        Test Flask-Caching response caching decorators and patterns.
-        
-        Validates:
-        - @cache_for decorator functionality
-        - Response caching with TTL management
-        - Cache key generation and namespace management
-        """
-        app = flask_app_with_cache
+        app, cache_extensions = flask_app_with_cache
+        redis_client = cache_extensions['redis_client']
         
         with app.test_client() as client:
-            # Test basic response caching
-            response1 = client.get('/api/cached-endpoint')
-            assert response1.status_code == 200
-            data1 = response1.get_json()
-            assert data1['data'] == 'cached_response'
-            assert data1['cache_test'] is True
-            timestamp1 = data1['timestamp']
-            
-            # Second request should return cached response
-            response2 = client.get('/api/cached-endpoint')
-            assert response2.status_code == 200
-            data2 = response2.get_json()
-            assert data2['data'] == 'cached_response'
-            assert data2['timestamp'] == timestamp1  # Same timestamp = cached
-            
-            # Test user-specific caching
-            user_response1 = client.get('/api/user-context/user123')
-            assert user_response1.status_code == 200
-            user_data1 = user_response1.get_json()
-            assert user_data1['user_id'] == 'user123'
-            assert user_data1['data'] == 'user_data_user123'
-            
-            # Different user should not share cache
-            user_response2 = client.get('/api/user-context/user456')
-            assert user_response2.status_code == 200
-            user_data2 = user_response2.get_json()
-            assert user_data2['user_id'] == 'user456'
-            assert user_data2['data'] == 'user_data_user456'
-            assert user_data2['timestamp'] != user_data1['timestamp']
-            
-            # Same user should get cached response
-            user_response3 = client.get('/api/user-context/user123')
-            assert user_response3.status_code == 200
-            user_data3 = user_response3.get_json()
-            assert user_data3['timestamp'] == user_data1['timestamp']  # Cached
-        
-        logger.info("response_caching_decorators_validated")
-    
-    def test_conditional_caching_patterns(self, flask_app_with_cache):
-        """
-        Test conditional caching with @cache_unless decorator.
-        
-        Validates:
-        - Conditional cache bypass functionality
-        - Dynamic caching decisions based on request parameters
-        - Cache control flow patterns
-        """
-        app = flask_app_with_cache
-        
-        with app.test_client() as client:
-            # Test normal caching behavior
-            response1 = client.get('/api/uncached-endpoint')
-            assert response1.status_code == 200
-            data1 = response1.get_json()
-            assert data1['data'] == 'conditional_response'
-            assert data1['nocache'] is None
-            timestamp1 = data1['timestamp']
-            
-            # Second request should be cached
-            response2 = client.get('/api/uncached-endpoint')
-            assert response2.status_code == 200
-            data2 = response2.get_json()
-            assert data2['timestamp'] == timestamp1  # Cached response
-            
-            # Test cache bypass with nocache parameter
-            response3 = client.get('/api/uncached-endpoint?nocache=true')
-            assert response3.status_code == 200
-            data3 = response3.get_json()
-            assert data3['data'] == 'conditional_response'
-            assert data3['nocache'] == 'true'
-            assert data3['timestamp'] != timestamp1  # Not cached
-            
-            # Another nocache request should also bypass cache
-            response4 = client.get('/api/uncached-endpoint?nocache=1')
-            assert response4.status_code == 200
-            data4 = response4.get_json()
-            assert data4['nocache'] == '1'
-            assert data4['timestamp'] != data3['timestamp']  # Fresh response
-        
-        logger.info("conditional_caching_patterns_validated")
-    
-    def test_cache_invalidation_endpoints(self, flask_app_with_cache):
-        """
-        Test cache invalidation through API endpoints.
-        
-        Validates:
-        - Manual cache invalidation functionality
-        - Cache clearing for specific endpoints
-        - Invalidation effectiveness verification
-        """
-        app = flask_app_with_cache
-        
-        with app.test_client() as client:
-            # Populate cache with initial request
-            response1 = client.get('/api/cached-endpoint')
-            assert response1.status_code == 200
-            data1 = response1.get_json()
-            timestamp1 = data1['timestamp']
-            
-            # Verify caching is working
-            response2 = client.get('/api/cached-endpoint')
-            assert response2.status_code == 200
-            data2 = response2.get_json()
-            assert data2['timestamp'] == timestamp1  # Cached
-            
-            # Invalidate cache
-            invalidate_response = client.get('/api/invalidate-cache')
-            assert invalidate_response.status_code == 200
-            invalidate_data = invalidate_response.get_json()
-            assert invalidate_data['status'] == 'cache_invalidated'
-            
-            # Request after invalidation should be fresh
-            response3 = client.get('/api/cached-endpoint')
-            assert response3.status_code == 200
-            data3 = response3.get_json()
-            assert data3['data'] == 'cached_response'
-            assert data3['timestamp'] != timestamp1  # Fresh response
-        
-        logger.info("cache_invalidation_endpoints_validated")
-    
-    def test_cache_metrics_collection(self, flask_app_with_cache):
-        """
-        Test cache metrics collection and monitoring.
-        
-        Validates:
-        - Prometheus metrics collection for cache operations
-        - Cache hit/miss ratio tracking
-        - Performance metrics monitoring
-        """
-        app = flask_app_with_cache
-        
-        with app.app_context():
-            cache_mgr = get_cache_manager()
-            
-            # Get initial metrics
-            initial_metrics = cache_monitor.get_metrics_summary()
-            
-            with app.test_client() as client:
-                # Generate cache hits and misses
-                for i in range(10):
-                    # First request (cache miss)
-                    response = client.get(f'/api/user-context/user{i}')
-                    assert response.status_code == 200
-                    
-                    # Second request (cache hit)
-                    response = client.get(f'/api/user-context/user{i}')
-                    assert response.status_code == 200
-            
-            # Get final metrics
-            final_metrics = cache_monitor.get_metrics_summary()
-            
-            # Validate metrics collection
-            assert final_metrics['total_operations'] > initial_metrics['total_operations']
-            assert final_metrics['cache_hits'] > initial_metrics['cache_hits']
-            assert final_metrics['cache_misses'] > initial_metrics['cache_misses']
-            
-            # Calculate hit ratio
-            hit_ratio = final_metrics['cache_hits'] / final_metrics['total_operations']
-            assert hit_ratio >= 0.4  # At least 40% hit ratio expected
-            
-            # Test Prometheus metrics export
-            prometheus_metrics = generate_latest(cache_monitor.registry)
-            assert b'response_cache_hits_total' in prometheus_metrics
-            assert b'response_cache_misses_total' in prometheus_metrics
-            assert b'response_cache_operation_duration_seconds' in prometheus_metrics
-        
-        logger.info(
-            "cache_metrics_collection_validated",
-            final_metrics=final_metrics,
-            hit_ratio=hit_ratio
-        )
-
-
-class TestCachePerformanceOptimization(TestRedisIntegrationSetup):
-    """
-    Cache performance optimization testing with baseline comparison.
-    
-    Tests performance optimization patterns equivalent to Node.js caching
-    performance and validates ≤10% variance requirement per Section 0.1.1.
-    """
-    
-    def test_cache_operation_performance(self, flask_app_with_cache, performance_test_data):
-        """
-        Test cache operation performance against baseline requirements.
-        
-        Validates:
-        - Cache operation latency optimization
-        - Throughput performance compared to Node.js baseline
-        - ≤10% variance requirement compliance
-        """
-        app = flask_app_with_cache
-        
-        with app.app_context():
-            cache_mgr = get_cache_manager()
-            redis_client = cache_mgr.get_client()
-            
-            # Performance test configuration
-            test_operations = 1000
-            test_data = performance_test_data['cache_operations']
-            
-            # Test cache SET performance
-            set_operations = []
-            set_start_time = time.time()
-            
-            for i in range(test_operations):
-                operation_start = time.time()
-                
-                cache_key = f"perf_test:set:{i}"
-                cache_value = test_data[i % len(test_data)]
-                
-                redis_client.set(cache_key, json.dumps(cache_value), ttl=300)
-                
-                operation_time = time.time() - operation_start
-                set_operations.append(operation_time)
-            
-            total_set_time = time.time() - set_start_time
-            
-            # Test cache GET performance
-            get_operations = []
-            get_start_time = time.time()
-            
-            for i in range(test_operations):
-                operation_start = time.time()
-                
-                cache_key = f"perf_test:set:{i}"
-                cached_value = redis_client.get(cache_key)
-                
-                # Validate retrieved data
-                assert cached_value is not None
-                parsed_value = json.loads(cached_value)
-                expected_value = test_data[i % len(test_data)]
-                assert parsed_value == expected_value
-                
-                operation_time = time.time() - operation_start
-                get_operations.append(operation_time)
-            
-            total_get_time = time.time() - get_start_time
-            
-            # Calculate performance metrics
-            avg_set_latency = sum(set_operations) / len(set_operations)
-            avg_get_latency = sum(get_operations) / len(get_operations)
-            max_set_latency = max(set_operations)
-            max_get_latency = max(get_operations)
-            set_throughput = test_operations / total_set_time
-            get_throughput = test_operations / total_get_time
-            
-            # Performance validation against Node.js baseline equivalent
-            # These thresholds ensure ≤10% variance from Node.js performance
-            assert avg_set_latency < 0.002  # 2ms average SET latency
-            assert avg_get_latency < 0.001  # 1ms average GET latency
-            assert max_set_latency < 0.01   # 10ms max SET latency
-            assert max_get_latency < 0.005  # 5ms max GET latency
-            assert set_throughput > 2000    # Minimum 2000 SET ops/second
-            assert get_throughput > 5000    # Minimum 5000 GET ops/second
-            
-            # Test bulk operation performance
-            bulk_test_size = 100
-            bulk_data = {f"bulk_test:{i}": test_data[i % len(test_data)] for i in range(bulk_test_size)}
-            
-            # Bulk SET performance
-            bulk_set_start = time.time()
-            redis_client.mset(bulk_data, ttl=300)
-            bulk_set_time = time.time() - bulk_set_start
-            
-            # Bulk GET performance
-            bulk_get_start = time.time()
-            bulk_keys = list(bulk_data.keys())
-            bulk_values = redis_client.mget(bulk_keys)
-            bulk_get_time = time.time() - bulk_get_start
-            
-            # Validate bulk operation performance
-            assert bulk_set_time < 0.05  # 50ms for 100 bulk SET operations
-            assert bulk_get_time < 0.02  # 20ms for 100 bulk GET operations
-            assert len(bulk_values) == bulk_test_size
-            
-            # Cleanup performance test data
-            cleanup_keys = [f"perf_test:set:{i}" for i in range(test_operations)] + bulk_keys
-            redis_client.delete(*cleanup_keys)
-        
-        logger.info(
-            "cache_operation_performance_validated",
-            avg_set_latency=avg_set_latency,
-            avg_get_latency=avg_get_latency,
-            set_throughput=set_throughput,
-            get_throughput=get_throughput,
-            bulk_set_time=bulk_set_time,
-            bulk_get_time=bulk_get_time
-        )
-    
-    def test_concurrent_cache_access_performance(self, flask_app_with_cache):
-        """
-        Test concurrent cache access performance and thread safety.
-        
-        Validates:
-        - Multi-threaded cache operation performance
-        - Connection pool efficiency under load
-        - Thread safety of cache operations
-        """
-        app = flask_app_with_cache
-        
-        with app.app_context():
-            cache_mgr = get_cache_manager()
-            redis_client = cache_mgr.get_client()
-            
-            # Concurrent access test configuration
-            num_threads = 10
-            operations_per_thread = 100
-            total_operations = num_threads * operations_per_thread
-            
-            def cache_worker(thread_id: int, results: List[Dict]):
-                """Worker function for concurrent cache operations."""
-                thread_results = {'set_times': [], 'get_times': [], 'errors': 0}
-                
-                for i in range(operations_per_thread):
-                    try:
-                        # SET operation
-                        set_start = time.time()
-                        cache_key = f"concurrent_test:{thread_id}:{i}"
-                        cache_value = {'thread_id': thread_id, 'operation': i, 'timestamp': datetime.utcnow().isoformat()}
-                        redis_client.set(cache_key, json.dumps(cache_value), ttl=60)
-                        set_time = time.time() - set_start
-                        thread_results['set_times'].append(set_time)
-                        
-                        # GET operation
-                        get_start = time.time()
-                        retrieved_value = redis_client.get(cache_key)
-                        get_time = time.time() - get_start
-                        thread_results['get_times'].append(get_time)
-                        
-                        # Validate data integrity
-                        assert retrieved_value is not None
-                        parsed_value = json.loads(retrieved_value)
-                        assert parsed_value['thread_id'] == thread_id
-                        assert parsed_value['operation'] == i
-                        
-                    except Exception as e:
-                        thread_results['errors'] += 1
-                        logger.error("cache_worker_error", thread_id=thread_id, operation=i, error=str(e))
-                
-                results.append(thread_results)
-            
-            # Execute concurrent cache operations
-            concurrent_start_time = time.time()
-            thread_results = []
-            
-            with ThreadPoolExecutor(max_workers=num_threads) as executor:
-                futures = [
-                    executor.submit(cache_worker, thread_id, thread_results)
-                    for thread_id in range(num_threads)
-                ]
-                
-                # Wait for all threads to complete
-                for future in as_completed(futures):
-                    future.result()  # Raise any exceptions
-            
-            total_concurrent_time = time.time() - concurrent_start_time
-            
-            # Analyze concurrent performance results
-            all_set_times = []
-            all_get_times = []
-            total_errors = 0
-            
-            for result in thread_results:
-                all_set_times.extend(result['set_times'])
-                all_get_times.extend(result['get_times'])
-                total_errors += result['errors']
-            
-            # Calculate concurrent performance metrics
-            avg_concurrent_set_latency = sum(all_set_times) / len(all_set_times)
-            avg_concurrent_get_latency = sum(all_get_times) / len(all_get_times)
-            concurrent_throughput = total_operations / total_concurrent_time
-            error_rate = total_errors / total_operations
-            
-            # Validate concurrent performance
-            assert avg_concurrent_set_latency < 0.01  # 10ms average under concurrency
-            assert avg_concurrent_get_latency < 0.005  # 5ms average under concurrency
-            assert concurrent_throughput > 1000  # Minimum 1000 ops/second under concurrency
-            assert error_rate < 0.01  # Less than 1% error rate
-            
-            # Verify connection pool health after concurrent access
-            pool_stats = redis_client.get_pool_stats()
-            assert pool_stats['available_connections'] > 0
-            assert pool_stats['connection_errors'] == 0
-            
-            # Cleanup concurrent test data
-            cleanup_keys = [
-                f"concurrent_test:{thread_id}:{i}"
-                for thread_id in range(num_threads)
-                for i in range(operations_per_thread)
-            ]
-            redis_client.delete(*cleanup_keys)
-        
-        logger.info(
-            "concurrent_cache_access_performance_validated",
-            num_threads=num_threads,
-            operations_per_thread=operations_per_thread,
-            avg_concurrent_set_latency=avg_concurrent_set_latency,
-            avg_concurrent_get_latency=avg_concurrent_get_latency,
-            concurrent_throughput=concurrent_throughput,
-            error_rate=error_rate,
-            pool_stats=pool_stats
-        )
-    
-    def test_cache_memory_efficiency(self, flask_app_with_cache):
-        """
-        Test cache memory efficiency and resource optimization.
-        
-        Validates:
-        - Memory usage optimization patterns
-        - Cache size management and cleanup
-        - Resource efficiency equivalent to Node.js patterns
-        """
-        app = flask_app_with_cache
-        
-        with app.app_context():
-            cache_mgr = get_cache_manager()
-            redis_client = cache_mgr.get_client()
-            
-            # Get initial memory usage
-            initial_memory_info = redis_client.info('memory')
-            initial_memory_usage = initial_memory_info.get('used_memory', 0)
-            
-            # Memory efficiency test with varying data sizes
-            memory_test_data = {
-                'small_data': {'size': 'small', 'data': 'x' * 100},  # 100 bytes
-                'medium_data': {'size': 'medium', 'data': 'x' * 1000},  # 1KB
-                'large_data': {'size': 'large', 'data': 'x' * 10000},  # 10KB
+            # Set sensitive session data
+            sensitive_data = {
+                'user_id': 'user_123',
+                'permissions': ['read', 'write', 'admin'],
+                'auth_token': 'sensitive_auth_token_12345'
             }
             
-            # Store data of different sizes
-            stored_keys = []
-            for size_category, data in memory_test_data.items():
-                for i in range(100):  # 100 entries per size category
-                    key = f"memory_test:{size_category}:{i}"
-                    redis_client.set(key, json.dumps(data), ttl=300)
-                    stored_keys.append(key)
+            response = client.get(f'/set_session/sensitive_data/{json.dumps(sensitive_data)}')
+            assert response.status_code == 200
             
-            # Measure memory usage after data storage
-            post_storage_memory_info = redis_client.info('memory')
-            post_storage_memory_usage = post_storage_memory_info.get('used_memory', 0)
-            memory_increase = post_storage_memory_usage - initial_memory_usage
+            # Verify data is encrypted in Redis (not readable as plain text)
+            redis_keys = redis_client.scan_pattern('test_session:*')
+            assert len(redis_keys) >= 1
             
-            # Calculate memory efficiency metrics
-            total_stored_keys = len(stored_keys)
-            avg_memory_per_key = memory_increase / total_stored_keys if total_stored_keys > 0 else 0
+            for key in redis_keys:
+                stored_data = redis_client._client.get(key)
+                assert stored_data is not None
+                
+                # Ensure sensitive data is not stored as plain text
+                stored_str = str(stored_data)
+                assert 'user_123' not in stored_str
+                assert 'sensitive_auth_token_12345' not in stored_str
+                assert 'admin' not in stored_str
             
-            # Validate memory efficiency
-            assert avg_memory_per_key < 500  # Less than 500 bytes overhead per key
-            assert memory_increase < 2 * 1024 * 1024  # Less than 2MB for test data
+            # Verify session can be properly decrypted and retrieved
+            response = client.get('/get_session/sensitive_data')
+            assert response.status_code == 200
+            retrieved_data = response.get_json()
             
-            # Test cache size management
-            cache_size_info = redis_client.dbsize()
-            assert cache_size_info >= total_stored_keys
+            retrieved_sensitive = json.loads(retrieved_data['value'])
+            assert retrieved_sensitive == sensitive_data
             
-            # Test memory cleanup efficiency
-            cleanup_start_time = time.time()
-            redis_client.delete(*stored_keys)
-            cleanup_time = time.time() - cleanup_start_time
-            
-            # Verify cleanup effectiveness
-            final_memory_info = redis_client.info('memory')
-            final_memory_usage = final_memory_info.get('used_memory', 0)
-            memory_freed = post_storage_memory_usage - final_memory_usage
-            
-            # Validate cleanup efficiency
-            assert cleanup_time < 1.0  # Cleanup should complete within 1 second
-            assert memory_freed > 0  # Memory should be freed
-            assert final_memory_usage <= initial_memory_usage * 1.1  # Within 10% of initial
-            
-            # Test cache size after cleanup
-            final_cache_size = redis_client.dbsize()
-            assert final_cache_size < cache_size_info  # Cache size should decrease
+            logger.info("Session security and encryption validation completed")
+    
+    def test_session_ttl_management(self, flask_app_with_cache):
+        """
+        Test session TTL management and expiration policies.
         
-        logger.info(
-            "cache_memory_efficiency_validated",
-            initial_memory_usage=initial_memory_usage,
-            memory_increase=memory_increase,
-            avg_memory_per_key=avg_memory_per_key,
-            cleanup_time=cleanup_time,
-            memory_freed=memory_freed,
-            final_memory_usage=final_memory_usage
-        )
+        Validates:
+        - Session TTL configuration per Section 5.2.7
+        - Automatic session cleanup and expiration
+        - Session renewal and extension mechanisms
+        """
+        app, cache_extensions = flask_app_with_cache
+        redis_client = cache_extensions['redis_client']
+        
+        with app.test_client() as client:
+            # Set session with default TTL
+            response = client.get('/set_session/ttl_test/ttl_test_value')
+            assert response.status_code == 200
+            
+            # Get session key from Redis
+            redis_keys = redis_client.scan_pattern('test_session:*')
+            assert len(redis_keys) >= 1
+            
+            session_key = redis_keys[0]
+            
+            # Check initial TTL
+            initial_ttl = redis_client._client.ttl(session_key)
+            assert initial_ttl > 0, "Session TTL not set properly"
+            
+            # Verify session is accessible
+            response = client.get('/get_session/ttl_test')
+            assert response.status_code == 200
+            assert response.get_json()['value'] == 'ttl_test_value'
+            
+            # Check TTL after access (should be renewed)
+            renewed_ttl = redis_client._client.ttl(session_key)
+            assert renewed_ttl > 0
+            
+            # Wait for a short period and check TTL decrease
+            time.sleep(2)
+            decreased_ttl = redis_client._client.ttl(session_key)
+            assert decreased_ttl < initial_ttl, "TTL not decreasing properly"
+            
+            logger.info(
+                "Session TTL management validated",
+                initial_ttl=initial_ttl,
+                renewed_ttl=renewed_ttl,
+                decreased_ttl=decreased_ttl
+            )
 
 
-@pytest.mark.integration
-@pytest.mark.performance
-class TestCacheIntegrationSuite:
+class TestCacheInvalidationIntegration:
     """
-    Comprehensive cache integration test suite aggregator.
-    
-    Executes all cache integration tests in sequence to validate complete
-    Redis caching functionality with Testcontainers providing realistic
-    behavior per Section 6.6.1 testing strategy requirements.
+    Test comprehensive cache invalidation patterns and TTL management
+    with enterprise-grade invalidation strategies.
     """
     
-    def test_complete_cache_integration_workflow(self, flask_app_with_cache, cache_test_data):
+    @pytest.fixture
+    def cache_strategy_manager(self, redis_client):
         """
-        Execute complete cache integration workflow validation.
-        
-        Validates end-to-end cache functionality including:
-        - Cache initialization and configuration
-        - Distributed caching across instances
-        - Performance optimization and monitoring
-        - Circuit breaker and resilience patterns
+        Cache strategy manager for invalidation testing.
         """
-        app = flask_app_with_cache
-        
-        with app.app_context():
-            cache_mgr = get_cache_manager()
-            
-            # Validate cache manager initialization
-            assert cache_mgr is not None
-            assert cache_mgr.redis_client is not None
-            assert cache_mgr.response_cache is not None
-            
-            # Test complete cache health status
-            health_status = cache_mgr.get_health_status()
-            assert health_status['status'] in ['healthy', 'degraded']
-            assert 'redis' in health_status['components']
-            assert 'response_cache' in health_status['components']
-            assert 'strategies' in health_status['components']
-            assert 'monitoring' in health_status['components']
-            
-            # Validate cache metrics collection
-            metrics_summary = cache_monitor.get_metrics_summary()
-            assert isinstance(metrics_summary, dict)
-            assert 'total_operations' in metrics_summary
-            
-        logger.info(
-            "complete_cache_integration_workflow_validated",
-            health_status=health_status['status'],
-            components_healthy=len([c for c in health_status['components'].values() if c.get('status') == 'healthy']),
-            metrics_collected=len(metrics_summary)
+        invalidation_strategy = CacheInvalidationStrategy(
+            redis_client=redis_client,
+            monitoring=None
         )
+        
+        ttl_strategy = TTLManagementStrategy(
+            redis_client=redis_client,
+            monitoring=None
+        )
+        
+        key_pattern_manager = CacheKeyPatternManager(
+            redis_client=redis_client,
+            monitoring=None
+        )
+        
+        yield {
+            'invalidation': invalidation_strategy,
+            'ttl': ttl_strategy,
+            'key_pattern': key_pattern_manager,
+            'redis_client': redis_client
+        }
     
-    def test_cache_integration_performance_baseline(self, flask_app_with_cache):
+    def test_immediate_cache_invalidation(self, cache_strategy_manager):
         """
-        Validate cache integration performance against Node.js baseline.
+        Test immediate cache invalidation patterns.
         
-        Ensures ≤10% variance requirement compliance for complete cache
-        integration workflow per Section 0.1.1 primary objective.
+        Validates:
+        - Immediate invalidation for critical data per Section 5.2.7
+        - Single key and pattern-based invalidation
+        - Invalidation performance requirements
         """
-        app = flask_app_with_cache
+        strategies = cache_strategy_manager
+        redis_client = strategies['redis_client']
+        invalidation_strategy = strategies['invalidation']
         
-        # Performance baseline test parameters
-        baseline_requirements = {
-            'avg_response_time_ms': 5.0,    # Maximum 5ms average response time
-            'throughput_ops_per_sec': 2000,  # Minimum 2000 operations per second
-            'memory_efficiency_mb': 10.0,    # Maximum 10MB memory usage
-            'connection_efficiency': 0.95    # Minimum 95% connection efficiency
+        # Set up test data
+        test_keys = [
+            'user:123:profile',
+            'user:123:permissions',
+            'user:123:session',
+            'user:456:profile',
+            'api:cache:endpoint_1',
+            'api:cache:endpoint_2'
+        ]
+        
+        test_data = {
+            'timestamp': time.time(),
+            'invalidation_test': True
         }
         
-        with app.test_client() as client:
-            # Execute performance baseline test
-            baseline_start_time = time.time()
-            
-            # Test response caching performance
-            response_times = []
-            for i in range(100):
-                request_start = time.time()
-                response = client.get('/api/cached-endpoint')
-                request_time = (time.time() - request_start) * 1000  # Convert to milliseconds
-                response_times.append(request_time)
-                assert response.status_code == 200
-            
-            total_baseline_time = time.time() - baseline_start_time
-            
-            # Calculate performance metrics
-            avg_response_time = sum(response_times) / len(response_times)
-            baseline_throughput = len(response_times) / total_baseline_time
-            
-            # Validate performance against baseline requirements
-            assert avg_response_time <= baseline_requirements['avg_response_time_ms']
-            assert baseline_throughput >= baseline_requirements['throughput_ops_per_sec']
-            
-            # Validate memory efficiency
-            with app.app_context():
-                cache_mgr = get_cache_manager()
-                redis_client = cache_mgr.get_client()
-                
-                memory_info = redis_client.info('memory')
-                memory_usage_mb = memory_info.get('used_memory', 0) / (1024 * 1024)
-                assert memory_usage_mb <= baseline_requirements['memory_efficiency_mb']
-                
-                # Validate connection efficiency
-                pool_stats = redis_client.get_pool_stats()
-                connection_efficiency = (
-                    pool_stats.get('successful_connections', 0) /
-                    max(pool_stats.get('total_connection_attempts', 1), 1)
-                )
-                assert connection_efficiency >= baseline_requirements['connection_efficiency']
+        # Populate cache with test data
+        for key in test_keys:
+            redis_client.set(key, json.dumps(test_data), ttl=3600)
+        
+        # Verify all keys exist
+        for key in test_keys:
+            assert redis_client.get(key) is not None
+        
+        # Test single key invalidation
+        start_time = time.time()
+        invalidation_strategy.invalidate_keys(['user:123:profile'])
+        single_invalidation_time = time.time() - start_time
+        
+        assert redis_client.get('user:123:profile') is None
+        assert redis_client.get('user:123:permissions') is not None  # Should still exist
+        
+        # Performance requirement: ≤5ms for single key invalidation
+        assert single_invalidation_time <= 0.005, f"Single key invalidation took {single_invalidation_time:.3f}s"
+        
+        # Test pattern-based invalidation
+        start_time = time.time()
+        invalidated_count = invalidation_strategy.invalidate_pattern('user:123:*')
+        pattern_invalidation_time = time.time() - start_time
+        
+        assert invalidated_count >= 2  # Should invalidate remaining user:123 keys
+        assert redis_client.get('user:123:permissions') is None
+        assert redis_client.get('user:123:session') is None
+        assert redis_client.get('user:456:profile') is not None  # Different user, should exist
+        
+        # Performance requirement: ≤50ms for pattern-based invalidation
+        assert pattern_invalidation_time <= 0.050, f"Pattern invalidation took {pattern_invalidation_time:.3f}s"
         
         logger.info(
-            "cache_integration_performance_baseline_validated",
-            avg_response_time_ms=avg_response_time,
-            baseline_throughput=baseline_throughput,
-            memory_usage_mb=memory_usage_mb,
-            connection_efficiency=connection_efficiency,
-            baseline_met=True
+            "Immediate cache invalidation validated",
+            single_invalidation_time=single_invalidation_time,
+            pattern_invalidation_time=pattern_invalidation_time,
+            invalidated_count=invalidated_count
         )
+    
+    def test_tag_based_invalidation(self, cache_strategy_manager):
+        """
+        Test tag-based cache invalidation for complex scenarios.
+        
+        Validates:
+        - Tag-based invalidation for related data per Section 5.2.7
+        - Cross-cutting invalidation patterns
+        - Tag coordination and consistency
+        """
+        strategies = cache_strategy_manager
+        redis_client = strategies['redis_client']
+        invalidation_strategy = strategies['invalidation']
+        
+        # Set up test data with tags
+        tagged_data = [
+            ('product:123:details', {'tag': 'product:123', 'data': 'product details'}),
+            ('product:123:inventory', {'tag': 'product:123', 'data': 'inventory data'}),
+            ('product:123:reviews', {'tag': 'product:123', 'data': 'review data'}),
+            ('product:456:details', {'tag': 'product:456', 'data': 'other product'}),
+            ('user:789:cart', {'tag': 'user:789', 'data': 'cart data'}),
+            ('global:featured', {'tag': 'featured', 'data': 'featured products'})
+        ]
+        
+        # Populate cache with tagged data
+        for key, data in tagged_data:
+            redis_client.set(key, json.dumps(data), ttl=3600)
+            # Set tag mapping
+            redis_client.sadd(f'cache_tag:{data["tag"]}', key)
+        
+        # Test tag-based invalidation
+        tag_to_invalidate = 'product:123'
+        start_time = time.time()
+        invalidated_keys = invalidation_strategy.invalidate_by_tag(tag_to_invalidate)
+        tag_invalidation_time = time.time() - start_time
+        
+        # Verify product:123 related data is invalidated
+        assert redis_client.get('product:123:details') is None
+        assert redis_client.get('product:123:inventory') is None
+        assert redis_client.get('product:123:reviews') is None
+        
+        # Verify other data remains
+        assert redis_client.get('product:456:details') is not None
+        assert redis_client.get('user:789:cart') is not None
+        assert redis_client.get('global:featured') is not None
+        
+        # Verify tag cleanup
+        tag_members = redis_client.smembers(f'cache_tag:{tag_to_invalidate}')
+        assert len(tag_members) == 0, "Tag mapping not cleaned up properly"
+        
+        assert len(invalidated_keys) == 3
+        assert tag_invalidation_time <= 0.050, f"Tag invalidation took {tag_invalidation_time:.3f}s"
+        
+        logger.info(
+            "Tag-based cache invalidation validated",
+            tag=tag_to_invalidate,
+            invalidated_keys=len(invalidated_keys),
+            invalidation_time=tag_invalidation_time
+        )
+    
+    def test_ttl_management_strategies(self, cache_strategy_manager):
+        """
+        Test intelligent TTL management strategies.
+        
+        Validates:
+        - Adaptive TTL policies per Section 5.2.7
+        - TTL calculation performance requirements
+        - Dynamic TTL adjustment based on access patterns
+        """
+        strategies = cache_strategy_manager
+        redis_client = strategies['redis_client']
+        ttl_strategy = strategies['ttl']
+        
+        # Test different TTL policies
+        ttl_test_cases = [
+            {
+                'key': 'static_content:logo',
+                'policy': TTLPolicy.STATIC,
+                'expected_ttl_range': (3600, 86400),  # 1 hour to 1 day
+                'data': {'type': 'static', 'content': 'logo data'}
+            },
+            {
+                'key': 'user:session:active',
+                'policy': TTLPolicy.DYNAMIC,
+                'expected_ttl_range': (300, 3600),  # 5 minutes to 1 hour
+                'data': {'type': 'session', 'user_id': 'user_123'}
+            },
+            {
+                'key': 'api:cache:frequent',
+                'policy': TTLPolicy.ADAPTIVE,
+                'expected_ttl_range': (60, 1800),  # 1 minute to 30 minutes
+                'data': {'type': 'api_cache', 'endpoint': '/api/frequent'}
+            }
+        ]
+        
+        for test_case in ttl_test_cases:
+            key = test_case['key']
+            policy = test_case['policy']
+            expected_range = test_case['expected_ttl_range']
+            data = test_case['data']
+            
+            # Calculate TTL based on policy
+            start_time = time.time()
+            calculated_ttl = ttl_strategy.calculate_ttl(key, policy, metadata=data)
+            ttl_calculation_time = time.time() - start_time
+            
+            # Performance requirement: ≤1ms for TTL calculation
+            assert ttl_calculation_time <= 0.001, f"TTL calculation took {ttl_calculation_time:.3f}s"
+            
+            # Validate TTL is within expected range
+            assert expected_range[0] <= calculated_ttl <= expected_range[1], \
+                f"TTL {calculated_ttl} not in expected range {expected_range}"
+            
+            # Set data with calculated TTL
+            redis_client.set(key, json.dumps(data), ttl=calculated_ttl)
+            
+            # Verify TTL is set correctly
+            actual_ttl = redis_client._client.ttl(key)
+            assert abs(actual_ttl - calculated_ttl) <= 2, "TTL not set correctly"
+        
+        # Test TTL adjustment based on access patterns
+        frequent_access_key = 'user:profile:frequent'
+        redis_client.set(frequent_access_key, json.dumps({'frequent': True}), ttl=300)
+        
+        # Simulate frequent access
+        for _ in range(10):
+            redis_client.get(frequent_access_key)
+            ttl_strategy.record_access(frequent_access_key)
+        
+        # Adjust TTL based on access pattern
+        new_ttl = ttl_strategy.adjust_ttl_by_access_pattern(frequent_access_key)
+        assert new_ttl > 300, "TTL should be increased for frequently accessed data"
+        
+        logger.info(
+            "TTL management strategies validated",
+            test_cases=len(ttl_test_cases),
+            adaptive_ttl=new_ttl
+        )
+    
+    def test_distributed_invalidation_coordination(self, cache_strategy_manager):
+        """
+        Test distributed cache invalidation coordination across instances.
+        
+        Validates:
+        - Multi-instance invalidation coordination per Section 3.4.2
+        - Distributed invalidation consistency
+        - Performance of distributed operations
+        """
+        strategies = cache_strategy_manager
+        redis_client = strategies['redis_client']
+        invalidation_strategy = strategies['invalidation']
+        
+        # Set up distributed test scenario
+        instance_prefix = f'instance_{uuid.uuid4()}'
+        distributed_keys = [
+            f'{instance_prefix}:cache:user:123:profile',
+            f'{instance_prefix}:cache:user:123:settings',
+            f'{instance_prefix}:cache:api:endpoint:data'
+        ]
+        
+        test_data = {
+            'distributed_test': True,
+            'timestamp': time.time(),
+            'instance_id': instance_prefix
+        }
+        
+        # Populate distributed cache
+        for key in distributed_keys:
+            redis_client.set(key, json.dumps(test_data), ttl=3600)
+            # Add to distributed invalidation set
+            redis_client.sadd('distributed_invalidation:user:123', key)
+        
+        # Test distributed invalidation
+        start_time = time.time()
+        distributed_keys_invalidated = invalidation_strategy.invalidate_distributed_set('user:123')
+        distributed_invalidation_time = time.time() - start_time
+        
+        # Verify all distributed keys are invalidated
+        for key in distributed_keys:
+            assert redis_client.get(key) is None, f"Key {key} was not invalidated"
+        
+        # Verify distributed set is cleaned up
+        remaining_keys = redis_client.smembers('distributed_invalidation:user:123')
+        assert len(remaining_keys) == 0, "Distributed invalidation set not cleaned up"
+        
+        # Performance requirement: ≤10ms for distributed coordination
+        assert distributed_invalidation_time <= 0.010, \
+            f"Distributed invalidation took {distributed_invalidation_time:.3f}s"
+        
+        assert len(distributed_keys_invalidated) == len(distributed_keys)
+        
+        logger.info(
+            "Distributed invalidation coordination validated",
+            keys_invalidated=len(distributed_keys_invalidated),
+            invalidation_time=distributed_invalidation_time
+        )
+
+
+class TestResponseCacheIntegration:
+    """
+    Test Flask-Caching integration with response caching patterns
+    and HTTP cache optimization.
+    """
+    
+    @pytest.fixture
+    def flask_app_with_response_cache(self, redis_client):
+        """
+        Flask application with response caching configured.
+        """
+        app = Flask(__name__)
+        app.config.update({
+            'SECRET_KEY': 'test-secret-key-response-cache',
+            'TESTING': True,
+            'CACHE_TYPE': 'RedisCache',
+            'CACHE_DEFAULT_TIMEOUT': 300,
+            'CACHE_KEY_PREFIX': 'test_response_cache:'
+        })
+        
+        # Initialize cache extensions with response caching
+        cache_config = CacheConfiguration(
+            policy=CachePolicy.DYNAMIC,
+            ttl_seconds=300,
+            compression=CompressionType.AUTO,
+            vary_headers=['Accept', 'Accept-Encoding', 'Authorization'],
+            cache_private_responses=False,
+            distributed_invalidation=True
+        )
+        
+        cache_extensions = init_cache_extensions(
+            app=app,
+            redis_config=redis_client.get_connection_info(),
+            response_cache_config=cache_config,
+            monitoring_enabled=True
+        )
+        
+        response_cache = cache_extensions['response_cache']
+        
+        # Add test routes with different caching patterns
+        @app.route('/api/public/data/<data_id>')
+        @cached_response(ttl=600, policy='public', tags=['public_data'])
+        def get_public_data(data_id):
+            return jsonify({
+                'data_id': data_id,
+                'timestamp': time.time(),
+                'type': 'public',
+                'processing_time': random.uniform(0.1, 0.5)
+            })
+        
+        @app.route('/api/private/user/<user_id>')
+        @cached_response(ttl=300, policy='private', tags=['user_data'])
+        def get_user_data(user_id):
+            return jsonify({
+                'user_id': user_id,
+                'timestamp': time.time(),
+                'type': 'private',
+                'processing_time': random.uniform(0.1, 0.5)
+            })
+        
+        @app.route('/api/dynamic/content')
+        @cached_response(ttl=60, policy='dynamic', tags=['dynamic_content'])
+        def get_dynamic_content():
+            return jsonify({
+                'content': f'Dynamic content {uuid.uuid4()}',
+                'timestamp': time.time(),
+                'processing_time': random.uniform(0.1, 0.5)
+            })
+        
+        @app.route('/api/no-cache/sensitive')
+        @cached_response(ttl=0, policy='no-cache')
+        def get_sensitive_data():
+            return jsonify({
+                'sensitive': True,
+                'timestamp': time.time(),
+                'processing_time': random.uniform(0.1, 0.5)
+            })
+        
+        @app.route('/invalidate/<tag>')
+        def invalidate_by_tag(tag):
+            result = invalidate_cache(tags=[tag])
+            return jsonify(result)
+        
+        yield app, cache_extensions, response_cache
+        
+        # Cleanup
+        cleanup_cache_resources()
+    
+    def test_response_cache_hit_miss_patterns(self, flask_app_with_response_cache):
+        """
+        Test response cache hit/miss patterns and performance optimization.
+        
+        Validates:
+        - Cache hit/miss behavior per Section 3.4.2
+        - Response cache performance requirements
+        - Cache key generation and retrieval
+        """
+        app, cache_extensions, response_cache = flask_app_with_response_cache
+        
+        with app.test_client() as client:
+            # Test cache miss (first request)
+            start_time = time.time()
+            response1 = client.get('/api/public/data/test_item_123')
+            miss_time = time.time() - start_time
+            
+            assert response1.status_code == 200
+            data1 = response1.get_json()
+            
+            # Test cache hit (second request)
+            start_time = time.time()
+            response2 = client.get('/api/public/data/test_item_123')
+            hit_time = time.time() - start_time
+            
+            assert response2.status_code == 200
+            data2 = response2.get_json()
+            
+            # Verify same data returned (cached)
+            assert data1['data_id'] == data2['data_id']
+            assert data1['timestamp'] == data2['timestamp']  # Should be cached
+            
+            # Performance requirements
+            # Cache hit should be faster than cache miss
+            assert hit_time < miss_time, "Cache hit should be faster than cache miss"
+            # Cache hit latency: ≤2ms
+            assert hit_time <= 0.002, f"Cache hit took {hit_time:.3f}s, exceeds 2ms requirement"
+            
+            # Test different data_id (should be cache miss)
+            response3 = client.get('/api/public/data/test_item_456')
+            assert response3.status_code == 200
+            data3 = response3.get_json()
+            assert data3['data_id'] == 'test_item_456'
+            assert data3['timestamp'] != data1['timestamp']  # Different data
+            
+            logger.info(
+                "Response cache hit/miss patterns validated",
+                miss_time=miss_time,
+                hit_time=hit_time,
+                performance_improvement=miss_time / hit_time
+            )
+    
+    def test_cache_policy_enforcement(self, flask_app_with_response_cache):
+        """
+        Test different cache policy enforcement and behavior.
+        
+        Validates:
+        - Public, private, and no-cache policies per Section 3.4.2
+        - Cache headers and HTTP optimization
+        - Policy-specific cache behavior
+        """
+        app, cache_extensions, response_cache = flask_app_with_response_cache
+        
+        with app.test_client() as client:
+            # Test public cache policy
+            response = client.get('/api/public/data/public_test')
+            assert response.status_code == 200
+            
+            # Check cache headers for public policy
+            cache_control = response.headers.get('Cache-Control', '')
+            assert 'public' in cache_control or 'max-age' in cache_control
+            
+            # Test private cache policy
+            response = client.get('/api/private/user/user_123')
+            assert response.status_code == 200
+            
+            # Test dynamic cache policy
+            response1 = client.get('/api/dynamic/content')
+            assert response1.status_code == 200
+            data1 = response1.get_json()
+            
+            # Wait and test again (should use cache within TTL)
+            response2 = client.get('/api/dynamic/content')
+            assert response2.status_code == 200
+            data2 = response2.get_json()
+            
+            # Should be cached (same timestamp within TTL)
+            assert data1['timestamp'] == data2['timestamp']
+            
+            # Test no-cache policy
+            response1 = client.get('/api/no-cache/sensitive')
+            assert response1.status_code == 200
+            data1 = response1.get_json()
+            
+            time.sleep(0.1)  # Small delay
+            
+            response2 = client.get('/api/no-cache/sensitive')
+            assert response2.status_code == 200
+            data2 = response2.get_json()
+            
+            # Should not be cached (different timestamps)
+            assert data1['timestamp'] != data2['timestamp']
+            
+            logger.info("Cache policy enforcement validated successfully")
+    
+    def test_cache_invalidation_by_tags(self, flask_app_with_response_cache):
+        """
+        Test tag-based cache invalidation for response cache.
+        
+        Validates:
+        - Tag-based invalidation per Section 5.2.7
+        - Response cache tag coordination
+        - Invalidation effectiveness and performance
+        """
+        app, cache_extensions, response_cache = flask_app_with_response_cache
+        
+        with app.test_client() as client:
+            # Populate cache with tagged data
+            tagged_endpoints = [
+                ('/api/public/data/tagged_1', 'public_data'),
+                ('/api/public/data/tagged_2', 'public_data'),
+                ('/api/private/user/tagged_user_1', 'user_data'),
+                ('/api/dynamic/content', 'dynamic_content')
+            ]
+            
+            cached_responses = {}
+            for endpoint, tag in tagged_endpoints:
+                response = client.get(endpoint)
+                assert response.status_code == 200
+                cached_responses[endpoint] = response.get_json()
+            
+            # Verify data is cached (second requests return same data)
+            for endpoint, tag in tagged_endpoints:
+                response = client.get(endpoint)
+                assert response.status_code == 200
+                data = response.get_json()
+                assert data['timestamp'] == cached_responses[endpoint]['timestamp']
+            
+            # Invalidate by tag
+            response = client.get('/invalidate/public_data')
+            assert response.status_code == 200
+            invalidation_result = response.get_json()
+            
+            # Verify public_data tagged items are invalidated
+            public_endpoints = [ep for ep, tag in tagged_endpoints if tag == 'public_data']
+            for endpoint in public_endpoints:
+                response = client.get(endpoint)
+                assert response.status_code == 200
+                data = response.get_json()
+                # Should be new data (different timestamp)
+                assert data['timestamp'] != cached_responses[endpoint]['timestamp']
+            
+            # Verify other tagged data remains cached
+            other_endpoints = [ep for ep, tag in tagged_endpoints if tag != 'public_data']
+            for endpoint in other_endpoints:
+                response = client.get(endpoint)
+                assert response.status_code == 200
+                data = response.get_json()
+                # Should still be cached (same timestamp)
+                assert data['timestamp'] == cached_responses[endpoint]['timestamp']
+            
+            logger.info(
+                "Cache invalidation by tags validated",
+                invalidated_endpoints=len(public_endpoints),
+                preserved_endpoints=len(other_endpoints)
+            )
+    
+    def test_response_cache_compression(self, flask_app_with_response_cache):
+        """
+        Test response cache compression and memory optimization.
+        
+        Validates:
+        - Response compression for memory efficiency per Section 3.4.2
+        - Compression effectiveness and performance
+        - Memory usage optimization
+        """
+        app, cache_extensions, response_cache = flask_app_with_response_cache
+        redis_client = cache_extensions['redis_client']
+        
+        with app.test_client() as client:
+            # Generate large response data for compression testing
+            large_data_endpoint = '/api/public/data/large_data_test'
+            
+            # Mock a large response
+            with patch('src.cache.response_cache.uuid.uuid4') as mock_uuid:
+                mock_uuid.return_value = 'large_data_test'
+                
+                # Create large response data
+                large_response_data = {
+                    'data_id': 'large_data_test',
+                    'timestamp': time.time(),
+                    'large_content': 'x' * 10000,  # 10KB of data
+                    'repeated_data': ['item'] * 1000
+                }
+                
+                with patch.object(app.view_functions['get_public_data'], '__call__') as mock_view:
+                    mock_view.return_value = jsonify(large_response_data)
+                    
+                    # Request large data
+                    response = client.get(large_data_endpoint)
+                    assert response.status_code == 200
+                    
+                    # Check if data is cached and compressed
+                    cache_keys = redis_client.scan_pattern('test_response_cache:*large_data_test*')
+                    assert len(cache_keys) >= 1, "Response not found in cache"
+                    
+                    # Get cached data size
+                    cached_data = redis_client._client.get(cache_keys[0])
+                    cached_size = len(cached_data) if cached_data else 0
+                    
+                    # Original response size
+                    original_size = len(json.dumps(large_response_data))
+                    
+                    # Compression should reduce size
+                    compression_ratio = cached_size / original_size if original_size > 0 else 1
+                    
+                    assert compression_ratio < 0.8, f"Compression ratio {compression_ratio:.2f} not effective"
+                    
+                    logger.info(
+                        "Response cache compression validated",
+                        original_size=original_size,
+                        cached_size=cached_size,
+                        compression_ratio=compression_ratio
+                    )
+
+
+class TestCachePerformanceMonitoring:
+    """
+    Test cache performance monitoring and metrics collection
+    with Prometheus integration.
+    """
+    
+    @pytest.fixture
+    def monitoring_enabled_cache(self, redis_client):
+        """
+        Cache setup with monitoring enabled.
+        """
+        if not MONITORING_AVAILABLE:
+            pytest.skip("Cache monitoring not available")
+        
+        # Create custom registry for test isolation
+        test_registry = CollectorRegistry()
+        
+        cache_extensions = init_cache_extensions(
+            redis_config=redis_client.get_connection_info(),
+            monitoring_enabled=True
+        )
+        
+        yield cache_extensions, test_registry
+        
+        cleanup_cache_resources()
+    
+    def test_cache_hit_miss_metrics(self, monitoring_enabled_cache):
+        """
+        Test cache hit/miss ratio monitoring and metrics collection.
+        
+        Validates:
+        - Cache hit/miss metrics tracking per Section 6.1.1
+        - Prometheus metrics collection
+        - Performance monitoring accuracy
+        """
+        cache_extensions, test_registry = monitoring_enabled_cache
+        redis_client = cache_extensions['redis_client']
+        monitoring_manager = cache_extensions['monitoring_manager']
+        
+        if not monitoring_manager:
+            pytest.skip("Monitoring manager not available")
+        
+        # Perform cache operations to generate metrics
+        test_operations = [
+            ('cache_hit_test_1', 'hit_test_value_1'),
+            ('cache_hit_test_2', 'hit_test_value_2'),
+            ('cache_hit_test_3', 'hit_test_value_3')
+        ]
+        
+        # Set data (cache misses)
+        for key, value in test_operations:
+            redis_client.set(key, value, ttl=300)
+        
+        # Retrieve data (cache hits)
+        for key, expected_value in test_operations:
+            retrieved_value = redis_client.get(key)
+            assert retrieved_value == expected_value
+        
+        # Generate some cache misses
+        for i in range(5):
+            redis_client.get(f'non_existent_key_{i}')
+        
+        # Get cache statistics
+        cache_stats = get_cache_stats()
+        assert 'redis' in cache_stats
+        
+        redis_stats = cache_stats['redis']
+        if 'hit_rate' in redis_stats:
+            hit_rate = redis_stats['hit_rate']
+            assert 0.0 <= hit_rate <= 1.0, f"Invalid hit rate: {hit_rate}"
+        
+        # Verify monitoring data collection
+        if hasattr(monitoring_manager, 'get_metrics_summary'):
+            metrics_summary = monitoring_manager.get_metrics_summary()
+            assert 'total_operations' in metrics_summary
+            assert metrics_summary['total_operations'] > 0
+        
+        logger.info(
+            "Cache hit/miss metrics validated",
+            cache_stats=cache_stats,
+            test_operations=len(test_operations)
+        )
+    
+    def test_performance_baseline_comparison(self, monitoring_enabled_cache):
+        """
+        Test performance baseline comparison with Node.js cache implementation.
+        
+        Validates:
+        - Performance variance ≤10% from Node.js baseline per Section 0.1.1
+        - Latency measurement and comparison
+        - Throughput validation
+        """
+        cache_extensions, test_registry = monitoring_enabled_cache
+        redis_client = cache_extensions['redis_client']
+        
+        # Node.js baseline performance metrics (simulated)
+        nodejs_baseline = {
+            'get_latency_ms': 2.5,
+            'set_latency_ms': 3.0,
+            'throughput_ops_per_sec': 5000
+        }
+        
+        # Performance test parameters
+        test_iterations = 100
+        performance_data = {
+            'get_times': [],
+            'set_times': [],
+            'total_operations': 0
+        }
+        
+        # Warm up cache
+        for i in range(10):
+            redis_client.set(f'warmup_{i}', f'warmup_value_{i}', ttl=300)
+        
+        # Performance testing
+        start_total = time.time()
+        
+        for i in range(test_iterations):
+            # Test SET performance
+            start_time = time.time()
+            redis_client.set(f'perf_test_{i}', f'performance_test_value_{i}', ttl=300)
+            set_time = (time.time() - start_time) * 1000  # Convert to milliseconds
+            performance_data['set_times'].append(set_time)
+            
+            # Test GET performance
+            start_time = time.time()
+            value = redis_client.get(f'perf_test_{i}')
+            get_time = (time.time() - start_time) * 1000  # Convert to milliseconds
+            performance_data['get_times'].append(get_time)
+            
+            assert value == f'performance_test_value_{i}'
+            performance_data['total_operations'] += 2
+        
+        total_time = time.time() - start_total
+        
+        # Calculate performance metrics
+        avg_get_time = sum(performance_data['get_times']) / len(performance_data['get_times'])
+        avg_set_time = sum(performance_data['set_times']) / len(performance_data['set_times'])
+        throughput = performance_data['total_operations'] / total_time
+        
+        # Performance variance validation (≤10% from baseline)
+        get_variance = abs(avg_get_time - nodejs_baseline['get_latency_ms']) / nodejs_baseline['get_latency_ms']
+        set_variance = abs(avg_set_time - nodejs_baseline['set_latency_ms']) / nodejs_baseline['set_latency_ms']
+        throughput_variance = abs(throughput - nodejs_baseline['throughput_ops_per_sec']) / nodejs_baseline['throughput_ops_per_sec']
+        
+        assert get_variance <= 0.10, f"GET latency variance {get_variance:.2%} exceeds 10%"
+        assert set_variance <= 0.10, f"SET latency variance {set_variance:.2%} exceeds 10%"
+        assert throughput_variance <= 0.10, f"Throughput variance {throughput_variance:.2%} exceeds 10%"
+        
+        logger.info(
+            "Performance baseline comparison validated",
+            avg_get_time_ms=avg_get_time,
+            avg_set_time_ms=avg_set_time,
+            throughput_ops_per_sec=throughput,
+            get_variance_percent=get_variance * 100,
+            set_variance_percent=set_variance * 100,
+            throughput_variance_percent=throughput_variance * 100
+        )
+    
+    def test_cache_health_monitoring(self, monitoring_enabled_cache):
+        """
+        Test comprehensive cache health monitoring and alerting.
+        
+        Validates:
+        - Cache health status monitoring per Section 6.1.1
+        - Health check endpoint functionality
+        - Monitoring integration and alerting
+        """
+        cache_extensions, test_registry = monitoring_enabled_cache
+        
+        # Test cache health status
+        health_status = get_cache_health()
+        
+        assert 'overall_healthy' in health_status
+        assert 'redis' in health_status
+        assert 'response_cache' in health_status
+        assert 'monitoring' in health_status
+        assert 'extensions' in health_status
+        
+        # Validate Redis health
+        redis_health = health_status['redis']
+        assert 'healthy' in redis_health
+        assert redis_health['healthy'] is True
+        assert 'details' in redis_health
+        
+        redis_details = redis_health['details']
+        required_health_fields = ['redis_version', 'memory_usage', 'connected_clients']
+        for field in required_health_fields:
+            assert field in redis_details, f"Missing health field: {field}"
+        
+        # Validate response cache health
+        response_cache_health = health_status['response_cache']
+        assert 'healthy' in response_cache_health
+        
+        # Validate monitoring health
+        monitoring_health = health_status['monitoring']
+        assert 'available' in monitoring_health
+        assert monitoring_health['available'] == MONITORING_AVAILABLE
+        
+        # Test overall health assessment
+        assert health_status['overall_healthy'] is True
+        
+        # Test health monitoring over time
+        health_checks = []
+        for i in range(5):
+            health = get_cache_health()
+            health_checks.append(health['overall_healthy'])
+            time.sleep(0.1)
+        
+        # All health checks should be consistent
+        assert all(health_checks), "Inconsistent health status detected"
+        
+        logger.info(
+            "Cache health monitoring validated",
+            overall_healthy=health_status['overall_healthy'],
+            redis_healthy=redis_health['healthy'],
+            monitoring_available=monitoring_health['available'],
+            health_checks_performed=len(health_checks)
+        )
+
+
+class TestCircuitBreakerResilience:
+    """
+    Test circuit breaker patterns for Redis connectivity resilience
+    with comprehensive failure scenarios and recovery testing.
+    """
+    
+    @pytest.fixture
+    def resilient_cache_client(self, redis_client):
+        """
+        Cache client with circuit breaker configured for testing.
+        """
+        # Configure circuit breaker for testing (lower thresholds)
+        circuit_breaker_config = {
+            'fail_max': 3,  # Lower threshold for testing
+            'reset_timeout': 2,  # Shorter timeout for testing
+            'expected_exception': (ConnectionError, TimeoutError, ResponseError)
+        }
+        
+        # Apply circuit breaker configuration
+        if hasattr(redis_client, 'configure_circuit_breaker'):
+            redis_client.configure_circuit_breaker(**circuit_breaker_config)
+        
+        yield redis_client
+    
+    def test_circuit_breaker_activation(self, resilient_cache_client):
+        """
+        Test circuit breaker activation on connection failures.
+        
+        Validates:
+        - Circuit breaker activation on Redis failures per Section 6.1.3
+        - Failure threshold enforcement
+        - Circuit breaker state transitions
+        """
+        redis_client = resilient_cache_client
+        
+        # Test normal operation first
+        assert redis_client.set('circuit_test_normal', 'normal_value', ttl=60) is True
+        assert redis_client.get('circuit_test_normal') == 'normal_value'
+        
+        # Simulate Redis connection failures
+        original_get = redis_client._client.get
+        original_set = redis_client._client.set
+        
+        def failing_operation(*args, **kwargs):
+            raise ConnectionError("Simulated Redis connection failure")
+        
+        # Mock failing operations to trigger circuit breaker
+        with patch.object(redis_client._client, 'get', side_effect=failing_operation):
+            with patch.object(redis_client._client, 'set', side_effect=failing_operation):
+                
+                # Perform operations that should fail and trigger circuit breaker
+                failures = 0
+                for i in range(5):
+                    try:
+                        redis_client.set(f'failing_key_{i}', f'failing_value_{i}')
+                    except (ConnectionError, CircuitBreakerOpenError, CacheError):
+                        failures += 1
+                
+                # At least some operations should fail (triggering circuit breaker)
+                assert failures >= 3, f"Expected at least 3 failures, got {failures}"
+        
+        # Restore normal operations
+        redis_client._client.get = original_get
+        redis_client._client.set = original_set
+        
+        # Test circuit breaker recovery
+        recovery_success = False
+        max_recovery_attempts = 10
+        
+        for attempt in range(max_recovery_attempts):
+            try:
+                # Wait for circuit breaker reset
+                time.sleep(0.5)
+                
+                # Test recovery
+                redis_client.set('recovery_test', 'recovery_value', ttl=60)
+                recovery_value = redis_client.get('recovery_test')
+                
+                if recovery_value == 'recovery_value':
+                    recovery_success = True
+                    break
+                    
+            except (CircuitBreakerOpenError, CacheError):
+                # Circuit breaker still open, continue waiting
+                continue
+        
+        assert recovery_success, "Circuit breaker failed to recover after connection restoration"
+        
+        logger.info(
+            "Circuit breaker activation and recovery validated",
+            failures_detected=failures,
+            recovery_attempts=attempt + 1
+        )
+    
+    def test_graceful_degradation_patterns(self, resilient_cache_client):
+        """
+        Test graceful degradation during Redis unavailability.
+        
+        Validates:
+        - Graceful degradation strategies per Section 6.1.3
+        - Fallback mechanisms during service unavailability
+        - Application continuity during cache failures
+        """
+        redis_client = resilient_cache_client
+        
+        # Set up test data before simulating failures
+        test_data = {
+            'user:123:profile': {'name': 'Test User', 'email': 'test@example.com'},
+            'api:cache:endpoint': {'data': 'cached_api_response'},
+            'session:abc123': {'user_id': '123', 'permissions': ['read', 'write']}
+        }
+        
+        # Populate cache with test data
+        for key, value in test_data.items():
+            redis_client.set(key, json.dumps(value), ttl=300)
+        
+        # Verify data is accessible
+        for key, expected_value in test_data.items():
+            cached_value = redis_client.get(key)
+            assert cached_value is not None
+            assert json.loads(cached_value) == expected_value
+        
+        # Simulate Redis unavailability
+        def unavailable_operation(*args, **kwargs):
+            raise ConnectionError("Redis service unavailable")
+        
+        with patch.object(redis_client._client, 'get', side_effect=unavailable_operation):
+            with patch.object(redis_client._client, 'set', side_effect=unavailable_operation):
+                
+                # Test graceful degradation - operations should handle failures gracefully
+                degraded_results = {}
+                
+                for key in test_data.keys():
+                    try:
+                        # This should fail gracefully without crashing
+                        value = redis_client.get(key)
+                        degraded_results[key] = value
+                    except (ConnectionError, CircuitBreakerOpenError, CacheError) as e:
+                        # Expected behavior - record the graceful failure
+                        degraded_results[key] = None
+                        logger.info(f"Graceful degradation for key {key}: {type(e).__name__}")
+                
+                # Verify graceful handling (no unhandled exceptions)
+                assert len(degraded_results) == len(test_data)
+                
+                # All values should be None or handled gracefully
+                for key, value in degraded_results.items():
+                    assert value is None or isinstance(value, str)
+        
+        # Test service recovery
+        recovery_data = {}
+        for key, expected_value in test_data.items():
+            try:
+                # Some data might still be available after recovery
+                cached_value = redis_client.get(key)
+                if cached_value:
+                    recovery_data[key] = json.loads(cached_value)
+            except Exception as e:
+                logger.info(f"Recovery attempt for {key} failed: {e}")
+        
+        logger.info(
+            "Graceful degradation patterns validated",
+            test_keys=len(test_data),
+            degraded_results=len(degraded_results),
+            recovered_keys=len(recovery_data)
+        )
+    
+    def test_multi_instance_resilience(self, redis_config):
+        """
+        Test resilience patterns across multiple cache instances.
+        
+        Validates:
+        - Multi-instance resilience coordination per Section 3.4.2
+        - Distributed failure handling
+        - Instance isolation and recovery
+        """
+        # Create multiple cache instances
+        cache_instances = []
+        try:
+            for i in range(3):
+                instance = create_redis_client(config=redis_config)
+                cache_instances.append(instance)
+            
+            # Test normal multi-instance coordination
+            coordination_key = f'multi_instance_test_{uuid.uuid4()}'
+            test_value = {'instance_test': True, 'timestamp': time.time()}
+            
+            # Instance 0 sets data
+            cache_instances[0].set(coordination_key, json.dumps(test_value), ttl=300)
+            
+            # All instances should read the same data
+            for i, instance in enumerate(cache_instances):
+                retrieved_value = instance.get(coordination_key)
+                assert retrieved_value is not None
+                parsed_value = json.loads(retrieved_value)
+                assert parsed_value == test_value
+            
+            # Simulate failure in one instance
+            failing_instance = cache_instances[1]
+            
+            def failing_operation(*args, **kwargs):
+                raise ConnectionError("Instance connection failure")
+            
+            with patch.object(failing_instance._client, 'get', side_effect=failing_operation):
+                with patch.object(failing_instance._client, 'set', side_effect=failing_operation):
+                    
+                    # Test that other instances continue working
+                    working_instances = [cache_instances[0], cache_instances[2]]
+                    
+                    for instance in working_instances:
+                        # Should still work on non-failing instances
+                        value = instance.get(coordination_key)
+                        assert value is not None
+                        
+                        # Set new data
+                        new_key = f'resilience_test_{uuid.uuid4()}'
+                        instance.set(new_key, 'resilience_value', ttl=300)
+                        retrieved = instance.get(new_key)
+                        assert retrieved == 'resilience_value'
+                    
+                    # Failing instance should handle gracefully
+                    try:
+                        failing_instance.get(coordination_key)
+                        assert False, "Expected failure on failing instance"
+                    except (ConnectionError, CircuitBreakerOpenError, CacheError):
+                        # Expected graceful failure
+                        pass
+            
+            # Test recovery coordination
+            time.sleep(1)  # Allow for recovery
+            
+            # All instances should recover
+            recovery_key = f'recovery_coordination_{uuid.uuid4()}'
+            recovery_value = 'all_instances_recovered'
+            
+            # Set from recovered instance
+            cache_instances[1].set(recovery_key, recovery_value, ttl=300)
+            
+            # Verify all instances can access
+            for i, instance in enumerate(cache_instances):
+                retrieved = instance.get(recovery_key)
+                assert retrieved == recovery_value
+            
+            logger.info(
+                "Multi-instance resilience validated",
+                instance_count=len(cache_instances),
+                coordination_successful=True
+            )
+            
+        finally:
+            # Clean up instances
+            for instance in cache_instances:
+                if instance:
+                    instance.close()
+
+
+# Integration test configuration and markers
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.redis,
+    pytest.mark.cache,
+    pytest.mark.testcontainers
+]
+
+# Test execution configuration
+def pytest_configure(config):
+    """Configure pytest for cache integration testing."""
+    config.addinivalue_line(
+        "markers", "integration: mark test as integration test requiring external services"
+    )
+    config.addinivalue_line(
+        "markers", "redis: mark test as requiring Redis functionality"
+    )
+    config.addinivalue_line(
+        "markers", "cache: mark test as cache-specific functionality"
+    )
+    config.addinivalue_line(
+        "markers", "testcontainers: mark test as using Testcontainers for service integration"
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    """Modify test collection to ensure proper ordering and dependencies."""
+    # Ensure connection tests run first
+    connection_tests = [item for item in items if 'connection' in item.name.lower()]
+    other_tests = [item for item in items if 'connection' not in item.name.lower()]
+    
+    # Reorder items to run connection tests first
+    items[:] = connection_tests + other_tests
+
+
+if __name__ == "__main__":
+    # Allow running tests directly
+    pytest.main([__file__, "-v", "--tb=short"])
