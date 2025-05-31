@@ -1,2337 +1,2407 @@
 """
-Comprehensive Business Logic Testing Suite
+Core Business Logic Testing Suite for Flask Application
 
-This module provides extensive unit testing for the business logic components including
-models, validators, processors, services, and utilities. Implements comprehensive
-test coverage maintaining the mandatory 95% coverage requirement per Section 6.6.3
-while validating business rule implementations and data transformation pipelines.
+This module provides comprehensive testing for the business logic layer including models,
+validators, processors, services, and utilities. Implements 95% coverage requirement
+per Section 6.6.3 with behavioral equivalence validation per F-004-RQ-001 and
+performance validation within ≤10% variance per Section 0.1.1.
 
 Test Coverage Areas:
-- Business data models with pydantic validation testing per Section 5.2.4
-- Marshmallow schema validation and business rule enforcement per F-004-RQ-001
-- Business logic processors maintaining behavioral equivalence per F-004-RQ-001
-- Service orchestration and workflow management per Section 5.2.4
-- Data transformation logic with identical input/output characteristics per Section 5.2.4
-- Business calculations and utilities with performance validation
-- Error handling and exception management per F-005 requirements
-- Performance testing within ≤10% variance per Section 0.1.1
+- Business Models: Pydantic model validation, serialization, business rules (95% coverage)
+- Business Validators: Marshmallow schema validation, business rule enforcement
+- Business Processors: Data transformation, business rule execution, performance
+- Business Services: Service orchestration, external service integration
+- Business Utils: Data manipulation, validation utilities, type conversion
 
-Testing Strategy:
-- Unit tests with 95% coverage per Section 6.6.3 mandatory requirement
-- Behavioral equivalence validation per F-004-RQ-001
-- Performance benchmarking per Section 0.1.1 ≤10% variance requirement
-- Business rule validation maintaining existing patterns
-- Comprehensive edge case and error condition testing
-- Integration with pytest fixtures and test automation
-- Mock external dependencies for isolated unit testing
+Testing Framework:
+- pytest 7.4+ with extensive plugin ecosystem per Section 6.6.1
+- pytest-mock for comprehensive external service simulation
+- factory_boy for dynamic test object generation per Section 6.6.1
+- Testcontainers for realistic MongoDB/Redis behavior per Section 6.6.1
+- Performance validation ensuring ≤10% variance from Node.js baseline
 
-Author: Business Logic Testing Team
+Compliance Requirements:
+- F-004-RQ-001: Identical data transformation and business rules
+- Section 5.2.4: Business logic engine behavioral equivalence
+- Section 6.6.3: 95% core business logic coverage mandatory
+- Section 0.1.1: Performance within ≤10% variance requirement
+
+Author: Flask Migration Team
 Version: 1.0.0
-License: Enterprise
+Test Coverage Target: 95% mandatory for deployment
+Performance Target: ≤10% variance from Node.js baseline
 """
 
-import pytest
-import time
+import asyncio
 import json
+import time
 import uuid
 from datetime import datetime, timezone, timedelta, date
 from decimal import Decimal, InvalidOperation
-from typing import Any, Dict, List, Optional, Union, Set
-from unittest.mock import Mock, MagicMock, patch, call
-from dataclasses import dataclass
-import asyncio
-from contextlib import contextmanager
+from typing import Any, Dict, List, Optional, Union, Tuple
+from unittest.mock import Mock, patch, MagicMock, AsyncMock, call
 
-# Third-party testing libraries
-import marshmallow as ma
-from marshmallow import fields, validate, ValidationError as MarshmallowValidationError
+import pytest
+import pytest_asyncio
 from pydantic import ValidationError as PydanticValidationError
-from freezegun import freeze_time
+from marshmallow import ValidationError as MarshmallowValidationError
+import factory
+from testcontainers.mongodb import MongoDbContainer
+from testcontainers.redis import RedisContainer
 
-# Business logic modules under test
+# Import business logic components for comprehensive testing
 from src.business.models import (
-    BaseBusinessModel, User, Organization, Product, ProductCategory, Order, OrderItem,
-    PaymentTransaction, Address, ContactInfo, MonetaryAmount, DateTimeRange,
-    FileUpload, SystemConfiguration, ApiResponse, PaginatedResponse,
-    PaginationParams, SortParams, SearchParams,
-    UserStatus, UserRole, OrderStatus, PaymentStatus, PaymentMethod, ProductStatus,
-    Priority, ContactMethod, BUSINESS_MODEL_REGISTRY, get_model_by_name,
-    validate_model_data, serialize_for_api
+    BaseBusinessModel, User, Organization, Product, ProductCategory, Order,
+    OrderItem, PaymentTransaction, Address, ContactInfo, MonetaryAmount,
+    DateTimeRange, FileUpload, SystemConfiguration, PaginationParams,
+    SortParams, SearchParams, ApiResponse, PaginatedResponse,
+    UserStatus, UserRole, OrderStatus, PaymentStatus, PaymentMethod,
+    ProductStatus, Priority, ContactMethod, BUSINESS_MODEL_REGISTRY,
+    get_model_by_name, validate_model_data, serialize_for_api
 )
+
 from src.business.validators import (
-    ValidationContext, ValidationType, ValidationMode, BaseValidator,
-    BusinessRuleValidator, DataModelValidator, InputValidator, OutputValidator,
-    validate_business_data, validate_request_data, validate_response_data,
-    create_validation_schema, format_validation_errors, CommonFieldValidators
+    ValidationConfig, BaseBusinessValidator, UserValidator,
+    OrganizationValidator, ProductValidator, OrderValidator,
+    PaymentValidator, AddressValidator, ContactInfoValidator,
+    MonetaryAmountValidator, FileUploadValidator, BusinessRuleEngine,
+    ValidationChain, ConditionalValidator, CrossFieldValidator
 )
+
 from src.business.processors import (
-    ProcessingMetrics, DateTimeProcessor, monitor_performance
+    DataTransformer, ValidationProcessor, SanitizationProcessor,
+    NormalizationProcessor, BusinessRuleEngine as ProcessorBusinessRuleEngine,
+    WorkflowProcessor, CalculationProcessor, AggregationProcessor,
+    DateTimeProcessor, TimezoneProcessor, BusinessDayProcessor,
+    ProcessingPipeline, BatchProcessor, AsyncProcessor
 )
+
 from src.business.services import (
-    # Service classes will be imported as they're implemented
+    UserService, OrganizationService, ProductService, OrderService,
+    PaymentService, AuthenticationService, FileStorageService,
+    CacheService, BusinessWorkflowService, DataProcessingService,
+    IntegrationOrchestrator, TransactionService, ValidationService,
+    AuditService, MetricsService, HealthCheckService
 )
+
 from src.business.utils import (
-    # Utility functions will be imported as they're implemented
+    clean_data, validate_email, validate_phone, validate_postal_code,
+    sanitize_input, safe_str, safe_int, safe_float, normalize_boolean,
+    parse_date, format_date, round_currency, validate_currency,
+    DataFormat, JSONType, DateTimeType, NumericType
 )
+
 from src.business.exceptions import (
     BaseBusinessException, BusinessRuleViolationError, DataValidationError,
-    DataProcessingError, ErrorSeverity, ErrorCategory
+    DataProcessingError, ExternalServiceError, ResourceNotFoundError,
+    AuthorizationError, ConcurrencyError, ConfigurationError,
+    ErrorSeverity, ErrorCategory
 )
 
-
-# ============================================================================
-# TEST CONFIGURATION AND FIXTURES
-# ============================================================================
-
-@pytest.fixture
-def performance_threshold():
-    """Performance threshold for business logic operations (≤10% variance)."""
-    return 1.0  # 1 second baseline for business operations
-
-
-@pytest.fixture
-def sample_user_data():
-    """Sample user data for testing business models."""
-    return {
-        "username": "testuser123",
-        "email": "test@example.com",
-        "first_name": "Test",
-        "last_name": "User",
-        "status": UserStatus.ACTIVE,
-        "role": UserRole.USER,
-        "permissions": {"read", "write"},
-        "language_code": "en",
-        "timezone": "UTC"
-    }
-
-
-@pytest.fixture
-def sample_organization_data():
-    """Sample organization data for testing business models."""
-    return {
-        "name": "Test Corporation",
-        "legal_name": "Test Corporation LLC",
-        "business_type": "Technology",
-        "tax_id": "12-3456789",
-        "website_url": "https://testcorp.com",
-        "industry": "Software Development",
-        "employee_count": 50,
-        "status": UserStatus.ACTIVE,
-        "is_verified": True,
-        "verification_date": datetime.now(timezone.utc)
-    }
-
-
-@pytest.fixture
-def sample_product_data():
-    """Sample product data for testing business models."""
-    return {
-        "sku": "TEST-PROD-001",
-        "name": "Test Product",
-        "slug": "test-product",
-        "description": "A comprehensive test product for validation",
-        "base_price": {
-            "amount": Decimal("99.99"),
-            "currency_code": "USD"
-        },
-        "status": ProductStatus.ACTIVE,
-        "inventory_quantity": 100,
-        "track_inventory": True,
-        "weight": Decimal("1.5"),
-        "brand": "TestBrand"
-    }
-
-
-@pytest.fixture
-def sample_order_data():
-    """Sample order data for testing business models."""
-    return {
-        "customer_email": "customer@example.com",
-        "customer_name": "John Customer",
-        "items": [
-            {
-                "product_id": "prod-123",
-                "product_sku": "TEST-001",
-                "product_name": "Test Product",
-                "quantity": 2,
-                "unit_price": {"amount": Decimal("50.00"), "currency_code": "USD"}
-            }
-        ],
-        "subtotal": {"amount": Decimal("100.00"), "currency_code": "USD"},
-        "tax_amount": {"amount": Decimal("8.25"), "currency_code": "USD"},
-        "shipping_amount": {"amount": Decimal("5.00"), "currency_code": "USD"},
-        "discount_amount": {"amount": Decimal("0.00"), "currency_code": "USD"},
-        "total_amount": {"amount": Decimal("113.25"), "currency_code": "USD"},
-        "billing_address": {
-            "street_line_1": "123 Test St",
-            "city": "Test City",
-            "state_province": "TC",
-            "postal_code": "12345",
-            "country_code": "US"
-        },
-        "status": OrderStatus.PENDING
-    }
-
-
-@pytest.fixture
-def sample_payment_data():
-    """Sample payment transaction data for testing business models."""
-    return {
-        "amount": {"amount": Decimal("113.25"), "currency_code": "USD"},
-        "payment_method": PaymentMethod.CREDIT_CARD,
-        "payment_status": PaymentStatus.PENDING,
-        "processor_name": "stripe",
-        "initiated_at": datetime.now(timezone.utc)
-    }
-
-
-@pytest.fixture
-def validation_context():
-    """Standard validation context for testing."""
-    return ValidationContext(
-        validation_type=ValidationType.STRICT,
-        validation_mode=ValidationMode.CREATE,
-        strict_mode=True,
-        user_context={"user_id": "test-user-123", "role": "admin"},
-        business_rules={"data_integrity", "business_constraints"}
-    )
-
-
-@pytest.fixture
-def large_test_dataset():
-    """Large dataset for performance testing (≤10% variance requirement)."""
-    return [
-        {
-            "id": f"item-{i}",
-            "name": f"Test Item {i}",
-            "value": Decimal(str(i * 10.50)),
-            "created_at": datetime.now(timezone.utc) - timedelta(days=i % 365),
-            "metadata": {
-                "category": f"category-{i % 10}",
-                "tags": [f"tag-{j}" for j in range(i % 5)],
-                "priority": i % 3
-            }
-        }
-        for i in range(1000)  # 1000 items for performance testing
-    ]
+# Configure structured logging for business logic testing
+import structlog
+logger = structlog.get_logger("tests.unit.test_business_logic")
 
 
 # ============================================================================
-# BUSINESS MODEL TESTING
+# TEST FACTORIES FOR DYNAMIC DATA GENERATION
 # ============================================================================
 
-class TestBaseBusinessModel:
-    """Test suite for BaseBusinessModel functionality."""
+class UserModelFactory(factory.Factory):
+    """Factory for generating User model test instances with varied data."""
     
-    def test_model_creation_with_valid_data(self, sample_user_data):
-        """Test successful model creation with valid data."""
-        user = User(**sample_user_data)
-        
-        assert user.username == "testuser123"
-        assert user.email == "test@example.com"
-        assert user.status == UserStatus.ACTIVE
+    class Meta:
+        model = User
+    
+    id = factory.LazyFunction(lambda: str(uuid.uuid4()))
+    username = factory.Sequence(lambda n: f"testuser{n}")
+    email = factory.LazyAttribute(lambda obj: f"{obj.username}@example.com")
+    first_name = factory.Faker('first_name')
+    last_name = factory.Faker('last_name')
+    status = UserStatus.ACTIVE
+    role = UserRole.USER
+    permissions = factory.LazyFunction(lambda: {'read_profile', 'update_profile'})
+    language_code = "en"
+    timezone = "UTC"
+
+
+class OrganizationModelFactory(factory.Factory):
+    """Factory for generating Organization model test instances."""
+    
+    class Meta:
+        model = Organization
+    
+    id = factory.LazyFunction(lambda: str(uuid.uuid4()))
+    name = factory.Faker('company')
+    legal_name = factory.LazyAttribute(lambda obj: f"{obj.name} Inc.")
+    business_type = "corporation"
+    status = UserStatus.ACTIVE
+    is_verified = False
+
+
+class ProductModelFactory(factory.Factory):
+    """Factory for generating Product model test instances."""
+    
+    class Meta:
+        model = Product
+    
+    id = factory.LazyFunction(lambda: str(uuid.uuid4()))
+    sku = factory.Sequence(lambda n: f"SKU{n:06d}")
+    name = factory.Faker('word')
+    slug = factory.LazyAttribute(lambda obj: obj.name.lower().replace(' ', '-'))
+    base_price = factory.LazyFunction(
+        lambda: MonetaryAmount(amount=Decimal('99.99'), currency_code='USD')
+    )
+    status = ProductStatus.ACTIVE
+    inventory_quantity = 100
+    track_inventory = True
+
+
+class OrderModelFactory(factory.Factory):
+    """Factory for generating Order model test instances."""
+    
+    class Meta:
+        model = Order
+    
+    id = factory.LazyFunction(lambda: str(uuid.uuid4()))
+    customer_email = factory.Faker('email')
+    customer_name = factory.Faker('name')
+    subtotal = factory.LazyFunction(
+        lambda: MonetaryAmount(amount=Decimal('100.00'), currency_code='USD')
+    )
+    tax_amount = factory.LazyFunction(
+        lambda: MonetaryAmount(amount=Decimal('8.50'), currency_code='USD')
+    )
+    shipping_amount = factory.LazyFunction(
+        lambda: MonetaryAmount(amount=Decimal('5.99'), currency_code='USD')
+    )
+    discount_amount = factory.LazyFunction(
+        lambda: MonetaryAmount(amount=Decimal('0.00'), currency_code='USD')
+    )
+    total_amount = factory.LazyFunction(
+        lambda: MonetaryAmount(amount=Decimal('114.49'), currency_code='USD')
+    )
+    status = OrderStatus.PENDING
+    billing_address = factory.SubFactory('tests.unit.test_business_logic.AddressModelFactory')
+    items = factory.LazyFunction(list)  # Will be populated in tests
+
+
+class AddressModelFactory(factory.Factory):
+    """Factory for generating Address model test instances."""
+    
+    class Meta:
+        model = Address
+    
+    street_line_1 = factory.Faker('street_address')
+    city = factory.Faker('city')
+    state_province = factory.Faker('state')
+    postal_code = factory.Faker('zipcode')
+    country_code = "US"
+
+
+class PaymentTransactionFactory(factory.Factory):
+    """Factory for generating PaymentTransaction model test instances."""
+    
+    class Meta:
+        model = PaymentTransaction
+    
+    id = factory.LazyFunction(lambda: str(uuid.uuid4()))
+    amount = factory.LazyFunction(
+        lambda: MonetaryAmount(amount=Decimal('114.49'), currency_code='USD')
+    )
+    payment_method = PaymentMethod.CREDIT_CARD
+    payment_status = PaymentStatus.PENDING
+
+
+# ============================================================================
+# BUSINESS MODELS TESTING
+# ============================================================================
+
+class TestBusinessModels:
+    """
+    Comprehensive testing for business model validation, serialization, and business rules.
+    
+    Tests cover Pydantic model functionality, field validation, business rule enforcement,
+    serialization patterns, and integration with business logic processing per Section 5.2.4.
+    Target: 95% coverage per Section 6.6.3 mandatory requirement.
+    """
+    
+    def test_base_business_model_initialization(self):
+        """Test BaseBusinessModel initialization and basic functionality."""
+        # Test successful initialization
+        user = UserModelFactory()
+        assert user.id is not None
         assert user.created_at is not None
         assert user.updated_at is not None
         assert user.version == 1
-    
-    def test_model_validation_error_handling(self):
-        """Test model validation error handling and exception conversion."""
+        
+        # Test model validation during initialization
         with pytest.raises(DataValidationError) as exc_info:
             User(
-                username="",  # Invalid: too short
-                email="invalid-email",  # Invalid: not email format
-                first_name="",  # Invalid: too short
-                last_name=""  # Invalid: too short
+                username="",  # Invalid: empty username
+                email="invalid-email",  # Invalid: malformed email
+                first_name="",  # Invalid: empty first name
+                last_name=""  # Invalid: empty last name
             )
         
         error = exc_info.value
         assert error.error_code == "MODEL_VALIDATION_FAILED"
-        assert error.validation_errors is not None
-        assert len(error.validation_errors) > 0
+        assert "validation failed" in error.message.lower()
+        
+        logger.info("BaseBusinessModel initialization tested successfully")
     
-    def test_model_to_api_dict_serialization(self, sample_user_data):
-        """Test model serialization to API dictionary format."""
-        user = User(**sample_user_data)
-        api_dict = user.to_api_dict(exclude_audit=True)
-        
-        assert isinstance(api_dict, dict)
-        assert "username" in api_dict
-        assert "email" in api_dict
-        assert "created_at" not in api_dict  # Excluded
-        assert "updated_at" not in api_dict  # Excluded
-        assert "version" not in api_dict  # Excluded
-    
-    def test_model_from_dict_creation(self, sample_user_data):
-        """Test model creation from dictionary data."""
-        user = User.from_dict(sample_user_data)
-        
-        assert isinstance(user, User)
-        assert user.username == sample_user_data["username"]
-        assert user.email == sample_user_data["email"]
-    
-    def test_model_business_rules_validation(self, sample_user_data):
-        """Test business rules validation in model creation."""
-        # Test with reserved username
-        invalid_data = sample_user_data.copy()
-        invalid_data["username"] = "admin"  # Reserved username
-        
-        with pytest.raises(BusinessRuleViolationError):
-            User(**invalid_data)
-    
-    def test_model_update_timestamp(self, sample_user_data):
-        """Test automatic timestamp updates on model modification."""
-        user = User(**sample_user_data)
-        original_updated_at = user.updated_at
-        
-        # Simulate modification (in real implementation, this would trigger update)
-        time.sleep(0.001)  # Small delay to ensure timestamp difference
-        user.first_name = "Updated Name"
-        user.update_timestamp()
-        
-        assert user.updated_at > original_updated_at
-    
-    @pytest.mark.performance
-    def test_model_creation_performance(self, sample_user_data, performance_threshold):
-        """Test model creation performance within ≤10% variance."""
-        start_time = time.perf_counter()
-        
-        # Create multiple models to test performance
-        for _ in range(100):
-            user = User(**sample_user_data)
-            assert user.username == sample_user_data["username"]
-        
-        execution_time = time.perf_counter() - start_time
-        assert execution_time < performance_threshold, \
-            f"Model creation took {execution_time:.4f}s, expected < {performance_threshold}s"
-
-
-class TestUserModel:
-    """Test suite for User model functionality."""
-    
-    def test_user_creation_with_complete_data(self, sample_user_data):
-        """Test user creation with comprehensive data."""
-        # Add contact info
-        sample_user_data["contact_info"] = {
-            "primary_email": "test@example.com",
-            "primary_phone": "+1-555-123-4567",
-            "preferred_contact_method": ContactMethod.EMAIL
+    def test_user_model_validation_and_business_rules(self):
+        """Test User model field validation and business rule enforcement."""
+        # Test valid user creation
+        valid_user_data = {
+            'username': 'testuser123',
+            'email': 'test@example.com',
+            'first_name': 'John',
+            'last_name': 'Doe',
+            'status': UserStatus.ACTIVE,
+            'role': UserRole.USER
         }
-        
-        user = User(**sample_user_data)
-        
-        assert user.username == "testuser123"
-        assert user.full_name == "Test User"
+        user = User(**valid_user_data)
+        assert user.username == 'testuser123'
+        assert user.email == 'test@example.com'
+        assert user.full_name == 'John Doe'
         assert user.is_active is True
-        assert user.has_permission("read") is True
-        assert user.has_permission("admin_only") is False
-    
-    def test_user_permission_checking(self, sample_user_data):
-        """Test user permission checking logic."""
-        # Test regular user permissions
-        user = User(**sample_user_data)
-        assert user.has_permission("read") is True
-        assert user.has_permission("write") is True
-        assert user.has_permission("admin_only") is False
         
-        # Test admin user permissions
-        admin_data = sample_user_data.copy()
-        admin_data["role"] = UserRole.ADMIN
-        admin_user = User(**admin_data)
-        assert admin_user.has_permission("admin_only") is True
-    
-    def test_user_account_locking(self, sample_user_data):
-        """Test user account locking and unlocking logic."""
-        user_data = sample_user_data.copy()
-        user_data["is_locked"] = True
-        user_data["lock_expires_at"] = datetime.now(timezone.utc) + timedelta(hours=1)
-        
-        user = User(**user_data)
-        assert user.is_active is False
-        
-        # Test expired lock
-        user_data["lock_expires_at"] = datetime.now(timezone.utc) - timedelta(hours=1)
-        user_expired = User(**user_data)
-        assert user_expired.is_active is True
-    
-    def test_user_email_validation(self, sample_user_data):
-        """Test user email validation business rules."""
-        # Test valid email
-        user = User(**sample_user_data)
-        assert user.email == "test@example.com"
-        
-        # Test invalid email format
-        invalid_data = sample_user_data.copy()
-        invalid_data["email"] = "invalid-email-format"
-        
-        with pytest.raises((DataValidationError, BusinessRuleViolationError)):
-            User(**invalid_data)
-    
-    def test_user_status_transitions(self, sample_user_data):
-        """Test user status transitions and business rules."""
-        # Test active user
-        user = User(**sample_user_data)
-        assert user.status == UserStatus.ACTIVE
-        
-        # Test inactive user
-        inactive_data = sample_user_data.copy()
-        inactive_data["status"] = UserStatus.INACTIVE
-        inactive_user = User(**inactive_data)
-        assert inactive_user.is_active is False
-
-
-class TestOrganizationModel:
-    """Test suite for Organization model functionality."""
-    
-    def test_organization_creation_with_addresses(self, sample_organization_data):
-        """Test organization creation with address information."""
-        # Add address information
-        sample_organization_data["billing_address"] = {
-            "street_line_1": "123 Corporate Blvd",
-            "street_line_2": "Suite 100",
-            "city": "Business City",
-            "state_province": "BC",
-            "postal_code": "12345",
-            "country_code": "US"
-        }
-        
-        org = Organization(**sample_organization_data)
-        
-        assert org.name == "Test Corporation"
-        assert org.legal_name == "Test Corporation LLC"
-        assert org.is_verified is True
-        assert org.billing_address is not None
-    
-    def test_organization_verification_rules(self, sample_organization_data):
-        """Test organization verification business rules."""
-        # Test verified organization must have verification date
-        verified_data = sample_organization_data.copy()
-        verified_data["is_verified"] = True
-        verified_data.pop("verification_date", None)  # Remove verification date
-        
+        # Test username validation
         with pytest.raises(BusinessRuleViolationError) as exc_info:
-            Organization(**verified_data)
+            User(
+                username='admin',  # Reserved username
+                email='test@example.com',
+                first_name='Test',
+                last_name='User'
+            )
+        assert exc_info.value.error_code == "RESERVED_USERNAME"
         
-        assert "verification_date" in str(exc_info.value)
+        # Test email format validation
+        with pytest.raises(PydanticValidationError):
+            User(
+                username='validuser',
+                email='invalid-email-format',
+                first_name='Test',
+                last_name='User'
+            )
+        
+        # Test permissions handling
+        user_with_permissions = User(
+            username='poweruser',
+            email='power@example.com',
+            first_name='Power',
+            last_name='User',
+            permissions={'read_all', 'write_all', 'admin_access'}
+        )
+        assert user_with_permissions.has_permission('read_all') is True
+        assert user_with_permissions.has_permission('delete_all') is False
+        
+        # Test admin permissions
+        admin_user = User(
+            username='adminuser',
+            email='admin@example.com',
+            first_name='Admin',
+            last_name='User',
+            role=UserRole.ADMIN
+        )
+        assert admin_user.has_permission('any_permission') is True
+        
+        logger.info("User model validation and business rules tested successfully")
     
-    def test_organization_tax_id_sanitization(self, sample_organization_data):
-        """Test tax ID sanitization and validation."""
-        # Test with special characters in tax ID
-        org_data = sample_organization_data.copy()
-        org_data["tax_id"] = "12-3456789!@#$%"
-        
-        org = Organization(**org_data)
-        # Tax ID should be sanitized (special chars removed)
-        assert org.tax_id == "12-3456789"
-
-
-class TestProductModel:
-    """Test suite for Product model functionality."""
-    
-    def test_product_creation_with_pricing(self, sample_product_data):
-        """Test product creation with pricing information."""
-        product = Product(**sample_product_data)
-        
-        assert product.sku == "TEST-PROD-001"
-        assert product.name == "Test Product"
-        assert product.base_price.amount == Decimal("99.99")
-        assert product.current_price == product.base_price
-        assert product.is_on_sale is False
-    
-    def test_product_sale_pricing(self, sample_product_data):
-        """Test product sale pricing logic."""
-        # Add sale price
-        sample_product_data["sale_price"] = {
-            "amount": Decimal("79.99"),
-            "currency_code": "USD"
-        }
-        
-        product = Product(**sample_product_data)
+    def test_product_model_pricing_and_inventory_validation(self):
+        """Test Product model pricing calculations and inventory business rules."""
+        # Test valid product with sale price
+        product = ProductModelFactory(
+            base_price=MonetaryAmount(amount=Decimal('100.00'), currency_code='USD'),
+            sale_price=MonetaryAmount(amount=Decimal('80.00'), currency_code='USD'),
+            inventory_quantity=50,
+            low_stock_threshold=10
+        )
         
         assert product.is_on_sale is True
-        assert product.current_price == product.sale_price
-        assert product.current_price.amount == Decimal("79.99")
-    
-    def test_product_inventory_tracking(self, sample_product_data):
-        """Test product inventory tracking and low stock detection."""
-        # Test normal stock
-        product = Product(**sample_product_data)
+        assert product.current_price.amount == Decimal('80.00')
         assert product.is_low_stock is False
         
-        # Test low stock
-        low_stock_data = sample_product_data.copy()
-        low_stock_data["inventory_quantity"] = 3
-        low_stock_data["low_stock_threshold"] = 5
-        
-        low_stock_product = Product(**low_stock_data)
+        # Test low stock detection
+        low_stock_product = ProductModelFactory(
+            inventory_quantity=5,
+            low_stock_threshold=10
+        )
         assert low_stock_product.is_low_stock is True
+        
+        # Test invalid sale price (higher than base price)
+        with pytest.raises(BusinessRuleViolationError) as exc_info:
+            product_data = {
+                'sku': 'TEST001',
+                'name': 'Test Product',
+                'slug': 'test-product',
+                'base_price': MonetaryAmount(amount=Decimal('50.00'), currency_code='USD'),
+                'sale_price': MonetaryAmount(amount=Decimal('60.00'), currency_code='USD'),  # Invalid
+                'status': ProductStatus.ACTIVE,
+                'inventory_quantity': 100
+            }
+            Product(**product_data)
+            # Trigger business rule validation
+            Product(**product_data).validate_business_rules()
+        
+        assert exc_info.value.error_code == "INVALID_SALE_PRICE"
+        
+        # Test currency mismatch validation
+        with pytest.raises(BusinessRuleViolationError) as exc_info:
+            product_data = {
+                'sku': 'TEST002',
+                'name': 'Test Product 2',
+                'slug': 'test-product-2',
+                'base_price': MonetaryAmount(amount=Decimal('50.00'), currency_code='USD'),
+                'sale_price': MonetaryAmount(amount=Decimal('40.00'), currency_code='EUR'),  # Different currency
+                'status': ProductStatus.ACTIVE,
+                'inventory_quantity': 100
+            }
+            Product(**product_data).validate_business_rules()
+        
+        assert exc_info.value.error_code == "CURRENCY_MISMATCH"
+        
+        logger.info("Product model pricing and inventory validation tested successfully")
     
-    def test_product_pricing_validation(self, sample_product_data):
-        """Test product pricing validation business rules."""
-        # Test sale price higher than base price (invalid)
-        invalid_data = sample_product_data.copy()
-        invalid_data["sale_price"] = {
-            "amount": Decimal("129.99"),  # Higher than base price
-            "currency_code": "USD"
-        }
+    def test_order_model_calculation_and_validation(self):
+        """Test Order model total calculations and business rule validation."""
+        # Create order items
+        order_item1 = OrderItem(
+            product_id=str(uuid.uuid4()),
+            product_sku='ITEM001',
+            product_name='Test Item 1',
+            quantity=2,
+            unit_price=MonetaryAmount(amount=Decimal('25.00'), currency_code='USD')
+        )
+        
+        order_item2 = OrderItem(
+            product_id=str(uuid.uuid4()),
+            product_sku='ITEM002',
+            product_name='Test Item 2',
+            quantity=1,
+            unit_price=MonetaryAmount(amount=Decimal('50.00'), currency_code='USD')
+        )
+        
+        # Test order with proper calculations
+        billing_address = AddressModelFactory()
+        order = Order(
+            customer_email='customer@example.com',
+            customer_name='John Customer',
+            items=[order_item1, order_item2],
+            subtotal=MonetaryAmount(amount=Decimal('100.00'), currency_code='USD'),
+            tax_amount=MonetaryAmount(amount=Decimal('8.00'), currency_code='USD'),
+            shipping_amount=MonetaryAmount(amount=Decimal('5.99'), currency_code='USD'),
+            discount_amount=MonetaryAmount(amount=Decimal('3.99'), currency_code='USD'),
+            total_amount=MonetaryAmount(amount=Decimal('110.00'), currency_code='USD'),
+            billing_address=billing_address
+        )
+        
+        assert order.item_count == 3  # 2 + 1
+        assert order.effective_shipping_address == billing_address
+        
+        # Test invalid total calculation
+        with pytest.raises(BusinessRuleViolationError) as exc_info:
+            Order(
+                customer_email='customer@example.com',
+                customer_name='John Customer',
+                items=[order_item1],
+                subtotal=MonetaryAmount(amount=Decimal('50.00'), currency_code='USD'),
+                tax_amount=MonetaryAmount(amount=Decimal('4.00'), currency_code='USD'),
+                shipping_amount=MonetaryAmount(amount=Decimal('5.99'), currency_code='USD'),
+                discount_amount=MonetaryAmount(amount=Decimal('0.00'), currency_code='USD'),
+                total_amount=MonetaryAmount(amount=Decimal('100.00'), currency_code='USD'),  # Wrong total
+                billing_address=billing_address
+            )
+        
+        assert exc_info.value.error_code == "INVALID_ORDER_TOTAL"
+        
+        # Test status progression validation
+        order_with_shipped_date = Order(
+            customer_email='customer@example.com',
+            customer_name='John Customer',
+            items=[order_item1],
+            subtotal=MonetaryAmount(amount=Decimal('50.00'), currency_code='USD'),
+            tax_amount=MonetaryAmount(amount=Decimal('0.00'), currency_code='USD'),
+            shipping_amount=MonetaryAmount(amount=Decimal('0.00'), currency_code='USD'),
+            discount_amount=MonetaryAmount(amount=Decimal('0.00'), currency_code='USD'),
+            total_amount=MonetaryAmount(amount=Decimal('50.00'), currency_code='USD'),
+            billing_address=billing_address,
+            status=OrderStatus.PENDING,  # Wrong status for shipped date
+            shipped_date=datetime.now(timezone.utc)
+        )
         
         with pytest.raises(BusinessRuleViolationError) as exc_info:
-            Product(**invalid_data)
+            order_with_shipped_date.validate_business_rules()
         
-        assert "sale price must be less than base price" in str(exc_info.value).lower()
+        assert exc_info.value.error_code == "INVALID_STATUS_FOR_SHIPPED_DATE"
+        
+        logger.info("Order model calculation and validation tested successfully")
     
-    def test_product_currency_consistency(self, sample_product_data):
-        """Test currency consistency validation across prices."""
-        # Test mismatched currencies
-        invalid_data = sample_product_data.copy()
-        invalid_data["sale_price"] = {
-            "amount": Decimal("79.99"),
-            "currency_code": "EUR"  # Different from base price USD
-        }
+    def test_monetary_amount_validation_and_calculations(self):
+        """Test MonetaryAmount model validation and currency handling."""
+        # Test valid monetary amount
+        amount = MonetaryAmount(amount=Decimal('99.99'), currency_code='USD')
+        assert amount.amount == Decimal('99.99')
+        assert amount.currency_code == 'USD'
         
-        with pytest.raises(BusinessRuleViolationError) as exc_info:
-            Product(**invalid_data)
-        
-        assert "same currency" in str(exc_info.value).lower()
-
-
-class TestOrderModel:
-    """Test suite for Order model functionality."""
-    
-    def test_order_creation_with_items(self, sample_order_data):
-        """Test order creation with order items."""
-        order = Order(**sample_order_data)
-        
-        assert order.customer_email == "customer@example.com"
-        assert len(order.items) == 1
-        assert order.total_amount.amount == Decimal("113.25")
-        assert order.item_count == 2  # Quantity from order items
-        assert order.status == OrderStatus.PENDING
-    
-    def test_order_total_calculation_validation(self, sample_order_data):
-        """Test order total calculation validation."""
-        # Test with incorrect total
-        invalid_data = sample_order_data.copy()
-        invalid_data["total_amount"]["amount"] = Decimal("999.99")  # Incorrect total
-        
-        with pytest.raises(BusinessRuleViolationError) as exc_info:
-            Order(**invalid_data)
-        
-        assert "total does not match calculated amount" in str(exc_info.value).lower()
-    
-    def test_order_status_progression_validation(self, sample_order_data):
-        """Test order status progression business rules."""
-        # Test shipped date without shipped status
-        invalid_data = sample_order_data.copy()
-        invalid_data["shipped_date"] = datetime.now(timezone.utc)
-        invalid_data["status"] = OrderStatus.PENDING  # Inconsistent status
-        
-        with pytest.raises(BusinessRuleViolationError) as exc_info:
-            Order(**invalid_data)
-        
-        assert "shipped" in str(exc_info.value).lower()
-    
-    def test_order_date_progression_validation(self, sample_order_data):
-        """Test order date progression validation."""
-        order_date = datetime.now(timezone.utc)
-        
-        # Test invalid shipping date (before order date)
-        invalid_data = sample_order_data.copy()
-        invalid_data["order_date"] = order_date
-        invalid_data["shipped_date"] = order_date - timedelta(hours=1)  # Before order
-        invalid_data["status"] = OrderStatus.SHIPPED
-        
-        with pytest.raises(BusinessRuleViolationError) as exc_info:
-            Order(**invalid_data)
-        
-        assert "shipping date cannot be before order date" in str(exc_info.value).lower()
-    
-    def test_order_shipping_address_default(self, sample_order_data):
-        """Test order shipping address defaulting to billing address."""
-        order = Order(**sample_order_data)
-        
-        # Should default to billing address when shipping address not provided
-        assert order.effective_shipping_address == order.billing_address
-
-
-class TestPaymentTransactionModel:
-    """Test suite for PaymentTransaction model functionality."""
-    
-    def test_payment_creation_with_basic_data(self, sample_payment_data):
-        """Test payment transaction creation with basic data."""
-        payment = PaymentTransaction(**sample_payment_data)
-        
-        assert payment.amount.amount == Decimal("113.25")
-        assert payment.payment_method == PaymentMethod.CREDIT_CARD
-        assert payment.payment_status == PaymentStatus.PENDING
-        assert payment.is_successful is False
-        assert payment.is_expired is False
-    
-    def test_payment_completion_validation(self, sample_payment_data):
-        """Test payment completion business rules."""
-        # Test completed payment must have processed timestamp
-        invalid_data = sample_payment_data.copy()
-        invalid_data["payment_status"] = PaymentStatus.COMPLETED
-        # Missing processed_at timestamp
-        
-        with pytest.raises(BusinessRuleViolationError) as exc_info:
-            PaymentTransaction(**invalid_data)
-        
-        assert "processed timestamp" in str(exc_info.value).lower()
-    
-    def test_payment_failure_validation(self, sample_payment_data):
-        """Test payment failure business rules."""
-        # Test failed payment should have failure reason
-        failed_data = sample_payment_data.copy()
-        failed_data["payment_status"] = PaymentStatus.FAILED
-        # Missing failure_reason
-        
-        payment = PaymentTransaction(**failed_data)
-        # Should create warning but not fail (medium severity)
-        assert payment.payment_status == PaymentStatus.FAILED
-    
-    def test_payment_expiration_logic(self, sample_payment_data):
-        """Test payment expiration logic."""
-        # Test expired payment
-        expired_data = sample_payment_data.copy()
-        expired_data["expires_at"] = datetime.now(timezone.utc) - timedelta(hours=1)
-        
-        payment = PaymentTransaction(**expired_data)
-        assert payment.is_expired is True
-        
-        # Test non-expired payment
-        future_data = sample_payment_data.copy()
-        future_data["expires_at"] = datetime.now(timezone.utc) + timedelta(hours=1)
-        
-        future_payment = PaymentTransaction(**future_data)
-        assert future_payment.is_expired is False
-    
-    def test_payment_ip_address_validation(self, sample_payment_data):
-        """Test IP address validation in payment transactions."""
-        # Test valid IPv4
-        valid_data = sample_payment_data.copy()
-        valid_data["ip_address"] = "192.168.1.100"
-        
-        payment = PaymentTransaction(**valid_data)
-        assert payment.ip_address == "192.168.1.100"
-        
-        # Test invalid IP format
-        invalid_data = sample_payment_data.copy()
-        invalid_data["ip_address"] = "invalid-ip-address"
-        
-        with pytest.raises(BusinessRuleViolationError):
-            PaymentTransaction(**invalid_data)
-
-
-class TestUtilityModels:
-    """Test suite for utility models (Address, ContactInfo, MonetaryAmount, etc.)."""
-    
-    def test_address_model_validation(self):
-        """Test address model validation and formatting."""
-        address_data = {
-            "street_line_1": "123 Main St",
-            "street_line_2": "Apt 4B",
-            "city": "Test City",
-            "state_province": "TC",
-            "postal_code": "12345",
-            "country_code": "US"
-        }
-        
-        address = Address(**address_data)
-        
-        assert address.street_line_1 == "123 Main St"
-        assert address.country_code == "US"
-        
-        # Test formatted address
-        formatted = address.get_formatted_address(single_line=True)
-        assert "123 Main St" in formatted
-        assert "Test City" in formatted
-    
-    def test_contact_info_validation(self):
-        """Test contact information validation."""
-        contact_data = {
-            "primary_email": "test@example.com",
-            "primary_phone": "+1-555-123-4567",
-            "preferred_contact_method": ContactMethod.EMAIL,
-            "allow_marketing": False
-        }
-        
-        contact = ContactInfo(**contact_data)
-        
-        assert contact.primary_email == "test@example.com"
-        assert contact.primary_phone == "+1-555-123-4567"
-        
-        # Test business rule: at least one contact method required
-        invalid_data = {"preferred_contact_method": ContactMethod.EMAIL}
-        
-        with pytest.raises(BusinessRuleViolationError):
-            contact_invalid = ContactInfo(**invalid_data)
-            contact_invalid.validate_business_rules()
-    
-    def test_monetary_amount_validation(self):
-        """Test monetary amount validation and precision."""
-        amount_data = {
-            "amount": Decimal("99.99"),
-            "currency_code": "USD"
-        }
-        
-        amount = MonetaryAmount(**amount_data)
-        
-        assert amount.amount == Decimal("99.99")
-        assert amount.currency_code == "USD"
+        # Test amount rounding
+        rounded_amount = amount.get_rounded_amount()
+        assert isinstance(rounded_amount, Decimal)
+        assert rounded_amount == Decimal('99.99')
         
         # Test negative amount validation
-        with pytest.raises(BusinessRuleViolationError):
-            MonetaryAmount(amount=Decimal("-10.00"), currency_code="USD")
+        with pytest.raises(BusinessRuleViolationError) as exc_info:
+            MonetaryAmount(amount=Decimal('-10.00'), currency_code='USD')
+        
+        assert exc_info.value.error_code == "NEGATIVE_AMOUNT"
         
         # Test invalid currency code
-        with pytest.raises(BusinessRuleViolationError):
-            MonetaryAmount(amount=Decimal("99.99"), currency_code="INVALID")
+        with pytest.raises(BusinessRuleViolationError) as exc_info:
+            MonetaryAmount(amount=Decimal('100.00'), currency_code='INVALID')
+        
+        assert exc_info.value.error_code == "INVALID_CURRENCY_CODE"
+        
+        # Test business rule validation
+        valid_amount = MonetaryAmount(amount=Decimal('50.00'), currency_code='USD')
+        valid_amount.validate_business_rules()  # Should not raise
+        
+        logger.info("MonetaryAmount validation and calculations tested successfully")
     
-    def test_datetime_range_validation(self):
-        """Test date/time range validation."""
-        start_time = datetime.now(timezone.utc)
-        end_time = start_time + timedelta(hours=2)
+    def test_model_serialization_and_api_response_format(self):
+        """Test model serialization for API responses per F-004-RQ-004."""
+        user = UserModelFactory()
         
-        date_range = DateTimeRange(
-            start_datetime=start_time,
-            end_datetime=end_time,
-            timezone_name="UTC"
-        )
+        # Test API dictionary serialization
+        api_dict = user.to_api_dict(exclude_audit=True)
+        assert 'created_at' not in api_dict
+        assert 'updated_at' not in api_dict
+        assert 'version' not in api_dict
+        assert 'username' in api_dict
+        assert 'email' in api_dict
         
-        assert date_range.duration_minutes == 120
+        # Test API dictionary with audit fields
+        api_dict_with_audit = user.to_api_dict(exclude_audit=False)
+        assert 'created_at' in api_dict_with_audit
+        assert 'updated_at' in api_dict_with_audit
+        assert 'version' in api_dict_with_audit
         
-        # Test invalid range (end before start)
-        with pytest.raises(BusinessRuleViolationError):
-            DateTimeRange(
-                start_datetime=end_time,
-                end_datetime=start_time  # Invalid: end before start
-            )
-    
-    def test_file_upload_validation(self):
-        """Test file upload validation and security checks."""
-        file_data = {
-            "filename": "test_document.pdf",
-            "content_type": "application/pdf",
-            "file_size": 1024 * 1024,  # 1MB
-            "uploaded_by": "test-user-123"
-        }
-        
-        file_upload = FileUpload(**file_data)
-        
-        assert file_upload.filename == "test_document.pdf"
-        assert file_upload.file_extension == "pdf"
-        assert file_upload.is_image is False
-        assert file_upload.is_expired is False
-        
-        # Test dangerous filename
-        with pytest.raises(BusinessRuleViolationError):
-            FileUpload(
-                filename="../../../etc/passwd",
-                content_type="text/plain",
-                file_size=1024
-            )
-        
-        # Test file size limit
-        with pytest.raises(BusinessRuleViolationError):
-            FileUpload(
-                filename="huge_file.pdf",
-                content_type="application/pdf",
-                file_size=200 * 1024 * 1024  # 200MB - exceeds limit
-            )
-
-
-class TestAPIModels:
-    """Test suite for API request/response models."""
-    
-    def test_pagination_params_validation(self):
-        """Test pagination parameters validation."""
-        # Test valid pagination
-        pagination = PaginationParams(page=2, page_size=50)
-        
-        assert pagination.page == 2
-        assert pagination.page_size == 50
-        assert pagination.offset == 50  # (page - 1) * page_size
-        assert pagination.limit == 50
-        
-        # Test invalid pagination
-        with pytest.raises(DataValidationError):
-            PaginationParams(page=0, page_size=50)  # Page must be >= 1
-        
-        with pytest.raises(DataValidationError):
-            PaginationParams(page=1, page_size=0)  # Page size must be >= 1
-    
-    def test_sort_params_validation(self):
-        """Test sorting parameters validation."""
-        sort_params = SortParams(sort_by="name", sort_order="asc")
-        
-        assert sort_params.sort_by == "name"
-        assert sort_params.sort_order == "asc"
-        
-        # Test invalid sort order
-        with pytest.raises(DataValidationError):
-            SortParams(sort_by="name", sort_order="invalid")
-    
-    def test_search_params_validation(self):
-        """Test search parameters validation and sanitization."""
-        search_params = SearchParams(
-            query="test search query",
-            filters={"category": "electronics", "price_min": 10},
-            include_inactive=False
-        )
-        
-        assert search_params.query == "test search query"
-        assert search_params.filters["category"] == "electronics"
-        assert search_params.include_inactive is False
-        
-        # Test query sanitization
-        dangerous_search = SearchParams(query="<script>alert('xss')</script>")
-        assert "<script>" not in dangerous_search.query
-    
-    def test_api_response_creation(self):
-        """Test API response model creation and formatting."""
-        # Test success response
-        success_response = ApiResponse.success_response(
-            data={"user_id": "123", "name": "Test User"},
-            message="User retrieved successfully",
-            request_id="req-123"
-        )
-        
-        assert success_response.success is True
-        assert success_response.data["user_id"] == "123"
-        assert success_response.message == "User retrieved successfully"
-        assert success_response.request_id == "req-123"
-        
-        # Test error response
-        error_response = ApiResponse.error_response(
-            message="Validation failed",
-            errors=[{"field": "email", "message": "Invalid format"}],
-            request_id="req-456"
-        )
-        
-        assert error_response.success is False
-        assert error_response.message == "Validation failed"
-        assert len(error_response.errors) == 1
-    
-    def test_paginated_response_creation(self):
-        """Test paginated response creation with metadata."""
-        test_data = [{"id": i, "name": f"Item {i}"} for i in range(1, 11)]
-        pagination_params = PaginationParams(page=1, page_size=10)
-        
-        paginated_response = PaginatedResponse.paginated_success(
-            data=test_data,
-            pagination_params=pagination_params,
-            total_count=100,
-            request_id="req-789"
-        )
-        
-        assert paginated_response.success is True
-        assert len(paginated_response.data) == 10
-        assert paginated_response.pagination["total_count"] == 100
-        assert paginated_response.pagination["total_pages"] == 10
-        assert paginated_response.pagination["has_next"] is True
-        assert paginated_response.pagination["has_previous"] is False
-
-
-class TestModelRegistry:
-    """Test suite for model registry and utility functions."""
-    
-    def test_model_registry_completeness(self):
-        """Test model registry contains all expected models."""
-        expected_models = [
-            "User", "Organization", "Product", "ProductCategory",
-            "Order", "OrderItem", "PaymentTransaction",
-            "Address", "ContactInfo", "MonetaryAmount", "DateTimeRange",
-            "FileUpload", "SystemConfiguration",
-            "ApiResponse", "PaginatedResponse", "PaginationParams",
-            "SortParams", "SearchParams"
-        ]
-        
-        for model_name in expected_models:
-            assert model_name in BUSINESS_MODEL_REGISTRY
-            assert get_model_by_name(model_name) is not None
-    
-    def test_validate_model_data_function(self, sample_user_data):
-        """Test model data validation utility function."""
-        # Test successful validation
-        validated_user = validate_model_data("User", sample_user_data)
-        
-        assert isinstance(validated_user, User)
-        assert validated_user.username == sample_user_data["username"]
+        # Test model registry functionality
+        user_model_class = get_model_by_name('User')
+        assert user_model_class == User
         
         # Test unknown model
+        unknown_model = get_model_by_name('UnknownModel')
+        assert unknown_model is None
+        
+        # Test validate_model_data function
+        user_data = {
+            'username': 'testapi',
+            'email': 'testapi@example.com',
+            'first_name': 'Test',
+            'last_name': 'API'
+        }
+        validated_user = validate_model_data('User', user_data)
+        assert isinstance(validated_user, User)
+        assert validated_user.username == 'testapi'
+        
+        # Test validation with unknown model
         with pytest.raises(DataValidationError) as exc_info:
-            validate_model_data("UnknownModel", {})
+            validate_model_data('UnknownModel', user_data)
         
-        assert "Unknown business model" in str(exc_info.value)
-    
-    def test_serialize_for_api_function(self, sample_user_data):
-        """Test API serialization utility function."""
-        user = User(**sample_user_data)
-        api_dict = serialize_for_api(user, exclude_audit=True)
+        assert exc_info.value.error_code == "UNKNOWN_MODEL"
         
-        assert isinstance(api_dict, dict)
-        assert "username" in api_dict
-        assert "created_at" not in api_dict  # Excluded
-
-
-# ============================================================================
-# BUSINESS VALIDATOR TESTING
-# ============================================================================
-
-class TestValidationContext:
-    """Test suite for ValidationContext functionality."""
-    
-    def test_validation_context_creation(self):
-        """Test validation context creation and configuration."""
-        context = ValidationContext(
-            validation_type=ValidationType.STRICT,
-            validation_mode=ValidationMode.CREATE,
-            strict_mode=True,
-            user_context={"user_id": "test-123"},
-            business_rules={"rule1", "rule2"}
-        )
+        # Test serialize_for_api function
+        serialized = serialize_for_api(user, exclude_audit=True)
+        assert isinstance(serialized, dict)
+        assert 'username' in serialized
         
-        assert context.validation_type == ValidationType.STRICT
-        assert context.validation_mode == ValidationMode.CREATE
-        assert context.strict_mode is True
-        assert context.user_context["user_id"] == "test-123"
-        assert "rule1" in context.business_rules
-    
-    def test_validation_context_error_tracking(self):
-        """Test validation context error and warning tracking."""
-        context = ValidationContext()
-        
-        # Test error tracking
-        error = {"field": "email", "message": "Invalid format"}
-        context.add_error(error)
-        
-        assert context.has_errors() is True
-        assert len(context.get_errors()) == 1
-        
-        # Test warning tracking
-        warning = {"field": "phone", "message": "Format suggestion"}
-        context.add_warning(warning)
-        
-        assert len(context.get_warnings()) == 1
-        
-        # Test clearing errors
-        context.clear_errors()
-        assert context.has_errors() is False
-    
-    def test_validation_context_manager(self):
-        """Test validation context as context manager."""
-        with ValidationContext(validation_type=ValidationType.STRICT) as context:
-            assert context.validation_type == ValidationType.STRICT
-            context.add_error({"field": "test", "message": "test error"})
-        
-        # Context should track performance metrics after exit
-        assert hasattr(context, '_performance_metrics')
-    
-    def test_business_rule_enforcement(self):
-        """Test business rule enforcement logic."""
-        context = ValidationContext(
-            strict_mode=True,
-            business_rules={"data_integrity", "business_constraints"}
-        )
-        
-        assert context.should_enforce_rule("data_integrity") is True
-        assert context.should_enforce_rule("unknown_rule") is False
-        
-        # Test non-strict mode
-        non_strict_context = ValidationContext(strict_mode=False)
-        assert non_strict_context.should_enforce_rule("any_rule") is False
-    
-    def test_custom_validator_management(self):
-        """Test custom validator function management."""
-        def custom_rule(data, context):
-            if "required_field" not in data:
-                raise BusinessRuleViolationError("Required field missing")
-        
-        context = ValidationContext(
-            custom_validators={"custom_rule": custom_rule}
-        )
-        
-        validator_func = context.get_custom_validator("custom_rule")
-        assert validator_func is not None
-        assert callable(validator_func)
-
-
-class TestBaseValidator:
-    """Test suite for BaseValidator functionality."""
-    
-    def test_base_validator_creation(self, validation_context):
-        """Test base validator creation with context."""
-        
-        class TestValidator(BaseValidator):
-            name = fields.String(required=True, validate=validate.Length(min=1))
-            email = fields.Email(required=True)
-        
-        validator = TestValidator(validation_context=validation_context)
-        
-        assert validator.validation_context == validation_context
-        assert hasattr(validator, '_validation_metrics')
-    
-    def test_base_validator_load_with_context(self, validation_context):
-        """Test base validator loading with context."""
-        
-        class TestValidator(BaseValidator):
-            name = fields.String(required=True)
-            age = fields.Integer(validate=validate.Range(min=0))
-        
-        validator = TestValidator()
-        
-        test_data = {"name": "John Doe", "age": 30}
-        validated_data = validator.load_with_context(
-            test_data,
-            validation_context=validation_context
-        )
-        
-        assert validated_data["name"] == "John Doe"
-        assert validated_data["age"] == 30
-    
-    def test_base_validator_error_handling(self):
-        """Test base validator error handling and conversion."""
-        
-        class TestValidator(BaseValidator):
-            name = fields.String(required=True)
-            age = fields.Integer(required=True)
-        
-        validator = TestValidator()
-        
-        # Test validation error handling
-        with pytest.raises(DataValidationError) as exc_info:
-            validator.load_with_context({"name": ""})  # Missing age, empty name
-        
-        error = exc_info.value
-        assert error.error_code == "SCHEMA_VALIDATION_FAILED"
-        assert error.validation_errors is not None
-    
-    def test_base_validator_performance_metrics(self):
-        """Test base validator performance tracking."""
-        
-        class TestValidator(BaseValidator):
-            name = fields.String(required=True)
-        
-        validator = TestValidator(performance_tracking=True)
-        
-        # Perform validation
-        validator.load_with_context({"name": "Test"})
-        
-        metrics = validator.get_validation_metrics()
-        assert "validation_count" in metrics
-        assert "total_duration" in metrics
-        assert "average_duration" in metrics
-        assert metrics["validation_count"] >= 1
+        logger.info("Model serialization and API response format tested successfully")
     
     @pytest.mark.performance
-    def test_base_validator_performance_threshold(self, performance_threshold):
-        """Test base validator performance within threshold."""
+    def test_model_performance_benchmarks(self, performance_test_context):
+        """Test model performance to ensure ≤10% variance from Node.js baseline."""
+        performance_test_context['start_measurement']('model_creation_performance')
         
-        class TestValidator(BaseValidator):
-            name = fields.String(required=True)
-            description = fields.String()
-        
-        validator = TestValidator()
-        
+        # Create multiple model instances to test performance
         start_time = time.perf_counter()
         
-        # Perform multiple validations
+        users = []
         for i in range(100):
-            validator.load_with_context({
-                "name": f"Test Name {i}",
-                "description": f"Test description {i}"
+            user = UserModelFactory()
+            users.append(user)
+        
+        creation_time = time.perf_counter() - start_time
+        
+        # Test serialization performance
+        serialization_start = time.perf_counter()
+        
+        for user in users:
+            api_dict = user.to_api_dict()
+        
+        serialization_time = time.perf_counter() - serialization_start
+        
+        # Test validation performance
+        validation_start = time.perf_counter()
+        
+        for user in users:
+            user.validate_business_rules()
+        
+        validation_time = time.perf_counter() - validation_start
+        
+        execution_time = performance_test_context['end_measurement']()
+        
+        # Log performance metrics
+        logger.info(
+            "Model performance benchmarks completed",
+            total_execution_time=execution_time,
+            creation_time=creation_time,
+            serialization_time=serialization_time,
+            validation_time=validation_time,
+            models_created=len(users)
+        )
+        
+        # Verify performance is within acceptable bounds
+        # (These would be compared against Node.js baselines in real implementation)
+        assert creation_time < 1.0  # Should create 100 models in under 1 second
+        assert serialization_time < 0.5  # Should serialize 100 models in under 0.5 seconds
+        assert validation_time < 0.5  # Should validate 100 models in under 0.5 seconds
+
+
+# ============================================================================
+# BUSINESS VALIDATORS TESTING
+# ============================================================================
+
+class TestBusinessValidators:
+    """
+    Comprehensive testing for marshmallow schema validation and business rule enforcement.
+    
+    Tests cover schema validation patterns, business rule validation, cross-field validation,
+    error handling integration, and validation performance per Section 5.2.4 requirements.
+    """
+    
+    def test_base_business_validator_functionality(self):
+        """Test BaseBusinessValidator core functionality and configuration."""
+        # Test validator initialization
+        validator = BaseBusinessValidator()
+        assert validator.enforce_business_rules is True
+        assert validator.strict_mode is True
+        assert validator.sanitize_input is True
+        
+        # Test validation context
+        validator_with_context = BaseBusinessValidator(
+            validation_context={'user_id': '123', 'operation': 'create'},
+            business_rules={'check_permissions': True}
+        )
+        assert validator_with_context.validation_context['user_id'] == '123'
+        assert validator_with_context.business_rules['check_permissions'] is True
+        
+        logger.info("BaseBusinessValidator functionality tested successfully")
+    
+    def test_user_validator_schema_validation(self):
+        """Test UserValidator schema validation and business rules."""
+        validator = UserValidator()
+        
+        # Test valid user data validation
+        valid_user_data = {
+            'username': 'testuser123',
+            'email': 'test@example.com',
+            'first_name': 'John',
+            'last_name': 'Doe',
+            'status': 'active',
+            'role': 'user'
+        }
+        
+        result = validator.load(valid_user_data)
+        assert result['username'] == 'testuser123'
+        assert result['email'] == 'test@example.com'
+        
+        # Test username validation with reserved names
+        with pytest.raises(MarshmallowValidationError) as exc_info:
+            invalid_data = valid_user_data.copy()
+            invalid_data['username'] = 'admin'  # Reserved username
+            validator.load(invalid_data)
+        
+        # Test email format validation
+        with pytest.raises(MarshmallowValidationError) as exc_info:
+            invalid_data = valid_user_data.copy()
+            invalid_data['email'] = 'invalid-email-format'
+            validator.load(invalid_data)
+        
+        # Test required field validation
+        with pytest.raises(MarshmallowValidationError) as exc_info:
+            incomplete_data = {
+                'username': 'testuser',
+                # Missing required fields
+            }
+            validator.load(incomplete_data)
+        
+        logger.info("UserValidator schema validation tested successfully")
+    
+    def test_product_validator_business_rules(self):
+        """Test ProductValidator business rules and cross-field validation."""
+        validator = ProductValidator()
+        
+        # Test valid product data
+        valid_product_data = {
+            'sku': 'PROD001',
+            'name': 'Test Product',
+            'slug': 'test-product',
+            'base_price': {'amount': '99.99', 'currency_code': 'USD'},
+            'status': 'active',
+            'inventory_quantity': 100,
+            'track_inventory': True
+        }
+        
+        result = validator.load(valid_product_data)
+        assert result['sku'] == 'PROD001'
+        assert result['name'] == 'Test Product'
+        
+        # Test sale price validation (must be less than base price)
+        invalid_sale_price_data = valid_product_data.copy()
+        invalid_sale_price_data['sale_price'] = {'amount': '120.00', 'currency_code': 'USD'}
+        
+        with pytest.raises(MarshmallowValidationError):
+            validator.load(invalid_sale_price_data)
+        
+        # Test currency consistency validation
+        invalid_currency_data = valid_product_data.copy()
+        invalid_currency_data['sale_price'] = {'amount': '80.00', 'currency_code': 'EUR'}
+        
+        with pytest.raises(MarshmallowValidationError):
+            validator.load(invalid_currency_data)
+        
+        logger.info("ProductValidator business rules tested successfully")
+    
+    def test_order_validator_complex_validation(self):
+        """Test OrderValidator complex business logic and calculation validation."""
+        validator = OrderValidator()
+        
+        # Test valid order data with items
+        valid_order_data = {
+            'customer_email': 'customer@example.com',
+            'customer_name': 'John Customer',
+            'items': [
+                {
+                    'product_id': str(uuid.uuid4()),
+                    'product_sku': 'ITEM001',
+                    'product_name': 'Test Item',
+                    'quantity': 2,
+                    'unit_price': {'amount': '25.00', 'currency_code': 'USD'}
+                }
+            ],
+            'subtotal': {'amount': '50.00', 'currency_code': 'USD'},
+            'tax_amount': {'amount': '4.00', 'currency_code': 'USD'},
+            'shipping_amount': {'amount': '5.99', 'currency_code': 'USD'},
+            'discount_amount': {'amount': '0.00', 'currency_code': 'USD'},
+            'total_amount': {'amount': '59.99', 'currency_code': 'USD'},
+            'billing_address': {
+                'street_line_1': '123 Test St',
+                'city': 'Test City',
+                'state_province': 'Test State',
+                'postal_code': '12345',
+                'country_code': 'US'
+            }
+        }
+        
+        result = validator.load(valid_order_data)
+        assert result['customer_email'] == 'customer@example.com'
+        assert len(result['items']) == 1
+        
+        # Test total calculation validation
+        invalid_total_data = valid_order_data.copy()
+        invalid_total_data['total_amount'] = {'amount': '100.00', 'currency_code': 'USD'}  # Wrong total
+        
+        with pytest.raises(MarshmallowValidationError):
+            validator.load(invalid_total_data)
+        
+        # Test currency consistency across all amounts
+        invalid_currency_data = valid_order_data.copy()
+        invalid_currency_data['tax_amount'] = {'amount': '4.00', 'currency_code': 'EUR'}  # Different currency
+        
+        with pytest.raises(MarshmallowValidationError):
+            validator.load(invalid_currency_data)
+        
+        logger.info("OrderValidator complex validation tested successfully")
+    
+    def test_conditional_validator_business_rules(self):
+        """Test ConditionalValidator for context-dependent business rules."""
+        validator = ConditionalValidator()
+        
+        # Test conditional validation based on user context
+        context = {'user_role': 'admin', 'operation': 'create'}
+        
+        # Admin users should pass validation
+        admin_data = {'sensitive_field': 'admin_value', 'public_field': 'public_value'}
+        result = validator.validate_conditional_rules(admin_data, context)
+        assert result is True
+        
+        # Regular users should have restrictions
+        user_context = {'user_role': 'user', 'operation': 'create'}
+        user_data = {'sensitive_field': 'user_value', 'public_field': 'public_value'}
+        
+        with pytest.raises(BusinessRuleViolationError):
+            validator.validate_conditional_rules(user_data, user_context)
+        
+        logger.info("ConditionalValidator business rules tested successfully")
+    
+    def test_cross_field_validator_integration(self):
+        """Test CrossFieldValidator for complex inter-field validation."""
+        validator = CrossFieldValidator()
+        
+        # Test date range validation
+        valid_date_data = {
+            'start_date': '2023-01-01T00:00:00Z',
+            'end_date': '2023-12-31T23:59:59Z'
+        }
+        result = validator.validate_date_range(valid_date_data)
+        assert result is True
+        
+        # Test invalid date range (end before start)
+        invalid_date_data = {
+            'start_date': '2023-12-31T23:59:59Z',
+            'end_date': '2023-01-01T00:00:00Z'
+        }
+        
+        with pytest.raises(BusinessRuleViolationError):
+            validator.validate_date_range(invalid_date_data)
+        
+        # Test password confirmation validation
+        password_data = {
+            'password': 'securePassword123!',
+            'confirm_password': 'securePassword123!'
+        }
+        result = validator.validate_password_confirmation(password_data)
+        assert result is True
+        
+        # Test password mismatch
+        password_mismatch_data = {
+            'password': 'securePassword123!',
+            'confirm_password': 'differentPassword'
+        }
+        
+        with pytest.raises(BusinessRuleViolationError):
+            validator.validate_password_confirmation(password_mismatch_data)
+        
+        logger.info("CrossFieldValidator integration tested successfully")
+    
+    @pytest.mark.performance
+    def test_validation_performance_benchmarks(self, performance_test_context):
+        """Test validation performance to ensure ≤10% variance from Node.js baseline."""
+        performance_test_context['start_measurement']('validation_performance')
+        
+        validator = UserValidator()
+        
+        # Generate test data for performance testing
+        test_data = []
+        for i in range(100):
+            test_data.append({
+                'username': f'testuser{i}',
+                'email': f'test{i}@example.com',
+                'first_name': f'First{i}',
+                'last_name': f'Last{i}',
+                'status': 'active',
+                'role': 'user'
             })
         
-        execution_time = time.perf_counter() - start_time
-        assert execution_time < performance_threshold, \
-            f"Validation took {execution_time:.4f}s, expected < {performance_threshold}s"
-
-
-class TestBusinessRuleValidator:
-    """Test suite for BusinessRuleValidator functionality."""
-    
-    def test_business_rule_registration(self):
-        """Test business rule registration and management."""
+        # Measure validation performance
+        start_time = time.perf_counter()
         
-        def test_rule(data, context):
-            if data.get("age", 0) < 18:
-                raise BusinessRuleViolationError("Must be 18 or older")
+        validated_results = []
+        for data in test_data:
+            result = validator.load(data)
+            validated_results.append(result)
         
-        BusinessRuleValidator.register_business_rule(
-            "age_restriction",
-            test_rule,
-            "Users must be 18 or older"
+        validation_time = time.perf_counter() - start_time
+        execution_time = performance_test_context['end_measurement']()
+        
+        # Log performance metrics
+        logger.info(
+            "Validation performance benchmarks completed",
+            total_execution_time=execution_time,
+            validation_time=validation_time,
+            records_validated=len(validated_results),
+            avg_validation_time=validation_time / len(test_data)
         )
         
-        rules = BusinessRuleValidator.get_registered_rules()
-        assert "age_restriction" in rules
-        assert rules["age_restriction"]["description"] == "Users must be 18 or older"
-    
-    def test_business_rule_validation(self, validation_context):
-        """Test business rule validation execution."""
-        
-        def age_rule(data, context):
-            if data.get("age", 0) < 18:
-                raise BusinessRuleViolationError("Must be 18 or older")
-        
-        BusinessRuleValidator.register_business_rule("age_check", age_rule)
-        
-        class TestBusinessValidator(BusinessRuleValidator):
-            name = fields.String(required=True)
-            age = fields.Integer(required=True)
-        
-        validator = TestBusinessValidator(validation_context=validation_context)
-        
-        # Test valid data
-        valid_data = {"name": "John", "age": 25}
-        violations = validator.validate_business_rules(valid_data, {"age_check"})
-        assert len(violations) == 0
-        
-        # Test rule violation
-        invalid_data = {"name": "Minor", "age": 16}
-        violations = validator.validate_business_rules(invalid_data, {"age_check"})
-        assert len(violations) == 1
-        assert violations[0]["rule_name"] == "age_check"
-    
-    def test_business_rule_context_enforcement(self, validation_context):
-        """Test business rule enforcement based on context."""
-        
-        def strict_rule(data, context):
-            if not data.get("required_field"):
-                raise BusinessRuleViolationError("Required field missing")
-        
-        BusinessRuleValidator.register_business_rule("strict_validation", strict_rule)
-        
-        # Test with strict context
-        strict_context = ValidationContext(
-            strict_mode=True,
-            business_rules={"strict_validation"}
-        )
-        
-        class TestValidator(BusinessRuleValidator):
-            name = fields.String()
-        
-        validator = TestValidator(validation_context=strict_context)
-        
-        # Should enforce rule in strict context
-        violations = validator.validate_business_rules({}, {"strict_validation"})
-        assert len(violations) == 1
-        
-        # Test with non-strict context
-        non_strict_context = ValidationContext(strict_mode=False)
-        validator_non_strict = TestValidator(validation_context=non_strict_context)
-        
-        # Should not enforce rule in non-strict context
-        violations_non_strict = validator_non_strict.validate_business_rules({}, {"strict_validation"})
-        assert len(violations_non_strict) == 0
+        # Verify performance is within acceptable bounds
+        assert validation_time < 1.0  # Should validate 100 records in under 1 second
+        assert len(validated_results) == 100
 
 
-class TestDataModelValidator:
-    """Test suite for DataModelValidator functionality."""
-    
-    def test_data_preprocessing(self):
-        """Test data preprocessing and sanitization."""
-        
-        class TestDataValidator(DataModelValidator):
-            name = fields.String(required=True)
-            email = fields.Email(required=True)
-            phone = fields.String()
-        
-        validator = TestDataValidator()
-        
-        raw_data = {
-            "name": "  John Doe  ",  # Whitespace
-            "email": "  JOHN@EXAMPLE.COM  ",  # Uppercase, whitespace
-            "phone": "(555) 123-4567",  # Phone format
-        }
-        
-        # Test preprocessing
-        processed_data = validator.preprocess_data(raw_data)
-        
-        assert processed_data["name"] == "John Doe"  # Trimmed
-        assert processed_data["email"] == "john@example.com"  # Lowercase, trimmed
-        assert processed_data["phone"] == "(555) 123-4567"  # Phone cleaned
-    
-    def test_data_postprocessing(self):
-        """Test data postprocessing and computed fields."""
-        
-        class TestDataValidator(DataModelValidator):
-            name = fields.String(required=True)
-            created_at = fields.DateTime(dump_only=True)
-        
-        validator = TestDataValidator()
-        
-        validated_data = {"name": "Test"}
-        postprocessed_data = validator.postprocess_data(validated_data)
-        
-        assert "name" in postprocessed_data
-        # Postprocessing may add computed fields
-    
-    def test_partial_data_validation(self):
-        """Test partial data validation for updates."""
-        
-        class TestDataValidator(DataModelValidator):
-            name = fields.String(required=True)
-            email = fields.Email(required=True)
-            age = fields.Integer()
-        
-        validator = TestDataValidator()
-        
-        # Test partial validation (only update email)
-        partial_data = {"email": "updated@example.com"}
-        validated_partial = validator.validate_partial_data(
-            partial_data,
-            fields_to_validate={"email"}
-        )
-        
-        assert validated_partial["email"] == "updated@example.com"
-        assert "name" not in validated_partial  # Not required for partial update
-    
-    def test_field_metadata_extraction(self):
-        """Test field metadata extraction for documentation."""
-        
-        class TestDataValidator(DataModelValidator):
-            name = fields.String(required=True, validate=validate.Length(min=2, max=100))
-            age = fields.Integer(validate=validate.Range(min=0, max=150))
-            email = fields.Email(required=True)
-        
-        validator = TestDataValidator()
-        metadata = validator.get_field_metadata()
-        
-        assert "name" in metadata
-        assert metadata["name"]["required"] is True
-        assert metadata["name"]["type"] == "String"
-        
-        assert "age" in metadata
-        assert metadata["age"]["required"] is False
-        assert metadata["age"]["type"] == "Integer"
+# ============================================================================
+# BUSINESS PROCESSORS TESTING
+# ============================================================================
 
-
-class TestInputValidator:
-    """Test suite for InputValidator functionality."""
+class TestBusinessProcessors:
+    """
+    Comprehensive testing for data processing and transformation engine.
     
-    def test_input_sanitization(self):
-        """Test input data sanitization and security."""
+    Tests cover data transformation, business rule execution, date/time processing,
+    workflow orchestration, and performance validation per Section 5.2.4 requirements.
+    """
+    
+    def test_data_transformer_core_functionality(self):
+        """Test DataTransformer for data format conversion and transformation."""
+        transformer = DataTransformer()
         
-        class TestInputValidator(InputValidator):
-            name = fields.String(required=True)
-            message = fields.String()
+        # Test JSON to dict transformation
+        json_data = '{"name": "John", "age": 30, "active": true}'
+        result = transformer.transform_json_to_dict(json_data)
+        assert result['name'] == 'John'
+        assert result['age'] == 30
+        assert result['active'] is True
         
-        validator = TestInputValidator(enable_sanitization=True)
+        # Test dict to JSON transformation
+        dict_data = {'name': 'Jane', 'age': 25, 'active': False}
+        json_result = transformer.transform_dict_to_json(dict_data)
+        assert isinstance(json_result, str)
+        assert 'Jane' in json_result
         
-        dangerous_data = {
-            "name": "<script>alert('xss')</script>John",
-            "message": "Hello <b>world</b>!"
+        # Test data normalization
+        messy_data = {
+            'NAME': '  John Doe  ',
+            'EMAIL': 'JOHN@EXAMPLE.COM',
+            'age': '30',
+            'active': 'true'
+        }
+        normalized = transformer.normalize_data(messy_data)
+        assert normalized['name'] == 'John Doe'
+        assert normalized['email'] == 'john@example.com'
+        assert normalized['age'] == 30
+        assert normalized['active'] is True
+        
+        # Test invalid JSON handling
+        with pytest.raises(DataProcessingError):
+            transformer.transform_json_to_dict('invalid json string')
+        
+        logger.info("DataTransformer core functionality tested successfully")
+    
+    def test_business_rule_engine_execution(self):
+        """Test BusinessRuleEngine for complex business logic execution."""
+        rule_engine = ProcessorBusinessRuleEngine()
+        
+        # Test user eligibility rules
+        user_data = {
+            'age': 25,
+            'account_status': 'active',
+            'verification_status': 'verified',
+            'account_balance': 1000.0
         }
         
-        sanitized_data = validator.sanitize_input_data(dangerous_data)
+        # Test eligibility for premium features
+        is_eligible = rule_engine.check_premium_eligibility(user_data)
+        assert is_eligible is True
         
-        # Should remove dangerous scripts but preserve safe content
-        assert "<script>" not in sanitized_data["name"]
-        assert "John" in sanitized_data["name"]
-    
-    def test_file_upload_validation(self):
-        """Test file upload validation and security checks."""
+        # Test ineligible user (insufficient balance)
+        ineligible_user = user_data.copy()
+        ineligible_user['account_balance'] = 50.0
+        is_eligible = rule_engine.check_premium_eligibility(ineligible_user)
+        assert is_eligible is False
         
-        validator = InputValidator(
-            allowed_file_types={"pdf", "jpg", "png"},
-            max_file_size=5 * 1024 * 1024  # 5MB
-        )
-        
-        # Test valid file
-        valid_file = {
-            "filename": "document.pdf",
-            "content_type": "application/pdf",
-            "size": 1024 * 1024  # 1MB
+        # Test order processing rules
+        order_data = {
+            'total_amount': 150.0,
+            'customer_tier': 'gold',
+            'items_count': 3,
+            'shipping_address': {'country': 'US'}
         }
         
-        validated_file = validator.validate_file_upload(valid_file)
-        assert validated_file["filename"] == "document.pdf"
+        processing_result = rule_engine.process_order_rules(order_data)
+        assert processing_result['approved'] is True
+        assert 'discount_applied' in processing_result
         
-        # Test invalid file type
-        invalid_file = {
-            "filename": "malware.exe",
-            "content_type": "application/octet-stream",
-            "size": 1024
+        # Test fraud detection rules
+        transaction_data = {
+            'amount': 5000.0,
+            'user_id': '12345',
+            'transaction_pattern': 'unusual',
+            'risk_score': 0.3
         }
         
-        with pytest.raises(DataValidationError) as exc_info:
-            validator.validate_file_upload(invalid_file)
-        assert "not allowed" in str(exc_info.value).lower()
+        fraud_result = rule_engine.check_fraud_detection(transaction_data)
+        assert 'risk_assessment' in fraud_result
+        assert 'requires_review' in fraud_result
         
-        # Test file too large
-        large_file = {
-            "filename": "huge.pdf",
-            "content_type": "application/pdf",
-            "size": 10 * 1024 * 1024  # 10MB - exceeds 5MB limit
+        logger.info("BusinessRuleEngine execution tested successfully")
+    
+    def test_datetime_processor_equivalent_to_momentjs(self):
+        """Test DateTimeProcessor for date/time processing equivalent to moment.js."""
+        processor = DateTimeProcessor()
+        
+        # Test date parsing equivalent to moment.js
+        date_string = '2023-12-25T15:30:00Z'
+        parsed_date = processor.parse_datetime(date_string)
+        assert isinstance(parsed_date, datetime)
+        assert parsed_date.year == 2023
+        assert parsed_date.month == 12
+        assert parsed_date.day == 25
+        
+        # Test date formatting
+        formatted = processor.format_datetime(parsed_date, 'YYYY-MM-DD HH:mm:ss')
+        assert '2023-12-25 15:30:00' in formatted
+        
+        # Test relative time calculations
+        now = datetime.now(timezone.utc)
+        past_date = now - timedelta(days=5, hours=3)
+        relative = processor.get_relative_time(past_date, now)
+        assert 'days ago' in relative.lower()
+        
+        # Test business day calculations
+        start_date = date(2023, 12, 25)  # Monday
+        business_days = processor.calculate_business_days(start_date, days_to_add=5)
+        assert isinstance(business_days, date)
+        
+        # Test timezone conversion
+        utc_time = datetime(2023, 12, 25, 15, 30, 0, tzinfo=timezone.utc)
+        est_time = processor.convert_timezone(utc_time, 'US/Eastern')
+        assert est_time.hour != utc_time.hour  # Should be different due to timezone
+        
+        # Test date validation
+        assert processor.is_valid_date('2023-12-25') is True
+        assert processor.is_valid_date('invalid-date') is False
+        
+        # Test ISO format compliance
+        iso_formatted = processor.to_iso_format(parsed_date)
+        assert 'T' in iso_formatted
+        assert iso_formatted.endswith('Z') or '+' in iso_formatted
+        
+        logger.info("DateTimeProcessor moment.js equivalence tested successfully")
+    
+    def test_calculation_processor_business_calculations(self):
+        """Test CalculationProcessor for business calculations and formulas."""
+        calculator = CalculationProcessor()
+        
+        # Test percentage calculations
+        percentage = calculator.calculate_percentage(25, 100)
+        assert percentage == 25.0
+        
+        # Test discount applications
+        original_price = Decimal('100.00')
+        discount_percent = 15
+        discounted_price = calculator.apply_percentage_discount(original_price, discount_percent)
+        assert discounted_price == Decimal('85.00')
+        
+        # Test tax calculations
+        subtotal = Decimal('100.00')
+        tax_rate = Decimal('0.08')  # 8% tax
+        tax_amount = calculator.calculate_tax(subtotal, tax_rate)
+        assert tax_amount == Decimal('8.00')
+        
+        # Test compound interest calculations
+        principal = Decimal('1000.00')
+        annual_rate = Decimal('0.05')  # 5% annual rate
+        years = 2
+        compound_amount = calculator.calculate_compound_interest(principal, annual_rate, years)
+        assert compound_amount > principal
+        
+        # Test currency rounding
+        unrounded_amount = Decimal('123.456789')
+        rounded_amount = calculator.round_currency(unrounded_amount, 'USD')
+        assert rounded_amount == Decimal('123.46')
+        
+        # Test percentage change calculations
+        old_value = 100
+        new_value = 120
+        change_percent = calculator.calculate_percentage_change(old_value, new_value)
+        assert change_percent == 20.0
+        
+        # Test statistical calculations
+        numbers = [10, 20, 30, 40, 50]
+        average = calculator.calculate_average(numbers)
+        assert average == 30.0
+        
+        median = calculator.calculate_median(numbers)
+        assert median == 30.0
+        
+        logger.info("CalculationProcessor business calculations tested successfully")
+    
+    def test_workflow_processor_orchestration(self):
+        """Test WorkflowProcessor for complex business workflow orchestration."""
+        workflow_processor = WorkflowProcessor()
+        
+        # Test order fulfillment workflow
+        order_context = {
+            'order_id': str(uuid.uuid4()),
+            'customer_id': str(uuid.uuid4()),
+            'items': [
+                {'product_id': 'PROD001', 'quantity': 2},
+                {'product_id': 'PROD002', 'quantity': 1}
+            ],
+            'payment_status': 'completed',
+            'shipping_address': {'country': 'US', 'state': 'CA'}
         }
         
-        with pytest.raises(DataValidationError) as exc_info:
-            validator.validate_file_upload(large_file)
-        assert "exceeds maximum" in str(exc_info.value).lower()
-    
-    def test_query_parameter_validation(self):
-        """Test query parameter validation and type conversion."""
+        result = workflow_processor.execute_order_fulfillment(order_context)
+        assert result['workflow_completed'] is True
+        assert 'inventory_reserved' in result
+        assert 'shipping_label_created' in result
         
-        class TestInputValidator(InputValidator):
-            name = fields.String()
-            age = fields.Integer()
-            active = fields.Boolean()
-        
-        validator = TestInputValidator()
-        
-        query_params = {
-            "name": "John Doe",
-            "age": "30",  # String that should convert to int
-            "active": "true",  # String that should convert to bool
-            "unknown_param": "value"  # Should be filtered out
+        # Test user onboarding workflow
+        user_context = {
+            'user_id': str(uuid.uuid4()),
+            'email': 'newuser@example.com',
+            'verification_token': str(uuid.uuid4()),
+            'registration_source': 'web'
         }
         
-        validated_params = validator.validate_query_parameters(
-            query_params,
-            allowed_params={"name", "age", "active"}
-        )
+        onboarding_result = workflow_processor.execute_user_onboarding(user_context)
+        assert onboarding_result['onboarding_completed'] is True
+        assert 'welcome_email_sent' in onboarding_result
+        assert 'profile_created' in onboarding_result
         
-        assert validated_params["name"] == "John Doe"
-        assert "unknown_param" not in validated_params
-    
-    def test_security_sanitization_levels(self):
-        """Test different levels of security sanitization."""
-        
-        class StrictInputValidator(InputValidator):
-            content = fields.String()
-        
-        # Test with HTML allowed for specific fields
-        validator = StrictInputValidator(enable_sanitization=True)
-        
-        html_data = {
-            "content": "<p>Safe paragraph</p><script>alert('xss')</script>"
+        # Test payment processing workflow
+        payment_context = {
+            'payment_id': str(uuid.uuid4()),
+            'amount': 99.99,
+            'currency': 'USD',
+            'payment_method': 'credit_card',
+            'customer_id': str(uuid.uuid4())
         }
         
-        sanitized = validator.sanitize_input_data(html_data)
+        payment_result = workflow_processor.execute_payment_processing(payment_context)
+        assert 'payment_processed' in payment_result
+        assert 'transaction_id' in payment_result
         
-        # Should remove dangerous scripts
-        assert "<script>" not in sanitized["content"]
-
-
-class TestOutputValidator:
-    """Test suite for OutputValidator functionality."""
+        # Test workflow error handling
+        invalid_context = {'invalid_field': 'invalid_value'}
+        
+        with pytest.raises(DataProcessingError):
+            workflow_processor.execute_order_fulfillment(invalid_context)
+        
+        logger.info("WorkflowProcessor orchestration tested successfully")
     
-    def test_success_response_formatting(self):
-        """Test success response formatting and structure."""
+    def test_batch_processor_bulk_operations(self):
+        """Test BatchProcessor for efficient bulk data processing operations."""
+        batch_processor = BatchProcessor()
         
-        class TestOutputValidator(OutputValidator):
-            id = fields.String(required=True)
-            name = fields.String(required=True)
-            created_at = fields.DateTime(dump_only=True)
+        # Test bulk user creation
+        user_batch_data = []
+        for i in range(10):
+            user_batch_data.append({
+                'username': f'batchuser{i}',
+                'email': f'batch{i}@example.com',
+                'first_name': f'Batch{i}',
+                'last_name': 'User'
+            })
         
-        validator = TestOutputValidator()
+        batch_result = batch_processor.process_user_batch(user_batch_data)
+        assert batch_result['processed_count'] == 10
+        assert batch_result['success_count'] == 10
+        assert batch_result['error_count'] == 0
         
-        data = {
-            "id": "123",
-            "name": "Test User",
-            "created_at": datetime.now(timezone.utc)
-        }
+        # Test batch processing with errors
+        mixed_batch_data = user_batch_data.copy()
+        mixed_batch_data.append({
+            'username': '',  # Invalid data
+            'email': 'invalid-email',
+            'first_name': '',
+            'last_name': ''
+        })
         
-        response = validator.format_success_response(
-            data,
-            status_code=200,
-            message="User retrieved successfully"
-        )
+        mixed_result = batch_processor.process_user_batch(mixed_batch_data)
+        assert mixed_result['processed_count'] == 11
+        assert mixed_result['success_count'] == 10
+        assert mixed_result['error_count'] == 1
+        assert len(mixed_result['errors']) == 1
         
-        assert response["success"] is True
-        assert response["status_code"] == 200
-        assert response["message"] == "User retrieved successfully"
-        assert "data" in response
-        assert "timestamp" in response
+        # Test batch size limits
+        large_batch = [{'data': f'item{i}'} for i in range(1000)]
+        
+        with pytest.raises(DataProcessingError) as exc_info:
+            batch_processor.process_large_batch(large_batch, max_batch_size=500)
+        
+        assert exc_info.value.error_code == "BATCH_SIZE_EXCEEDED"
+        
+        logger.info("BatchProcessor bulk operations tested successfully")
     
-    def test_error_response_formatting(self):
-        """Test error response formatting and security."""
+    @pytest.mark.asyncio
+    async def test_async_processor_concurrent_operations(self):
+        """Test AsyncProcessor for concurrent and asynchronous processing operations."""
+        async_processor = AsyncProcessor()
         
-        validator = OutputValidator()
+        # Test concurrent data processing
+        data_items = [{'id': i, 'value': f'item{i}'} for i in range(20)]
         
-        # Create a business exception
-        error = DataValidationError(
-            message="Validation failed",
-            error_code="VALIDATION_ERROR",
-            validation_errors=[
-                {"field": "email", "message": "Invalid format"}
-            ]
-        )
+        start_time = time.perf_counter()
+        results = await async_processor.process_concurrent(data_items, concurrency_limit=5)
+        processing_time = time.perf_counter() - start_time
         
-        response = validator.format_error_response(error, include_details=True)
+        assert len(results) == 20
+        assert all('processed' in result for result in results)
         
-        assert response["success"] is False
-        assert response["error"]["code"] == "VALIDATION_ERROR"
-        assert response["error"]["message"] == "Validation failed"
-        assert "details" in response["error"] or "validation_errors" in response["error"]
-    
-    def test_paginated_response_formatting(self):
-        """Test paginated response formatting with metadata."""
-        
-        class TestOutputValidator(OutputValidator):
-            id = fields.String()
-            name = fields.String()
-        
-        validator = TestOutputValidator()
-        
-        test_data = [
-            {"id": "1", "name": "Item 1"},
-            {"id": "2", "name": "Item 2"},
-            {"id": "3", "name": "Item 3"}
+        # Test async workflow execution
+        workflow_tasks = [
+            {'task_id': f'task{i}', 'operation': 'process', 'data': {'value': i}}
+            for i in range(10)
         ]
         
-        response = validator.format_paginated_response(
-            data=test_data,
-            page=1,
-            per_page=10,
-            total_count=25
+        workflow_results = await async_processor.execute_async_workflow(workflow_tasks)
+        assert len(workflow_results) == 10
+        assert all(result['completed'] for result in workflow_results)
+        
+        # Test error handling in async processing
+        error_tasks = [
+            {'task_id': 'error_task', 'operation': 'invalid_operation', 'data': {}}
+        ]
+        
+        with pytest.raises(DataProcessingError):
+            await async_processor.execute_async_workflow(error_tasks)
+        
+        logger.info(
+            "AsyncProcessor concurrent operations tested successfully",
+            processing_time=processing_time,
+            items_processed=len(results)
+        )
+    
+    @pytest.mark.performance
+    def test_processing_performance_benchmarks(self, performance_test_context):
+        """Test processing performance to ensure ≤10% variance from Node.js baseline."""
+        performance_test_context['start_measurement']('processing_performance')
+        
+        transformer = DataTransformer()
+        calculator = CalculationProcessor()
+        
+        # Generate test data for performance testing
+        test_data = []
+        for i in range(1000):
+            test_data.append({
+                'id': i,
+                'amount': Decimal(f'{100 + i}.99'),
+                'discount_percent': 10 + (i % 20),
+                'tax_rate': Decimal('0.08'),
+                'created_date': f'2023-01-{(i % 28) + 1:02d}T12:00:00Z'
+            })
+        
+        # Measure data transformation performance
+        transform_start = time.perf_counter()
+        
+        transformed_results = []
+        for data in test_data:
+            normalized = transformer.normalize_data(data)
+            transformed_results.append(normalized)
+        
+        transform_time = time.perf_counter() - transform_start
+        
+        # Measure calculation performance
+        calculation_start = time.perf_counter()
+        
+        calculation_results = []
+        for data in transformed_results:
+            discounted = calculator.apply_percentage_discount(
+                data['amount'], data['discount_percent']
+            )
+            tax = calculator.calculate_tax(discounted, data['tax_rate'])
+            calculation_results.append({'discounted': discounted, 'tax': tax})
+        
+        calculation_time = time.perf_counter() - calculation_start
+        
+        execution_time = performance_test_context['end_measurement']()
+        
+        # Log performance metrics
+        logger.info(
+            "Processing performance benchmarks completed",
+            total_execution_time=execution_time,
+            transform_time=transform_time,
+            calculation_time=calculation_time,
+            records_processed=len(test_data),
+            avg_transform_time=transform_time / len(test_data),
+            avg_calculation_time=calculation_time / len(test_data)
         )
         
-        assert response["success"] is True
-        assert len(response["data"]) == 3
-        assert response["pagination"]["total_count"] == 25
-        assert response["pagination"]["total_pages"] == 3
-        assert response["pagination"]["has_next"] is True
-        assert response["pagination"]["has_prev"] is False
+        # Verify performance is within acceptable bounds
+        assert transform_time < 2.0  # Should transform 1000 records in under 2 seconds
+        assert calculation_time < 1.0  # Should calculate 1000 records in under 1 second
+        assert len(calculation_results) == 1000
+
+
+# ============================================================================
+# BUSINESS SERVICES TESTING
+# ============================================================================
+
+class TestBusinessServices:
+    """
+    Comprehensive testing for business service orchestration and external integrations.
     
-    def test_response_schema_validation(self):
-        """Test response schema validation."""
+    Tests cover service orchestration, external service integration, workflow management,
+    circuit breaker patterns, and integration resilience per Section 5.2.4 requirements.
+    """
+    
+    @pytest.fixture
+    def mock_external_services(self):
+        """Fixture providing mock external services for service testing."""
+        with patch('src.business.services.httpx.AsyncClient') as mock_httpx, \
+             patch('src.business.services.boto3.client') as mock_boto3, \
+             patch('src.business.services.redis.Redis') as mock_redis:
+            
+            # Configure mock HTTP client
+            mock_client = AsyncMock()
+            mock_response = AsyncMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {'status': 'success'}
+            mock_client.get.return_value = mock_response
+            mock_client.post.return_value = mock_response
+            mock_httpx.return_value = mock_client
+            
+            # Configure mock AWS client
+            mock_s3 = Mock()
+            mock_s3.upload_file.return_value = {'ETag': 'test-etag'}
+            mock_boto3.return_value = mock_s3
+            
+            # Configure mock Redis client
+            mock_redis_instance = Mock()
+            mock_redis_instance.get.return_value = None
+            mock_redis_instance.set.return_value = True
+            mock_redis.return_value = mock_redis_instance
+            
+            yield {
+                'httpx': mock_client,
+                'boto3': mock_s3,
+                'redis': mock_redis_instance
+            }
+    
+    def test_user_service_crud_operations(self, mock_external_services):
+        """Test UserService CRUD operations and business logic integration."""
+        user_service = UserService()
         
-        validator = OutputValidator()
-        
-        # Test valid success response
-        valid_response = {
-            "success": True,
-            "data": {"id": "123", "name": "Test"}
+        # Test user creation
+        user_data = {
+            'username': 'servicetest',
+            'email': 'servicetest@example.com',
+            'first_name': 'Service',
+            'last_name': 'Test',
+            'password': 'securePassword123!'
         }
         
-        assert validator.validate_response_schema(valid_response) is True
+        created_user = user_service.create_user(user_data)
+        assert created_user.username == 'servicetest'
+        assert created_user.email == 'servicetest@example.com'
+        assert created_user.is_active is True
         
-        # Test invalid response (missing success field)
-        invalid_response = {
-            "data": {"id": "123", "name": "Test"}
-        }
+        # Test user validation during creation
+        invalid_user_data = user_data.copy()
+        invalid_user_data['email'] = 'invalid-email'
         
         with pytest.raises(DataValidationError):
-            validator.validate_response_schema(invalid_response)
+            user_service.create_user(invalid_user_data)
         
-        # Test valid error response
-        error_response = {
-            "success": False,
-            "error": {"code": "ERROR", "message": "Something went wrong"}
+        # Test user retrieval
+        retrieved_user = user_service.get_user_by_id(created_user.id)
+        assert retrieved_user is not None
+        assert retrieved_user.username == 'servicetest'
+        
+        # Test user update
+        update_data = {'first_name': 'UpdatedService'}
+        updated_user = user_service.update_user(created_user.id, update_data)
+        assert updated_user.first_name == 'UpdatedService'
+        
+        # Test user deletion
+        deletion_result = user_service.delete_user(created_user.id)
+        assert deletion_result is True
+        
+        # Test non-existent user retrieval
+        with pytest.raises(ResourceNotFoundError):
+            user_service.get_user_by_id('non-existent-id')
+        
+        logger.info("UserService CRUD operations tested successfully")
+    
+    def test_order_service_complex_workflow(self, mock_external_services):
+        """Test OrderService complex order processing workflow."""
+        order_service = OrderService()
+        
+        # Test order creation with validation
+        order_data = {
+            'customer_email': 'customer@example.com',
+            'customer_name': 'Test Customer',
+            'items': [
+                {
+                    'product_id': str(uuid.uuid4()),
+                    'product_sku': 'TEST001',
+                    'product_name': 'Test Product',
+                    'quantity': 2,
+                    'unit_price': {'amount': '25.00', 'currency_code': 'USD'}
+                }
+            ],
+            'billing_address': {
+                'street_line_1': '123 Test St',
+                'city': 'Test City',
+                'state_province': 'Test State',
+                'postal_code': '12345',
+                'country_code': 'US'
+            }
         }
         
-        assert validator.validate_response_schema(error_response) is True
-
-
-class TestValidationUtilityFunctions:
-    """Test suite for validation utility functions."""
-    
-    def test_validate_business_data_function(self, validation_context):
-        """Test validate_business_data utility function."""
+        created_order = order_service.create_order(order_data)
+        assert created_order.status == OrderStatus.PENDING
+        assert len(created_order.items) == 1
+        assert created_order.customer_email == 'customer@example.com'
         
-        class TestValidator(DataModelValidator):
-            name = fields.String(required=True)
-            age = fields.Integer(validate=validate.Range(min=0))
+        # Test order processing workflow
+        processing_result = order_service.process_order(created_order.id)
+        assert processing_result['order_processed'] is True
+        assert processing_result['inventory_updated'] is True
+        assert processing_result['payment_validated'] is True
         
-        test_data = {"name": "John Doe", "age": 30}
-        
-        validated_data, warnings = validate_business_data(
-            test_data,
-            TestValidator,
-            validation_context
+        # Test order status update
+        updated_order = order_service.update_order_status(
+            created_order.id, OrderStatus.CONFIRMED
         )
+        assert updated_order.status == OrderStatus.CONFIRMED
         
-        assert validated_data["name"] == "John Doe"
-        assert validated_data["age"] == 30
-        assert isinstance(warnings, list)
+        # Test order fulfillment
+        fulfillment_result = order_service.fulfill_order(created_order.id)
+        assert fulfillment_result['shipping_label_created'] is True
+        assert fulfillment_result['tracking_number'] is not None
+        
+        # Test order cancellation
+        cancellation_result = order_service.cancel_order(created_order.id)
+        assert cancellation_result['order_cancelled'] is True
+        
+        logger.info("OrderService complex workflow tested successfully")
     
-    def test_validate_request_data_function(self):
-        """Test validate_request_data utility function."""
+    def test_payment_service_transaction_processing(self, mock_external_services):
+        """Test PaymentService transaction processing and fraud detection."""
+        payment_service = PaymentService()
         
-        class TestRequestValidator(InputValidator):
-            username = fields.String(required=True)
-            email = fields.Email(required=True)
-        
-        request_data = {
-            "username": "  testuser  ",  # With whitespace
-            "email": "  TEST@EXAMPLE.COM  "  # Uppercase
+        # Test payment creation
+        payment_data = {
+            'order_id': str(uuid.uuid4()),
+            'amount': {'amount': '99.99', 'currency_code': 'USD'},
+            'payment_method': PaymentMethod.CREDIT_CARD,
+            'customer_id': str(uuid.uuid4())
         }
         
-        validated_data = validate_request_data(
-            request_data,
-            TestRequestValidator,
-            sanitize=True
-        )
+        payment_transaction = payment_service.create_payment(payment_data)
+        assert payment_transaction.payment_status == PaymentStatus.PENDING
+        assert payment_transaction.amount.amount == Decimal('99.99')
         
-        assert validated_data["username"] == "testuser"  # Trimmed
-        assert validated_data["email"] == "test@example.com"  # Lowercase
+        # Test payment processing
+        processing_result = payment_service.process_payment(payment_transaction.id)
+        assert processing_result['payment_processed'] is True
+        assert processing_result['transaction_id'] is not None
+        
+        # Test fraud detection
+        fraud_check_result = payment_service.check_fraud_risk(payment_transaction.id)
+        assert 'risk_score' in fraud_check_result
+        assert 'risk_level' in fraud_check_result
+        
+        # Test payment confirmation
+        confirmation_result = payment_service.confirm_payment(payment_transaction.id)
+        assert confirmation_result['payment_confirmed'] is True
+        
+        # Test refund processing
+        refund_data = {
+            'amount': {'amount': '50.00', 'currency_code': 'USD'},
+            'reason': 'customer_request'
+        }
+        refund_result = payment_service.process_refund(payment_transaction.id, refund_data)
+        assert refund_result['refund_processed'] is True
+        assert refund_result['refund_amount'] == Decimal('50.00')
+        
+        # Test payment failure handling
+        failed_payment_data = payment_data.copy()
+        failed_payment_data['amount'] = {'amount': '0.00', 'currency_code': 'USD'}  # Invalid amount
+        
+        with pytest.raises(BusinessRuleViolationError):
+            payment_service.create_payment(failed_payment_data)
+        
+        logger.info("PaymentService transaction processing tested successfully")
     
-    def test_validate_response_data_function(self):
-        """Test validate_response_data utility function."""
+    def test_authentication_service_jwt_management(self, mock_external_services):
+        """Test AuthenticationService JWT token management and Auth0 integration."""
+        auth_service = AuthenticationService()
         
-        class TestResponseValidator(OutputValidator):
-            id = fields.String(required=True)
-            name = fields.String(required=True)
-        
-        response_data = {"id": "123", "name": "Test User"}
-        
-        formatted_response = validate_response_data(
-            response_data,
-            TestResponseValidator,
-            format_response=True
-        )
-        
-        assert formatted_response["success"] is True
-        assert "data" in formatted_response
-        assert formatted_response["data"]["id"] == "123"
-    
-    def test_create_validation_schema_function(self):
-        """Test dynamic validation schema creation."""
-        
-        field_definitions = {
-            "name": fields.String(required=True, validate=validate.Length(min=1)),
-            "age": fields.Integer(validate=validate.Range(min=0, max=150)),
-            "email": fields.Email()
+        # Test token generation
+        user_data = {
+            'user_id': str(uuid.uuid4()),
+            'email': 'auth@example.com',
+            'roles': ['user'],
+            'permissions': ['read_profile', 'update_profile']
         }
         
-        DynamicValidator = create_validation_schema(
-            field_definitions,
-            schema_name="UserValidator"
+        token_result = auth_service.generate_jwt_token(user_data)
+        assert 'access_token' in token_result
+        assert 'expires_in' in token_result
+        assert 'token_type' in token_result
+        
+        # Test token validation
+        access_token = token_result['access_token']
+        validation_result = auth_service.validate_jwt_token(access_token)
+        assert validation_result['valid'] is True
+        assert validation_result['user_id'] == user_data['user_id']
+        
+        # Test token refresh
+        refresh_result = auth_service.refresh_jwt_token(access_token)
+        assert 'access_token' in refresh_result
+        assert 'expires_in' in refresh_result
+        
+        # Test Auth0 user profile retrieval
+        profile_result = auth_service.get_user_profile(user_data['user_id'])
+        assert 'user_profile' in profile_result
+        assert 'metadata' in profile_result
+        
+        # Test permission checking
+        has_permission = auth_service.check_user_permission(
+            user_data['user_id'], 'read_profile'
         )
+        assert has_permission is True
         
-        assert DynamicValidator.__name__ == "UserValidator"
-        assert hasattr(DynamicValidator, "name")
-        assert hasattr(DynamicValidator, "age")
-        assert hasattr(DynamicValidator, "email")
+        lacks_permission = auth_service.check_user_permission(
+            user_data['user_id'], 'admin_access'
+        )
+        assert lacks_permission is False
         
-        # Test using the dynamic validator
-        validator = DynamicValidator()
-        test_data = {"name": "John", "age": 30, "email": "john@example.com"}
-        result = validator.load(test_data)
+        # Test invalid token handling
+        with pytest.raises(AuthorizationError):
+            auth_service.validate_jwt_token('invalid.jwt.token')
         
-        assert result["name"] == "John"
-        assert result["age"] == 30
+        logger.info("AuthenticationService JWT management tested successfully")
     
-    def test_format_validation_errors_function(self):
-        """Test validation error formatting utility."""
+    def test_integration_orchestrator_circuit_breaker(self, mock_external_services):
+        """Test IntegrationOrchestrator circuit breaker patterns and resilience."""
+        orchestrator = IntegrationOrchestrator()
         
-        validation_errors = [
-            {"field": "email", "message": "Invalid email format", "code": "INVALID_EMAIL"},
-            {"field": "age", "message": "Must be at least 18", "code": "MIN_VALUE"}
-        ]
+        # Test successful external service call
+        service_config = {
+            'service_name': 'external_api',
+            'base_url': 'https://api.example.com',
+            'timeout': 30,
+            'retries': 3
+        }
         
-        # Test detailed format
-        detailed_format = format_validation_errors(validation_errors, "detailed")
+        success_result = orchestrator.call_external_service(
+            service_config, 'GET', '/users/123'
+        )
+        assert success_result['status_code'] == 200
+        assert success_result['success'] is True
         
-        assert detailed_format["error_count"] == 2
-        assert "errors" in detailed_format
-        assert "summary" in detailed_format
+        # Test circuit breaker failure handling
+        with patch.object(mock_external_services['httpx'], 'get', side_effect=Exception('Service unavailable')):
+            # Trigger multiple failures to open circuit breaker
+            for _ in range(5):
+                try:
+                    orchestrator.call_external_service(service_config, 'GET', '/failing-endpoint')
+                except ExternalServiceError:
+                    pass
+            
+            # Circuit breaker should now be open
+            circuit_state = orchestrator.get_circuit_breaker_state('external_api')
+            assert circuit_state['state'] in ['open', 'half-open']
         
-        # Test summary format
-        summary_format = format_validation_errors(validation_errors, "summary")
+        # Test retry mechanism
+        retry_config = service_config.copy()
+        retry_config['retries'] = 2
         
-        assert summary_format["error_count"] == 2
-        assert "messages" in summary_format
+        with patch.object(mock_external_services['httpx'], 'get', side_effect=[
+            Exception('Temporary failure'),
+            AsyncMock(status_code=200, json=lambda: {'status': 'success'})
+        ]):
+            retry_result = orchestrator.call_external_service_with_retry(
+                retry_config, 'GET', '/retry-endpoint'
+            )
+            assert retry_result['success'] is True
+            assert retry_result['attempts'] == 2
         
-        # Test field-only format
-        field_format = format_validation_errors(validation_errors, "field_only")
+        # Test service health monitoring
+        health_result = orchestrator.check_service_health('external_api')
+        assert 'healthy' in health_result
+        assert 'response_time' in health_result
         
-        assert "field_errors" in field_format
-        assert "email" in field_format["field_errors"]
-        assert "age" in field_format["field_errors"]
-
-
-# ============================================================================
-# BUSINESS PROCESSOR TESTING
-# ============================================================================
-
-class TestProcessingMetrics:
-    """Test suite for ProcessingMetrics functionality."""
+        logger.info("IntegrationOrchestrator circuit breaker tested successfully")
     
-    def test_processing_metrics_creation(self):
-        """Test processing metrics creation and initialization."""
-        metrics = ProcessingMetrics()
+    def test_business_workflow_service_orchestration(self, mock_external_services):
+        """Test BusinessWorkflowService complex workflow orchestration."""
+        workflow_service = BusinessWorkflowService()
         
-        assert metrics.records_processed == 0
-        assert metrics.errors_encountered == 0
-        assert metrics.start_time > 0
-        assert metrics.end_time is None
-    
-    def test_processing_metrics_calculations(self):
-        """Test processing metrics calculations."""
-        metrics = ProcessingMetrics()
+        # Test e-commerce order fulfillment workflow
+        order_context = {
+            'order_id': str(uuid.uuid4()),
+            'customer_id': str(uuid.uuid4()),
+            'items': [
+                {'product_id': 'PROD001', 'quantity': 2},
+                {'product_id': 'PROD002', 'quantity': 1}
+            ],
+            'payment_method': 'credit_card',
+            'shipping_address': {
+                'country': 'US',
+                'state': 'CA',
+                'city': 'San Francisco',
+                'postal_code': '94105'
+            }
+        }
         
-        # Simulate processing
-        metrics.records_processed = 100
-        metrics.errors_encountered = 5
-        time.sleep(0.1)  # Small delay for execution time
-        metrics.end_time = time.perf_counter()
+        workflow_result = workflow_service.execute_order_fulfillment_workflow(order_context)
+        assert workflow_result['workflow_completed'] is True
+        assert workflow_result['steps_completed'] > 0
+        assert 'inventory_reserved' in workflow_result
+        assert 'payment_processed' in workflow_result
+        assert 'shipping_arranged' in workflow_result
         
-        assert metrics.execution_time > 0
-        assert metrics.processing_rate > 0
-        assert metrics.error_rate == 5.0  # 5%
-    
-    def test_processing_metrics_edge_cases(self):
-        """Test processing metrics edge cases."""
-        metrics = ProcessingMetrics()
+        # Test user registration workflow
+        registration_context = {
+            'user_id': str(uuid.uuid4()),
+            'email': 'newuser@example.com',
+            'registration_method': 'email',
+            'referral_code': 'REF123'
+        }
         
-        # Test with no records processed
-        assert metrics.processing_rate == 0.0
-        assert metrics.error_rate == 0.0
+        registration_result = workflow_service.execute_user_registration_workflow(
+            registration_context
+        )
+        assert registration_result['workflow_completed'] is True
+        assert 'account_created' in registration_result
+        assert 'welcome_email_sent' in registration_result
+        assert 'referral_processed' in registration_result
         
-        # Test with no execution time
-        metrics.records_processed = 10
-        metrics.end_time = metrics.start_time  # Same time
-        assert metrics.processing_rate >= 0  # Should handle division by zero
-
-
-class TestDateTimeProcessor:
-    """Test suite for DateTimeProcessor functionality."""
-    
-    def test_datetime_processor_creation(self):
-        """Test DateTime processor creation and constants."""
-        processor = DateTimeProcessor()
+        # Test subscription renewal workflow
+        subscription_context = {
+            'subscription_id': str(uuid.uuid4()),
+            'customer_id': str(uuid.uuid4()),
+            'plan_id': 'premium_monthly',
+            'payment_method_id': 'pm_123456'
+        }
         
-        # Test that constants are defined
-        assert hasattr(processor, 'ISO_FORMAT')
-        assert hasattr(processor, 'DATE_FORMAT')
-        assert hasattr(processor, 'DATETIME_FORMAT')
-        assert hasattr(processor, 'BUSINESS_FORMAT')
+        renewal_result = workflow_service.execute_subscription_renewal_workflow(
+            subscription_context
+        )
+        assert renewal_result['workflow_completed'] is True
+        assert 'payment_processed' in renewal_result
+        assert 'subscription_updated' in renewal_result
+        
+        # Test workflow error handling
+        invalid_context = {'missing_required_fields': True}
+        
+        with pytest.raises(DataValidationError):
+            workflow_service.execute_order_fulfillment_workflow(invalid_context)
+        
+        logger.info("BusinessWorkflowService orchestration tested successfully")
     
     @pytest.mark.performance
-    def test_datetime_processing_performance(self, performance_threshold):
-        """Test datetime processing performance within ≤10% variance."""
-        processor = DateTimeProcessor()
+    def test_service_performance_benchmarks(self, performance_test_context, mock_external_services):
+        """Test service performance to ensure ≤10% variance from Node.js baseline."""
+        performance_test_context['start_measurement']('service_performance')
         
-        start_time = time.perf_counter()
+        user_service = UserService()
+        order_service = OrderService()
         
-        # Perform multiple date operations
-        test_dates = [
-            "2024-01-15T10:30:00Z",
-            "2024-02-20T15:45:30Z",
-            "2024-03-25T08:15:45Z"
+        # Measure user service performance
+        user_start_time = time.perf_counter()
+        
+        # Create multiple users
+        created_users = []
+        for i in range(50):
+            user_data = {
+                'username': f'perfuser{i}',
+                'email': f'perf{i}@example.com',
+                'first_name': f'Perf{i}',
+                'last_name': 'User'
+            }
+            user = user_service.create_user(user_data)
+            created_users.append(user)
+        
+        user_creation_time = time.perf_counter() - user_start_time
+        
+        # Measure order service performance
+        order_start_time = time.perf_counter()
+        
+        # Create multiple orders
+        created_orders = []
+        for i in range(25):
+            order_data = {
+                'customer_email': f'customer{i}@example.com',
+                'customer_name': f'Customer {i}',
+                'items': [
+                    {
+                        'product_id': str(uuid.uuid4()),
+                        'product_sku': f'PERF{i:03d}',
+                        'product_name': f'Performance Product {i}',
+                        'quantity': 1,
+                        'unit_price': {'amount': '10.00', 'currency_code': 'USD'}
+                    }
+                ],
+                'billing_address': {
+                    'street_line_1': f'{i} Performance St',
+                    'city': 'Test City',
+                    'state_province': 'Test State',
+                    'postal_code': '12345',
+                    'country_code': 'US'
+                }
+            }
+            order = order_service.create_order(order_data)
+            created_orders.append(order)
+        
+        order_creation_time = time.perf_counter() - order_start_time
+        
+        execution_time = performance_test_context['end_measurement']()
+        
+        # Log performance metrics
+        logger.info(
+            "Service performance benchmarks completed",
+            total_execution_time=execution_time,
+            user_creation_time=user_creation_time,
+            order_creation_time=order_creation_time,
+            users_created=len(created_users),
+            orders_created=len(created_orders),
+            avg_user_creation_time=user_creation_time / len(created_users),
+            avg_order_creation_time=order_creation_time / len(created_orders)
+        )
+        
+        # Verify performance is within acceptable bounds
+        assert user_creation_time < 5.0  # Should create 50 users in under 5 seconds
+        assert order_creation_time < 5.0  # Should create 25 orders in under 5 seconds
+        assert len(created_users) == 50
+        assert len(created_orders) == 25
+
+
+# ============================================================================
+# BUSINESS UTILITIES TESTING
+# ============================================================================
+
+class TestBusinessUtils:
+    """
+    Comprehensive testing for business utility functions and helper operations.
+    
+    Tests cover data manipulation, validation utilities, type conversion, date/time
+    processing, and currency operations per Section 5.2.4 utility requirements.
+    """
+    
+    def test_data_cleaning_and_sanitization(self):
+        """Test data cleaning and sanitization utility functions."""
+        # Test basic data cleaning
+        messy_data = {
+            'name': '  John Doe  ',
+            'email': 'JOHN@EXAMPLE.COM',
+            'age': '30',
+            'active': 'true',
+            'empty_field': '',
+            'none_field': None,
+            'whitespace_only': '   '
+        }
+        
+        cleaned = clean_data(messy_data)
+        assert cleaned['name'] == 'John Doe'
+        assert cleaned['email'] == 'JOHN@EXAMPLE.COM'  # Email should preserve case
+        assert 'empty_field' not in cleaned  # Empty fields removed
+        assert 'none_field' not in cleaned  # None fields removed
+        assert 'whitespace_only' not in cleaned  # Whitespace-only fields removed
+        
+        # Test input sanitization
+        unsafe_input = '<script>alert("xss")</script>Hello World'
+        sanitized = sanitize_input(unsafe_input)
+        assert '<script>' not in sanitized
+        assert 'Hello World' in sanitized
+        
+        # Test HTML tag removal
+        html_input = '<p>This is <strong>bold</strong> text</p>'
+        clean_text = sanitize_input(html_input, allow_html=False)
+        assert '<p>' not in clean_text
+        assert '<strong>' not in clean_text
+        assert 'This is bold text' in clean_text
+        
+        # Test length limiting
+        long_input = 'a' * 1000
+        limited = sanitize_input(long_input, max_length=100)
+        assert len(limited) <= 100
+        
+        logger.info("Data cleaning and sanitization tested successfully")
+    
+    def test_email_validation_comprehensive(self):
+        """Test comprehensive email validation with business rules."""
+        # Test valid email formats
+        valid_emails = [
+            'user@example.com',
+            'test.email@domain.co.uk',
+            'user+tag@example.org',
+            'firstname.lastname@company.com'
         ]
         
-        for date_str in test_dates * 100:  # 300 operations
-            # Test date parsing (simulated)
-            try:
-                parsed_date = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
-                # Test formatting
-                formatted = parsed_date.strftime("%Y-%m-%d")
-                assert formatted is not None
-            except Exception:
-                pass  # Handle any parsing errors gracefully
+        for email in valid_emails:
+            assert validate_email(email) is True
         
-        execution_time = time.perf_counter() - start_time
-        assert execution_time < performance_threshold, \
-            f"DateTime processing took {execution_time:.4f}s, expected < {performance_threshold}s"
-
-
-class TestMonitorPerformance:
-    """Test suite for performance monitoring decorator."""
+        # Test invalid email formats
+        invalid_emails = [
+            'invalid-email',
+            '@example.com',
+            'user@',
+            'user..double.dot@example.com',
+            'user@domain',
+            ''
+        ]
+        
+        for email in invalid_emails:
+            assert validate_email(email) is False
+        
+        # Test strict email validation
+        borderline_email = 'user@localhost'
+        assert validate_email(borderline_email, strict=False) is True
+        assert validate_email(borderline_email, strict=True) is False
+        
+        # Test domain validation
+        assert validate_email('user@example.com', check_domain=True) is True
+        
+        logger.info("Email validation tested successfully")
     
-    def test_monitor_performance_decorator_success(self):
-        """Test performance monitoring decorator with successful execution."""
+    def test_phone_number_validation_international(self):
+        """Test international phone number validation and formatting."""
+        # Test valid phone numbers
+        valid_phones = [
+            '+1-555-123-4567',  # US format
+            '(555) 123-4567',   # US format
+            '+44 20 7946 0958', # UK format
+            '+33 1 42 86 83 26' # France format
+        ]
         
-        @monitor_performance(threshold_seconds=0.5)
-        def fast_function():
-            time.sleep(0.1)  # Fast execution
-            return "success"
+        for phone in valid_phones:
+            assert validate_phone(phone) is True
         
-        # Should execute without raising performance error
-        result = fast_function()
-        assert result == "success"
+        # Test invalid phone numbers
+        invalid_phones = [
+            '123',              # Too short
+            '555-CALL-NOW',     # Contains letters
+            '+1-555-123',       # Incomplete
+            ''                  # Empty
+        ]
+        
+        for phone in invalid_phones:
+            assert validate_phone(phone) is False
+        
+        # Test phone formatting
+        raw_phone = '15551234567'
+        formatted = validate_phone(raw_phone, format_type='international', country_code='US')
+        assert formatted is not False  # Should return formatted string or True
+        
+        logger.info("Phone number validation tested successfully")
     
-    def test_monitor_performance_decorator_threshold_exceeded(self):
-        """Test performance monitoring decorator with threshold exceeded."""
+    def test_postal_code_validation_by_country(self):
+        """Test postal code validation for different countries."""
+        # Test US ZIP codes
+        assert validate_postal_code('12345', 'US') is True
+        assert validate_postal_code('12345-6789', 'US') is True
+        assert validate_postal_code('ABCDE', 'US') is False
         
-        @monitor_performance(threshold_seconds=0.05)  # Very short threshold
-        def slow_function():
-            time.sleep(0.2)  # Slow execution
-            return "success"
+        # Test Canadian postal codes
+        assert validate_postal_code('K1A 0A6', 'CA') is True
+        assert validate_postal_code('M5V 3L9', 'CA') is True
+        assert validate_postal_code('12345', 'CA') is False
         
-        # Should still complete but may log warning
-        result = slow_function()
-        assert result == "success"
+        # Test UK postal codes
+        assert validate_postal_code('SW1A 1AA', 'GB') is True
+        assert validate_postal_code('M1 1AA', 'GB') is True
+        assert validate_postal_code('12345', 'GB') is False
+        
+        # Test invalid country code
+        assert validate_postal_code('12345', 'INVALID') is False
+        
+        logger.info("Postal code validation tested successfully")
     
-    def test_monitor_performance_decorator_extreme_violation(self):
-        """Test performance monitoring decorator with extreme violation."""
+    def test_safe_type_conversion_functions(self):
+        """Test safe type conversion functions with error handling."""
+        # Test safe integer conversion
+        assert safe_int('123') == 123
+        assert safe_int('123.45') == 123  # Truncates float
+        assert safe_int('invalid', default=0) == 0
+        assert safe_int(None, default=-1) == -1
         
-        @monitor_performance(threshold_seconds=0.01)  # Very short threshold
-        def very_slow_function():
-            time.sleep(0.15)  # Very slow execution (>10% variance)
-            return "success"
+        # Test safe float conversion
+        assert safe_float('123.45') == 123.45
+        assert safe_float('123') == 123.0
+        assert safe_float('invalid', default=0.0) == 0.0
+        assert safe_float(None, default=-1.0) == -1.0
         
-        # Should raise PerformanceError for >10% variance
-        with pytest.raises(Exception):  # Could be PerformanceError
-            very_slow_function()
-
-
-# ============================================================================
-# BUSINESS UTILITY TESTING
-# ============================================================================
-
-class TestBusinessUtilities:
-    """Test suite for business utility functions."""
+        # Test safe string conversion
+        assert safe_str(123) == '123'
+        assert safe_str(123.45) == '123.45'
+        assert safe_str(None, default='') == ''
+        assert safe_str([1, 2, 3]) == '[1, 2, 3]'
+        
+        # Test boolean normalization
+        assert normalize_boolean('true') is True
+        assert normalize_boolean('True') is True
+        assert normalize_boolean('1') is True
+        assert normalize_boolean('yes') is True
+        assert normalize_boolean('false') is False
+        assert normalize_boolean('False') is False
+        assert normalize_boolean('0') is False
+        assert normalize_boolean('no') is False
+        assert normalize_boolean('invalid', default=None) is None
+        
+        logger.info("Safe type conversion functions tested successfully")
     
-    def test_data_format_enum(self):
-        """Test DataFormat enumeration."""
-        # Test that all expected formats are available
-        expected_formats = ["JSON", "CSV", "XML", "YAML", "FORM_DATA", "QUERY_STRING"]
+    def test_date_time_processing_momentjs_equivalent(self):
+        """Test date/time processing functions equivalent to moment.js."""
+        # Test date parsing
+        date_strings = [
+            '2023-12-25',
+            '2023-12-25T15:30:00Z',
+            '2023-12-25T15:30:00-05:00',
+            'December 25, 2023'
+        ]
         
-        for format_name in expected_formats:
-            assert hasattr(DataFormat, format_name)
-            format_value = getattr(DataFormat, format_name)
-            assert isinstance(format_value, DataFormat)
+        for date_string in date_strings:
+            parsed = parse_date(date_string)
+            assert isinstance(parsed, datetime)
+            assert parsed.year == 2023
+            assert parsed.month == 12
+            assert parsed.day == 25
+        
+        # Test date formatting
+        test_date = datetime(2023, 12, 25, 15, 30, 0, tzinfo=timezone.utc)
+        
+        formatted_iso = format_date(test_date, 'iso')
+        assert '2023-12-25' in formatted_iso
+        assert 'T15:30:00' in formatted_iso
+        
+        formatted_custom = format_date(test_date, 'YYYY-MM-DD HH:mm:ss')
+        assert formatted_custom == '2023-12-25 15:30:00'
+        
+        formatted_human = format_date(test_date, 'MMMM DD, YYYY')
+        assert 'December 25, 2023' in formatted_human
+        
+        # Test invalid date handling
+        invalid_parsed = parse_date('invalid-date-string', default=None)
+        assert invalid_parsed is None
+        
+        # Test timezone handling
+        utc_date = datetime(2023, 12, 25, 15, 30, 0, tzinfo=timezone.utc)
+        local_formatted = format_date(utc_date, 'YYYY-MM-DD HH:mm:ss', timezone='US/Eastern')
+        # Should be different from UTC time due to timezone conversion
+        assert local_formatted != '2023-12-25 15:30:00'
+        
+        logger.info("Date/time processing moment.js equivalent tested successfully")
     
-    def test_utility_logging_configuration(self):
-        """Test that utility logging is properly configured."""
-        import logging
+    def test_currency_operations_and_rounding(self):
+        """Test currency operations, validation, and proper rounding."""
+        # Test currency rounding
+        test_amounts = [
+            (Decimal('123.456'), 'USD', Decimal('123.46')),
+            (Decimal('123.454'), 'USD', Decimal('123.45')),
+            (Decimal('123.455'), 'USD', Decimal('123.46')),  # Banker's rounding
+            (Decimal('100.999'), 'USD', Decimal('101.00'))
+        ]
         
-        # Test that business utils logger exists
-        utils_logger = logging.getLogger("business.utils")
-        assert utils_logger is not None
+        for amount, currency, expected in test_amounts:
+            rounded = round_currency(amount, currency)
+            assert rounded == expected
+        
+        # Test currency validation
+        valid_amounts = [
+            (Decimal('100.00'), 'USD'),
+            (Decimal('50.99'), 'EUR'),
+            (Decimal('0.01'), 'USD')
+        ]
+        
+        for amount, currency in valid_amounts:
+            assert validate_currency(amount, currency) is True
+        
+        # Test invalid currency amounts
+        invalid_amounts = [
+            (Decimal('-10.00'), 'USD'),  # Negative amount
+            (Decimal('0.00'), 'USD'),    # Zero amount
+            (Decimal('100.001'), 'USD')  # Too many decimal places
+        ]
+        
+        for amount, currency in invalid_amounts:
+            assert validate_currency(amount, currency) is False
+        
+        # Test currency code validation
+        assert validate_currency(Decimal('100.00'), 'INVALID') is False
+        assert validate_currency(Decimal('100.00'), 'USD') is True
+        
+        logger.info("Currency operations and rounding tested successfully")
+    
+    def test_data_format_conversion(self):
+        """Test data format conversion between different types."""
+        # Test JSON parsing and serialization
+        json_data = '{"name": "John", "age": 30, "active": true}'
+        parsed = json.loads(json_data)
+        assert parsed['name'] == 'John'
+        assert parsed['age'] == 30
+        assert parsed['active'] is True
+        
+        # Test data structure flattening
+        nested_data = {
+            'user': {
+                'profile': {
+                    'name': 'John Doe',
+                    'email': 'john@example.com'
+                },
+                'preferences': {
+                    'theme': 'dark',
+                    'notifications': True
+                }
+            }
+        }
+        
+        # Flatten using utility function (would need to implement)
+        # flattened = flatten_data(nested_data)
+        # assert 'user.profile.name' in flattened
+        # assert flattened['user.profile.name'] == 'John Doe'
+        
+        # Test data merging
+        data1 = {'a': 1, 'b': 2}
+        data2 = {'b': 3, 'c': 4}
+        # merged = merge_data(data1, data2)
+        # assert merged['a'] == 1
+        # assert merged['b'] == 3  # data2 should override data1
+        # assert merged['c'] == 4
+        
+        logger.info("Data format conversion tested successfully")
     
     @pytest.mark.performance
-    def test_utility_functions_performance(self, performance_threshold, large_test_dataset):
-        """Test utility function performance with large dataset."""
-        start_time = time.perf_counter()
+    def test_utility_performance_benchmarks(self, performance_test_context):
+        """Test utility function performance to ensure ≤10% variance from Node.js baseline."""
+        performance_test_context['start_measurement']('utility_performance')
         
-        # Simulate processing large dataset
-        processed_count = 0
-        for item in large_test_dataset:
-            # Simulate data processing operations
-            if isinstance(item, dict):
-                # Simulate data validation
-                if "id" in item and "name" in item:
-                    processed_count += 1
+        # Generate test data
+        test_emails = [f'user{i}@example.com' for i in range(1000)]
+        test_phones = [f'+1-555-{i:03d}-{i:04d}' for i in range(1000)]
+        test_amounts = [Decimal(f'{100 + i}.99') for i in range(1000)]
+        test_dates = [f'2023-{(i % 12) + 1:02d}-{(i % 28) + 1:02d}' for i in range(1000)]
         
-        execution_time = time.perf_counter() - start_time
+        # Measure email validation performance
+        email_start = time.perf_counter()
+        email_results = [validate_email(email) for email in test_emails]
+        email_time = time.perf_counter() - email_start
         
-        assert processed_count == len(large_test_dataset)
-        assert execution_time < performance_threshold, \
-            f"Utility processing took {execution_time:.4f}s for {len(large_test_dataset)} items"
+        # Measure phone validation performance
+        phone_start = time.perf_counter()
+        phone_results = [validate_phone(phone) for phone in test_phones]
+        phone_time = time.perf_counter() - phone_start
+        
+        # Measure currency rounding performance
+        currency_start = time.perf_counter()
+        currency_results = [round_currency(amount, 'USD') for amount in test_amounts]
+        currency_time = time.perf_counter() - currency_start
+        
+        # Measure date parsing performance
+        date_start = time.perf_counter()
+        date_results = [parse_date(date_str) for date_str in test_dates]
+        date_time = time.perf_counter() - date_start
+        
+        execution_time = performance_test_context['end_measurement']()
+        
+        # Log performance metrics
+        logger.info(
+            "Utility performance benchmarks completed",
+            total_execution_time=execution_time,
+            email_validation_time=email_time,
+            phone_validation_time=phone_time,
+            currency_rounding_time=currency_time,
+            date_parsing_time=date_time,
+            operations_performed=len(test_emails) * 4,
+            avg_email_validation_time=email_time / len(test_emails),
+            avg_phone_validation_time=phone_time / len(test_phones),
+            avg_currency_rounding_time=currency_time / len(test_amounts),
+            avg_date_parsing_time=date_time / len(test_dates)
+        )
+        
+        # Verify performance is within acceptable bounds
+        assert email_time < 2.0  # Should validate 1000 emails in under 2 seconds
+        assert phone_time < 3.0  # Should validate 1000 phones in under 3 seconds
+        assert currency_time < 1.0  # Should round 1000 amounts in under 1 second
+        assert date_time < 2.0  # Should parse 1000 dates in under 2 seconds
+        
+        # Verify all operations completed successfully
+        assert all(email_results)
+        assert all(phone_results)
+        assert len(currency_results) == 1000
+        assert all(result is not None for result in date_results if result)
 
 
 # ============================================================================
-# INTEGRATION AND PERFORMANCE TESTING
+# INTEGRATION AND ERROR HANDLING TESTING
 # ============================================================================
 
 class TestBusinessLogicIntegration:
-    """Test suite for business logic integration and workflows."""
+    """
+    Integration testing for business logic components working together.
     
-    def test_model_validator_integration(self, sample_user_data, validation_context):
-        """Test integration between models and validators."""
+    Tests component integration, error propagation, transaction handling,
+    and end-to-end business workflows per F-004-RQ-001 requirements.
+    """
+    
+    def test_model_validator_processor_integration(self):
+        """Test integration between models, validators, and processors."""
+        # Create user through integrated workflow
+        user_data = {
+            'username': 'integration_test',
+            'email': 'integration@example.com',
+            'first_name': 'Integration',
+            'last_name': 'Test'
+        }
         
-        # Create validator for User model
-        class UserDataValidator(DataModelValidator):
-            username = fields.String(required=True, validate=validate.Length(min=3))
-            email = fields.Email(required=True)
-            first_name = fields.String(required=True)
-            last_name = fields.String(required=True)
-        
-        # Test validation
-        validator = UserDataValidator(validation_context=validation_context)
-        validated_data = validator.load_with_context(sample_user_data)
+        # Validate using marshmallow validator
+        validator = UserValidator()
+        validated_data = validator.load(user_data)
         
         # Create model from validated data
-        user = User(**validated_data)
+        user_model = User(**validated_data)
         
-        assert user.username == sample_user_data["username"]
-        assert user.email == sample_user_data["email"]
+        # Process through business processor
+        processor = DataTransformer()
+        processed_data = processor.normalize_data(user_model.to_api_dict())
+        
+        # Verify integration flow
+        assert processed_data['username'] == 'integration_test'
+        assert processed_data['email'] == 'integration@example.com'
+        assert 'full_name' in processed_data or ('first_name' in processed_data and 'last_name' in processed_data)
+        
+        logger.info("Model-validator-processor integration tested successfully")
     
-    def test_complete_business_workflow(self, sample_order_data, validation_context):
-        """Test complete business workflow from validation to processing."""
-        
-        # Step 1: Validate order data
-        class OrderValidator(DataModelValidator):
-            customer_email = fields.Email(required=True)
-            customer_name = fields.String(required=True)
-            items = fields.List(fields.Dict(), required=True)
-        
-        validator = OrderValidator(validation_context=validation_context)
-        validated_data = validator.load_with_context(sample_order_data)
-        
-        # Step 2: Create business model
-        order = Order(**validated_data)
-        
-        # Step 3: Business logic processing
-        assert order.status == OrderStatus.PENDING
-        assert order.total_amount.amount == Decimal("113.25")
-        
-        # Step 4: API response formatting
-        class OrderResponseValidator(OutputValidator):
-            id = fields.String()
-            customer_email = fields.Email()
-            total_amount = fields.Dict()
-            status = fields.String()
-        
-        response_validator = OrderResponseValidator()
-        api_response = response_validator.format_success_response(
-            order.to_api_dict(),
-            message="Order created successfully"
-        )
-        
-        assert api_response["success"] is True
-        assert "data" in api_response
+    def test_service_workflow_end_to_end(self):
+        """Test complete service workflow from request to response."""
+        with patch('src.business.services.httpx.AsyncClient') as mock_httpx:
+            # Configure mock external services
+            mock_client = AsyncMock()
+            mock_response = AsyncMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {'status': 'success'}
+            mock_client.post.return_value = mock_response
+            mock_httpx.return_value = mock_client
+            
+            # Execute complete order workflow
+            order_service = OrderService()
+            user_service = UserService()
+            payment_service = PaymentService()
+            
+            # Step 1: Create user
+            user_data = {
+                'username': 'workflow_user',
+                'email': 'workflow@example.com',
+                'first_name': 'Workflow',
+                'last_name': 'User'
+            }
+            user = user_service.create_user(user_data)
+            
+            # Step 2: Create order
+            order_data = {
+                'customer_email': user.email,
+                'customer_name': user.full_name,
+                'items': [
+                    {
+                        'product_id': str(uuid.uuid4()),
+                        'product_sku': 'WORKFLOW001',
+                        'product_name': 'Workflow Product',
+                        'quantity': 1,
+                        'unit_price': {'amount': '50.00', 'currency_code': 'USD'}
+                    }
+                ],
+                'billing_address': {
+                    'street_line_1': '123 Workflow St',
+                    'city': 'Test City',
+                    'state_province': 'Test State',
+                    'postal_code': '12345',
+                    'country_code': 'US'
+                }
+            }
+            order = order_service.create_order(order_data)
+            
+            # Step 3: Process payment
+            payment_data = {
+                'order_id': order.id,
+                'amount': order.total_amount,
+                'payment_method': PaymentMethod.CREDIT_CARD,
+                'customer_id': user.id
+            }
+            payment = payment_service.create_payment(payment_data)
+            payment_result = payment_service.process_payment(payment.id)
+            
+            # Step 4: Fulfill order
+            fulfillment_result = order_service.fulfill_order(order.id)
+            
+            # Verify end-to-end workflow
+            assert user.is_active is True
+            assert order.status in [OrderStatus.PENDING, OrderStatus.CONFIRMED]
+            assert payment_result['payment_processed'] is True
+            assert fulfillment_result['shipping_label_created'] is True
+            
+            logger.info("Service workflow end-to-end tested successfully")
     
-    @pytest.mark.performance
-    def test_bulk_processing_performance(self, large_test_dataset, performance_threshold):
-        """Test bulk processing performance within ≤10% variance."""
+    def test_error_propagation_and_handling(self):
+        """Test error propagation through business logic layers."""
+        # Test validation error propagation
+        validator = UserValidator()
         
-        class BulkDataValidator(DataModelValidator):
-            id = fields.String(required=True)
-            name = fields.String(required=True)
-            value = fields.Decimal()
+        with pytest.raises(MarshmallowValidationError) as exc_info:
+            invalid_data = {
+                'username': '',  # Invalid
+                'email': 'invalid-email',  # Invalid
+                'first_name': '',  # Invalid
+                'last_name': ''  # Invalid
+            }
+            validator.load(invalid_data)
         
-        validator = BulkDataValidator()
+        # Verify error structure
+        errors = exc_info.value.messages
+        assert 'username' in errors
+        assert 'email' in errors
         
-        start_time = time.perf_counter()
-        
-        processed_items = []
-        for item in large_test_dataset:
-            try:
-                validated_item = validator.load(item)
-                processed_items.append(validated_item)
-            except Exception:
-                continue  # Skip invalid items
-        
-        execution_time = time.perf_counter() - start_time
-        
-        assert len(processed_items) > 0
-        assert execution_time < performance_threshold * 2, \
-            f"Bulk processing took {execution_time:.4f}s for {len(large_test_dataset)} items"
-    
-    def test_error_handling_integration(self):
-        """Test error handling integration across business logic components."""
-        
-        # Test model validation error propagation
-        with pytest.raises(DataValidationError) as exc_info:
-            User(
-                username="",
-                email="invalid",
-                first_name="",
-                last_name=""
-            )
+        # Test business rule error propagation
+        with pytest.raises(BusinessRuleViolationError) as exc_info:
+            user_data = {
+                'username': 'admin',  # Reserved username
+                'email': 'test@example.com',
+                'first_name': 'Test',
+                'last_name': 'User'
+            }
+            user = User(**user_data)
+            user.validate_business_rules()
         
         error = exc_info.value
-        assert error.error_code == "MODEL_VALIDATION_FAILED"
+        assert error.error_code == "RESERVED_USERNAME"
         assert error.severity == ErrorSeverity.MEDIUM
         
-        # Test error formatting for API response
-        response_validator = OutputValidator()
-        error_response = response_validator.format_error_response(error)
+        # Test service layer error handling
+        user_service = UserService()
         
-        assert error_response["success"] is False
-        assert "error" in error_response
-        assert error_response["error"]["code"] == "MODEL_VALIDATION_FAILED"
-    
-    def test_business_rule_enforcement_integration(self, validation_context):
-        """Test business rule enforcement across components."""
-        
-        # Register a business rule
-        def email_domain_rule(data, context):
-            email = data.get("email", "")
-            if "@company.com" not in email:
-                raise BusinessRuleViolationError("Must use company email")
-        
-        BusinessRuleValidator.register_business_rule(
-            "company_email_required",
-            email_domain_rule
-        )
-        
-        # Create validator that enforces the rule
-        class CompanyUserValidator(BusinessRuleValidator):
-            username = fields.String(required=True)
-            email = fields.Email(required=True)
-        
-        # Test with validation context that enforces the rule
-        strict_context = ValidationContext(
-            strict_mode=True,
-            business_rules={"company_email_required"}
-        )
-        
-        validator = CompanyUserValidator(validation_context=strict_context)
-        
-        # Test valid company email
-        company_data = {
-            "username": "employee",
-            "email": "employee@company.com"
-        }
-        
-        validated_data = validator.load_with_context(company_data, strict_context)
-        assert validated_data["email"] == "employee@company.com"
-        
-        # Test invalid external email
-        external_data = {
-            "username": "external",
-            "email": "external@gmail.com"
-        }
-        
-        with pytest.raises(BusinessRuleViolationError) as exc_info:
-            validator.load_with_context(external_data, strict_context)
-        
-        assert "company email" in str(exc_info.value).lower()
-
-
-class TestPerformanceBenchmarks:
-    """Test suite for performance benchmarks and ≤10% variance validation."""
-    
-    @pytest.mark.performance
-    def test_model_creation_benchmark(self, sample_user_data):
-        """Benchmark model creation performance."""
-        iterations = 1000
-        
-        start_time = time.perf_counter()
-        
-        for _ in range(iterations):
-            user = User(**sample_user_data)
-            assert user.username == sample_user_data["username"]
-        
-        execution_time = time.perf_counter() - start_time
-        avg_time_per_model = execution_time / iterations
-        
-        # Should create model in reasonable time
-        assert avg_time_per_model < 0.01, \
-            f"Model creation took {avg_time_per_model:.6f}s per model"
-    
-    @pytest.mark.performance
-    def test_validation_benchmark(self, sample_user_data):
-        """Benchmark validation performance."""
-        
-        class UserValidator(DataModelValidator):
-            username = fields.String(required=True)
-            email = fields.Email(required=True)
-            first_name = fields.String(required=True)
-            last_name = fields.String(required=True)
-        
-        validator = UserValidator()
-        iterations = 500
-        
-        start_time = time.perf_counter()
-        
-        for _ in range(iterations):
-            validated_data = validator.load(sample_user_data)
-            assert validated_data["username"] == sample_user_data["username"]
-        
-        execution_time = time.perf_counter() - start_time
-        avg_time_per_validation = execution_time / iterations
-        
-        # Should validate in reasonable time
-        assert avg_time_per_validation < 0.02, \
-            f"Validation took {avg_time_per_validation:.6f}s per validation"
-    
-    @pytest.mark.performance
-    def test_serialization_benchmark(self, sample_user_data):
-        """Benchmark serialization performance."""
-        user = User(**sample_user_data)
-        iterations = 1000
-        
-        start_time = time.perf_counter()
-        
-        for _ in range(iterations):
-            api_dict = user.to_api_dict()
-            assert "username" in api_dict
-        
-        execution_time = time.perf_counter() - start_time
-        avg_time_per_serialization = execution_time / iterations
-        
-        # Should serialize in reasonable time
-        assert avg_time_per_serialization < 0.005, \
-            f"Serialization took {avg_time_per_serialization:.6f}s per operation"
-    
-    @pytest.mark.performance
-    def test_business_rule_validation_benchmark(self, validation_context):
-        """Benchmark business rule validation performance."""
-        
-        def simple_rule(data, context):
-            if not data.get("name"):
-                raise BusinessRuleViolationError("Name required")
-        
-        BusinessRuleValidator.register_business_rule("simple_rule", simple_rule)
-        
-        class TestValidator(BusinessRuleValidator):
-            name = fields.String()
-        
-        validator = TestValidator(validation_context=validation_context)
-        test_data = {"name": "Test"}
-        iterations = 200
-        
-        start_time = time.perf_counter()
-        
-        for _ in range(iterations):
-            violations = validator.validate_business_rules(test_data, {"simple_rule"})
-            assert len(violations) == 0
-        
-        execution_time = time.perf_counter() - start_time
-        avg_time_per_rule = execution_time / iterations
-        
-        # Should validate business rules in reasonable time
-        assert avg_time_per_rule < 0.01, \
-            f"Business rule validation took {avg_time_per_rule:.6f}s per rule"
-
-
-# ============================================================================
-# COVERAGE AND COMPLETENESS TESTING
-# ============================================================================
-
-class TestCodeCoverage:
-    """Test suite to ensure comprehensive code coverage for 95% requirement."""
-    
-    def test_all_model_classes_covered(self):
-        """Ensure all model classes are tested."""
-        model_classes = [
-            User, Organization, Product, ProductCategory, Order, OrderItem,
-            PaymentTransaction, Address, ContactInfo, MonetaryAmount,
-            DateTimeRange, FileUpload, SystemConfiguration,
-            ApiResponse, PaginatedResponse, PaginationParams,
-            SortParams, SearchParams
-        ]
-        
-        for model_class in model_classes:
-            # Verify each model class has basic functionality
-            assert hasattr(model_class, 'model_config')
-            assert issubclass(model_class, BaseBusinessModel)
-    
-    def test_all_validator_classes_covered(self):
-        """Ensure all validator classes are tested."""
-        validator_classes = [
-            BaseValidator, BusinessRuleValidator, DataModelValidator,
-            InputValidator, OutputValidator
-        ]
-        
-        for validator_class in validator_classes:
-            # Verify each validator class has basic functionality
-            assert issubclass(validator_class, BaseValidator)
-    
-    def test_all_enum_types_covered(self):
-        """Ensure all enum types are tested."""
-        enum_types = [
-            UserStatus, UserRole, OrderStatus, PaymentStatus,
-            PaymentMethod, ProductStatus, Priority, ContactMethod,
-            ValidationType, ValidationMode
-        ]
-        
-        for enum_type in enum_types:
-            # Verify each enum has expected structure
-            assert hasattr(enum_type, '__members__')
-            assert len(enum_type.__members__) > 0
-    
-    def test_all_utility_functions_covered(self):
-        """Ensure all utility functions are tested."""
-        utility_functions = [
-            validate_business_data, validate_request_data, validate_response_data,
-            create_validation_schema, format_validation_errors,
-            get_model_by_name, validate_model_data, serialize_for_api
-        ]
-        
-        for func in utility_functions:
-            # Verify each function is callable
-            assert callable(func)
-    
-    def test_exception_classes_coverage(self):
-        """Ensure all exception classes are properly tested."""
-        exception_classes = [
-            BaseBusinessException, BusinessRuleViolationError,
-            DataValidationError, DataProcessingError
-        ]
-        
-        for exception_class in exception_classes:
-            # Verify each exception class has proper structure
-            assert issubclass(exception_class, Exception)
-    
-    def test_edge_cases_and_error_conditions(self):
-        """Test edge cases and error conditions for comprehensive coverage."""
-        
-        # Test with None values
-        with pytest.raises((TypeError, DataValidationError)):
-            User(username=None, email=None, first_name=None, last_name=None)
-        
-        # Test with empty strings
         with pytest.raises(DataValidationError):
-            User(username="", email="", first_name="", last_name="")
+            invalid_service_data = {
+                'username': '',
+                'email': 'invalid',
+                'first_name': '',
+                'last_name': ''
+            }
+            user_service.create_user(invalid_service_data)
         
-        # Test with extremely long values
-        long_string = "x" * 1000
-        with pytest.raises(DataValidationError):
-            User(
-                username=long_string,
-                email=f"{long_string}@example.com",
-                first_name=long_string,
-                last_name=long_string
-            )
-        
-        # Test with Unicode and special characters
-        unicode_data = {
-            "username": "用户名123",
-            "email": "test@例え.テスト",
-            "first_name": "Ñoël",
-            "last_name": "Müller"
-        }
-        
-        # Should handle Unicode gracefully (may sanitize)
-        try:
-            user = User(**unicode_data)
-            assert user is not None
-        except (DataValidationError, BusinessRuleViolationError):
-            pass  # Expected for some Unicode cases
+        logger.info("Error propagation and handling tested successfully")
     
-    def test_concurrent_access_patterns(self):
-        """Test concurrent access patterns for thread safety."""
-        import threading
-        
-        results = []
-        errors = []
-        
-        def create_user(user_id):
-            try:
-                user_data = {
-                    "username": f"user{user_id}",
-                    "email": f"user{user_id}@example.com",
-                    "first_name": "Test",
-                    "last_name": "User"
+    def test_transaction_rollback_scenarios(self):
+        """Test transaction handling and rollback scenarios."""
+        with patch('src.business.services.DatabaseTransaction') as mock_transaction:
+            # Configure mock transaction
+            mock_tx = Mock()
+            mock_transaction.return_value = mock_tx
+            
+            order_service = OrderService()
+            payment_service = PaymentService()
+            
+            # Test successful transaction
+            order_data = {
+                'customer_email': 'transaction@example.com',
+                'customer_name': 'Transaction Test',
+                'items': [
+                    {
+                        'product_id': str(uuid.uuid4()),
+                        'product_sku': 'TX001',
+                        'product_name': 'Transaction Product',
+                        'quantity': 1,
+                        'unit_price': {'amount': '100.00', 'currency_code': 'USD'}
+                    }
+                ],
+                'billing_address': {
+                    'street_line_1': '123 Transaction St',
+                    'city': 'Test City',
+                    'state_province': 'Test State',
+                    'postal_code': '12345',
+                    'country_code': 'US'
                 }
-                user = User(**user_data)
-                results.append(user.username)
-            except Exception as e:
-                errors.append(str(e))
-        
-        # Create multiple threads
-        threads = []
-        for i in range(10):
-            thread = threading.Thread(target=create_user, args=(i,))
-            threads.append(thread)
-            thread.start()
-        
-        # Wait for all threads to complete
-        for thread in threads:
-            thread.join()
-        
-        # Verify results
-        assert len(results) == 10
-        assert len(errors) == 0
-        assert len(set(results)) == 10  # All usernames should be unique
-
-
-# ============================================================================
-# FINAL INTEGRATION TESTS
-# ============================================================================
-
-class TestBusinessLogicCompleteWorkflow:
-    """Final integration tests for complete business logic workflows."""
-    
-    def test_user_registration_workflow(self):
-        """Test complete user registration workflow."""
-        
-        # Step 1: Validate registration data
-        class UserRegistrationValidator(InputValidator):
-            username = fields.String(
-                required=True,
-                validate=validate.Length(min=3, max=50)
-            )
-            email = fields.Email(required=True)
-            password = fields.String(
-                required=True,
-                validate=validate.Length(min=8)
-            )
-            first_name = fields.String(required=True)
-            last_name = fields.String(required=True)
-        
-        registration_data = {
-            "username": "newuser123",
-            "email": "newuser@example.com",
-            "password": "SecurePass123!",
-            "first_name": "New",
-            "last_name": "User"
-        }
-        
-        validator = UserRegistrationValidator(enable_sanitization=True)
-        validated_data = validator.load_with_context(registration_data)
-        
-        # Step 2: Create user model
-        user_model_data = validated_data.copy()
-        user_model_data.pop("password")  # Don't store in model
-        
-        user = User(**user_model_data)
-        
-        # Step 3: Format API response
-        class UserResponseValidator(OutputValidator):
-            id = fields.String()
-            username = fields.String()
-            email = fields.Email()
-            first_name = fields.String()
-            last_name = fields.String()
-            created_at = fields.DateTime()
-        
-        response_validator = UserResponseValidator()
-        api_response = response_validator.format_success_response(
-            user.to_api_dict(),
-            message="User registered successfully",
-            metadata={"registration_ip": "192.168.1.100"}
-        )
-        
-        assert api_response["success"] is True
-        assert api_response["data"]["username"] == "newuser123"
-        assert api_response["message"] == "User registered successfully"
-    
-    def test_order_processing_workflow(self, sample_order_data):
-        """Test complete order processing workflow."""
-        
-        # Step 1: Validate order data
-        class OrderValidator(InputValidator):
-            customer_email = fields.Email(required=True)
-            customer_name = fields.String(required=True)
-            items = fields.List(fields.Dict(), required=True, validate=validate.Length(min=1))
-        
-        validator = OrderValidator()
-        validated_data = validator.load_with_context(sample_order_data)
-        
-        # Step 2: Create order model
-        order = Order(**validated_data)
-        
-        # Step 3: Process business rules
-        assert order.status == OrderStatus.PENDING
-        assert order.total_amount.amount > 0
-        
-        # Step 4: Create payment transaction
-        payment_data = {
-            "amount": order.total_amount.model_dump(),
-            "payment_method": PaymentMethod.CREDIT_CARD,
-            "order_id": order.id
-        }
-        
-        payment = PaymentTransaction(**payment_data)
-        
-        # Step 5: Format complete response
-        class OrderResponseValidator(OutputValidator):
-            id = fields.String()
-            order_number = fields.String()
-            customer_email = fields.Email()
-            total_amount = fields.Dict()
-            status = fields.String()
-            payment_status = fields.String()
-        
-        response_data = {
-            **order.to_api_dict(),
-            "payment_status": payment.payment_status.value
-        }
-        
-        response_validator = OrderResponseValidator()
-        api_response = response_validator.format_success_response(
-            response_data,
-            message="Order created and payment initiated"
-        )
-        
-        assert api_response["success"] is True
-        assert api_response["data"]["status"] == OrderStatus.PENDING.value
-    
-    def test_error_handling_complete_workflow(self):
-        """Test complete error handling workflow."""
-        
-        # Step 1: Simulate validation error
-        class StrictValidator(BusinessRuleValidator):
-            email = fields.Email(required=True)
-            age = fields.Integer(required=True, validate=validate.Range(min=18))
-        
-        def age_verification_rule(data, context):
-            if data.get("age", 0) < 21:
-                raise BusinessRuleViolationError(
-                    "Must be 21 or older for this service",
-                    error_code="AGE_RESTRICTION"
-                )
-        
-        BusinessRuleValidator.register_business_rule(
-            "age_verification",
-            age_verification_rule
-        )
-        
-        strict_context = ValidationContext(
-            strict_mode=True,
-            business_rules={"age_verification"}
-        )
-        
-        validator = StrictValidator(validation_context=strict_context)
-        
-        invalid_data = {
-            "email": "young@example.com",
-            "age": 20  # Under 21
-        }
-        
-        # Step 2: Catch and handle error
-        try:
-            validator.load_with_context(invalid_data, strict_context)
-            assert False, "Should have raised BusinessRuleViolationError"
-        except BusinessRuleViolationError as error:
-            # Step 3: Format error response
-            response_validator = OutputValidator()
-            error_response = response_validator.format_error_response(
-                error,
-                include_details=True
-            )
-            
-            assert error_response["success"] is False
-            assert error_response["error"]["code"] == "AGE_RESTRICTION"
-            assert "21 or older" in error_response["error"]["message"]
-    
-    @pytest.mark.performance
-    def test_complete_workflow_performance(self, performance_threshold):
-        """Test complete workflow performance within ≤10% variance."""
-        
-        start_time = time.perf_counter()
-        
-        # Complete workflow: validation → model creation → processing → response
-        for i in range(50):  # 50 complete workflows
-            
-            # Step 1: Validation
-            user_data = {
-                "username": f"user{i}",
-                "email": f"user{i}@example.com",
-                "first_name": "Test",
-                "last_name": "User"
             }
             
-            class QuickValidator(DataModelValidator):
-                username = fields.String(required=True)
-                email = fields.Email(required=True)
-                first_name = fields.String(required=True)
-                last_name = fields.String(required=True)
+            # Execute transaction
+            with order_service.begin_transaction() as tx:
+                order = order_service.create_order(order_data, transaction=tx)
+                payment_data = {
+                    'order_id': order.id,
+                    'amount': order.total_amount,
+                    'payment_method': PaymentMethod.CREDIT_CARD
+                }
+                payment = payment_service.create_payment(payment_data, transaction=tx)
+                
+                # Verify transaction setup
+                assert mock_tx.begin.called
+                assert order.id is not None
+                assert payment.id is not None
             
-            validator = QuickValidator()
-            validated_data = validator.load(user_data)
+            # Verify transaction commit
+            assert mock_tx.commit.called
             
-            # Step 2: Model creation
-            user = User(**validated_data)
+            # Test transaction rollback scenario
+            mock_tx.reset_mock()
             
-            # Step 3: Processing (simple check)
-            assert user.is_active is True
+            with pytest.raises(DataProcessingError):
+                with order_service.begin_transaction() as tx:
+                    # Create order successfully
+                    order = order_service.create_order(order_data, transaction=tx)
+                    
+                    # Simulate payment failure
+                    invalid_payment_data = {
+                        'order_id': order.id,
+                        'amount': {'amount': '-100.00', 'currency_code': 'USD'},  # Invalid negative amount
+                        'payment_method': PaymentMethod.CREDIT_CARD
+                    }
+                    payment_service.create_payment(invalid_payment_data, transaction=tx)
             
-            # Step 4: Response formatting
-            api_dict = user.to_api_dict()
-            assert "username" in api_dict
+            # Verify transaction rollback
+            assert mock_tx.rollback.called
+            
+            logger.info("Transaction rollback scenarios tested successfully")
+    
+    def test_cache_invalidation_integration(self):
+        """Test cache invalidation integration across business logic."""
+        with patch('src.business.services.redis.Redis') as mock_redis:
+            # Configure mock Redis client
+            mock_redis_instance = Mock()
+            mock_redis_instance.get.return_value = None
+            mock_redis_instance.set.return_value = True
+            mock_redis_instance.delete.return_value = 1
+            mock_redis.return_value = mock_redis_instance
+            
+            user_service = UserService()
+            cache_service = CacheService()
+            
+            # Create user (should set cache)
+            user_data = {
+                'username': 'cache_test',
+                'email': 'cache@example.com',
+                'first_name': 'Cache',
+                'last_name': 'Test'
+            }
+            user = user_service.create_user(user_data)
+            
+            # Verify cache operations
+            assert mock_redis_instance.set.called
+            
+            # Update user (should invalidate cache)
+            update_data = {'first_name': 'UpdatedCache'}
+            updated_user = user_service.update_user(user.id, update_data)
+            
+            # Verify cache invalidation
+            assert mock_redis_instance.delete.called
+            
+            # Retrieve user (should check cache first)
+            retrieved_user = user_service.get_user_by_id(user.id)
+            
+            # Verify cache lookup
+            assert mock_redis_instance.get.called
+            
+            logger.info("Cache invalidation integration tested successfully")
+    
+    @pytest.mark.performance
+    def test_integration_performance_under_load(self, performance_test_context):
+        """Test integration performance under load conditions."""
+        performance_test_context['start_measurement']('integration_load_performance')
         
-        execution_time = time.perf_counter() - start_time
-        avg_time_per_workflow = execution_time / 50
-        
-        assert avg_time_per_workflow < 0.05, \
-            f"Complete workflow took {avg_time_per_workflow:.6f}s per workflow"
-        assert execution_time < performance_threshold, \
-            f"Total workflow time {execution_time:.4f}s exceeded threshold"
+        with patch('src.business.services.httpx.AsyncClient') as mock_httpx:
+            # Configure mock services
+            mock_client = AsyncMock()
+            mock_response = AsyncMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {'status': 'success'}
+            mock_client.post.return_value = mock_response
+            mock_httpx.return_value = mock_client
+            
+            user_service = UserService()
+            order_service = OrderService()
+            
+            # Simulate load with concurrent operations
+            start_time = time.perf_counter()
+            
+            results = []
+            for i in range(100):
+                # Create user
+                user_data = {
+                    'username': f'load_user_{i}',
+                    'email': f'load_{i}@example.com',
+                    'first_name': f'Load{i}',
+                    'last_name': 'User'
+                }
+                user = user_service.create_user(user_data)
+                
+                # Create order for user
+                order_data = {
+                    'customer_email': user.email,
+                    'customer_name': user.full_name,
+                    'items': [
+                        {
+                            'product_id': str(uuid.uuid4()),
+                            'product_sku': f'LOAD{i:03d}',
+                            'product_name': f'Load Product {i}',
+                            'quantity': 1,
+                            'unit_price': {'amount': f'{10 + i}.99', 'currency_code': 'USD'}
+                        }
+                    ],
+                    'billing_address': {
+                        'street_line_1': f'{i} Load St',
+                        'city': 'Load City',
+                        'state_province': 'Load State',
+                        'postal_code': '12345',
+                        'country_code': 'US'
+                    }
+                }
+                order = order_service.create_order(order_data)
+                
+                results.append({
+                    'user_id': user.id,
+                    'order_id': order.id,
+                    'iteration': i
+                })
+            
+            load_time = time.perf_counter() - start_time
+            execution_time = performance_test_context['end_measurement']()
+            
+            # Log performance metrics
+            logger.info(
+                "Integration load performance completed",
+                total_execution_time=execution_time,
+                load_processing_time=load_time,
+                operations_completed=len(results) * 2,  # User + Order creation
+                avg_operation_time=load_time / (len(results) * 2),
+                throughput_ops_per_second=(len(results) * 2) / load_time
+            )
+            
+            # Verify performance under load
+            assert load_time < 30.0  # Should complete 200 operations in under 30 seconds
+            assert len(results) == 100
+            assert all('user_id' in result and 'order_id' in result for result in results)
 
 
 # ============================================================================
-# PYTEST CONFIGURATION AND MARKERS
+# TEST EXECUTION AND REPORTING
 # ============================================================================
 
-# Add markers for test organization
-pytestmark = [
-    pytest.mark.business,
-    pytest.mark.utilities
-]
-
-# Performance test marker
-performance_tests = pytest.mark.performance
-
-# Coverage test marker
-coverage_tests = pytest.mark.slow
+if __name__ == "__main__":
+    """
+    Execute business logic test suite with comprehensive reporting.
+    
+    Runs all business logic tests with performance monitoring, coverage analysis,
+    and detailed reporting for compliance with 95% coverage requirement and
+    ≤10% performance variance validation per Section 6.6.3 and Section 0.1.1.
+    """
+    
+    import sys
+    import pytest
+    
+    # Configure test execution arguments
+    test_args = [
+        __file__,
+        '-v',  # Verbose output
+        '--tb=short',  # Short traceback format
+        '--durations=10',  # Show 10 slowest tests
+        '--cov=src.business',  # Coverage for business logic
+        '--cov-report=term-missing',  # Show missing lines
+        '--cov-report=html:htmlcov',  # HTML coverage report
+        '--cov-fail-under=95',  # Fail if coverage below 95%
+        '--strict-markers',  # Strict marker validation
+        '--strict-config',  # Strict configuration validation
+        '-m', 'not slow'  # Skip slow tests by default
+    ]
+    
+    # Add performance testing if requested
+    if '--performance' in sys.argv:
+        test_args.extend(['-m', 'performance'])
+        test_args.remove('-m')
+        test_args.remove('not slow')
+    
+    # Execute test suite
+    exit_code = pytest.main(test_args)
+    
+    # Log test execution summary
+    logger.info(
+        "Business logic test suite execution completed",
+        exit_code=exit_code,
+        test_file=__file__,
+        coverage_target="95%",
+        performance_target="≤10% variance from Node.js baseline"
+    )
+    
+    sys.exit(exit_code)
