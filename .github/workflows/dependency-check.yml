@@ -1,1050 +1,1689 @@
-name: Dependency Security & Compliance Check
+# GitHub Actions Dependency Management and Security Validation Workflow
+# =====================================================================
+#
+# Comprehensive dependency management pipeline implementing pip-tools dependency
+# pinning validation, comprehensive vulnerability scanning with safety and pip-audit,
+# license compliance checking, and automated dependency update management with
+# security approval workflows per Section 8.5.1-8.5.3 requirements.
+#
+# This workflow ensures enterprise-grade dependency security through:
+# - Deterministic dependency resolution validation with pip-tools 7.3+
+# - Comprehensive vulnerability scanning with safety 3.0+ and pip-audit 2.7+
+# - License compliance validation with enterprise policy enforcement
+# - Automated dependency update detection with security impact assessment
+# - Security team notification for critical vulnerability findings
+# - Dependency security baseline validation and trend analysis
+# - Automated security approval workflow for dependency updates
+#
+# Key Features:
+# - Zero-tolerance policy for critical security vulnerabilities in dependencies
+# - Automated dependency update PR creation with security assessment
+# - License compliance enforcement with legal team integration
+# - Historical vulnerability tracking and trend analysis
+# - Security baseline validation for deployment gates
+# - Enterprise notification integration for critical findings
+# - Comprehensive dependency security reporting and compliance documentation
 
-# Dependency management and security validation workflow implementing pip-tools dependency 
-# pinning validation, comprehensive vulnerability scanning with safety and pip-audit, 
-# license compliance checking, and automated dependency update management with security 
-# approval workflows per Section 8.5.1 and 6.6.3 of technical specification.
+name: Dependency Security Validation
+
+# Trigger Configuration
+# ====================
+# Comprehensive trigger configuration for dependency security validation
+# across multiple scenarios including scheduled scans, pull requests, and manual execution
 
 on:
-  # Scheduled dependency security scanning
+  # Scheduled dependency vulnerability scanning - Daily at 3 AM UTC
   schedule:
-    - cron: '0 6 * * *'  # Daily at 6 AM UTC
-    - cron: '0 18 * * 1'  # Weekly on Monday at 6 PM UTC for comprehensive scan
-  
-  # Manual trigger for security assessments
+    # Daily comprehensive dependency security scan
+    - cron: '0 3 * * *'
+    # Weekly dependency update check and PR creation
+    - cron: '0 6 * * 1'  # Monday 6 AM UTC
+    
+  # Pull request validation for dependency changes
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'requirements.txt'
+      - 'requirements.in'
+      - 'requirements-dev.txt'
+      - 'pyproject.toml'
+      - 'setup.py'
+      - '.github/workflows/dependency-check.yml'
+    types: [ opened, synchronize, reopened, ready_for_review ]
+    
+  # Push to main branch for baseline update
+  push:
+    branches: [ main ]
+    paths:
+      - 'requirements.txt'
+      - 'requirements.in'
+      - 'requirements-dev.txt'
+      
+  # Manual workflow dispatch for emergency security scanning
   workflow_dispatch:
     inputs:
       scan_type:
         description: 'Type of dependency scan to perform'
         required: true
-        default: 'full'
+        default: 'comprehensive'
         type: choice
         options:
-          - full
+          - comprehensive
           - vulnerability-only
           - license-only
-          - pinning-validation
-      security_threshold:
-        description: 'Security vulnerability threshold'
+          - update-check
+          - security-baseline
+      force_update:
+        description: 'Force dependency update PR creation'
         required: false
-        default: 'medium'
+        default: false
+        type: boolean
+      security_override:
+        description: 'Override security findings (emergency only)'
+        required: false
+        default: false
+        type: boolean
+      notification_level:
+        description: 'Notification alert level'
+        required: false
+        default: 'normal'
         type: choice
         options:
-          - low
-          - medium
+          - normal
           - high
           - critical
-      notify_security_team:
-        description: 'Send notifications to security team'
-        required: false
-        default: true
-        type: boolean
 
-  # Trigger on dependency file changes
-  push:
-    paths:
-      - 'requirements.txt'
-      - 'requirements.in'
-      - 'requirements-dev.txt'
-      - 'pyproject.toml'
-      - 'setup.py'
-      - 'setup.cfg'
-      - '.github/workflows/dependency-check.yml'
-    branches: [ main, develop ]
+# Environment Variables
+# =====================
+# Global environment configuration for dependency security validation
+# and enterprise compliance requirements per Section 8.5.1
 
-  # Trigger on pull requests affecting dependencies
-  pull_request:
-    paths:
-      - 'requirements.txt'
-      - 'requirements.in'
-      - 'requirements-dev.txt'
-      - 'pyproject.toml'
-      - 'setup.py'
-      - 'setup.cfg'
-    branches: [ main, develop ]
-
-# Secure environment configuration for dependency scanning
 env:
+  # Python configuration
   PYTHON_VERSION: '3.11'
+  
+  # Dependency management tools per Section 8.5.1
   PIP_TOOLS_VERSION: '7.3.0'
   SAFETY_VERSION: '3.0.1'
-  PIP_AUDIT_VERSION: '2.7.3'
-  BANDIT_VERSION: '1.7.5'
-  # Security scanning configuration
+  PIP_AUDIT_VERSION: '2.7.0'
+  LICENSE_CHECKER_VERSION: '0.6.6'
+  
+  # Security policy configuration per Section 8.5.2
+  CRITICAL_VULNERABILITY_THRESHOLD: 0
+  HIGH_VULNERABILITY_THRESHOLD: 5
+  MEDIUM_VULNERABILITY_THRESHOLD: 10
+  SECURITY_SCAN_FAIL_ON_CRITICAL: true
+  
+  # License compliance configuration per Section 8.5.1
+  APPROVED_LICENSES: 'MIT,Apache-2.0,BSD-3-Clause,BSD-2-Clause,ISC,MPL-2.0'
+  FORBIDDEN_LICENSES: 'GPL-2.0,GPL-3.0,AGPL-1.0,AGPL-3.0,LGPL-2.1,LGPL-3.0'
+  LICENSE_COMPLIANCE_REQUIRED: true
+  
+  # Dependency update configuration per Section 8.5.1
+  AUTO_UPDATE_ENABLED: true
+  UPDATE_SECURITY_THRESHOLD: 'medium'
+  UPDATE_PR_BRANCH_PREFIX: 'dependency-security-update'
+  UPDATE_REVIEW_REQUIRED: true
+  
+  # Notification configuration per Section 8.5.2
+  SLACK_SECURITY_WEBHOOK: ${{ secrets.SLACK_SECURITY_WEBHOOK }}
+  TEAMS_SECURITY_WEBHOOK: ${{ secrets.TEAMS_SECURITY_WEBHOOK }}
+  SECURITY_EMAIL_LIST: ${{ secrets.SECURITY_EMAIL_LIST }}
+  
+  # Baseline and trending configuration per Section 6.6.3
+  SECURITY_BASELINE_ENABLED: true
+  TREND_ANALYSIS_ENABLED: true
+  BASELINE_HISTORY_DAYS: 90
+  TREND_REPORT_RETENTION: 365
+  
+  # API configuration for enhanced scanning
   SAFETY_API_KEY: ${{ secrets.SAFETY_API_KEY }}
-  SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-  # Notification configuration
-  SLACK_WEBHOOK_URL: ${{ secrets.SECURITY_SLACK_WEBHOOK }}
-  TEAMS_WEBHOOK_URL: ${{ secrets.SECURITY_TEAMS_WEBHOOK }}
-  # GitHub configuration
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  
+  # Report configuration
+  REPORT_RETENTION_DAYS: 90
+  COMPLIANCE_REPORT_REQUIRED: true
+  SECURITY_REPORT_FORMAT: 'json,html,sarif'
 
-# Concurrency control to prevent overlapping dependency scans
-concurrency:
-  group: dependency-check-${{ github.ref }}
-  cancel-in-progress: true
+# Permission Configuration
+# ========================
+# Required permissions for comprehensive dependency management operations
+
+permissions:
+  contents: read          # Repository content access
+  pull-requests: write    # PR creation and management
+  security-events: write  # Security alert management
+  issues: write          # Issue creation for security findings
+  checks: write          # Check status updates
+  actions: read          # Action artifact access
+
+# Pipeline Jobs
+# =============
+# Comprehensive job definition implementing enterprise-grade dependency
+# security validation with automated remediation and compliance reporting
 
 jobs:
-  # =============================================================================
-  # DEPENDENCY PINNING VALIDATION
-  # =============================================================================
-  dependency-pinning-validation:
-    name: Dependency Pinning Validation
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    
-    outputs:
-      pinning-status: ${{ steps.pinning-check.outputs.status }}
-      requirements-updated: ${{ steps.pinning-check.outputs.updated }}
-      validation-report: ${{ steps.pinning-check.outputs.report }}
-    
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set up Python Environment
-        uses: actions/setup-python@v4
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
-          cache-dependency-path: |
-            requirements.txt
-            requirements-dev.txt
-
-      - name: Install pip-tools for Dependency Management
-        run: |
-          python -m pip install --upgrade pip
-          pip install pip-tools==${{ env.PIP_TOOLS_VERSION }}
-          pip install pip-audit==${{ env.PIP_AUDIT_VERSION }}
-
-      - name: Validate Dependency Pinning with pip-tools
-        id: pinning-check
-        run: |
-          echo "=== Dependency Pinning Validation ==="
-          echo "Validating deterministic dependency resolution per Section 8.5.1"
-          
-          # Create temporary directory for validation
-          mkdir -p dependency-validation
-          cd dependency-validation
-          
-          # Copy requirements files for validation
-          cp ../requirements.txt . 2>/dev/null || echo "requirements.txt not found"
-          cp ../requirements.in . 2>/dev/null || echo "requirements.in not found"
-          cp ../requirements-dev.txt . 2>/dev/null || echo "requirements-dev.txt not found"
-          
-          VALIDATION_FAILED=false
-          VALIDATION_REPORT=""
-          
-          # Validate requirements.in if it exists
-          if [ -f "requirements.in" ]; then
-            echo "Validating requirements.in deterministic resolution..."
-            pip-compile requirements.in --output-file requirements-compiled.txt --no-emit-index-url --no-emit-trusted-host
-            
-            if [ -f "../requirements.txt" ]; then
-              # Compare compiled requirements with existing requirements.txt
-              if ! diff -u ../requirements.txt requirements-compiled.txt > pinning-diff.txt; then
-                echo "❌ Requirements.txt is not up to date with requirements.in"
-                VALIDATION_FAILED=true
-                VALIDATION_REPORT="Requirements.txt not synchronized with requirements.in. Run 'pip-compile requirements.in'"
-                
-                # Show the differences
-                echo "=== Dependency Differences ==="
-                cat pinning-diff.txt
-              else
-                echo "✅ Requirements.txt is properly synchronized with requirements.in"
-              fi
-            else
-              echo "⚠️  requirements.txt not found, cannot validate pinning"
-              VALIDATION_REPORT="requirements.txt not found for pinning validation"
-            fi
-          else
-            echo "⚠️  requirements.in not found, validating existing requirements.txt format"
-            
-            # Validate that requirements.txt has pinned versions
-            if [ -f "../requirements.txt" ]; then
-              UNPINNED_DEPS=$(grep -v '^#\|^$\|^-' ../requirements.txt | grep -v '==' | head -10 || true)
-              if [ -n "$UNPINNED_DEPS" ]; then
-                echo "❌ Found unpinned dependencies in requirements.txt:"
-                echo "$UNPINNED_DEPS"
-                VALIDATION_FAILED=true
-                VALIDATION_REPORT="Unpinned dependencies found in requirements.txt"
-              else
-                echo "✅ All dependencies in requirements.txt are properly pinned"
-              fi
-            fi
-          fi
-          
-          # Set outputs
-          if [ "$VALIDATION_FAILED" = "true" ]; then
-            echo "status=failed" >> $GITHUB_OUTPUT
-          else
-            echo "status=passed" >> $GITHUB_OUTPUT
-          fi
-          
-          echo "updated=false" >> $GITHUB_OUTPUT
-          echo "report=$VALIDATION_REPORT" >> $GITHUB_OUTPUT
-          
-          # Create validation artifact
-          echo "=== Dependency Pinning Validation Report ===" > ../dependency-pinning-report.txt
-          echo "Timestamp: $(date -u)" >> ../dependency-pinning-report.txt
-          echo "Status: $([ "$VALIDATION_FAILED" = "true" ] && echo "FAILED" || echo "PASSED")" >> ../dependency-pinning-report.txt
-          echo "Report: $VALIDATION_REPORT" >> ../dependency-pinning-report.txt
-          
-          if [ -f "pinning-diff.txt" ]; then
-            echo -e "\n=== Dependency Differences ===" >> ../dependency-pinning-report.txt
-            cat pinning-diff.txt >> ../dependency-pinning-report.txt
-          fi
-
-      - name: Upload Pinning Validation Report
-        uses: actions/upload-artifact@v3
-        if: always()
-        with:
-          name: dependency-pinning-report
-          path: dependency-pinning-report.txt
-          retention-days: 30
-
-  # =============================================================================
-  # VULNERABILITY SCANNING
-  # =============================================================================
-  vulnerability-scanning:
-    name: Dependency Vulnerability Scanning
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    needs: dependency-pinning-validation
-    
-    outputs:
-      vulnerability-status: ${{ steps.vulnerability-scan.outputs.status }}
-      critical-count: ${{ steps.vulnerability-scan.outputs.critical_count }}
-      high-count: ${{ steps.vulnerability-scan.outputs.high_count }}
-      scan-report: ${{ steps.vulnerability-scan.outputs.report }}
-    
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python Environment
-        uses: actions/setup-python@v4
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
-
-      - name: Install Security Scanning Tools
-        run: |
-          python -m pip install --upgrade pip
-          pip install safety==${{ env.SAFETY_VERSION }}
-          pip install pip-audit==${{ env.PIP_AUDIT_VERSION }}
-          pip install bandit==${{ env.BANDIT_VERSION }}
-
-      - name: Install Project Dependencies for Scanning
-        run: |
-          if [ -f "requirements.txt" ]; then
-            pip install -r requirements.txt
-          fi
-          if [ -f "requirements-dev.txt" ]; then
-            pip install -r requirements-dev.txt
-          fi
-
-      - name: Comprehensive Vulnerability Scanning
-        id: vulnerability-scan
-        run: |
-          echo "=== Comprehensive Dependency Vulnerability Scanning ==="
-          echo "Scanning with safety 3.0+ and pip-audit 2.7+ per Section 8.5.1"
-          
-          SCAN_FAILED=false
-          CRITICAL_COUNT=0
-          HIGH_COUNT=0
-          SCAN_REPORT=""
-          
-          # Create vulnerability reports directory
-          mkdir -p vulnerability-reports
-          
-          echo "=== Safety Vulnerability Scan ===" | tee vulnerability-reports/safety-report.txt
-          if [ -n "${{ env.SAFETY_API_KEY }}" ]; then
-            # Run safety with API key for enhanced scanning
-            if ! safety check --json --output vulnerability-reports/safety-results.json; then
-              echo "❌ Safety vulnerability scan found issues"
-              SCAN_FAILED=true
-              
-              # Parse safety results for severity counts
-              if [ -f "vulnerability-reports/safety-results.json" ]; then
-                CRITICAL_COUNT=$(jq -r '[.[] | select(.severity == "critical")] | length' vulnerability-reports/safety-results.json 2>/dev/null || echo "0")
-                HIGH_COUNT=$(jq -r '[.[] | select(.severity == "high")] | length' vulnerability-reports/safety-results.json 2>/dev/null || echo "0")
-              fi
-              
-              # Generate human-readable safety report
-              safety check --output text >> vulnerability-reports/safety-report.txt 2>&1 || true
-            else
-              echo "✅ Safety scan completed - no vulnerabilities found" | tee -a vulnerability-reports/safety-report.txt
-            fi
-          else
-            echo "⚠️  SAFETY_API_KEY not configured, running basic safety scan"
-            if ! safety check --output text >> vulnerability-reports/safety-report.txt 2>&1; then
-              echo "❌ Safety basic scan found vulnerabilities"
-              SCAN_FAILED=true
-            fi
-          fi
-          
-          echo -e "\n=== pip-audit Vulnerability Scan ===" | tee -a vulnerability-reports/pip-audit-report.txt
-          if ! pip-audit --format=json --output=vulnerability-reports/pip-audit-results.json; then
-            echo "❌ pip-audit vulnerability scan found issues"
-            SCAN_FAILED=true
-            
-            # Parse pip-audit results
-            if [ -f "vulnerability-reports/pip-audit-results.json" ]; then
-              PIP_AUDIT_CRITICAL=$(jq -r '[.vulnerabilities[] | select(.fix_versions == null)] | length' vulnerability-reports/pip-audit-results.json 2>/dev/null || echo "0")
-              CRITICAL_COUNT=$((CRITICAL_COUNT + PIP_AUDIT_CRITICAL))
-            fi
-            
-            # Generate human-readable pip-audit report
-            pip-audit --format=text >> vulnerability-reports/pip-audit-report.txt 2>&1 || true
-          else
-            echo "✅ pip-audit scan completed - no vulnerabilities found" | tee -a vulnerability-reports/pip-audit-report.txt
-          fi
-          
-          echo -e "\n=== Bandit Security Analysis ===" | tee -a vulnerability-reports/bandit-report.txt
-          if ! bandit -r . -f json -o vulnerability-reports/bandit-results.json -x "*/tests/*,*/test_*,*/.venv/*,*/venv/*,*/build/*,*/dist/*"; then
-            echo "❌ Bandit security analysis found issues"
-            SCAN_FAILED=true
-            
-            # Parse bandit results for high/critical issues
-            if [ -f "vulnerability-reports/bandit-results.json" ]; then
-              BANDIT_HIGH=$(jq -r '[.results[] | select(.issue_severity == "HIGH" or .issue_severity == "CRITICAL")] | length' vulnerability-reports/bandit-results.json 2>/dev/null || echo "0")
-              HIGH_COUNT=$((HIGH_COUNT + BANDIT_HIGH))
-            fi
-            
-            # Generate human-readable bandit report
-            bandit -r . -f txt >> vulnerability-reports/bandit-report.txt 2>&1 || true
-          else
-            echo "✅ Bandit security analysis completed - no issues found" | tee -a vulnerability-reports/bandit-report.txt
-          fi
-          
-          # Generate comprehensive vulnerability summary
-          echo "=== Vulnerability Scan Summary ===" > vulnerability-reports/summary.txt
-          echo "Timestamp: $(date -u)" >> vulnerability-reports/summary.txt
-          echo "Status: $([ "$SCAN_FAILED" = "true" ] && echo "VULNERABILITIES_FOUND" || echo "CLEAN")" >> vulnerability-reports/summary.txt
-          echo "Critical Vulnerabilities: $CRITICAL_COUNT" >> vulnerability-reports/summary.txt
-          echo "High Vulnerabilities: $HIGH_COUNT" >> vulnerability-reports/summary.txt
-          
-          # Set job outputs
-          if [ "$SCAN_FAILED" = "true" ]; then
-            echo "status=failed" >> $GITHUB_OUTPUT
-            SCAN_REPORT="Found $CRITICAL_COUNT critical and $HIGH_COUNT high severity vulnerabilities"
-          else
-            echo "status=passed" >> $GITHUB_OUTPUT
-            SCAN_REPORT="No vulnerabilities detected"
-          fi
-          
-          echo "critical_count=$CRITICAL_COUNT" >> $GITHUB_OUTPUT
-          echo "high_count=$HIGH_COUNT" >> $GITHUB_OUTPUT
-          echo "report=$SCAN_REPORT" >> $GITHUB_OUTPUT
-          
-          # Fail job if critical vulnerabilities found
-          if [ "$CRITICAL_COUNT" -gt 0 ]; then
-            echo "❌ CRITICAL: Found $CRITICAL_COUNT critical vulnerabilities - failing job"
-            exit 1
-          fi
-
-      - name: Upload Vulnerability Reports
-        uses: actions/upload-artifact@v3
-        if: always()
-        with:
-          name: vulnerability-reports
-          path: vulnerability-reports/
-          retention-days: 90
-
-      - name: Upload SARIF Results for Security Tab
-        uses: github/codeql-action/upload-sarif@v2
-        if: always() && fileExists('vulnerability-reports/bandit-results.json')
-        with:
-          sarif_file: vulnerability-reports/bandit-results.json
-          category: bandit-security-analysis
-
-  # =============================================================================
-  # LICENSE COMPLIANCE VALIDATION
-  # =============================================================================
-  license-compliance:
-    name: License Compliance Validation
+  # ==========================================================================
+  # DEPENDENCY VALIDATION SETUP JOB
+  # ==========================================================================
+  # Pipeline initialization, dependency caching, and environment validation
+  
+  dependency-setup:
+    name: 🔧 Dependency Validation Setup
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: dependency-pinning-validation
     
     outputs:
-      compliance-status: ${{ steps.license-check.outputs.status }}
-      non-compliant-count: ${{ steps.license-check.outputs.non_compliant_count }}
-      license-report: ${{ steps.license-check.outputs.report }}
-    
+      scan-type: ${{ steps.scan-config.outputs.scan-type }}
+      should-update: ${{ steps.scan-config.outputs.should-update }}
+      baseline-exists: ${{ steps.baseline-check.outputs.exists }}
+      cache-key: ${{ steps.cache-key.outputs.key }}
+      requirements-hash: ${{ steps.requirements-hash.outputs.hash }}
+      
     steps:
-      - name: Checkout Repository
+      - name: 📥 Checkout repository
         uses: actions/checkout@v4
-
-      - name: Set up Python Environment
+        with:
+          fetch-depth: 0  # Full history for trend analysis
+          
+      - name: 🐍 Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v4
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
-
-      - name: Install License Scanning Tools
+          
+      - name: 📊 Generate dependency cache key
+        id: cache-key
         run: |
-          python -m pip install --upgrade pip
-          pip install pip-licenses==4.3.0
-          pip install licensecheck==2023.1.1
-
-      - name: Install Project Dependencies for License Scanning
-        run: |
-          if [ -f "requirements.txt" ]; then
-            pip install -r requirements.txt
-          fi
-
-      - name: Enterprise License Compliance Validation
-        id: license-check
-        run: |
-          echo "=== License Compliance Validation ==="
-          echo "Validating license compliance per Section 8.5.1"
+          # Generate comprehensive cache key including all dependency files
+          HASH=$(find . -name "requirements*.txt" -o -name "requirements*.in" -o -name "pyproject.toml" -o -name "setup.py" | sort | xargs cat | sha256sum | cut -d' ' -f1)
+          echo "key=dependency-tools-${{ runner.os }}-${{ env.PYTHON_VERSION }}-${HASH}" >> $GITHUB_OUTPUT
+          echo "📊 Cache key generated: dependency-tools-${{ runner.os }}-${{ env.PYTHON_VERSION }}-${HASH}"
           
-          mkdir -p license-reports
-          
-          # Define approved enterprise licenses
-          APPROVED_LICENSES=(
-            "MIT"
-            "BSD"
-            "BSD-2-Clause"
-            "BSD-3-Clause"
-            "Apache"
-            "Apache-2.0"
-            "Apache Software License"
-            "ISC"
-            "Python Software Foundation License"
-            "Mozilla Public License 2.0 (MPL 2.0)"
-          )
-          
-          # Define prohibited licenses
-          PROHIBITED_LICENSES=(
-            "GPL"
-            "LGPL"
-            "AGPL"
-            "Copyleft"
-            "Strong Copyleft"
-          )
-          
-          COMPLIANCE_FAILED=false
-          NON_COMPLIANT_COUNT=0
-          
-          echo "=== Generating License Report ===" | tee license-reports/license-report.txt
-          
-          # Generate comprehensive license report
-          pip-licenses --format=json --output-file=license-reports/licenses.json
-          pip-licenses --format=csv --output-file=license-reports/licenses.csv
-          pip-licenses --format=plain-vertical >> license-reports/license-report.txt
-          
-          echo -e "\n=== License Compliance Analysis ===" | tee -a license-reports/license-report.txt
-          
-          # Check for prohibited licenses
-          echo "Checking for prohibited licenses..." | tee -a license-reports/license-report.txt
-          
-          for prohibited in "${PROHIBITED_LICENSES[@]}"; do
-            if grep -i "$prohibited" license-reports/license-report.txt > /dev/null; then
-              echo "❌ PROHIBITED LICENSE FOUND: $prohibited" | tee -a license-reports/license-report.txt
-              COMPLIANCE_FAILED=true
-              NON_COMPLIANT_COUNT=$((NON_COMPLIANT_COUNT + 1))
-            fi
-          done
-          
-          # Validate against approved licenses using jq
-          if [ -f "license-reports/licenses.json" ]; then
-            echo "Validating against approved license list..." | tee -a license-reports/license-report.txt
+      - name: 🗃️ Cache dependency scanning tools
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.local/lib/python*/site-packages
+          key: ${{ steps.cache-key.outputs.key }}
+          restore-keys: |
+            dependency-tools-${{ runner.os }}-${{ env.PYTHON_VERSION }}-
+            dependency-tools-${{ runner.os }}-
             
-            # Extract unique licenses from the JSON report
-            FOUND_LICENSES=$(jq -r '.[].License' license-reports/licenses.json | sort -u)
-            
-            while IFS= read -r license; do
-              if [ -n "$license" ] && [ "$license" != "UNKNOWN" ]; then
-                APPROVED=false
-                for approved in "${APPROVED_LICENSES[@]}"; do
-                  if [[ "$license" == *"$approved"* ]] || [[ "$approved" == *"$license"* ]]; then
-                    APPROVED=true
-                    break
-                  fi
-                done
-                
-                if [ "$APPROVED" = "false" ]; then
-                  echo "⚠️  UNAPPROVED LICENSE: $license" | tee -a license-reports/license-report.txt
-                  
-                  # Check if it's explicitly prohibited
-                  PROHIBITED=false
-                  for prohibited in "${PROHIBITED_LICENSES[@]}"; do
-                    if [[ "$license" == *"$prohibited"* ]]; then
-                      PROHIBITED=true
-                      break
-                    fi
-                  done
-                  
-                  if [ "$PROHIBITED" = "true" ]; then
-                    COMPLIANCE_FAILED=true
-                    NON_COMPLIANT_COUNT=$((NON_COMPLIANT_COUNT + 1))
-                  else
-                    echo "  -> Requires manual review for enterprise approval" | tee -a license-reports/license-report.txt
-                  fi
-                else
-                  echo "✅ APPROVED LICENSE: $license" | tee -a license-reports/license-report.txt
-                fi
-              fi
-            done <<< "$FOUND_LICENSES"
-          fi
-          
-          # Generate compliance summary
-          echo -e "\n=== License Compliance Summary ===" | tee -a license-reports/license-report.txt
-          echo "Timestamp: $(date -u)" | tee -a license-reports/license-report.txt
-          echo "Status: $([ "$COMPLIANCE_FAILED" = "true" ] && echo "NON_COMPLIANT" || echo "COMPLIANT")" | tee -a license-reports/license-report.txt
-          echo "Non-compliant licenses: $NON_COMPLIANT_COUNT" | tee -a license-reports/license-report.txt
-          
-          # Set job outputs
-          if [ "$COMPLIANCE_FAILED" = "true" ]; then
-            echo "status=failed" >> $GITHUB_OUTPUT
-            LICENSE_REPORT="Found $NON_COMPLIANT_COUNT non-compliant licenses requiring review"
-          else
-            echo "status=passed" >> $GITHUB_OUTPUT
-            LICENSE_REPORT="All licenses compliant with enterprise policy"
-          fi
-          
-          echo "non_compliant_count=$NON_COMPLIANT_COUNT" >> $GITHUB_OUTPUT
-          echo "report=$LICENSE_REPORT" >> $GITHUB_OUTPUT
-
-      - name: Upload License Reports
-        uses: actions/upload-artifact@v3
-        if: always()
-        with:
-          name: license-reports
-          path: license-reports/
-          retention-days: 90
-
-  # =============================================================================
-  # DEPENDENCY UPDATE DETECTION
-  # =============================================================================
-  dependency-update-detection:
-    name: Automated Dependency Update Detection
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    if: github.event_name == 'schedule' || github.event.inputs.scan_type == 'full'
-    
-    outputs:
-      updates-available: ${{ steps.update-check.outputs.available }}
-      security-updates: ${{ steps.update-check.outputs.security_updates }}
-      update-report: ${{ steps.update-check.outputs.report }}
-    
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set up Python Environment
-        uses: actions/setup-python@v4
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
-
-      - name: Install Update Detection Tools
+      - name: 📦 Install dependency management tools
         run: |
           python -m pip install --upgrade pip
           pip install pip-tools==${{ env.PIP_TOOLS_VERSION }}
           pip install safety==${{ env.SAFETY_VERSION }}
-          pip install requests
-
-      - name: Detect Available Dependency Updates
-        id: update-check
+          pip install pip-audit==${{ env.PIP_AUDIT_VERSION }}
+          pip install pip-licenses==${{ env.LICENSE_CHECKER_VERSION }}
+          pip install toml pyyaml requests packaging
+          
+          echo "✅ Dependency management tools installed successfully"
+          echo "- pip-tools: ${{ env.PIP_TOOLS_VERSION }}"
+          echo "- safety: ${{ env.SAFETY_VERSION }}"
+          echo "- pip-audit: ${{ env.PIP_AUDIT_VERSION }}"
+          echo "- pip-licenses: ${{ env.LICENSE_CHECKER_VERSION }}"
+          
+      - name: ⚙️ Configure scan type and parameters
+        id: scan-config
         run: |
-          echo "=== Automated Dependency Update Detection ==="
-          echo "Detecting security updates per Section 8.5.1"
-          
-          mkdir -p update-reports
-          
-          UPDATES_AVAILABLE=false
-          SECURITY_UPDATES=false
-          UPDATE_COUNT=0
-          SECURITY_UPDATE_COUNT=0
-          
-          # Install current dependencies
-          if [ -f "requirements.txt" ]; then
-            pip install -r requirements.txt
-          fi
-          
-          echo "=== Checking for Available Updates ===" | tee update-reports/update-report.txt
-          
-          # Use pip list --outdated to check for updates
-          pip list --outdated --format=json > update-reports/outdated-packages.json
-          
-          if [ -s update-reports/outdated-packages.json ]; then
-            UPDATE_COUNT=$(jq '. | length' update-reports/outdated-packages.json)
-            
-            if [ "$UPDATE_COUNT" -gt 0 ]; then
-              UPDATES_AVAILABLE=true
-              echo "Found $UPDATE_COUNT packages with available updates:" | tee -a update-reports/update-report.txt
-              
-              # Format the updates for display
-              jq -r '.[] | "  \(.name): \(.version) -> \(.latest_version)"' update-reports/outdated-packages.json | tee -a update-reports/update-report.txt
-            fi
-          fi
-          
-          echo -e "\n=== Security Update Analysis ===" | tee -a update-reports/update-report.txt
-          
-          # Check if any outdated packages have security vulnerabilities
-          if [ -f "update-reports/outdated-packages.json" ] && [ "$UPDATE_COUNT" -gt 0 ]; then
-            # Run safety check to identify packages with security issues
-            if ! safety check --json --output update-reports/security-vulnerabilities.json; then
-              echo "Found security vulnerabilities in current packages" | tee -a update-reports/update-report.txt
-              
-              # Cross-reference outdated packages with security vulnerabilities
-              if [ -f "update-reports/security-vulnerabilities.json" ]; then
-                # Extract vulnerable package names
-                VULNERABLE_PACKAGES=$(jq -r '.[].package_name' update-reports/security-vulnerabilities.json 2>/dev/null | sort -u)
-                
-                # Check if any vulnerable packages have updates available
-                while IFS= read -r package; do
-                  if [ -n "$package" ]; then
-                    if jq -e --arg pkg "$package" '.[] | select(.name == $pkg)' update-reports/outdated-packages.json > /dev/null; then
-                      echo "🔴 SECURITY UPDATE AVAILABLE: $package" | tee -a update-reports/update-report.txt
-                      SECURITY_UPDATES=true
-                      SECURITY_UPDATE_COUNT=$((SECURITY_UPDATE_COUNT + 1))
-                    fi
-                  fi
-                done <<< "$VULNERABLE_PACKAGES"
-              fi
-            else
-              echo "No security vulnerabilities found in current packages" | tee -a update-reports/update-report.txt
-            fi
-          fi
-          
-          # Generate update summary
-          echo -e "\n=== Update Summary ===" | tee -a update-reports/update-report.txt
-          echo "Timestamp: $(date -u)" | tee -a update-reports/update-report.txt
-          echo "Total updates available: $UPDATE_COUNT" | tee -a update-reports/update-report.txt
-          echo "Security-related updates: $SECURITY_UPDATE_COUNT" | tee -a update-reports/update-report.txt
-          echo "Updates available: $UPDATES_AVAILABLE" | tee -a update-reports/update-report.txt
-          echo "Security updates available: $SECURITY_UPDATES" | tee -a update-reports/update-report.txt
-          
-          # Set job outputs
-          echo "available=$UPDATES_AVAILABLE" >> $GITHUB_OUTPUT
-          echo "security_updates=$SECURITY_UPDATES" >> $GITHUB_OUTPUT
-          
-          if [ "$SECURITY_UPDATES" = "true" ]; then
-            UPDATE_REPORT="Found $SECURITY_UPDATE_COUNT security-related updates out of $UPDATE_COUNT total updates"
-          elif [ "$UPDATES_AVAILABLE" = "true" ]; then
-            UPDATE_REPORT="Found $UPDATE_COUNT dependency updates available"
+          # Determine scan type based on trigger
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            SCAN_TYPE="${{ github.event.inputs.scan_type }}"
+            SHOULD_UPDATE="${{ github.event.inputs.force_update }}"
+          elif [[ "${{ github.event_name }}" == "schedule" ]] && [[ "${{ github.event.schedule }}" == "0 6 * * 1" ]]; then
+            SCAN_TYPE="comprehensive"
+            SHOULD_UPDATE="true"
+          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            SCAN_TYPE="comprehensive"
+            SHOULD_UPDATE="false"
           else
-            UPDATE_REPORT="All dependencies are up to date"
+            SCAN_TYPE="comprehensive"
+            SHOULD_UPDATE="false"
           fi
           
-          echo "report=$UPDATE_REPORT" >> $GITHUB_OUTPUT
+          echo "scan-type=${SCAN_TYPE}" >> $GITHUB_OUTPUT
+          echo "should-update=${SHOULD_UPDATE}" >> $GITHUB_OUTPUT
+          
+          echo "📋 Scan Configuration:"
+          echo "- Scan Type: ${SCAN_TYPE}"
+          echo "- Should Update: ${SHOULD_UPDATE}"
+          echo "- Trigger: ${{ github.event_name }}"
+          
+      - name: 🎯 Generate requirements hash for baseline tracking
+        id: requirements-hash
+        run: |
+          # Generate hash of all requirements files for baseline tracking
+          REQUIREMENTS_HASH=$(find . -name "requirements*.txt" -o -name "requirements*.in" | sort | xargs cat | sha256sum | cut -d' ' -f1)
+          echo "hash=${REQUIREMENTS_HASH}" >> $GITHUB_OUTPUT
+          echo "📊 Requirements hash: ${REQUIREMENTS_HASH}"
+          
+      - name: 🔍 Check for existing security baseline
+        id: baseline-check
+        run: |
+          # Check if security baseline exists for trend analysis
+          if [[ -f ".github/security-baseline.json" ]]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "✅ Security baseline found for trend analysis"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "⚠️ No security baseline found - will create initial baseline"
+          fi
+          
+      - name: 📋 Setup summary
+        run: |
+          echo "## 🔧 Dependency Validation Setup Complete" >> $GITHUB_STEP_SUMMARY
+          echo "| Configuration | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Scan Type | ${{ steps.scan-config.outputs.scan-type }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Update Mode | ${{ steps.scan-config.outputs.should-update }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Baseline Exists | ${{ steps.baseline-check.outputs.exists }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Python Version | ${{ env.PYTHON_VERSION }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tools Version | pip-tools ${{ env.PIP_TOOLS_VERSION }}, safety ${{ env.SAFETY_VERSION }}, pip-audit ${{ env.PIP_AUDIT_VERSION }} |" >> $GITHUB_STEP_SUMMARY
 
-      - name: Upload Update Reports
+  # ==========================================================================
+  # DEPENDENCY PINNING VALIDATION JOB
+  # ==========================================================================
+  # Deterministic dependency resolution validation with pip-tools per Section 8.5.1
+  
+  dependency-pinning:
+    name: 📌 Dependency Pinning Validation
+    runs-on: ubuntu-latest
+    needs: dependency-setup
+    timeout-minutes: 15
+    if: contains(fromJson('["comprehensive", "vulnerability-only"]'), needs.dependency-setup.outputs.scan-type)
+    
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: 🐍 Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          
+      - name: 🗃️ Restore dependency tools cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.local/lib/python*/site-packages
+          key: ${{ needs.dependency-setup.outputs.cache-key }}
+          restore-keys: |
+            dependency-tools-${{ runner.os }}-${{ env.PYTHON_VERSION }}-
+            
+      - name: 📦 Install pip-tools for dependency validation
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-tools==${{ env.PIP_TOOLS_VERSION }}
+          
+      - name: 📌 Validate dependency pinning with pip-tools
+        run: |
+          echo "## 📌 Dependency Pinning Validation" >> $GITHUB_STEP_SUMMARY
+          echo "Enforcing deterministic dependency resolution per Section 8.5.1" >> $GITHUB_STEP_SUMMARY
+          
+          # Create reports directory
+          mkdir -p reports/dependency-validation
+          
+          # Validate requirements.txt pinning if requirements.in exists
+          if [[ -f "requirements.in" ]]; then
+            echo "🔍 Validating requirements.txt against requirements.in"
+            
+            # Generate new requirements.txt from requirements.in
+            pip-compile requirements.in --output-file requirements-new.txt --generate-hashes --no-emit-index-url
+            
+            # Compare with existing requirements.txt
+            if ! diff -u requirements.txt requirements-new.txt > reports/dependency-validation/pinning-diff.txt; then
+              echo "❌ **CRITICAL**: Requirements.txt not synchronized with requirements.in!" >> $GITHUB_STEP_SUMMARY
+              echo "### Detected Changes:" >> $GITHUB_STEP_SUMMARY
+              echo '```diff' >> $GITHUB_STEP_SUMMARY
+              head -50 reports/dependency-validation/pinning-diff.txt >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              echo "**Action Required**: Run \`pip-compile requirements.in\` to update requirements.txt" >> $GITHUB_STEP_SUMMARY
+              
+              # Create artifact with differences
+              echo "PINNING_VALIDATION_FAILED=true" >> $GITHUB_ENV
+              exit 1
+            else
+              echo "✅ **SUCCESS**: requirements.txt properly synchronized with requirements.in" >> $GITHUB_STEP_SUMMARY
+            fi
+            
+            # Clean up temporary file
+            rm -f requirements-new.txt
+          else
+            echo "⚠️ No requirements.in found - validating requirements.txt hash integrity only"
+          fi
+          
+          # Validate requirements.txt hash integrity
+          echo "🔐 Validating dependency hash integrity"
+          pip-compile --dry-run --generate-hashes requirements.txt > reports/dependency-validation/hash-validation.txt 2>&1 || {
+            echo "❌ **HASH VALIDATION FAILED**: Dependency hashes are invalid or missing!" >> $GITHUB_STEP_SUMMARY
+            echo "**Action Required**: Regenerate requirements.txt with proper hashes" >> $GITHUB_STEP_SUMMARY
+            echo "HASH_VALIDATION_FAILED=true" >> $GITHUB_ENV
+            exit 1
+          }
+          
+          echo "✅ **SUCCESS**: All dependency pinning validations passed" >> $GITHUB_STEP_SUMMARY
+          echo "- Requirements synchronization: ✅ Valid" >> $GITHUB_STEP_SUMMARY
+          echo "- Hash integrity: ✅ Valid" >> $GITHUB_STEP_SUMMARY
+          echo "- Deterministic resolution: ✅ Ensured" >> $GITHUB_STEP_SUMMARY
+          
+      - name: 📊 Analyze dependency resolution complexity
+        run: |
+          echo "## 📊 Dependency Resolution Analysis" >> $GITHUB_STEP_SUMMARY
+          
+          # Install dependencies to analyze resolution
+          pip install -r requirements.txt
+          
+          # Generate dependency tree
+          pip list --format=json > reports/dependency-validation/installed-packages.json
+          pip freeze > reports/dependency-validation/frozen-requirements.txt
+          
+          # Count direct vs transitive dependencies
+          TOTAL_DEPS=$(pip list --format=json | jq '. | length')
+          DIRECT_DEPS=$(grep -c "^[^#]" requirements.txt || echo "0")
+          TRANSITIVE_DEPS=$((TOTAL_DEPS - DIRECT_DEPS))
+          
+          echo "### 📈 Dependency Statistics:" >> $GITHUB_STEP_SUMMARY
+          echo "- **Total Dependencies**: ${TOTAL_DEPS}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Direct Dependencies**: ${DIRECT_DEPS}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Transitive Dependencies**: ${TRANSITIVE_DEPS}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Resolution Complexity**: $(echo "scale=2; ${TRANSITIVE_DEPS}/${DIRECT_DEPS}" | bc)" >> $GITHUB_STEP_SUMMARY
+          
+          # Store metrics for trend analysis
+          cat > reports/dependency-validation/dependency-metrics.json << EOF
+{
+  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "total_dependencies": ${TOTAL_DEPS},
+  "direct_dependencies": ${DIRECT_DEPS},
+  "transitive_dependencies": ${TRANSITIVE_DEPS},
+  "requirements_hash": "${{ needs.dependency-setup.outputs.requirements-hash }}"
+}
+EOF
+          
+      - name: 📊 Upload dependency validation reports
         uses: actions/upload-artifact@v3
         if: always()
         with:
-          name: update-reports
-          path: update-reports/
-          retention-days: 30
+          name: dependency-pinning-reports
+          path: reports/dependency-validation/
+          retention-days: ${{ env.REPORT_RETENTION_DAYS }}
+          
+      - name: 🚨 Notify on pinning validation failure
+        if: failure()
+        run: |
+          MESSAGE="🚨 Dependency Pinning Validation FAILED in ${{ github.repository }}"
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            MESSAGE="${MESSAGE} - PR #${{ github.event.number }} by ${{ github.actor }}"
+          fi
+          MESSAGE="${MESSAGE} - Requirements synchronization or hash validation failed"
+          
+          if [[ -n "${{ env.SLACK_SECURITY_WEBHOOK }}" ]]; then
+            curl -X POST -H 'Content-type: application/json' \
+              --data '{"text":"'"${MESSAGE}"'"}' \
+              ${{ env.SLACK_SECURITY_WEBHOOK }}
+          fi
 
-  # =============================================================================
-  # SECURITY NOTIFICATIONS
-  # =============================================================================
-  security-notifications:
-    name: Security Team Notifications
+  # ==========================================================================
+  # VULNERABILITY SCANNING JOB
+  # ==========================================================================
+  # Comprehensive vulnerability scanning with safety and pip-audit per Section 8.5.1
+  
+  vulnerability-scan:
+    name: 🔒 Vulnerability Scanning
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-    needs: [vulnerability-scanning, license-compliance, dependency-update-detection]
-    if: always() && (needs.vulnerability-scanning.outputs.critical-count != '0' || needs.vulnerability-scanning.outputs.high-count != '0' || needs.license-compliance.outputs.compliance-status == 'failed' || needs.dependency-update-detection.outputs.security-updates == 'true')
+    needs: [dependency-setup, dependency-pinning]
+    timeout-minutes: 20
+    if: always() && !cancelled() && contains(fromJson('["comprehensive", "vulnerability-only", "security-baseline"]'), needs.dependency-setup.outputs.scan-type)
     
     steps:
-      - name: Checkout Repository
+      - name: 📥 Checkout repository
         uses: actions/checkout@v4
-
-      - name: Prepare Security Notification Content
-        id: notification-content
+        
+      - name: 🐍 Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          
+      - name: 🗃️ Restore dependency tools cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.local/lib/python*/site-packages
+          key: ${{ needs.dependency-setup.outputs.cache-key }}
+          restore-keys: |
+            dependency-tools-${{ runner.os }}-${{ env.PYTHON_VERSION }}-
+            
+      - name: 📦 Install vulnerability scanning tools
         run: |
-          echo "=== Preparing Security Notification ==="
+          python -m pip install --upgrade pip
+          pip install safety==${{ env.SAFETY_VERSION }}
+          pip install pip-audit==${{ env.PIP_AUDIT_VERSION }}
+          pip install -r requirements.txt
           
-          # Prepare notification content
-          NOTIFICATION_TITLE="🚨 Dependency Security Alert - ${{ github.repository }}"
-          NOTIFICATION_BODY=""
-          SEVERITY="HIGH"
+      - name: 🛡️ Run safety vulnerability scanning
+        run: |
+          echo "## 🛡️ Safety Vulnerability Scanning" >> $GITHUB_STEP_SUMMARY
+          echo "Comprehensive dependency vulnerability assessment using safety ${{ env.SAFETY_VERSION }} per Section 8.5.1" >> $GITHUB_STEP_SUMMARY
           
-          # Check vulnerability results
-          if [ "${{ needs.vulnerability-scanning.outputs.critical-count }}" != "0" ]; then
-            SEVERITY="CRITICAL"
-            NOTIFICATION_BODY="${NOTIFICATION_BODY}🔴 **CRITICAL**: Found ${{ needs.vulnerability-scanning.outputs.critical-count }} critical vulnerabilities\n"
+          # Create security reports directory
+          mkdir -p reports/security-scan
+          
+          # Run safety vulnerability scan with detailed output
+          echo "🔍 Scanning dependencies for known vulnerabilities..."
+          
+          # Configure safety API key if available
+          SAFETY_OPTIONS=""
+          if [[ -n "${{ env.SAFETY_API_KEY }}" ]]; then
+            SAFETY_OPTIONS="--key ${{ env.SAFETY_API_KEY }}"
           fi
           
-          if [ "${{ needs.vulnerability-scanning.outputs.high-count }}" != "0" ]; then
-            if [ "$SEVERITY" != "CRITICAL" ]; then
-              SEVERITY="HIGH"
+          # Run safety scan with comprehensive output
+          safety check ${SAFETY_OPTIONS} \
+            --json \
+            --output reports/security-scan/safety-report.json \
+            --continue-on-error || SAFETY_EXIT_CODE=$?
+          
+          # Also generate human-readable report
+          safety check ${SAFETY_OPTIONS} \
+            --output reports/security-scan/safety-report.txt \
+            --continue-on-error || true
+          
+          # Parse results and categorize by severity
+          if [[ -f reports/security-scan/safety-report.json ]] && [[ -s reports/security-scan/safety-report.json ]]; then
+            # Count vulnerabilities by severity
+            CRITICAL_COUNT=$(jq '[.[] | select(.severity == "critical")] | length' reports/security-scan/safety-report.json 2>/dev/null || echo "0")
+            HIGH_COUNT=$(jq '[.[] | select(.severity == "high")] | length' reports/security-scan/safety-report.json 2>/dev/null || echo "0")
+            MEDIUM_COUNT=$(jq '[.[] | select(.severity == "medium")] | length' reports/security-scan/safety-report.json 2>/dev/null || echo "0")
+            LOW_COUNT=$(jq '[.[] | select(.severity == "low")] | length' reports/security-scan/safety-report.json 2>/dev/null || echo "0")
+            TOTAL_COUNT=$((CRITICAL_COUNT + HIGH_COUNT + MEDIUM_COUNT + LOW_COUNT))
+            
+            echo "### 🚨 Safety Vulnerability Summary:" >> $GITHUB_STEP_SUMMARY
+            echo "- **Critical**: ${CRITICAL_COUNT} vulnerabilities" >> $GITHUB_STEP_SUMMARY
+            echo "- **High**: ${HIGH_COUNT} vulnerabilities" >> $GITHUB_STEP_SUMMARY
+            echo "- **Medium**: ${MEDIUM_COUNT} vulnerabilities" >> $GITHUB_STEP_SUMMARY
+            echo "- **Low**: ${LOW_COUNT} vulnerabilities" >> $GITHUB_STEP_SUMMARY
+            echo "- **Total**: ${TOTAL_COUNT} vulnerabilities" >> $GITHUB_STEP_SUMMARY
+            
+            # Check against thresholds per Section 8.5.2
+            if [[ ${CRITICAL_COUNT} -gt ${{ env.CRITICAL_VULNERABILITY_THRESHOLD }} ]]; then
+              echo "❌ **CRITICAL ALERT**: ${CRITICAL_COUNT} critical vulnerabilities detected!" >> $GITHUB_STEP_SUMMARY
+              echo "**IMMEDIATE ACTION REQUIRED**: Critical vulnerabilities must be remediated" >> $GITHUB_STEP_SUMMARY
+              echo "CRITICAL_VULNERABILITIES_FOUND=true" >> $GITHUB_ENV
+              echo "VULNERABILITY_SCAN_FAILED=true" >> $GITHUB_ENV
             fi
-            NOTIFICATION_BODY="${NOTIFICATION_BODY}🟠 **HIGH**: Found ${{ needs.vulnerability-scanning.outputs.high-count }} high severity vulnerabilities\n"
+            
+            if [[ ${HIGH_COUNT} -gt ${{ env.HIGH_VULNERABILITY_THRESHOLD }} ]]; then
+              echo "⚠️ **HIGH ALERT**: ${HIGH_COUNT} high-severity vulnerabilities detected" >> $GITHUB_STEP_SUMMARY
+              echo "HIGH_VULNERABILITIES_FOUND=true" >> $GITHUB_ENV
+            fi
+            
+            # Display critical and high vulnerabilities
+            if [[ ${CRITICAL_COUNT} -gt 0 ]] || [[ ${HIGH_COUNT} -gt 0 ]]; then
+              echo "### 🔍 Critical and High Severity Vulnerabilities:" >> $GITHUB_STEP_SUMMARY
+              echo '```json' >> $GITHUB_STEP_SUMMARY
+              jq '[.[] | select(.severity == "critical" or .severity == "high")]' reports/security-scan/safety-report.json >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "Failed to parse vulnerability details" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "✅ **SUCCESS**: No vulnerabilities detected by safety scan" >> $GITHUB_STEP_SUMMARY
+            CRITICAL_COUNT=0
+            HIGH_COUNT=0
+            MEDIUM_COUNT=0
+            LOW_COUNT=0
+            TOTAL_COUNT=0
+          fi
+          
+          # Store safety results for later use
+          echo "SAFETY_CRITICAL_COUNT=${CRITICAL_COUNT}" >> $GITHUB_ENV
+          echo "SAFETY_HIGH_COUNT=${HIGH_COUNT}" >> $GITHUB_ENV
+          echo "SAFETY_TOTAL_COUNT=${TOTAL_COUNT}" >> $GITHUB_ENV
+          
+      - name: 🔍 Run pip-audit vulnerability scanning
+        run: |
+          echo "## 🔍 pip-audit Vulnerability Scanning" >> $GITHUB_STEP_SUMMARY
+          echo "Additional vulnerability assessment using pip-audit ${{ env.PIP_AUDIT_VERSION }} per Section 8.5.1" >> $GITHUB_STEP_SUMMARY
+          
+          # Run pip-audit for comprehensive vulnerability assessment
+          pip-audit --format=json --output=reports/security-scan/pip-audit-report.json || PIP_AUDIT_EXIT_CODE=$?
+          
+          # Also generate human-readable report
+          pip-audit --format=text --output=reports/security-scan/pip-audit-report.txt || true
+          
+          # Parse pip-audit results
+          if [[ -f reports/security-scan/pip-audit-report.json ]] && [[ -s reports/security-scan/pip-audit-report.json ]]; then
+            AUDIT_VULNERABILITIES=$(jq '.vulnerabilities | length' reports/security-scan/pip-audit-report.json 2>/dev/null || echo "0")
+            
+            echo "### 🔍 pip-audit Vulnerability Summary:" >> $GITHUB_STEP_SUMMARY
+            echo "- **Vulnerabilities Found**: ${AUDIT_VULNERABILITIES}" >> $GITHUB_STEP_SUMMARY
+            
+            if [[ ${AUDIT_VULNERABILITIES} -gt 0 ]]; then
+              echo "⚠️ **WARNING**: pip-audit detected ${AUDIT_VULNERABILITIES} potential vulnerabilities" >> $GITHUB_STEP_SUMMARY
+              echo "### 🔍 pip-audit Findings:" >> $GITHUB_STEP_SUMMARY
+              echo '```json' >> $GITHUB_STEP_SUMMARY
+              jq '.vulnerabilities' reports/security-scan/pip-audit-report.json >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "Failed to parse pip-audit details" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              echo "AUDIT_VULNERABILITIES_FOUND=true" >> $GITHUB_ENV
+            else
+              echo "✅ **SUCCESS**: No vulnerabilities detected by pip-audit" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "✅ pip-audit completed with no vulnerabilities detected" >> $GITHUB_STEP_SUMMARY
+            AUDIT_VULNERABILITIES=0
+          fi
+          
+          echo "AUDIT_VULNERABILITY_COUNT=${AUDIT_VULNERABILITIES}" >> $GITHUB_ENV
+          
+      - name: 📊 Generate comprehensive vulnerability report
+        run: |
+          echo "## 📊 Comprehensive Vulnerability Assessment" >> $GITHUB_STEP_SUMMARY
+          
+          # Create combined vulnerability report
+          cat > reports/security-scan/vulnerability-summary.json << EOF
+{
+  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "scan_id": "${{ github.run_id }}-${{ github.run_attempt }}",
+  "repository": "${{ github.repository }}",
+  "branch": "${{ github.ref_name }}",
+  "commit": "${{ github.sha }}",
+  "requirements_hash": "${{ needs.dependency-setup.outputs.requirements-hash }}",
+  "safety_scan": {
+    "critical_count": ${SAFETY_CRITICAL_COUNT:-0},
+    "high_count": ${SAFETY_HIGH_COUNT:-0},
+    "total_count": ${SAFETY_TOTAL_COUNT:-0}
+  },
+  "pip_audit_scan": {
+    "vulnerability_count": ${AUDIT_VULNERABILITY_COUNT:-0}
+  },
+  "overall_status": {
+    "critical_vulnerabilities": ${SAFETY_CRITICAL_COUNT:-0},
+    "high_vulnerabilities": ${SAFETY_HIGH_COUNT:-0},
+    "total_vulnerabilities": $((${SAFETY_TOTAL_COUNT:-0} + ${AUDIT_VULNERABILITY_COUNT:-0})),
+    "scan_passed": $(if [[ "${VULNERABILITY_SCAN_FAILED:-false}" == "true" ]]; then echo "false"; else echo "true"; fi)
+  }
+}
+EOF
+          
+          # Generate remediation guidance if vulnerabilities found
+          if [[ "${SAFETY_TOTAL_COUNT:-0}" -gt 0 ]] || [[ "${AUDIT_VULNERABILITY_COUNT:-0}" -gt 0 ]]; then
+            echo "### 🛠️ Remediation Guidance:" >> $GITHUB_STEP_SUMMARY
+            echo "1. **Review Vulnerability Reports**: Check detailed reports in artifacts" >> $GITHUB_STEP_SUMMARY
+            echo "2. **Update Dependencies**: Run \`pip-tools compile --upgrade\` for affected packages" >> $GITHUB_STEP_SUMMARY
+            echo "3. **Test Changes**: Ensure updates don't break functionality" >> $GITHUB_STEP_SUMMARY
+            echo "4. **Security Review**: Have security team review critical findings" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+      - name: 📊 Upload vulnerability scan reports
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: vulnerability-scan-reports
+          path: reports/security-scan/
+          retention-days: ${{ env.REPORT_RETENTION_DAYS }}
+          
+      - name: 📤 Upload SARIF report for GitHub Security
+        uses: github/codeql-action/upload-sarif@v2
+        if: always() && env.SAFETY_TOTAL_COUNT != '0'
+        with:
+          sarif_file: reports/security-scan/safety-report.json
+          category: dependency-vulnerability-scan
+          
+      - name: 🚨 Notify security team on critical vulnerabilities
+        if: env.CRITICAL_VULNERABILITIES_FOUND == 'true'
+        run: |
+          MESSAGE="🚨 CRITICAL SECURITY ALERT: ${SAFETY_CRITICAL_COUNT} critical vulnerabilities detected in ${{ github.repository }}"
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            MESSAGE="${MESSAGE} - PR #${{ github.event.number }} by ${{ github.actor }}"
+          fi
+          MESSAGE="${MESSAGE} - IMMEDIATE REMEDIATION REQUIRED"
+          
+          # Send to multiple notification channels per Section 8.5.2
+          if [[ -n "${{ env.SLACK_SECURITY_WEBHOOK }}" ]]; then
+            curl -X POST -H 'Content-type: application/json' \
+              --data '{"text":"'"${MESSAGE}"'", "channel": "#security-alerts"}' \
+              ${{ env.SLACK_SECURITY_WEBHOOK }}
+          fi
+          
+          if [[ -n "${{ env.TEAMS_SECURITY_WEBHOOK }}" ]]; then
+            curl -X POST -H 'Content-type: application/json' \
+              --data '{"text":"'"${MESSAGE}"'"}' \
+              ${{ env.TEAMS_SECURITY_WEBHOOK }}
+          fi
+          
+      - name: ❌ Fail on critical vulnerabilities
+        if: env.VULNERABILITY_SCAN_FAILED == 'true' && env.SECURITY_SCAN_FAIL_ON_CRITICAL == 'true'
+        run: |
+          echo "❌ **PIPELINE TERMINATED**: Critical vulnerabilities detected"
+          echo "Critical vulnerabilities must be remediated before proceeding"
+          exit 1
+
+  # ==========================================================================
+  # LICENSE COMPLIANCE VALIDATION JOB
+  # ==========================================================================
+  # License compliance checking with enterprise policy enforcement per Section 8.5.1
+  
+  license-compliance:
+    name: ⚖️ License Compliance Validation
+    runs-on: ubuntu-latest
+    needs: [dependency-setup, dependency-pinning]
+    timeout-minutes: 15
+    if: always() && !cancelled() && contains(fromJson('["comprehensive", "license-only"]'), needs.dependency-setup.outputs.scan-type)
+    
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: 🐍 Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          
+      - name: 🗃️ Restore dependency tools cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.local/lib/python*/site-packages
+          key: ${{ needs.dependency-setup.outputs.cache-key }}
+          restore-keys: |
+            dependency-tools-${{ runner.os }}-${{ env.PYTHON_VERSION }}-
+            
+      - name: 📦 Install license checking tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-licenses==${{ env.LICENSE_CHECKER_VERSION }}
+          pip install -r requirements.txt
+          
+      - name: ⚖️ Scan dependency licenses
+        run: |
+          echo "## ⚖️ License Compliance Validation" >> $GITHUB_STEP_SUMMARY
+          echo "Enterprise license policy enforcement per Section 8.5.1" >> $GITHUB_STEP_SUMMARY
+          
+          # Create license reports directory
+          mkdir -p reports/license-compliance
+          
+          # Generate comprehensive license report
+          echo "🔍 Scanning dependency licenses..."
+          
+          # JSON format for programmatic analysis
+          pip-licenses --format=json --output-file=reports/license-compliance/licenses.json
+          
+          # CSV format for spreadsheet analysis
+          pip-licenses --format=csv --output-file=reports/license-compliance/licenses.csv
+          
+          # HTML format for human-readable report
+          pip-licenses --format=html --output-file=reports/license-compliance/licenses.html
+          
+          # Plain text format for quick review
+          pip-licenses --format=plain-vertical --output-file=reports/license-compliance/licenses.txt
+          
+      - name: 🔍 Validate against enterprise license policy
+        run: |
+          echo "## 🔍 Enterprise License Policy Validation" >> $GITHUB_STEP_SUMMARY
+          
+          # Parse approved and forbidden licenses
+          IFS=',' read -ra APPROVED <<< "${{ env.APPROVED_LICENSES }}"
+          IFS=',' read -ra FORBIDDEN <<< "${{ env.FORBIDDEN_LICENSES }}"
+          
+          # Initialize counters
+          TOTAL_PACKAGES=0
+          APPROVED_COUNT=0
+          FORBIDDEN_COUNT=0
+          UNKNOWN_COUNT=0
+          COMPLIANCE_VIOLATIONS=()
+          
+          # Parse license report and validate each package
+          if [[ -f reports/license-compliance/licenses.json ]]; then
+            # Count total packages
+            TOTAL_PACKAGES=$(jq '. | length' reports/license-compliance/licenses.json)
+            
+            # Check each package license
+            while IFS= read -r package_info; do
+              PACKAGE_NAME=$(echo "$package_info" | jq -r '.Name')
+              PACKAGE_LICENSE=$(echo "$package_info" | jq -r '.License // "UNKNOWN"')
+              
+              # Check if license is forbidden
+              for forbidden in "${FORBIDDEN[@]}"; do
+                if [[ "$PACKAGE_LICENSE" == "$forbidden" ]] || [[ "$PACKAGE_LICENSE" =~ $forbidden ]]; then
+                  FORBIDDEN_COUNT=$((FORBIDDEN_COUNT + 1))
+                  COMPLIANCE_VIOLATIONS+=("$PACKAGE_NAME: $PACKAGE_LICENSE (FORBIDDEN)")
+                  break
+                fi
+              done
+              
+              # Check if license is approved
+              LICENSE_APPROVED=false
+              for approved in "${APPROVED[@]}"; do
+                if [[ "$PACKAGE_LICENSE" == "$approved" ]] || [[ "$PACKAGE_LICENSE" =~ $approved ]]; then
+                  APPROVED_COUNT=$((APPROVED_COUNT + 1))
+                  LICENSE_APPROVED=true
+                  break
+                fi
+              done
+              
+              # Count unknown licenses
+              if [[ "$LICENSE_APPROVED" == "false" ]] && [[ "$PACKAGE_LICENSE" == "UNKNOWN" || "$PACKAGE_LICENSE" == "null" ]]; then
+                UNKNOWN_COUNT=$((UNKNOWN_COUNT + 1))
+                COMPLIANCE_VIOLATIONS+=("$PACKAGE_NAME: $PACKAGE_LICENSE (UNKNOWN)")
+              fi
+              
+            done < <(jq -c '.[]' reports/license-compliance/licenses.json)
+            
+            # Generate compliance summary
+            echo "### 📊 License Compliance Summary:" >> $GITHUB_STEP_SUMMARY
+            echo "- **Total Packages**: ${TOTAL_PACKAGES}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Approved Licenses**: ${APPROVED_COUNT}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Forbidden Licenses**: ${FORBIDDEN_COUNT}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Unknown Licenses**: ${UNKNOWN_COUNT}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Compliance Rate**: $(echo "scale=2; ${APPROVED_COUNT}*100/${TOTAL_PACKAGES}" | bc)%" >> $GITHUB_STEP_SUMMARY
+            
+            # Report violations if any
+            if [[ ${FORBIDDEN_COUNT} -gt 0 ]] || [[ ${UNKNOWN_COUNT} -gt 0 ]]; then
+              echo "### ❌ License Compliance Violations:" >> $GITHUB_STEP_SUMMARY
+              for violation in "${COMPLIANCE_VIOLATIONS[@]}"; do
+                echo "- ${violation}" >> $GITHUB_STEP_SUMMARY
+              done
+              
+              echo "LICENSE_COMPLIANCE_FAILED=true" >> $GITHUB_ENV
+              echo "LICENSE_VIOLATIONS=${#COMPLIANCE_VIOLATIONS[@]}" >> $GITHUB_ENV
+              
+              if [[ "${{ env.LICENSE_COMPLIANCE_REQUIRED }}" == "true" ]]; then
+                echo "**ACTION REQUIRED**: Legal review and remediation required for license violations" >> $GITHUB_STEP_SUMMARY
+              else
+                echo "**WARNING**: License violations detected but not blocking deployment" >> $GITHUB_STEP_SUMMARY
+              fi
+            else
+              echo "✅ **SUCCESS**: All dependencies use approved licenses" >> $GITHUB_STEP_SUMMARY
+            fi
+            
+            # Generate detailed compliance report
+            cat > reports/license-compliance/compliance-summary.json << EOF
+{
+  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "total_packages": ${TOTAL_PACKAGES},
+  "approved_count": ${APPROVED_COUNT},
+  "forbidden_count": ${FORBIDDEN_COUNT},
+  "unknown_count": ${UNKNOWN_COUNT},
+  "compliance_rate": $(echo "scale=4; ${APPROVED_COUNT}/${TOTAL_PACKAGES}" | bc),
+  "violations": $(printf '%s\n' "${COMPLIANCE_VIOLATIONS[@]}" | jq -R . | jq -s .),
+  "approved_licenses": $(printf '%s\n' "${APPROVED[@]}" | jq -R . | jq -s .),
+  "forbidden_licenses": $(printf '%s\n' "${FORBIDDEN[@]}" | jq -R . | jq -s .)
+}
+EOF
+          else
+            echo "❌ **ERROR**: Failed to generate license report" >> $GITHUB_STEP_SUMMARY
+            echo "LICENSE_SCAN_FAILED=true" >> $GITHUB_ENV
+          fi
+          
+      - name: 📊 Upload license compliance reports
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: license-compliance-reports
+          path: reports/license-compliance/
+          retention-days: ${{ env.REPORT_RETENTION_DAYS }}
+          
+      - name: 🚨 Notify on license compliance violations
+        if: env.LICENSE_COMPLIANCE_FAILED == 'true'
+        run: |
+          MESSAGE="⚖️ License Compliance Violations Detected in ${{ github.repository }} - ${LICENSE_VIOLATIONS} violations found"
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            MESSAGE="${MESSAGE} - PR #${{ github.event.number }} by ${{ github.actor }}"
+          fi
+          MESSAGE="${MESSAGE} - Legal review required"
+          
+          if [[ -n "${{ env.SLACK_SECURITY_WEBHOOK }}" ]]; then
+            curl -X POST -H 'Content-type: application/json' \
+              --data '{"text":"'"${MESSAGE}"'"}' \
+              ${{ env.SLACK_SECURITY_WEBHOOK }}
+          fi
+          
+      - name: ❌ Fail on license compliance violations
+        if: env.LICENSE_COMPLIANCE_FAILED == 'true' && env.LICENSE_COMPLIANCE_REQUIRED == 'true'
+        run: |
+          echo "❌ **PIPELINE TERMINATED**: License compliance violations detected"
+          echo "Legal review and remediation required for forbidden or unknown licenses"
+          exit 1
+
+  # ==========================================================================
+  # DEPENDENCY UPDATE DETECTION JOB
+  # ==========================================================================
+  # Automated dependency update detection with security assessment per Section 8.5.1
+  
+  dependency-updates:
+    name: 🔄 Dependency Update Detection
+    runs-on: ubuntu-latest
+    needs: [dependency-setup, vulnerability-scan, license-compliance]
+    timeout-minutes: 20
+    if: always() && !cancelled() && contains(fromJson('["comprehensive", "update-check"]'), needs.dependency-setup.outputs.scan-type) && needs.dependency-setup.outputs.should-update == 'true'
+    
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: 🐍 Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          
+      - name: 🗃️ Restore dependency tools cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.local/lib/python*/site-packages
+          key: ${{ needs.dependency-setup.outputs.cache-key }}
+          restore-keys: |
+            dependency-tools-${{ runner.os }}-${{ env.PYTHON_VERSION }}-
+            
+      - name: 📦 Install dependency update tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-tools==${{ env.PIP_TOOLS_VERSION }}
+          pip install safety==${{ env.SAFETY_VERSION }}
+          pip install packaging requests
+          
+      - name: 🔄 Check for available dependency updates
+        run: |
+          echo "## 🔄 Dependency Update Detection" >> $GITHUB_STEP_SUMMARY
+          echo "Scanning for available security updates per Section 8.5.1" >> $GITHUB_STEP_SUMMARY
+          
+          # Create update reports directory
+          mkdir -p reports/dependency-updates
+          
+          # Install current dependencies for comparison
+          pip install -r requirements.txt
+          
+          # Generate current dependency snapshot
+          pip list --format=json > reports/dependency-updates/current-dependencies.json
+          
+          # Check for updates using pip list --outdated
+          echo "🔍 Checking for outdated packages..."
+          pip list --outdated --format=json > reports/dependency-updates/outdated-packages.json || true
+          
+          # Analyze outdated packages
+          if [[ -f reports/dependency-updates/outdated-packages.json ]] && [[ -s reports/dependency-updates/outdated-packages.json ]]; then
+            OUTDATED_COUNT=$(jq '. | length' reports/dependency-updates/outdated-packages.json)
+            
+            echo "### 📈 Available Updates:" >> $GITHUB_STEP_SUMMARY
+            echo "- **Packages with updates**: ${OUTDATED_COUNT}" >> $GITHUB_STEP_SUMMARY
+            
+            if [[ ${OUTDATED_COUNT} -gt 0 ]]; then
+              echo "### 🔍 Outdated Packages:" >> $GITHUB_STEP_SUMMARY
+              echo "| Package | Current | Latest | Type |" >> $GITHUB_STEP_SUMMARY
+              echo "|---------|---------|--------|------|" >> $GITHUB_STEP_SUMMARY
+              
+              # Process each outdated package
+              while IFS= read -r package_info; do
+                PACKAGE_NAME=$(echo "$package_info" | jq -r '.name')
+                CURRENT_VERSION=$(echo "$package_info" | jq -r '.version')
+                LATEST_VERSION=$(echo "$package_info" | jq -r '.latest_version')
+                LATEST_TYPE=$(echo "$package_info" | jq -r '.latest_filetype // "wheel"')
+                
+                echo "| ${PACKAGE_NAME} | ${CURRENT_VERSION} | ${LATEST_VERSION} | ${LATEST_TYPE} |" >> $GITHUB_STEP_SUMMARY
+              done < <(jq -c '.[]' reports/dependency-updates/outdated-packages.json)
+              
+              echo "UPDATES_AVAILABLE=true" >> $GITHUB_ENV
+              echo "UPDATE_COUNT=${OUTDATED_COUNT}" >> $GITHUB_ENV
+            else
+              echo "✅ All dependencies are up to date" >> $GITHUB_STEP_SUMMARY
+              echo "UPDATES_AVAILABLE=false" >> $GITHUB_ENV
+            fi
+          else
+            echo "⚠️ Unable to check for updates" >> $GITHUB_STEP_SUMMARY
+            echo "UPDATES_AVAILABLE=false" >> $GITHUB_ENV
+          fi
+          
+      - name: 🔒 Assess security impact of updates
+        if: env.UPDATES_AVAILABLE == 'true'
+        run: |
+          echo "## 🔒 Security Impact Assessment" >> $GITHUB_STEP_SUMMARY
+          echo "Evaluating security implications of available updates" >> $GITHUB_STEP_SUMMARY
+          
+          # Initialize security assessment
+          SECURITY_UPDATES=0
+          CRITICAL_SECURITY_UPDATES=0
+          UPDATE_SECURITY_ASSESSMENT=()
+          
+          # Check each outdated package for security relevance
+          while IFS= read -r package_info; do
+            PACKAGE_NAME=$(echo "$package_info" | jq -r '.name')
+            CURRENT_VERSION=$(echo "$package_info" | jq -r '.version')
+            LATEST_VERSION=$(echo "$package_info" | jq -r '.latest_version')
+            
+            # Check if package has known vulnerabilities in current version
+            echo "🔍 Checking security implications for ${PACKAGE_NAME}..."
+            
+            # Use safety to check current version
+            safety check --json --disable-optional-telemetry-data | jq --arg pkg "$PACKAGE_NAME" '.[] | select(.package_name == $pkg)' > temp_vuln.json 2>/dev/null || true
+            
+            if [[ -s temp_vuln.json ]]; then
+              VULNERABILITY_COUNT=$(jq '. | length' temp_vuln.json 2>/dev/null || echo "0")
+              if [[ ${VULNERABILITY_COUNT} -gt 0 ]]; then
+                SECURITY_UPDATES=$((SECURITY_UPDATES + 1))
+                
+                # Check for critical vulnerabilities
+                CRITICAL_VULNS=$(jq '[.[] | select(.severity == "critical")] | length' temp_vuln.json 2>/dev/null || echo "0")
+                if [[ ${CRITICAL_VULNS} -gt 0 ]]; then
+                  CRITICAL_SECURITY_UPDATES=$((CRITICAL_SECURITY_UPDATES + 1))
+                  UPDATE_SECURITY_ASSESSMENT+=("${PACKAGE_NAME}: ${VULNERABILITY_COUNT} vulnerabilities (${CRITICAL_VULNS} critical) - UPDATE REQUIRED")
+                else
+                  UPDATE_SECURITY_ASSESSMENT+=("${PACKAGE_NAME}: ${VULNERABILITY_COUNT} vulnerabilities - Update recommended")
+                fi
+              fi
+            fi
+            
+            rm -f temp_vuln.json
+          done < <(jq -c '.[]' reports/dependency-updates/outdated-packages.json)
+          
+          # Generate security assessment summary
+          echo "### 🔒 Security Assessment Summary:" >> $GITHUB_STEP_SUMMARY
+          echo "- **Total Updates Available**: ${UPDATE_COUNT}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Security-Related Updates**: ${SECURITY_UPDATES}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Critical Security Updates**: ${CRITICAL_SECURITY_UPDATES}" >> $GITHUB_STEP_SUMMARY
+          
+          if [[ ${SECURITY_UPDATES} -gt 0 ]]; then
+            echo "### 🚨 Security-Related Updates:" >> $GITHUB_STEP_SUMMARY
+            for assessment in "${UPDATE_SECURITY_ASSESSMENT[@]}"; do
+              echo "- ${assessment}" >> $GITHUB_STEP_SUMMARY
+            done
+            
+            echo "SECURITY_UPDATES_AVAILABLE=true" >> $GITHUB_ENV
+            echo "CRITICAL_SECURITY_UPDATES=${CRITICAL_SECURITY_UPDATES}" >> $GITHUB_ENV
+          else
+            echo "✅ No security-related updates identified" >> $GITHUB_STEP_SUMMARY
+            echo "SECURITY_UPDATES_AVAILABLE=false" >> $GITHUB_ENV
+          fi
+          
+          # Create security assessment report
+          cat > reports/dependency-updates/security-assessment.json << EOF
+{
+  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "total_updates": ${UPDATE_COUNT},
+  "security_updates": ${SECURITY_UPDATES},
+  "critical_security_updates": ${CRITICAL_SECURITY_UPDATES},
+  "assessment": $(printf '%s\n' "${UPDATE_SECURITY_ASSESSMENT[@]}" | jq -R . | jq -s .)
+}
+EOF
+          
+      - name: 🔄 Generate dependency update PR
+        if: env.UPDATES_AVAILABLE == 'true' && (env.SECURITY_UPDATES_AVAILABLE == 'true' || github.event.inputs.force_update == 'true')
+        run: |
+          echo "## 🔄 Generating Dependency Update PR" >> $GITHUB_STEP_SUMMARY
+          
+          # Configure git
+          git config --global user.name 'dependency-security-bot'
+          git config --global user.email 'security@company.com'
+          
+          # Create update branch
+          UPDATE_BRANCH="${{ env.UPDATE_PR_BRANCH_PREFIX }}-$(date +%Y%m%d-%H%M%S)"
+          git checkout -b "${UPDATE_BRANCH}"
+          
+          # Update dependencies with security focus
+          if [[ -f requirements.in ]]; then
+            echo "🔄 Updating requirements.in with security-focused updates..."
+            
+            # Update only security-related packages or all if forced
+            if [[ "${{ github.event.inputs.force_update }}" == "true" ]]; then
+              pip-compile --upgrade requirements.in
+            else
+              # Update specific packages with security issues
+              while IFS= read -r package_info; do
+                PACKAGE_NAME=$(echo "$package_info" | jq -r '.name')
+                # Check if this package has security implications
+                if grep -q "$PACKAGE_NAME" reports/dependency-updates/security-assessment.json; then
+                  echo "Updating security-critical package: ${PACKAGE_NAME}"
+                  pip-compile --upgrade-package "${PACKAGE_NAME}" requirements.in
+                fi
+              done < <(jq -c '.[]' reports/dependency-updates/outdated-packages.json)
+            fi
+          else
+            echo "⚠️ No requirements.in found - manual dependency update required"
+          fi
+          
+          # Check if there are changes to commit
+          if git diff --quiet requirements.txt; then
+            echo "⚠️ No dependency changes generated" >> $GITHUB_STEP_SUMMARY
+            echo "UPDATE_PR_CREATED=false" >> $GITHUB_ENV
+          else
+            # Commit changes
+            git add requirements.txt
+            
+            # Create commit message with security context
+            COMMIT_MSG="🔒 Security-focused dependency updates"
+            if [[ "${CRITICAL_SECURITY_UPDATES:-0}" -gt 0 ]]; then
+              COMMIT_MSG="${COMMIT_MSG} - ${CRITICAL_SECURITY_UPDATES} critical security updates"
+            fi
+            if [[ "${SECURITY_UPDATES:-0}" -gt 0 ]]; then
+              COMMIT_MSG="${COMMIT_MSG} - ${SECURITY_UPDATES} security-related updates"
+            fi
+            
+            git commit -m "${COMMIT_MSG}"
+            
+            # Push update branch
+            git push origin "${UPDATE_BRANCH}"
+            
+            # Create pull request using GitHub CLI
+            PR_TITLE="🔒 Automated Dependency Security Updates"
+            PR_BODY="## 🔒 Automated Dependency Security Updates
+            
+**Security Impact Assessment:**
+- Total Updates: ${UPDATE_COUNT}
+- Security-Related Updates: ${SECURITY_UPDATES:-0}
+- Critical Security Updates: ${CRITICAL_SECURITY_UPDATES:-0}
+
+**Update Summary:**
+$(cat reports/dependency-updates/security-assessment.json | jq -r '.assessment[]')
+
+**Validation Required:**
+- [ ] Security team review
+- [ ] Integration testing
+- [ ] Performance validation
+
+**Generated by:** Dependency Security Validation Workflow
+**Scan ID:** ${{ github.run_id }}-${{ github.run_attempt }}
+**Timestamp:** $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+/cc @security-team"
+            
+            # Create PR with appropriate labels and reviewers
+            gh pr create \
+              --title "${PR_TITLE}" \
+              --body "${PR_BODY}" \
+              --label "security,dependencies,automated" \
+              --reviewer "security-team" \
+              --head "${UPDATE_BRANCH}" \
+              --base main
+            
+            echo "✅ **SUCCESS**: Dependency update PR created successfully" >> $GITHUB_STEP_SUMMARY
+            echo "- **Branch**: ${UPDATE_BRANCH}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Security Updates**: ${SECURITY_UPDATES:-0}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Critical Updates**: ${CRITICAL_SECURITY_UPDATES:-0}" >> $GITHUB_STEP_SUMMARY
+            
+            echo "UPDATE_PR_CREATED=true" >> $GITHUB_ENV
+            echo "UPDATE_BRANCH=${UPDATE_BRANCH}" >> $GITHUB_ENV
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: 📊 Upload dependency update reports
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: dependency-update-reports
+          path: reports/dependency-updates/
+          retention-days: ${{ env.REPORT_RETENTION_DAYS }}
+          
+      - name: 🚨 Notify on critical security updates
+        if: env.CRITICAL_SECURITY_UPDATES != '0' && env.CRITICAL_SECURITY_UPDATES != ''
+        run: |
+          MESSAGE="🚨 CRITICAL Dependency Security Updates Available in ${{ github.repository }} - ${CRITICAL_SECURITY_UPDATES} critical updates"
+          if [[ "${UPDATE_PR_CREATED}" == "true" ]]; then
+            MESSAGE="${MESSAGE} - PR created: ${UPDATE_BRANCH}"
+          fi
+          MESSAGE="${MESSAGE} - Security team review required"
+          
+          if [[ -n "${{ env.SLACK_SECURITY_WEBHOOK }}" ]]; then
+            curl -X POST -H 'Content-type: application/json' \
+              --data '{"text":"'"${MESSAGE}"'", "channel": "#security-alerts"}' \
+              ${{ env.SLACK_SECURITY_WEBHOOK }}
+          fi
+
+  # ==========================================================================
+  # SECURITY BASELINE AND TREND ANALYSIS JOB
+  # ==========================================================================
+  # Dependency security baseline validation and trend analysis per Section 6.6.3
+  
+  security-baseline:
+    name: 📈 Security Baseline and Trend Analysis
+    runs-on: ubuntu-latest
+    needs: [dependency-setup, vulnerability-scan, license-compliance]
+    timeout-minutes: 15
+    if: always() && !cancelled() && contains(fromJson('["comprehensive", "security-baseline"]'), needs.dependency-setup.outputs.scan-type)
+    
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for trend analysis
+          
+      - name: 🐍 Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          
+      - name: 📊 Collect current security metrics
+        run: |
+          echo "## 📈 Security Baseline and Trend Analysis" >> $GITHUB_STEP_SUMMARY
+          echo "Historical vulnerability tracking and trend analysis per Section 6.6.3" >> $GITHUB_STEP_SUMMARY
+          
+          # Create baseline reports directory
+          mkdir -p reports/security-baseline
+          
+          # Download previous baseline if available
+          if [[ -f ".github/security-baseline.json" ]]; then
+            cp .github/security-baseline.json reports/security-baseline/previous-baseline.json
+            echo "✅ Previous security baseline found for comparison"
+          else
+            echo "⚠️ No previous security baseline found - creating initial baseline"
+            echo '{"baselines": []}' > reports/security-baseline/previous-baseline.json
+          fi
+          
+          # Extract current security metrics from vulnerability scan
+          CURRENT_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          CURRENT_COMMIT=${{ github.sha }}
+          CURRENT_BRANCH=${{ github.ref_name }}
+          
+          # Initialize metrics
+          SAFETY_CRITICAL=${SAFETY_CRITICAL_COUNT:-0}
+          SAFETY_HIGH=${SAFETY_HIGH_COUNT:-0}
+          SAFETY_TOTAL=${SAFETY_TOTAL_COUNT:-0}
+          AUDIT_TOTAL=${AUDIT_VULNERABILITY_COUNT:-0}
+          LICENSE_VIOLATIONS=${LICENSE_VIOLATIONS:-0}
+          
+          # Create current baseline entry
+          cat > reports/security-baseline/current-baseline.json << EOF
+{
+  "timestamp": "${CURRENT_TIMESTAMP}",
+  "commit": "${CURRENT_COMMIT}",
+  "branch": "${CURRENT_BRANCH}",
+  "run_id": "${{ github.run_id }}",
+  "requirements_hash": "${{ needs.dependency-setup.outputs.requirements-hash }}",
+  "security_metrics": {
+    "safety_critical": ${SAFETY_CRITICAL},
+    "safety_high": ${SAFETY_HIGH},
+    "safety_total": ${SAFETY_TOTAL},
+    "audit_total": ${AUDIT_TOTAL},
+    "license_violations": ${LICENSE_VIOLATIONS}
+  }
+}
+EOF
+          
+      - name: 📊 Perform trend analysis
+        run: |
+          echo "## 📊 Security Trend Analysis" >> $GITHUB_STEP_SUMMARY
+          
+          # Load previous baseline
+          PREVIOUS_BASELINES=$(jq '.baselines' reports/security-baseline/previous-baseline.json 2>/dev/null || echo '[]')
+          BASELINE_COUNT=$(echo "$PREVIOUS_BASELINES" | jq '. | length')
+          
+          echo "### 📈 Historical Data:" >> $GITHUB_STEP_SUMMARY
+          echo "- **Previous Baselines**: ${BASELINE_COUNT}" >> $GITHUB_STEP_SUMMARY
+          
+          if [[ ${BASELINE_COUNT} -gt 0 ]]; then
+            # Get most recent baseline for comparison
+            LATEST_BASELINE=$(echo "$PREVIOUS_BASELINES" | jq '.[-1]')
+            PREV_CRITICAL=$(echo "$LATEST_BASELINE" | jq '.security_metrics.safety_critical // 0')
+            PREV_HIGH=$(echo "$LATEST_BASELINE" | jq '.security_metrics.safety_high // 0')
+            PREV_TOTAL=$(echo "$LATEST_BASELINE" | jq '.security_metrics.safety_total // 0')
+            PREV_LICENSE=$(echo "$LATEST_BASELINE" | jq '.security_metrics.license_violations // 0')
+            
+            # Calculate trends
+            CRITICAL_TREND=$((${SAFETY_CRITICAL_COUNT:-0} - PREV_CRITICAL))
+            HIGH_TREND=$((${SAFETY_HIGH_COUNT:-0} - PREV_HIGH))
+            TOTAL_TREND=$((${SAFETY_TOTAL_COUNT:-0} - PREV_TOTAL))
+            LICENSE_TREND=$((${LICENSE_VIOLATIONS:-0} - PREV_LICENSE))
+            
+            echo "### 📊 Security Trend Comparison:" >> $GITHUB_STEP_SUMMARY
+            echo "| Metric | Previous | Current | Trend |" >> $GITHUB_STEP_SUMMARY
+            echo "|--------|----------|---------|-------|" >> $GITHUB_STEP_SUMMARY
+            echo "| Critical Vulnerabilities | ${PREV_CRITICAL} | ${SAFETY_CRITICAL_COUNT:-0} | $(if [[ ${CRITICAL_TREND} -gt 0 ]]; then echo "📈 +${CRITICAL_TREND}"; elif [[ ${CRITICAL_TREND} -lt 0 ]]; then echo "📉 ${CRITICAL_TREND}"; else echo "➡️ No change"; fi) |" >> $GITHUB_STEP_SUMMARY
+            echo "| High Vulnerabilities | ${PREV_HIGH} | ${SAFETY_HIGH_COUNT:-0} | $(if [[ ${HIGH_TREND} -gt 0 ]]; then echo "📈 +${HIGH_TREND}"; elif [[ ${HIGH_TREND} -lt 0 ]]; then echo "📉 ${HIGH_TREND}"; else echo "➡️ No change"; fi) |" >> $GITHUB_STEP_SUMMARY
+            echo "| Total Vulnerabilities | ${PREV_TOTAL} | ${SAFETY_TOTAL_COUNT:-0} | $(if [[ ${TOTAL_TREND} -gt 0 ]]; then echo "📈 +${TOTAL_TREND}"; elif [[ ${TOTAL_TREND} -lt 0 ]]; then echo "📉 ${TOTAL_TREND}"; else echo "➡️ No change"; fi) |" >> $GITHUB_STEP_SUMMARY
+            echo "| License Violations | ${PREV_LICENSE} | ${LICENSE_VIOLATIONS:-0} | $(if [[ ${LICENSE_TREND} -gt 0 ]]; then echo "📈 +${LICENSE_TREND}"; elif [[ ${LICENSE_TREND} -lt 0 ]]; then echo "📉 ${LICENSE_TREND}"; else echo "➡️ No change"; fi) |" >> $GITHUB_STEP_SUMMARY
+            
+            # Assess trend significance
+            TREND_ASSESSMENT="stable"
+            if [[ ${CRITICAL_TREND} -gt 0 ]] || [[ ${HIGH_TREND} -gt 2 ]]; then
+              TREND_ASSESSMENT="degraded"
+              echo "⚠️ **TREND ALERT**: Security posture has degraded" >> $GITHUB_STEP_SUMMARY
+              echo "SECURITY_TREND_DEGRADED=true" >> $GITHUB_ENV
+            elif [[ ${CRITICAL_TREND} -lt 0 ]] && [[ ${TOTAL_TREND} -lt 0 ]]; then
+              TREND_ASSESSMENT="improved"
+              echo "✅ **TREND SUCCESS**: Security posture has improved" >> $GITHUB_STEP_SUMMARY
+            fi
+            
+            # Create trend analysis report
+            cat > reports/security-baseline/trend-analysis.json << EOF
+{
+  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "baseline_count": ${BASELINE_COUNT},
+  "trends": {
+    "critical_trend": ${CRITICAL_TREND},
+    "high_trend": ${HIGH_TREND},
+    "total_trend": ${TOTAL_TREND},
+    "license_trend": ${LICENSE_TREND}
+  },
+  "assessment": "${TREND_ASSESSMENT}",
+  "previous_baseline": ${LATEST_BASELINE},
+  "current_metrics": $(cat reports/security-baseline/current-baseline.json | jq '.security_metrics')
+}
+EOF
+          else
+            echo "⚠️ **INITIAL BASELINE**: Creating first security baseline" >> $GITHUB_STEP_SUMMARY
+            echo "SECURITY_BASELINE_INITIAL=true" >> $GITHUB_ENV
+          fi
+          
+      - name: 📊 Update security baseline
+        if: github.ref == 'refs/heads/main'
+        run: |
+          echo "## 📊 Updating Security Baseline" >> $GITHUB_STEP_SUMMARY
+          
+          # Load existing baselines
+          EXISTING_BASELINES=$(jq '.baselines' reports/security-baseline/previous-baseline.json 2>/dev/null || echo '[]')
+          
+          # Add current baseline to history
+          CURRENT_BASELINE=$(cat reports/security-baseline/current-baseline.json)
+          UPDATED_BASELINES=$(echo "$EXISTING_BASELINES" | jq ". + [${CURRENT_BASELINE}]")
+          
+          # Keep only last 90 days of baselines (assuming daily runs)
+          RETENTION_LIMIT=90
+          BASELINE_COUNT=$(echo "$UPDATED_BASELINES" | jq '. | length')
+          
+          if [[ ${BASELINE_COUNT} -gt ${RETENTION_LIMIT} ]]; then
+            UPDATED_BASELINES=$(echo "$UPDATED_BASELINES" | jq ".[-(${RETENTION_LIMIT}):]")
+            echo "🗑️ Pruned baseline history to last ${RETENTION_LIMIT} entries"
+          fi
+          
+          # Create updated baseline file
+          cat > .github/security-baseline.json << EOF
+{
+  "last_updated": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "retention_days": ${RETENTION_LIMIT},
+  "baselines": ${UPDATED_BASELINES}
+}
+EOF
+          
+          echo "✅ Security baseline updated successfully" >> $GITHUB_STEP_SUMMARY
+          echo "- **Total Baselines**: $(echo "$UPDATED_BASELINES" | jq '. | length')" >> $GITHUB_STEP_SUMMARY
+          echo "- **Retention Policy**: ${RETENTION_LIMIT} days" >> $GITHUB_STEP_SUMMARY
+          
+      - name: 📊 Generate compliance report
+        if: env.COMPLIANCE_REPORT_REQUIRED == 'true'
+        run: |
+          echo "## 📊 Generating Compliance Report" >> $GITHUB_STEP_SUMMARY
+          
+          # Create comprehensive compliance report
+          cat > reports/security-baseline/compliance-report.json << EOF
+{
+  "report_timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "scan_id": "${{ github.run_id }}-${{ github.run_attempt }}",
+  "repository": "${{ github.repository }}",
+  "branch": "${{ github.ref_name }}",
+  "commit": "${{ github.sha }}",
+  "compliance_summary": {
+    "vulnerability_scan": {
+      "critical_vulnerabilities": ${SAFETY_CRITICAL_COUNT:-0},
+      "high_vulnerabilities": ${SAFETY_HIGH_COUNT:-0},
+      "total_vulnerabilities": ${SAFETY_TOTAL_COUNT:-0},
+      "threshold_compliance": $(if [[ "${SAFETY_CRITICAL_COUNT:-0}" -le "${{ env.CRITICAL_VULNERABILITY_THRESHOLD }}" ]]; then echo "true"; else echo "false"; fi)
+    },
+    "license_compliance": {
+      "violations": ${LICENSE_VIOLATIONS:-0},
+      "compliance_status": $(if [[ "${LICENSE_VIOLATIONS:-0}" -eq 0 ]]; then echo "compliant"; else echo "non_compliant"; fi)
+    },
+    "dependency_pinning": {
+      "pinning_valid": $(if [[ "${PINNING_VALIDATION_FAILED:-false}" == "false" ]]; then echo "true"; else echo "false"; fi),
+      "hash_integrity": $(if [[ "${HASH_VALIDATION_FAILED:-false}" == "false" ]]; then echo "true"; else echo "false"; fi)
+    }
+  },
+  "trend_analysis": {
+    "baseline_available": $(if [[ "${{ needs.dependency-setup.outputs.baseline-exists }}" == "true" ]]; then echo "true"; else echo "false"; fi),
+    "trend_status": "$(if [[ "${SECURITY_TREND_DEGRADED:-false}" == "true" ]]; then echo "degraded"; else echo "stable_or_improved"; fi)"
+  }
+}
+EOF
+          
+          echo "✅ Compliance report generated successfully" >> $GITHUB_STEP_SUMMARY
+          
+      - name: 📊 Upload security baseline reports
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: security-baseline-reports
+          path: reports/security-baseline/
+          retention-days: ${{ env.TREND_REPORT_RETENTION }}
+          
+      - name: 🚨 Notify on security trend degradation
+        if: env.SECURITY_TREND_DEGRADED == 'true'
+        run: |
+          MESSAGE="📈 Security Trend DEGRADATION Detected in ${{ github.repository }} - Security posture has worsened"
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            MESSAGE="${MESSAGE} - PR #${{ github.event.number }} by ${{ github.actor }}"
+          fi
+          MESSAGE="${MESSAGE} - Review and remediation recommended"
+          
+          if [[ -n "${{ env.SLACK_SECURITY_WEBHOOK }}" ]]; then
+            curl -X POST -H 'Content-type: application/json' \
+              --data '{"text":"'"${MESSAGE}"'"}' \
+              ${{ env.SLACK_SECURITY_WEBHOOK }}
+          fi
+
+  # ==========================================================================
+  # SECURITY APPROVAL WORKFLOW JOB
+  # ==========================================================================
+  # Automated security approval workflow for dependency updates per Section 8.5.3
+  
+  security-approval:
+    name: ✅ Security Approval Workflow
+    runs-on: ubuntu-latest
+    needs: [dependency-setup, vulnerability-scan, license-compliance, dependency-updates, security-baseline]
+    timeout-minutes: 10
+    if: always() && !cancelled() && needs.dependency-setup.outputs.scan-type == 'comprehensive'
+    
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: ✅ Evaluate security approval criteria
+        run: |
+          echo "## ✅ Security Approval Workflow Evaluation" >> $GITHUB_STEP_SUMMARY
+          echo "Automated security approval assessment per Section 8.5.3" >> $GITHUB_STEP_SUMMARY
+          
+          # Initialize approval criteria
+          APPROVAL_CRITERIA_MET=true
+          APPROVAL_VIOLATIONS=()
+          
+          # Check vulnerability scan results
+          if [[ "${SAFETY_CRITICAL_COUNT:-0}" -gt "${{ env.CRITICAL_VULNERABILITY_THRESHOLD }}" ]]; then
+            APPROVAL_CRITERIA_MET=false
+            APPROVAL_VIOLATIONS+=("Critical vulnerabilities detected: ${SAFETY_CRITICAL_COUNT:-0}")
           fi
           
           # Check license compliance
-          if [ "${{ needs.license-compliance.outputs.compliance-status }}" == "failed" ]; then
-            NOTIFICATION_BODY="${NOTIFICATION_BODY}⚖️ **LICENSE**: Found ${{ needs.license-compliance.outputs.non-compliant-count }} non-compliant licenses\n"
+          if [[ "${LICENSE_VIOLATIONS:-0}" -gt 0 ]] && [[ "${{ env.LICENSE_COMPLIANCE_REQUIRED }}" == "true" ]]; then
+            APPROVAL_CRITERIA_MET=false
+            APPROVAL_VIOLATIONS+=("License compliance violations: ${LICENSE_VIOLATIONS:-0}")
           fi
           
-          # Check security updates
-          if [ "${{ needs.dependency-update-detection.outputs.security-updates }}" == "true" ]; then
-            NOTIFICATION_BODY="${NOTIFICATION_BODY}🔄 **UPDATES**: Security-related dependency updates available\n"
+          # Check dependency pinning
+          if [[ "${PINNING_VALIDATION_FAILED:-false}" == "true" ]]; then
+            APPROVAL_CRITERIA_MET=false
+            APPROVAL_VIOLATIONS+=("Dependency pinning validation failed")
           fi
           
-          # Add workflow information
-          NOTIFICATION_BODY="${NOTIFICATION_BODY}\n**Repository**: ${{ github.repository }}\n"
-          NOTIFICATION_BODY="${NOTIFICATION_BODY}**Branch**: ${{ github.ref_name }}\n"
-          NOTIFICATION_BODY="${NOTIFICATION_BODY}**Workflow**: [View Details](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})\n"
-          NOTIFICATION_BODY="${NOTIFICATION_BODY}**Triggered by**: ${{ github.event_name }}\n"
-          NOTIFICATION_BODY="${NOTIFICATION_BODY}**Timestamp**: $(date -u)\n"
+          # Check for security trend degradation
+          if [[ "${SECURITY_TREND_DEGRADED:-false}" == "true" ]]; then
+            APPROVAL_CRITERIA_MET=false
+            APPROVAL_VIOLATIONS+=("Security trend degradation detected")
+          fi
           
-          # Set outputs for notification steps
-          echo "title=$NOTIFICATION_TITLE" >> $GITHUB_OUTPUT
-          echo "body<<EOF" >> $GITHUB_OUTPUT
-          echo -e "$NOTIFICATION_BODY" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-          echo "severity=$SEVERITY" >> $GITHUB_OUTPUT
-
-      - name: Send Slack Notification to Security Team
-        if: env.SLACK_WEBHOOK_URL != '' && (github.event.inputs.notify_security_team != 'false' || github.event.inputs.notify_security_team == '')
-        uses: 8398a7/action-slack@v3
+          # Generate approval assessment
+          echo "### 🔍 Security Approval Criteria Assessment:" >> $GITHUB_STEP_SUMMARY
+          echo "| Criteria | Status | Details |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|--------|---------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Vulnerability Threshold | $(if [[ "${SAFETY_CRITICAL_COUNT:-0}" -le "${{ env.CRITICAL_VULNERABILITY_THRESHOLD }}" ]]; then echo "✅ Pass"; else echo "❌ Fail"; fi) | Critical: ${SAFETY_CRITICAL_COUNT:-0}/${{ env.CRITICAL_VULNERABILITY_THRESHOLD }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| License Compliance | $(if [[ "${LICENSE_VIOLATIONS:-0}" -eq 0 || "${{ env.LICENSE_COMPLIANCE_REQUIRED }}" != "true" ]]; then echo "✅ Pass"; else echo "❌ Fail"; fi) | Violations: ${LICENSE_VIOLATIONS:-0} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Dependency Pinning | $(if [[ "${PINNING_VALIDATION_FAILED:-false}" == "false" ]]; then echo "✅ Pass"; else echo "❌ Fail"; fi) | Validation status |" >> $GITHUB_STEP_SUMMARY
+          echo "| Security Trend | $(if [[ "${SECURITY_TREND_DEGRADED:-false}" == "false" ]]; then echo "✅ Pass"; else echo "❌ Fail"; fi) | Trend analysis |" >> $GITHUB_STEP_SUMMARY
+          
+          # Overall approval decision
+          if [[ "$APPROVAL_CRITERIA_MET" == "true" ]]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "🎉 **SECURITY APPROVAL**: All criteria met - Automatic approval granted" >> $GITHUB_STEP_SUMMARY
+            echo "Dependencies are approved for deployment" >> $GITHUB_STEP_SUMMARY
+            echo "SECURITY_APPROVAL_GRANTED=true" >> $GITHUB_ENV
+          else
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "🚫 **SECURITY APPROVAL DENIED**: Criteria violations detected" >> $GITHUB_STEP_SUMMARY
+            echo "### ❌ Approval Violations:" >> $GITHUB_STEP_SUMMARY
+            for violation in "${APPROVAL_VIOLATIONS[@]}"; do
+              echo "- ${violation}" >> $GITHUB_STEP_SUMMARY
+            done
+            echo "**Manual security team review required before proceeding**" >> $GITHUB_STEP_SUMMARY
+            echo "SECURITY_APPROVAL_GRANTED=false" >> $GITHUB_ENV
+          fi
+          
+      - name: 📝 Create security approval record
+        run: |
+          # Create approval record directory
+          mkdir -p reports/security-approval
+          
+          # Generate comprehensive approval record
+          cat > reports/security-approval/approval-record.json << EOF
+{
+  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "scan_id": "${{ github.run_id }}-${{ github.run_attempt }}",
+  "repository": "${{ github.repository }}",
+  "branch": "${{ github.ref_name }}",
+  "commit": "${{ github.sha }}",
+  "approval_status": "${SECURITY_APPROVAL_GRANTED:-false}",
+  "approval_criteria": {
+    "vulnerability_threshold": {
+      "threshold": ${{ env.CRITICAL_VULNERABILITY_THRESHOLD }},
+      "actual": ${SAFETY_CRITICAL_COUNT:-0},
+      "passed": $(if [[ "${SAFETY_CRITICAL_COUNT:-0}" -le "${{ env.CRITICAL_VULNERABILITY_THRESHOLD }}" ]]; then echo "true"; else echo "false"; fi)
+    },
+    "license_compliance": {
+      "required": ${{ env.LICENSE_COMPLIANCE_REQUIRED }},
+      "violations": ${LICENSE_VIOLATIONS:-0},
+      "passed": $(if [[ "${LICENSE_VIOLATIONS:-0}" -eq 0 || "${{ env.LICENSE_COMPLIANCE_REQUIRED }}" != "true" ]]; then echo "true"; else echo "false"; fi)
+    },
+    "dependency_pinning": {
+      "passed": $(if [[ "${PINNING_VALIDATION_FAILED:-false}" == "false" ]]; then echo "true"; else echo "false"; fi)
+    },
+    "security_trend": {
+      "passed": $(if [[ "${SECURITY_TREND_DEGRADED:-false}" == "false" ]]; then echo "true"; else echo "false"; fi)
+    }
+  },
+  "scan_results_summary": {
+    "critical_vulnerabilities": ${SAFETY_CRITICAL_COUNT:-0},
+    "high_vulnerabilities": ${SAFETY_HIGH_COUNT:-0},
+    "total_vulnerabilities": ${SAFETY_TOTAL_COUNT:-0},
+    "license_violations": ${LICENSE_VIOLATIONS:-0},
+    "pinning_validation": $(if [[ "${PINNING_VALIDATION_FAILED:-false}" == "false" ]]; then echo "\"passed\""; else echo "\"failed\""; fi)
+  }
+}
+EOF
+          
+      - name: 📊 Upload security approval reports
+        uses: actions/upload-artifact@v3
+        if: always()
         with:
-          status: custom
-          custom_payload: |
-            {
-              "channel": "#security-alerts",
-              "username": "Dependency Security Bot",
-              "icon_emoji": ":warning:",
-              "attachments": [
-                {
-                  "color": "${{ steps.notification-content.outputs.severity == 'CRITICAL' && 'danger' || steps.notification-content.outputs.severity == 'HIGH' && 'warning' || 'good' }}",
-                  "title": "${{ steps.notification-content.outputs.title }}",
-                  "text": "${{ steps.notification-content.outputs.body }}",
-                  "footer": "Dependency Security Check",
-                  "footer_icon": "https://github.com/favicon.ico",
-                  "ts": ${{ github.event.head_commit.timestamp && github.event.head_commit.timestamp || github.event.repository.updated_at }}
-                }
-              ]
-            }
-        env:
-          SLACK_WEBHOOK_URL: ${{ env.SLACK_WEBHOOK_URL }}
+          name: security-approval-reports
+          path: reports/security-approval/
+          retention-days: ${{ env.REPORT_RETENTION_DAYS }}
+          
+      - name: 🎉 Notify on security approval granted
+        if: env.SECURITY_APPROVAL_GRANTED == 'true'
+        run: |
+          MESSAGE="✅ Security Approval GRANTED for ${{ github.repository }}"
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            MESSAGE="${MESSAGE} - PR #${{ github.event.number }} by ${{ github.actor }}"
+          fi
+          MESSAGE="${MESSAGE} - Dependencies approved for deployment"
+          
+          if [[ -n "${{ env.SLACK_SECURITY_WEBHOOK }}" ]]; then
+            curl -X POST -H 'Content-type: application/json' \
+              --data '{"text":"'"${MESSAGE}"'"}' \
+              ${{ env.SLACK_SECURITY_WEBHOOK }}
+          fi
+          
+      - name: 🚫 Notify on security approval denied
+        if: env.SECURITY_APPROVAL_GRANTED == 'false'
+        run: |
+          MESSAGE="🚫 Security Approval DENIED for ${{ github.repository }}"
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            MESSAGE="${MESSAGE} - PR #${{ github.event.number }} by ${{ github.actor }}"
+          fi
+          MESSAGE="${MESSAGE} - Manual security review required"
+          
+          if [[ -n "${{ env.SLACK_SECURITY_WEBHOOK }}" ]]; then
+            curl -X POST -H 'Content-type: application/json' \
+              --data '{"text":"'"${MESSAGE}"'", "channel": "#security-alerts"}' \
+              ${{ env.SLACK_SECURITY_WEBHOOK }}
+          fi
 
-      - name: Send Teams Notification to Security Team
-        if: env.TEAMS_WEBHOOK_URL != '' && (github.event.inputs.notify_security_team != 'false' || github.event.inputs.notify_security_team == '')
-        uses: jdcargile/ms-teams-notification@v1.3
-        with:
-          github-token: ${{ github.token }}
-          ms-teams-webhook-uri: ${{ env.TEAMS_WEBHOOK_URL }}
-          notification-summary: ${{ steps.notification-content.outputs.title }}
-          notification-color: ${{ steps.notification-content.outputs.severity == 'CRITICAL' && 'FF0000' || steps.notification-content.outputs.severity == 'HIGH' && 'FFA500' || '00FF00' }}
-          timezone: UTC
-
-      - name: Create GitHub Issue for Critical Vulnerabilities
-        if: needs.vulnerability-scanning.outputs.critical-count != '0' && github.event_name != 'pull_request'
-        uses: actions/github-script@v6
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const title = `🚨 CRITICAL: Dependency Security Vulnerabilities Found`;
-            const body = `
-            ## Critical Dependency Security Alert
-            
-            **Severity**: CRITICAL
-            **Critical Vulnerabilities**: ${{ needs.vulnerability-scanning.outputs.critical-count }}
-            **High Vulnerabilities**: ${{ needs.vulnerability-scanning.outputs.high-count }}
-            
-            ### Details
-            ${{ needs.vulnerability-scanning.outputs.scan-report }}
-            
-            ### Action Required
-            - [ ] Review vulnerability reports in workflow artifacts
-            - [ ] Update affected dependencies immediately
-            - [ ] Verify fixes with security team
-            - [ ] Deploy updates to production
-            
-            ### Workflow Information
-            - **Repository**: ${{ github.repository }}
-            - **Branch**: ${{ github.ref_name }}
-            - **Workflow Run**: [View Details](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
-            - **Timestamp**: ${new Date().toISOString()}
-            
-            ### Artifacts
-            Download the vulnerability reports from the workflow artifacts for detailed analysis.
-            
-            ---
-            *This issue was automatically created by the Dependency Security Check workflow.*
-            `;
-            
-            // Check if an issue already exists
-            const existingIssues = await github.rest.issues.listForRepo({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: 'open',
-              labels: 'security,dependencies,critical'
-            });
-            
-            const existingIssue = existingIssues.data.find(issue => 
-              issue.title.includes('CRITICAL: Dependency Security Vulnerabilities')
-            );
-            
-            if (existingIssue) {
-              // Update existing issue
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: existingIssue.number,
-                body: `## Updated Security Scan Results\n\n${body}`
-              });
-            } else {
-              // Create new issue
-              await github.rest.issues.create({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                title: title,
-                body: body,
-                labels: ['security', 'dependencies', 'critical', 'automated']
-              });
-            }
-
-  # =============================================================================
-  # SECURITY BASELINE VALIDATION
-  # =============================================================================
-  security-baseline-validation:
-    name: Security Baseline & Trend Analysis
+  # ==========================================================================
+  # COMPREHENSIVE REPORTING JOB
+  # ==========================================================================
+  # Final comprehensive dependency security report generation and summary
+  
+  comprehensive-reporting:
+    name: 📊 Comprehensive Dependency Security Report
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    needs: [vulnerability-scanning, license-compliance]
-    if: always()
+    needs: [dependency-setup, vulnerability-scan, license-compliance, dependency-updates, security-baseline, security-approval]
+    timeout-minutes: 15
+    if: always() && !cancelled()
     
     steps:
-      - name: Checkout Repository
+      - name: 📥 Checkout repository
         uses: actions/checkout@v4
-
-      - name: Download All Artifacts
-        uses: actions/download-artifact@v3
-
-      - name: Setup Python for Baseline Analysis
+        
+      - name: 🐍 Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v4
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Generate Security Baseline Report
-        run: |
-          echo "=== Security Baseline Validation & Trend Analysis ==="
-          echo "Generating baseline validation per Section 6.6.3"
           
-          mkdir -p security-baseline
-          
-          # Create comprehensive security baseline report
-          cat > security-baseline/security-baseline-report.md << 'EOF'
-          # Dependency Security Baseline Report
-          
-          **Generated**: $(date -u)
-          **Repository**: ${{ github.repository }}
-          **Branch**: ${{ github.ref_name }}
-          **Workflow Run**: [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
-          
-          ## Security Status Summary
-          
-          | Category | Status | Details |
-          |----------|--------|---------|
-          | Dependency Pinning | ${{ needs.dependency-pinning-validation.outputs.pinning-status == 'passed' && '✅ PASSED' || '❌ FAILED' }} | Deterministic dependency resolution validation |
-          | Vulnerability Scanning | ${{ needs.vulnerability-scanning.outputs.vulnerability-status == 'passed' && '✅ PASSED' || '❌ FAILED' }} | Critical: ${{ needs.vulnerability-scanning.outputs.critical-count }}, High: ${{ needs.vulnerability-scanning.outputs.high-count }} |
-          | License Compliance | ${{ needs.license-compliance.outputs.compliance-status == 'passed' && '✅ PASSED' || '❌ FAILED' }} | Non-compliant: ${{ needs.license-compliance.outputs.non-compliant-count }} |
-          | Dependency Updates | ${{ needs.dependency-update-detection.outputs.security-updates == 'true' && '⚠️ AVAILABLE' || '✅ CURRENT' }} | Security updates available: ${{ needs.dependency-update-detection.outputs.security-updates }} |
-          
-          ## Security Metrics
-          
-          ### Vulnerability Analysis
-          - **Critical Vulnerabilities**: ${{ needs.vulnerability-scanning.outputs.critical-count }}
-          - **High Severity Vulnerabilities**: ${{ needs.vulnerability-scanning.outputs.high-count }}
-          - **Scan Status**: ${{ needs.vulnerability-scanning.outputs.scan-report }}
-          
-          ### License Compliance
-          - **Compliance Status**: ${{ needs.license-compliance.outputs.compliance-status }}
-          - **Non-compliant Licenses**: ${{ needs.license-compliance.outputs.non-compliant-count }}
-          - **Report**: ${{ needs.license-compliance.outputs.license-report }}
-          
-          ### Dependency Management
-          - **Pinning Status**: ${{ needs.dependency-pinning-validation.outputs.pinning-status }}
-          - **Updates Available**: ${{ needs.dependency-update-detection.outputs.updates-available }}
-          - **Security Updates**: ${{ needs.dependency-update-detection.outputs.security-updates }}
-          
-          ## Trend Analysis
-          
-          This baseline report provides a snapshot of the current security posture for dependency management.
-          Regular comparison of these metrics enables trend analysis for:
-          
-          - Vulnerability exposure over time
-          - License compliance tracking
-          - Dependency update lag metrics
-          - Security response time measurements
-          
-          ## Recommended Actions
-          
-          EOF
-          
-          # Add conditional recommendations based on results
-          if [ "${{ needs.vulnerability-scanning.outputs.critical-count }}" != "0" ]; then
-            echo "- 🚨 **IMMEDIATE**: Address ${{ needs.vulnerability-scanning.outputs.critical-count }} critical vulnerabilities" >> security-baseline/security-baseline-report.md
-          fi
-          
-          if [ "${{ needs.vulnerability-scanning.outputs.high-count }}" != "0" ]; then
-            echo "- ⚠️ **HIGH PRIORITY**: Address ${{ needs.vulnerability-scanning.outputs.high-count }} high severity vulnerabilities" >> security-baseline/security-baseline-report.md
-          fi
-          
-          if [ "${{ needs.license-compliance.outputs.compliance-status }}" == "failed" ]; then
-            echo "- ⚖️ **COMPLIANCE**: Review ${{ needs.license-compliance.outputs.non-compliant-count }} non-compliant licenses" >> security-baseline/security-baseline-report.md
-          fi
-          
-          if [ "${{ needs.dependency-update-detection.outputs.security-updates }}" == "true" ]; then
-            echo "- 🔄 **MAINTENANCE**: Apply available security updates" >> security-baseline/security-baseline-report.md
-          fi
-          
-          if [ "${{ needs.dependency-pinning-validation.outputs.pinning-status }}" == "failed" ]; then
-            echo "- 📌 **STABILITY**: Fix dependency pinning issues for deterministic builds" >> security-baseline/security-baseline-report.md
-          fi
-          
-          echo "" >> security-baseline/security-baseline-report.md
-          echo "---" >> security-baseline/security-baseline-report.md
-          echo "*This report was automatically generated by the Dependency Security Check workflow.*" >> security-baseline/security-baseline-report.md
-          
-          # Generate JSON metrics for programmatic analysis
-          cat > security-baseline/metrics.json << EOF
-          {
-            "timestamp": "$(date -u -Iseconds)",
-            "repository": "${{ github.repository }}",
-            "branch": "${{ github.ref_name }}",
-            "workflow_run": "${{ github.run_id }}",
-            "security_status": {
-              "dependency_pinning": "${{ needs.dependency-pinning-validation.outputs.pinning-status }}",
-              "vulnerability_scanning": "${{ needs.vulnerability-scanning.outputs.vulnerability-status }}",
-              "license_compliance": "${{ needs.license-compliance.outputs.compliance-status }}",
-              "security_updates_available": ${{ needs.dependency-update-detection.outputs.security-updates == 'true' && 'true' || 'false' }}
-            },
-            "vulnerability_metrics": {
-              "critical_count": ${{ needs.vulnerability-scanning.outputs.critical-count }},
-              "high_count": ${{ needs.vulnerability-scanning.outputs.high-count }}
-            },
-            "license_metrics": {
-              "non_compliant_count": ${{ needs.license-compliance.outputs.non-compliant-count }}
-            },
-            "overall_security_score": $(( 100 - (${{ needs.vulnerability-scanning.outputs.critical-count }} * 20) - (${{ needs.vulnerability-scanning.outputs.high-count }} * 5) - (${{ needs.license-compliance.outputs.non-compliant-count }} * 10) ))
-          }
-          EOF
-
-      - name: Upload Security Baseline Report
-        uses: actions/upload-artifact@v3
+      - name: 📊 Download all scan reports
+        uses: actions/download-artifact@v3
         with:
-          name: security-baseline-report
-          path: security-baseline/
-          retention-days: 365  # Keep baseline reports for yearly trend analysis
-
-      - name: Comment on PR with Security Summary
-        if: github.event_name == 'pull_request'
-        uses: actions/github-script@v6
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const fs = require('fs');
-            
-            // Read the security baseline report
-            const report = fs.readFileSync('security-baseline/security-baseline-report.md', 'utf8');
-            
-            // Create a concise PR comment
-            const prComment = `
-            ## 🔒 Dependency Security Check Results
-            
-            | Check | Status | Details |
-            |-------|--------|---------|
-            | Vulnerability Scanning | ${{ needs.vulnerability-scanning.outputs.vulnerability-status == 'passed' && '✅' || '❌' }} | Critical: ${{ needs.vulnerability-scanning.outputs.critical-count }}, High: ${{ needs.vulnerability-scanning.outputs.high-count }} |
-            | License Compliance | ${{ needs.license-compliance.outputs.compliance-status == 'passed' && '✅' || '❌' }} | Non-compliant: ${{ needs.license-compliance.outputs.non-compliant-count }} |
-            | Dependency Pinning | ${{ needs.dependency-pinning-validation.outputs.pinning-status == 'passed' && '✅' || '❌' }} | Deterministic resolution check |
-            
-            ${{ needs.vulnerability-scanning.outputs.critical-count != '0' && '🚨 **CRITICAL VULNERABILITIES FOUND** - Deployment blocked until resolved' || '' }}
-            
-            <details>
-            <summary>📊 View Full Security Report</summary>
-            
-            ${report}
-            
-            </details>
-            
-            [View Detailed Workflow Results](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
-            `;
-            
-            await github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: prComment
-            });
-
-  # =============================================================================
-  # WORKFLOW SUMMARY
-  # =============================================================================
-  workflow-summary:
-    name: Dependency Security Workflow Summary
-    runs-on: ubuntu-latest
-    needs: [dependency-pinning-validation, vulnerability-scanning, license-compliance, dependency-update-detection, security-baseline-validation]
-    if: always()
-    
-    steps:
-      - name: Generate Workflow Summary
+          path: all-reports/
+          
+      - name: 📊 Generate comprehensive summary report
         run: |
-          echo "# 🔒 Dependency Security Check Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Repository**: ${{ github.repository }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Branch**: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Triggered by**: ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Timestamp**: $(date -u)" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 📊 Comprehensive Dependency Security Report" >> $GITHUB_STEP_SUMMARY
+          echo "Complete security validation summary for enterprise compliance" >> $GITHUB_STEP_SUMMARY
           
-          echo "## 📊 Security Check Results" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Security Check | Status | Details |" >> $GITHUB_STEP_SUMMARY
-          echo "|----------------|--------|---------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Dependency Pinning | ${{ needs.dependency-pinning-validation.outputs.pinning-status == 'passed' && '✅ PASSED' || '❌ FAILED' }} | ${{ needs.dependency-pinning-validation.outputs.report }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Vulnerability Scanning | ${{ needs.vulnerability-scanning.outputs.vulnerability-status == 'passed' && '✅ PASSED' || '❌ FAILED' }} | Critical: ${{ needs.vulnerability-scanning.outputs.critical-count }}, High: ${{ needs.vulnerability-scanning.outputs.high-count }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| License Compliance | ${{ needs.license-compliance.outputs.compliance-status == 'passed' && '✅ PASSED' || '❌ FAILED' }} | Non-compliant: ${{ needs.license-compliance.outputs.non-compliant-count }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Dependency Updates | ${{ needs.dependency-update-detection.outputs.security-updates == 'true' && '⚠️ AVAILABLE' || '✅ CURRENT' }} | ${{ needs.dependency-update-detection.outputs.report || 'N/A' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+          # Create comprehensive report directory
+          mkdir -p reports/comprehensive
           
-          # Add critical alerts
-          if [ "${{ needs.vulnerability-scanning.outputs.critical-count }}" != "0" ]; then
-            echo "## 🚨 CRITICAL ALERT" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "**${{ needs.vulnerability-scanning.outputs.critical-count }} critical vulnerabilities found!**" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Immediate action required:" >> $GITHUB_STEP_SUMMARY
-            echo "- Review vulnerability reports in workflow artifacts" >> $GITHUB_STEP_SUMMARY
-            echo "- Update affected dependencies" >> $GITHUB_STEP_SUMMARY
-            echo "- Contact security team for guidance" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-          fi
+          # Initialize report metrics
+          OVERALL_STATUS="PASSED"
+          CRITICAL_ISSUES=0
           
-          echo "## 📋 Next Steps" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "1. Review detailed reports in workflow artifacts" >> $GITHUB_STEP_SUMMARY
-          echo "2. Address any security findings following enterprise security procedures" >> $GITHUB_STEP_SUMMARY
-          echo "3. Monitor security notifications for ongoing updates" >> $GITHUB_STEP_SUMMARY
-          echo "4. Ensure compliance with enterprise security policies" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "---" >> $GITHUB_STEP_SUMMARY
-          echo "*Dependency Security Check completed per Section 8.5.1 and 6.6.3 requirements*" >> $GITHUB_STEP_SUMMARY
-
-      - name: Set Final Workflow Status
-        run: |
-          if [ "${{ needs.vulnerability-scanning.outputs.critical-count }}" != "0" ]; then
-            echo "❌ WORKFLOW FAILED: Critical vulnerabilities found"
-            exit 1
-          elif [ "${{ needs.vulnerability-scanning.outputs.vulnerability-status }}" == "failed" ] || [ "${{ needs.license-compliance.outputs.compliance-status }}" == "failed" ] || [ "${{ needs.dependency-pinning-validation.outputs.pinning-status }}" == "failed" ]; then
-            echo "⚠️  WORKFLOW COMPLETED WITH WARNINGS: Security issues require attention"
-            exit 0
+          # Aggregate all scan results
+          echo "### 🔍 Scan Results Summary:" >> $GITHUB_STEP_SUMMARY
+          echo "| Component | Status | Details |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|--------|---------|" >> $GITHUB_STEP_SUMMARY
+          
+          # Dependency Pinning
+          if [[ "${PINNING_VALIDATION_FAILED:-false}" == "false" ]]; then
+            echo "| Dependency Pinning | ✅ Pass | Deterministic resolution validated |" >> $GITHUB_STEP_SUMMARY
           else
-            echo "✅ WORKFLOW COMPLETED SUCCESSFULLY: All security checks passed"
-            exit 0
+            echo "| Dependency Pinning | ❌ Fail | Requirements synchronization failed |" >> $GITHUB_STEP_SUMMARY
+            OVERALL_STATUS="FAILED"
+            CRITICAL_ISSUES=$((CRITICAL_ISSUES + 1))
           fi
+          
+          # Vulnerability Scanning
+          if [[ "${SAFETY_CRITICAL_COUNT:-0}" -eq 0 ]]; then
+            echo "| Vulnerability Scan | ✅ Pass | ${SAFETY_TOTAL_COUNT:-0} total vulnerabilities, 0 critical |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Vulnerability Scan | ❌ Fail | ${SAFETY_CRITICAL_COUNT:-0} critical vulnerabilities detected |" >> $GITHUB_STEP_SUMMARY
+            OVERALL_STATUS="FAILED"
+            CRITICAL_ISSUES=$((CRITICAL_ISSUES + 1))
+          fi
+          
+          # License Compliance
+          if [[ "${LICENSE_VIOLATIONS:-0}" -eq 0 || "${{ env.LICENSE_COMPLIANCE_REQUIRED }}" != "true" ]]; then
+            echo "| License Compliance | ✅ Pass | ${LICENSE_VIOLATIONS:-0} violations |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| License Compliance | ❌ Fail | ${LICENSE_VIOLATIONS:-0} license violations |" >> $GITHUB_STEP_SUMMARY
+            OVERALL_STATUS="FAILED"
+            CRITICAL_ISSUES=$((CRITICAL_ISSUES + 1))
+          fi
+          
+          # Security Approval
+          if [[ "${SECURITY_APPROVAL_GRANTED:-false}" == "true" ]]; then
+            echo "| Security Approval | ✅ Pass | Automated approval granted |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Security Approval | ⚠️ Manual Review | Manual security review required |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Overall Status
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [[ "$OVERALL_STATUS" == "PASSED" ]]; then
+            echo "🎉 **OVERALL STATUS**: DEPENDENCY SECURITY VALIDATION PASSED" >> $GITHUB_STEP_SUMMARY
+            echo "All dependency security requirements met" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "🚫 **OVERALL STATUS**: DEPENDENCY SECURITY VALIDATION FAILED" >> $GITHUB_STEP_SUMMARY
+            echo "**Critical Issues**: ${CRITICAL_ISSUES}" >> $GITHUB_STEP_SUMMARY
+            echo "**Action Required**: Remediate critical issues before proceeding" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Create comprehensive JSON report
+          cat > reports/comprehensive/dependency-security-report.json << EOF
+{
+  "report_metadata": {
+    "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+    "scan_id": "${{ github.run_id }}-${{ github.run_attempt }}",
+    "repository": "${{ github.repository }}",
+    "branch": "${{ github.ref_name }}",
+    "commit": "${{ github.sha }}",
+    "scan_type": "${{ needs.dependency-setup.outputs.scan-type }}",
+    "workflow_trigger": "${{ github.event_name }}"
+  },
+  "overall_status": "${OVERALL_STATUS}",
+  "critical_issues": ${CRITICAL_ISSUES},
+  "scan_results": {
+    "dependency_pinning": {
+      "status": $(if [[ "${PINNING_VALIDATION_FAILED:-false}" == "false" ]]; then echo "\"PASSED\""; else echo "\"FAILED\""; fi),
+      "details": "Deterministic dependency resolution validation"
+    },
+    "vulnerability_scanning": {
+      "status": $(if [[ "${SAFETY_CRITICAL_COUNT:-0}" -eq 0 ]]; then echo "\"PASSED\""; else echo "\"FAILED\""; fi),
+      "critical_count": ${SAFETY_CRITICAL_COUNT:-0},
+      "high_count": ${SAFETY_HIGH_COUNT:-0},
+      "total_count": ${SAFETY_TOTAL_COUNT:-0},
+      "audit_count": ${AUDIT_VULNERABILITY_COUNT:-0}
+    },
+    "license_compliance": {
+      "status": $(if [[ "${LICENSE_VIOLATIONS:-0}" -eq 0 || "${{ env.LICENSE_COMPLIANCE_REQUIRED }}" != "true" ]]; then echo "\"PASSED\""; else echo "\"FAILED\""; fi),
+      "violations": ${LICENSE_VIOLATIONS:-0},
+      "compliance_required": ${{ env.LICENSE_COMPLIANCE_REQUIRED }}
+    },
+    "security_approval": {
+      "status": $(if [[ "${SECURITY_APPROVAL_GRANTED:-false}" == "true" ]]; then echo "\"GRANTED\""; else echo "\"MANUAL_REVIEW\""; fi),
+      "automated_approval": ${SECURITY_APPROVAL_GRANTED:-false}
+    }
+  },
+  "recommendations": [
+    $(if [[ "${PINNING_VALIDATION_FAILED:-false}" == "true" ]]; then echo "\"Run pip-compile to synchronize requirements.txt\","; fi)
+    $(if [[ "${SAFETY_CRITICAL_COUNT:-0}" -gt 0 ]]; then echo "\"Update dependencies with critical vulnerabilities\","; fi)
+    $(if [[ "${LICENSE_VIOLATIONS:-0}" -gt 0 ]]; then echo "\"Review and remediate license compliance violations\","; fi)
+    $(if [[ "${SECURITY_TREND_DEGRADED:-false}" == "true" ]]; then echo "\"Investigate security trend degradation\","; fi)
+    "Maintain regular dependency security scanning"
+  ]
+}
+EOF
+          
+          echo "DEPENDENCY_SECURITY_STATUS=${OVERALL_STATUS}" >> $GITHUB_ENV
+          
+      - name: 📊 Upload comprehensive reports
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: comprehensive-dependency-security-report
+          path: reports/comprehensive/
+          retention-days: ${{ env.REPORT_RETENTION_DAYS }}
+          
+      - name: 📧 Final notification summary
+        if: always()
+        run: |
+          if [[ "${DEPENDENCY_SECURITY_STATUS}" == "PASSED" ]]; then
+            MESSAGE="✅ Dependency Security Validation COMPLETED SUCCESSFULLY for ${{ github.repository }}"
+          else
+            MESSAGE="🚫 Dependency Security Validation FAILED for ${{ github.repository }} - ${CRITICAL_ISSUES} critical issues"
+          fi
+          
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            MESSAGE="${MESSAGE} - PR #${{ github.event.number }} by ${{ github.actor }}"
+          fi
+          
+          if [[ -n "${{ env.SLACK_SECURITY_WEBHOOK }}" ]]; then
+            curl -X POST -H 'Content-type: application/json' \
+              --data '{"text":"'"${MESSAGE}"'"}' \
+              ${{ env.SLACK_SECURITY_WEBHOOK }}
+          fi
+          
+      - name: ❌ Fail workflow on critical security issues
+        if: env.DEPENDENCY_SECURITY_STATUS == 'FAILED'
+        run: |
+          echo "❌ **WORKFLOW TERMINATED**: Critical dependency security issues detected"
+          echo "Remediation required before proceeding with deployment"
+          exit 1
