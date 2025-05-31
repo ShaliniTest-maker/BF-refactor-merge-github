@@ -1,330 +1,324 @@
-# Dependabot Configuration for Python Flask Migration Project
-# Automated dependency security updates and vulnerability management
-# Supports Python 3.8+ with primary target Python 3.11-slim base image
+# Dependabot configuration for automated Python dependency security updates
+# and vulnerability management for Flask migration project
+#
+# Implements comprehensive dependency security management per:
+# - Section 8.5.1 Dependency Security Validation Pipeline
+# - Section 8.3.5 Container Security Framework  
+# - Section 6.6.2 CI/CD Integration
+# - Section 8.5.1 Security Scanning requirements
+#
+# Ensures continuous security maintenance for pip packages, Docker base images,
+# and GitHub Actions workflows with automated vulnerability detection and remediation.
 
 version: 2
+
 updates:
-  # Python pip dependency management
-  # Requirements: Section 8.5.1 Dependency Security Validation Pipeline
+  # =============================================================================
+  # PYTHON PIP DEPENDENCIES
+  # =============================================================================
+  # Monitors Python package dependencies in requirements.txt for security updates
+  # Integrates with safety 3.0+ vulnerability scanning per Section 8.5.1
+  
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
-      interval: "weekly"
-      day: "monday"
+      # Daily security updates for Python packages during business hours
+      # Ensures rapid response to critical vulnerability disclosures
+      interval: "daily"
       time: "09:00"
       timezone: "UTC"
-    # Security updates have higher priority than feature updates
+    
+    # Security-focused update configuration
     open-pull-requests-limit: 10
-    # Group related updates to reduce noise
-    groups:
-      # Critical security updates - immediate priority
-      security-updates:
-        patterns:
-          - "*"
-        update-types:
-          - "security-update"
-      # Core framework dependencies
-      flask-ecosystem:
-        patterns:
-          - "flask*"
-          - "werkzeug"
-          - "jinja2"
-          - "click"
-          - "itsdangerous"
-          - "markupsafe"
-        update-types:
-          - "minor"
-          - "patch"
-      # Authentication and security libraries
-      auth-security:
-        patterns:
-          - "pyjwt"
-          - "cryptography"
-          - "bcrypt"
-          - "authlib"
-          - "python-jose"
-          - "passlib"
-        update-types:
-          - "minor"
-          - "patch"
-      # Database and caching dependencies
-      database-cache:
-        patterns:
-          - "pymongo"
-          - "motor"
-          - "redis"
-          - "redis-py"
-        update-types:
-          - "minor"
-          - "patch"
-      # HTTP clients and external service integrations
-      http-external:
-        patterns:
-          - "requests"
-          - "httpx"
-          - "urllib3"
-          - "boto3"
-          - "botocore"
-        update-types:
-          - "minor"
-          - "patch"
-      # Validation and serialization libraries
-      validation-serialization:
-        patterns:
-          - "marshmallow"
-          - "pydantic"
-          - "cerberus"
-          - "jsonschema"
-        update-types:
-          - "minor"
-          - "patch"
-      # WSGI servers and deployment
-      wsgi-deployment:
-        patterns:
-          - "gunicorn"
-          - "uwsgi"
-          - "gevent"
-          - "eventlet"
-        update-types:
-          - "minor"
-          - "patch"
-      # Testing framework dependencies
-      testing-framework:
-        patterns:
-          - "pytest*"
-          - "coverage"
-          - "factory-boy"
-          - "testcontainers"
-          - "mock"
-        update-types:
-          - "minor"
-          - "patch"
-      # Development and quality tools
-      dev-quality:
-        patterns:
-          - "flake8*"
-          - "mypy*"
-          - "black"
-          - "isort"
-          - "bandit"
-          - "safety"
-          - "pre-commit"
-        update-types:
-          - "minor"
-          - "patch"
-      # Monitoring and observability
-      monitoring-observability:
-        patterns:
-          - "prometheus-client"
-          - "structlog"
-          - "sentry-sdk"
-          - "datadog"
-          - "newrelic"
-        update-types:
-          - "minor"
-          - "patch"
-    # Custom labels for enhanced tracking and automation
+    
+    # Target branches for security updates
+    target-branch: "main"
+    
+    # Pull request configuration for security updates
+    pull-request-branch-name:
+      separator: "/"
+    
+    # Commit message configuration for clear security tracking
+    commit-message:
+      prefix: "security"
+      prefix-development: "security"
+      include: "scope"
+    
+    # Review assignment for security updates
+    reviewers:
+      - "security-team"
+      - "python-maintainers"
+    
+    assignees:
+      - "security-team"
+    
+    # Security-focused labeling for automated processing
     labels:
+      - "security"
       - "dependencies"
       - "python"
-      - "security"
       - "automated"
-    # Enable automatic rebasing for conflicts
-    rebase-strategy: "auto"
-    # Target specific branches for dependency updates
-    target-branch: "develop"
-    # Custom commit message format for better tracking
-    commit-message:
-      prefix: "deps"
-      prefix-development: "deps-dev"
-      include: "scope"
-    # Allow updates to requirements files and related dependency management
+    
+    # Allow both direct and indirect dependency updates for comprehensive security
     allow:
       - dependency-type: "direct"
       - dependency-type: "indirect"
-    # Ignore specific packages that require manual review
+    
+    # Group patch and minor security updates to reduce PR volume
+    groups:
+      # Group security patches for rapid deployment
+      security-patches:
+        applies-to: security-updates
+        patterns:
+          - "*"
+        update-types:
+          - "patch"
+      
+      # Group minor version updates for weekly review
+      minor-updates:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+    
+    # Ignore major version updates to prevent breaking changes
+    # Major updates require manual review and testing
     ignore:
-      # Ignore major version updates for critical dependencies requiring manual testing
-      - dependency-name: "flask"
+      - dependency-name: "*"
         update-types: ["version-update:semver-major"]
-      - dependency-name: "pymongo"
-        update-types: ["version-update:semver-major"]
-      - dependency-name: "motor"
-        update-types: ["version-update:semver-major"]
-      - dependency-name: "pyjwt"
-        update-types: ["version-update:semver-major"]
-      # Temporarily ignore packages with known compatibility issues
-      - dependency-name: "cryptography"
-        versions: ["<3.0"]
+    
+    # Enable Dependabot security advisories integration
+    insecure-external-code-execution: "allow"
 
-  # Docker base image security updates
-  # Requirements: Section 8.3.5 Container Security Framework
+  # =============================================================================
+  # DOCKER BASE IMAGE UPDATES
+  # =============================================================================
+  # Monitors Docker base images for security patches per Section 8.3.5
+  # Ensures python:3.11-slim base image receives critical security updates
+  
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
+      # Weekly Docker image updates to balance security and stability
+      # Base image updates are less frequent but critical for container security
       interval: "weekly"
       day: "tuesday"
       time: "10:00"
       timezone: "UTC"
-    # Limited pull requests for Docker updates to maintain stability
+    
     open-pull-requests-limit: 5
-    # Group Docker updates by base image type
-    groups:
-      # Python base images - primary focus on python:3.11-slim
-      python-base-images:
-        patterns:
-          - "python:3.11*"
-          - "python:3.8*"
-          - "python:*-slim"
-        update-types:
-          - "minor"
-          - "patch"
-      # System base images for multi-stage builds
-      system-base-images:
-        patterns:
-          - "ubuntu:*"
-          - "debian:*"
-          - "alpine:*"
-        update-types:
-          - "minor"
-          - "patch"
-    # Docker-specific labels for container security tracking
-    labels:
-      - "dependencies"
-      - "docker"
-      - "security"
-      - "base-image"
-      - "automated"
-    # Aggressive rebasing for Docker security updates
-    rebase-strategy: "auto"
-    # Target develop branch for Docker updates
-    target-branch: "develop"
-    # Custom commit messages for container updates
+    target-branch: "main"
+    
+    # Docker-specific commit messages
     commit-message:
       prefix: "docker"
+      prefix-development: "docker-security"
       include: "scope"
-    # Allow all Docker dependency updates for security
+    
+    # Container security team review
+    reviewers:
+      - "security-team"
+      - "devops-team"
+    
+    assignees:
+      - "devops-team"
+    
+    # Docker security labeling
+    labels:
+      - "security"
+      - "docker"
+      - "base-image"
+      - "automated"
+    
+    # Monitor all Docker dependencies
     allow:
       - dependency-type: "direct"
       - dependency-type: "indirect"
-    # Ignore development-only or deprecated base images
-    ignore:
-      # Ignore non-slim Python images to maintain security posture
-      - dependency-name: "python"
-        versions: ["*-buster", "*-bullseye", "*-bookworm"]
-      # Ignore Python versions below minimum requirement (3.8+)
-      - dependency-name: "python"
-        versions: ["<3.8"]
+    
+    # Group Docker updates for coordinated deployment
+    groups:
+      docker-security:
+        patterns:
+          - "python"
+          - "python:*"
+        update-types:
+          - "patch"
+          - "minor"
 
-  # GitHub Actions workflow dependency updates
-  # Requirements: Section 6.6.2 CI/CD Integration
+  # =============================================================================
+  # GITHUB ACTIONS WORKFLOWS
+  # =============================================================================
+  # Monitors GitHub Actions for security updates per Section 6.6.2 CI/CD Integration
+  # Ensures workflow security and prevents supply chain vulnerabilities
+  
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
+      # Weekly GitHub Actions updates for security and feature improvements
+      # Actions updates are crucial for CI/CD pipeline security
       interval: "weekly"
       day: "wednesday"
       time: "11:00"
       timezone: "UTC"
-    # Moderate limit for GitHub Actions updates
+    
     open-pull-requests-limit: 5
-    # Group GitHub Actions by functionality
-    groups:
-      # Core GitHub Actions
-      core-actions:
-        patterns:
-          - "actions/checkout*"
-          - "actions/setup-python*"
-          - "actions/cache*"
-          - "actions/upload-artifact*"
-          - "actions/download-artifact*"
-        update-types:
-          - "minor"
-          - "patch"
-      # Security and code quality actions
-      security-quality-actions:
-        patterns:
-          - "github/codeql-action*"
-          - "aquasecurity/trivy-action*"
-          - "codecov/codecov-action*"
-          - "securecodewarrior/github-action-add*"
-        update-types:
-          - "minor"
-          - "patch"
-      # Docker and container actions
-      docker-actions:
-        patterns:
-          - "docker/setup-buildx-action*"
-          - "docker/build-push-action*"
-          - "docker/login-action*"
-          - "docker/setup-qemu-action*"
-        update-types:
-          - "minor"
-          - "patch"
-      # Deployment and infrastructure actions
-      deployment-actions:
-        patterns:
-          - "azure/webapps-deploy*"
-          - "aws-actions/*"
-          - "google-github-actions/*"
-        update-types:
-          - "minor"
-          - "patch"
-    # GitHub Actions specific labels
+    target-branch: "main"
+    
+    # GitHub Actions commit messages
+    commit-message:
+      prefix: "actions"
+      prefix-development: "actions-security"
+      include: "scope"
+    
+    # CI/CD team review for workflow changes
+    reviewers:
+      - "devops-team"
+      - "security-team"
+    
+    assignees:
+      - "devops-team"
+    
+    # Actions security labeling
     labels:
-      - "dependencies"
+      - "security"
       - "github-actions"
       - "ci-cd"
       - "automated"
-    # Enable rebasing for workflow updates
-    rebase-strategy: "auto"
-    # Target develop branch for CI/CD updates
-    target-branch: "develop"
-    # Custom commit messages for workflow updates
-    commit-message:
-      prefix: "ci"
-      include: "scope"
-    # Allow all GitHub Actions updates
+    
+    # Monitor all GitHub Actions dependencies
     allow:
       - dependency-type: "direct"
       - dependency-type: "indirect"
-    # Ignore deprecated or experimental actions
-    ignore:
-      # Ignore actions that are being deprecated
-      - dependency-name: "actions/setup-node"
-        versions: ["<3.0"]
-      # Ignore beta/alpha versions for stability
-      - dependency-name: "*"
-        versions: ["*-beta", "*-alpha", "*-rc*"]
+    
+    # Group Actions updates by category
+    groups:
+      # Security-focused actions (scanning, vulnerability detection)
+      security-actions:
+        patterns:
+          - "github/codeql-action"
+          - "aquasecurity/trivy-action"
+          - "securecodewarrior/github-action-add-sarif"
+          - "actions/dependency-review-action"
+        update-types:
+          - "patch"
+          - "minor"
+      
+      # Core CI/CD actions (checkout, setup, cache)
+      core-actions:
+        patterns:
+          - "actions/checkout"
+          - "actions/setup-python"
+          - "actions/cache"
+          - "actions/upload-artifact"
+        update-types:
+          - "patch"
+          - "minor"
 
-# Global Dependabot configuration
-# Enhanced security and monitoring integration
-assignees:
-  # Default assignees for dependency update reviews
-  - "tech-lead"
-  - "security-team"
+  # =============================================================================
+  # ADDITIONAL SECURITY CONFIGURATIONS
+  # =============================================================================
+  # Enhanced security monitoring for development dependencies and tools
+  
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      # Monthly updates for development dependencies
+      # Less critical than production dependencies but important for developer security
+      interval: "monthly"
+      day: "first-tuesday"
+      time: "14:00"
+      timezone: "UTC"
+    
+    open-pull-requests-limit: 3
+    target-branch: "develop"
+    
+    commit-message:
+      prefix: "dev-deps"
+      include: "scope"
+    
+    reviewers:
+      - "python-maintainers"
+    
+    assignees:
+      - "python-maintainers"
+    
+    labels:
+      - "dependencies"
+      - "development"
+      - "automated"
+    
+    # Focus on development and testing dependencies
+    allow:
+      - dependency-type: "development"
+    
+    # Development tools grouping
+    groups:
+      dev-tools:
+        patterns:
+          - "pytest*"
+          - "black"
+          - "flake8"
+          - "mypy"
+          - "bandit"
+          - "safety"
+          - "pip-tools"
+        update-types:
+          - "patch"
+          - "minor"
 
-reviewers:
-  # Default reviewers for all dependency updates
-  teams:
-    - "backend-team"
-    - "security-reviewers"
-  users:
-    - "senior-developer"
-
-# Custom labels applied to all Dependabot PRs for enhanced tracking
-labels:
-  - "dependencies"
-  - "automated"
-  - "requires-review"
-
-# Security-focused configuration notes:
-# 1. Weekly schedule ensures timely security updates while maintaining stability
-# 2. Grouped updates reduce noise and improve review efficiency
-# 3. Target branch 'develop' allows testing before main branch integration
-# 4. Security updates have no grouping restrictions for immediate application
-# 5. Major version updates require manual review for breaking changes
-# 6. Python 3.11-slim base image prioritized per Section 8.3.2
-# 7. Integration with safety 3.0+ vulnerability scanning per Section 8.5.1
-# 8. Supports GitHub Actions workflow security updates per Section 6.6.2
-# 9. Container security framework compliance per Section 8.3.5
-# 10. Automated dependency security validation pipeline integration
+# =============================================================================
+# DEPENDABOT SECURITY INTEGRATION NOTES
+# =============================================================================
+#
+# Security Features:
+# - Automated daily scanning of Python dependencies for CVE vulnerabilities
+# - Weekly Docker base image monitoring for security patches
+# - GitHub Actions workflow security updates to prevent supply chain attacks
+# - Integration with GitHub Security Advisories for vulnerability detection
+# - Automated labeling for security team triage and response
+#
+# Compliance Integration:
+# - Supports enterprise security review processes through reviewer assignment
+# - Enables automated security scanning per Section 8.5.1 requirements
+# - Provides traceability for security updates through commit message prefixes
+# - Facilitates rapid response to critical vulnerabilities through daily updates
+#
+# Vulnerability Management:
+# - Groups security patches for rapid deployment coordination
+# - Separates major updates requiring manual review and testing
+# - Provides clear labeling for automated security processing
+# - Enables integration with safety 3.0+ and pip-audit scanning tools
+#
+# CI/CD Pipeline Integration:
+# - Coordinates with GitHub Actions security scanning workflows
+# - Supports blue-green deployment security validation
+# - Enables automated security testing through PR-based updates
+# - Facilitates container vulnerability scanning integration with Trivy
+#
+# Team Workflow Integration:
+# - Assigns security updates to appropriate teams for rapid review
+# - Provides clear commit messages for security audit trails
+# - Enables automated processing of low-risk security patches
+# - Supports manual review processes for high-impact changes
+#
+# =============================================================================
+# RELATED SECURITY TOOLS INTEGRATION
+# =============================================================================
+#
+# This Dependabot configuration integrates with:
+# - safety 3.0+ for Python vulnerability scanning (Section 8.5.1)
+# - Trivy 0.48+ for container vulnerability assessment (Section 8.5.2)
+# - bandit 1.7+ for Python security analysis (Section 8.5.1)
+# - pip-audit 2.7+ for package vulnerability assessment (Section 8.5.1)
+# - GitHub Security Advisories for vulnerability intelligence
+# - SARIF upload for security findings centralization
+#
+# Security Update Workflow:
+# 1. Dependabot detects security vulnerability in dependency
+# 2. Automated PR created with security label and reviewer assignment
+# 3. CI/CD pipeline runs security validation (safety, bandit, Trivy)
+# 4. Security team reviews and approves for rapid deployment
+# 5. Blue-green deployment with performance and security validation
+# 6. Automated monitoring for regression detection post-deployment
+#
+# =============================================================================
