@@ -1,10 +1,10 @@
 """
 External Service Integration Mock Fixtures
 
-Comprehensive mock fixtures providing AWS service simulation, HTTP client mocking, circuit breaker
-testing, and third-party API integration patterns for external dependency testing. This module
-implements enterprise-grade testing patterns aligned with Section 0.1.2, 6.3.3, and 6.6.1
-specifications for external service integration library replacement.
+This module provides comprehensive mock fixtures for external service integrations including
+AWS service simulation, HTTP client mocking, circuit breaker testing, and third-party API
+integration patterns. Implements enterprise-grade mock patterns for testing external
+dependencies without actual service calls.
 
 Key Features:
 - boto3 1.28+ AWS service mock fixtures for S3 operations testing per Section 0.1.2
@@ -12,25 +12,31 @@ Key Features:
 - Circuit breaker mock fixtures for external service resilience testing per Section 6.3.3
 - Third-party API mock fixtures maintaining API contracts per Section 0.1.4
 - Retry logic mock fixtures with exponential backoff testing per Section 4.2.3
-- Performance monitoring mock fixtures for external service testing per Section 6.3.5
 - AWS KMS mock fixtures for encryption key management testing per Section 6.4.3
+- External service monitoring mock fixtures for performance testing per Section 6.3.5
 
-Testing Integration:
-- pytest fixture integration for comprehensive test isolation and repeatability
-- Testcontainers compatibility for production-equivalent behavior per Section 6.6.1
-- Factory pattern integration for dynamic test object generation per Section 6.6.1
-- Performance variance testing supporting ≤10% variance requirement per Section 0.3.2
+Architecture Integration:
+- Section 0.1.2: External Integration Components - AWS and HTTP client mocking
+- Section 6.3.3: External Systems - Resilience patterns and monitoring mock fixtures
+- Section 6.3.5: Performance and Scalability - Performance monitoring fixtures
+- Section 4.2.3: Error Handling and Recovery - Retry logic and circuit breaker mocks
+- Section 6.4.3: Security Architecture - AWS KMS encryption mock fixtures
 
-Dependencies:
-- pytest 7.4+ with comprehensive external service simulation capabilities
-- pytest-mock for HTTP client and AWS service mocking per Section 6.6.1
-- boto3 1.28+ for AWS service integration testing per Section 0.1.2
-- requests 2.31+ and httpx 0.24+ for HTTP client testing per Section 0.1.2
-- pybreaker for circuit breaker pattern testing per Section 6.3.3
+Performance Requirements:
+- Performance baseline mock fixtures ensuring ≤10% variance testing per Section 0.3.2
+- External service latency simulation for realistic testing scenarios
+- Connection pool mock fixtures for HTTP client performance validation
+- Circuit breaker state transition mock fixtures for resilience testing
 
-Author: Blitzy Platform Migration Team
+Testing Strategy:
+- Comprehensive external service integration testing per Section 6.6.1
+- Performance validation mock fixtures per Section 6.6.1
+- Mock external dependencies for isolated unit testing
+- Integration test fixtures for end-to-end external service workflows
+
+Author: Flask Migration Team
 Version: 1.0.0
-Dependencies: pytest 7.4+, pytest-mock, boto3 1.28+, requests 2.31+, httpx 0.24+
+Dependencies: pytest, boto3, moto, requests-mock, httpx, pytest-mock, pytest-asyncio
 """
 
 import asyncio
@@ -38,406 +44,209 @@ import json
 import logging
 import time
 import uuid
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Union, Callable, Tuple
-from unittest.mock import Mock, MagicMock, patch, AsyncMock, PropertyMock
-from io import BytesIO, StringIO
+from typing import Any, Dict, List, Optional, Union, Callable, AsyncGenerator, Generator
+from unittest.mock import Mock, MagicMock, AsyncMock, patch, PropertyMock
+from urllib.parse import urljoin, urlparse
 
 import pytest
 import pytest_asyncio
-from moto import mock_s3, mock_kms, mock_sts, mock_cloudwatch, mock_iam
+from moto import mock_s3, mock_kms, mock_cloudwatch
 import boto3
-from botocore.exceptions import ClientError, NoCredentialsError, BotoCoreError
+from botocore.exceptions import ClientError, NoCredentialsError
 import requests
 import httpx
-from requests.exceptions import RequestException, Timeout, ConnectionError as RequestsConnectionError
-from httpx import RequestError, TimeoutException, ConnectError
+from requests.exceptions import RequestException, ConnectionError, Timeout, HTTPError
+import httpx
+import structlog
 
-# Import application dependencies for comprehensive integration testing
-try:
-    from src.integrations.base_client import (
-        BaseExternalServiceClient,
-        BaseClientConfiguration,
-        ServiceType,
-        HealthStatus,
-        CircuitBreakerState
-    )
-    from src.integrations.http_client import (
-        SynchronousHTTPClient,
-        AsynchronousHTTPClient,
-        HTTPClientManager
-    )
-    from src.integrations.circuit_breaker import (
-        ExternalServiceCircuitBreaker,
-        CircuitBreakerManager,
-        CircuitBreakerConfig
-    )
-    from src.integrations.external_apis import (
-        GenericAPIClient,
-        APIClientConfig,
-        WebhookConfig,
-        FileProcessingConfig
-    )
-    from src.config.settings import BaseConfig
-except ImportError:
-    # Graceful handling if modules don't exist yet - provide fallback classes
-    class ServiceType:
-        AUTH = "auth"
-        AWS = "aws"
-        DATABASE = "database"
-        CACHE = "cache"
-        EXTERNAL_API = "external_api"
-    
-    class HealthStatus:
-        HEALTHY = "healthy"
-        DEGRADED = "degraded"
-        UNHEALTHY = "unhealthy"
-    
-    class CircuitBreakerState:
-        CLOSED = "closed"
-        OPEN = "open"
-        HALF_OPEN = "half_open"
-    
-    class BaseConfig:
-        TESTING = True
+# Import integration components for mocking
+from src.integrations.base_client import (
+    BaseExternalServiceClient,
+    BaseClientConfiguration,
+    create_auth0_config,
+    create_aws_s3_config,
+    create_external_api_config
+)
+from src.integrations.http_client import (
+    HTTPClientManager,
+    SynchronousHTTPClient,
+    AsynchronousHTTPClient,
+    OptimizedHTTPAdapter
+)
+from src.integrations.circuit_breaker import (
+    EnhancedCircuitBreaker,
+    CircuitBreakerConfig,
+    CircuitBreakerPolicy,
+    CircuitBreakerState
+)
+from src.integrations.external_apis import (
+    GenericAPIClient,
+    WebhookHandler,
+    FileProcessingClient,
+    EnterpriseServiceWrapper
+)
+from src.integrations.monitoring import (
+    ExternalServiceMonitor,
+    ServiceHealthState,
+    ExternalServiceType,
+    ServiceMetrics
+)
+from src.config.settings import TestingConfig
 
-# Initialize structured logger for test execution tracking
-logger = logging.getLogger(__name__)
+# Initialize structured logger for mock fixtures
+logger = structlog.get_logger(__name__)
 
+# =============================================================================
+# AWS Service Mock Fixtures - boto3 1.28+ per Section 0.1.2
+# =============================================================================
 
-# ================================================================================================
-# AWS SERVICE MOCK FIXTURES - Section 0.1.2 External Integration Components
-# ================================================================================================
-
-@pytest.fixture(scope="function")
-def mock_aws_credentials(monkeypatch):
-    """
-    Mock AWS credentials fixture preventing accidental live service calls during testing.
-    
-    Provides safe credential mocking for all AWS service interactions ensuring test isolation
-    and preventing unintended charges or security exposure during development testing.
-    
-    Returns:
-        Dict[str, str]: Mocked AWS credential configuration
-    """
-    mock_credentials = {
-        'AWS_ACCESS_KEY_ID': 'testing',
-        'AWS_SECRET_ACCESS_KEY': 'testing',
-        'AWS_SECURITY_TOKEN': 'testing',
-        'AWS_SESSION_TOKEN': 'testing',
-        'AWS_DEFAULT_REGION': 'us-east-1'
+@pytest.fixture(scope="session")
+def aws_credentials():
+    """Mock AWS credentials for testing to prevent real AWS calls."""
+    import os
+    os.environ["AWS_ACCESS_KEY_ID"] = "testing"
+    os.environ["AWS_SECRET_ACCESS_KEY"] = "testing"
+    os.environ["AWS_SECURITY_TOKEN"] = "testing"
+    os.environ["AWS_SESSION_TOKEN"] = "testing"
+    os.environ["AWS_DEFAULT_REGION"] = "us-east-1"
+    return {
+        "aws_access_key_id": "testing",
+        "aws_secret_access_key": "testing",
+        "region_name": "us-east-1"
     }
-    
-    # Set environment variables for boto3 credential discovery
-    for key, value in mock_credentials.items():
-        monkeypatch.setenv(key, value)
-    
-    return mock_credentials
 
 
-@pytest.fixture(scope="function")
-def mock_s3_service(mock_aws_credentials):
+@pytest.fixture
+def mock_s3_client(aws_credentials):
     """
-    Comprehensive S3 service mock fixture providing realistic S3 operations testing.
+    Mock AWS S3 client with comprehensive bucket and object operations.
     
-    Implements moto-based S3 mocking with complete bucket lifecycle management, object
-    operations, and error condition simulation for comprehensive AWS integration testing
-    per Section 0.1.2 AWS SDK for JavaScript replacement with boto3 1.28+.
-    
-    Yields:
-        boto3.client: Mocked S3 client with comprehensive operation support
+    Provides realistic S3 behavior for file upload, download, deletion,
+    and metadata operations supporting all S3 client methods used in
+    the application per Section 0.1.2 AWS SDK migration.
     """
     with mock_s3():
-        # Create boto3 S3 client with mocked backend
+        # Create mock S3 client
         s3_client = boto3.client('s3', region_name='us-east-1')
         
-        # Create test buckets for various test scenarios
+        # Create test buckets for different use cases
         test_buckets = [
-            'test-file-uploads',
-            'test-document-storage',
-            'test-image-processing',
-            'test-backup-storage',
-            'test-error-scenarios'
+            'test-uploads-bucket',
+            'test-documents-bucket', 
+            'test-images-bucket',
+            'test-backups-bucket'
         ]
         
         for bucket_name in test_buckets:
             s3_client.create_bucket(Bucket=bucket_name)
         
-        # Populate test buckets with sample objects for testing
+        # Add sample objects for testing
         sample_objects = [
-            ('test-file-uploads', 'documents/sample.pdf', b'Sample PDF content'),
-            ('test-file-uploads', 'images/test.jpg', b'Sample image content'),
-            ('test-document-storage', 'contracts/agreement.docx', b'Contract content'),
-            ('test-image-processing', 'thumbnails/preview.png', b'Thumbnail content'),
-            ('test-backup-storage', 'backups/database.sql', b'Database backup content')
+            {
+                'bucket': 'test-uploads-bucket',
+                'key': 'sample/test-file.txt',
+                'body': b'Sample file content for testing',
+                'metadata': {'content-type': 'text/plain', 'uploaded-by': 'test-user'}
+            },
+            {
+                'bucket': 'test-images-bucket',
+                'key': 'images/sample-image.jpg',
+                'body': b'\xff\xd8\xff\xe0\x00\x10JFIF',  # JPEG header
+                'metadata': {'content-type': 'image/jpeg', 'size': '1024x768'}
+            },
+            {
+                'bucket': 'test-documents-bucket',
+                'key': 'docs/sample-document.pdf',
+                'body': b'%PDF-1.4 Sample PDF content',
+                'metadata': {'content-type': 'application/pdf', 'version': '1.0'}
+            }
         ]
         
-        for bucket, key, content in sample_objects:
+        for obj in sample_objects:
             s3_client.put_object(
-                Bucket=bucket,
-                Key=key,
-                Body=content,
-                ContentType='application/octet-stream',
-                Metadata={
-                    'test-object': 'true',
-                    'created-at': datetime.utcnow().isoformat(),
-                    'test-scenario': 'mock-fixture'
-                }
+                Bucket=obj['bucket'],
+                Key=obj['key'],
+                Body=obj['body'],
+                Metadata=obj['metadata']
             )
         
+        # Add performance tracking methods
+        s3_client._performance_metrics = {
+            'upload_times': [],
+            'download_times': [],
+            'operation_counts': {'put_object': 0, 'get_object': 0, 'delete_object': 0}
+        }
+        
+        original_put_object = s3_client.put_object
+        original_get_object = s3_client.get_object
+        original_delete_object = s3_client.delete_object
+        
+        def tracked_put_object(*args, **kwargs):
+            start_time = time.time()
+            result = original_put_object(*args, **kwargs)
+            s3_client._performance_metrics['upload_times'].append(time.time() - start_time)
+            s3_client._performance_metrics['operation_counts']['put_object'] += 1
+            return result
+        
+        def tracked_get_object(*args, **kwargs):
+            start_time = time.time()
+            result = original_get_object(*args, **kwargs)
+            s3_client._performance_metrics['download_times'].append(time.time() - start_time)
+            s3_client._performance_metrics['operation_counts']['get_object'] += 1
+            return result
+        
+        def tracked_delete_object(*args, **kwargs):
+            start_time = time.time()
+            result = original_delete_object(*args, **kwargs)
+            s3_client._performance_metrics['operation_counts']['delete_object'] += 1
+            return result
+        
+        s3_client.put_object = tracked_put_object
+        s3_client.get_object = tracked_get_object
+        s3_client.delete_object = tracked_delete_object
+        
         logger.info(
-            "s3_mock_service_initialized",
-            buckets_created=len(test_buckets),
-            objects_created=len(sample_objects),
-            component="external_service_mocks"
+            "Mock S3 client initialized",
+            buckets=test_buckets,
+            sample_objects=len(sample_objects),
+            performance_tracking=True
         )
         
         yield s3_client
 
 
-@pytest.fixture(scope="function")
-def mock_s3_operations(mock_s3_service):
+@pytest.fixture 
+def mock_kms_client(aws_credentials):
     """
-    High-level S3 operations mock fixture providing common S3 operation patterns.
+    Mock AWS KMS client for encryption key management testing per Section 6.4.3.
     
-    Encapsulates frequent S3 operations including file upload/download, batch operations,
-    and error condition simulation for comprehensive external service integration testing.
-    
-    Returns:
-        Dict[str, Callable]: Dictionary of mocked S3 operation functions
-    """
-    def upload_file(bucket: str, key: str, content: Union[str, bytes], 
-                   metadata: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
-        """Mock S3 file upload operation with comprehensive response simulation."""
-        try:
-            if isinstance(content, str):
-                content = content.encode('utf-8')
-            
-            upload_metadata = metadata or {}
-            upload_metadata.update({
-                'upload-timestamp': datetime.utcnow().isoformat(),
-                'mock-operation': 'upload_file',
-                'content-size': str(len(content))
-            })
-            
-            response = mock_s3_service.put_object(
-                Bucket=bucket,
-                Key=key,
-                Body=content,
-                Metadata=upload_metadata
-            )
-            
-            return {
-                'success': True,
-                'etag': response['ETag'].strip('"'),
-                'version_id': response.get('VersionId'),
-                'size': len(content),
-                'metadata': upload_metadata,
-                'upload_timestamp': datetime.utcnow().isoformat()
-            }
-        except Exception as e:
-            return {
-                'success': False,
-                'error': str(e),
-                'error_type': type(e).__name__,
-                'timestamp': datetime.utcnow().isoformat()
-            }
-    
-    def download_file(bucket: str, key: str) -> Dict[str, Any]:
-        """Mock S3 file download operation with error handling simulation."""
-        try:
-            response = mock_s3_service.get_object(Bucket=bucket, Key=key)
-            content = response['Body'].read()
-            
-            return {
-                'success': True,
-                'content': content,
-                'content_type': response.get('ContentType', 'application/octet-stream'),
-                'metadata': response.get('Metadata', {}),
-                'last_modified': response.get('LastModified', datetime.utcnow()).isoformat(),
-                'etag': response['ETag'].strip('"'),
-                'size': response.get('ContentLength', len(content))
-            }
-        except ClientError as e:
-            error_code = e.response['Error']['Code']
-            return {
-                'success': False,
-                'error': f"S3 ClientError: {error_code}",
-                'error_code': error_code,
-                'error_type': 'ClientError',
-                'timestamp': datetime.utcnow().isoformat()
-            }
-        except Exception as e:
-            return {
-                'success': False,
-                'error': str(e),
-                'error_type': type(e).__name__,
-                'timestamp': datetime.utcnow().isoformat()
-            }
-    
-    def delete_file(bucket: str, key: str) -> Dict[str, Any]:
-        """Mock S3 file deletion operation with comprehensive response tracking."""
-        try:
-            response = mock_s3_service.delete_object(Bucket=bucket, Key=key)
-            
-            return {
-                'success': True,
-                'deleted': True,
-                'delete_marker': response.get('DeleteMarker', False),
-                'version_id': response.get('VersionId'),
-                'timestamp': datetime.utcnow().isoformat()
-            }
-        except Exception as e:
-            return {
-                'success': False,
-                'error': str(e),
-                'error_type': type(e).__name__,
-                'timestamp': datetime.utcnow().isoformat()
-            }
-    
-    def list_objects(bucket: str, prefix: str = '') -> Dict[str, Any]:
-        """Mock S3 object listing with pagination and filtering support."""
-        try:
-            kwargs = {'Bucket': bucket}
-            if prefix:
-                kwargs['Prefix'] = prefix
-            
-            response = mock_s3_service.list_objects_v2(**kwargs)
-            
-            objects = []
-            for obj in response.get('Contents', []):
-                objects.append({
-                    'key': obj['Key'],
-                    'size': obj['Size'],
-                    'last_modified': obj['LastModified'].isoformat(),
-                    'etag': obj['ETag'].strip('"'),
-                    'storage_class': obj.get('StorageClass', 'STANDARD')
-                })
-            
-            return {
-                'success': True,
-                'objects': objects,
-                'count': len(objects),
-                'truncated': response.get('IsTruncated', False),
-                'prefix': prefix,
-                'timestamp': datetime.utcnow().isoformat()
-            }
-        except Exception as e:
-            return {
-                'success': False,
-                'error': str(e),
-                'error_type': type(e).__name__,
-                'timestamp': datetime.utcnow().isoformat()
-            }
-    
-    def batch_upload(uploads: List[Tuple[str, str, bytes]]) -> Dict[str, Any]:
-        """Mock S3 batch upload operation for performance testing scenarios."""
-        results = []
-        start_time = time.time()
-        
-        for bucket, key, content in uploads:
-            result = upload_file(bucket, key, content)
-            result['batch_item'] = True
-            results.append(result)
-        
-        duration = time.time() - start_time
-        success_count = sum(1 for r in results if r['success'])
-        
-        return {
-            'success': success_count == len(uploads),
-            'results': results,
-            'total_uploads': len(uploads),
-            'successful_uploads': success_count,
-            'failed_uploads': len(uploads) - success_count,
-            'duration_seconds': duration,
-            'uploads_per_second': len(uploads) / duration if duration > 0 else 0,
-            'timestamp': datetime.utcnow().isoformat()
-        }
-    
-    def simulate_s3_error(error_type: str = 'NoSuchBucket') -> Callable:
-        """Generate S3 error simulation function for error handling testing."""
-        def error_operation(*args, **kwargs):
-            error_responses = {
-                'NoSuchBucket': ClientError(
-                    error_response={
-                        'Error': {
-                            'Code': 'NoSuchBucket',
-                            'Message': 'The specified bucket does not exist'
-                        }
-                    },
-                    operation_name='GetObject'
-                ),
-                'AccessDenied': ClientError(
-                    error_response={
-                        'Error': {
-                            'Code': 'AccessDenied',
-                            'Message': 'Access Denied'
-                        }
-                    },
-                    operation_name='GetObject'
-                ),
-                'NoSuchKey': ClientError(
-                    error_response={
-                        'Error': {
-                            'Code': 'NoSuchKey',
-                            'Message': 'The specified key does not exist'
-                        }
-                    },
-                    operation_name='GetObject'
-                ),
-                'ServiceUnavailable': ClientError(
-                    error_response={
-                        'Error': {
-                            'Code': 'ServiceUnavailable',
-                            'Message': 'Service Unavailable'
-                        }
-                    },
-                    operation_name='GetObject'
-                )
-            }
-            
-            raise error_responses.get(error_type, Exception(f"Simulated error: {error_type}"))
-        
-        return error_operation
-    
-    return {
-        'upload_file': upload_file,
-        'download_file': download_file,
-        'delete_file': delete_file,
-        'list_objects': list_objects,
-        'batch_upload': batch_upload,
-        'simulate_error': simulate_s3_error,
-        'client': mock_s3_service
-    }
-
-
-@pytest.fixture(scope="function")
-def mock_kms_service(mock_aws_credentials):
-    """
-    AWS KMS service mock fixture for encryption key management testing per Section 6.4.3.
-    
-    Provides comprehensive KMS operations mocking including key creation, encryption/decryption,
-    and key rotation simulation for security testing scenarios.
-    
-    Yields:
-        boto3.client: Mocked KMS client with comprehensive cryptographic operation support
+    Provides realistic KMS behavior for key creation, encryption, decryption,
+    and key rotation operations supporting enterprise security requirements.
     """
     with mock_kms():
+        # Create mock KMS client
         kms_client = boto3.client('kms', region_name='us-east-1')
         
-        # Create test encryption keys for various scenarios
+        # Create test encryption keys
         test_keys = []
-        key_configs = [
-            {'KeyUsage': 'ENCRYPT_DECRYPT', 'Description': 'Test encryption key'},
-            {'KeyUsage': 'ENCRYPT_DECRYPT', 'Description': 'Test file encryption key'},
-            {'KeyUsage': 'SIGN_VERIFY', 'Description': 'Test signing key'}
+        key_descriptions = [
+            'Application data encryption key',
+            'Database encryption key', 
+            'File storage encryption key',
+            'Session token encryption key'
         ]
         
-        for config in key_configs:
-            response = kms_client.create_key(**config)
-            test_keys.append(response['KeyMetadata']['KeyId'])
+        for description in key_descriptions:
+            key_response = kms_client.create_key(
+                Description=description,
+                Usage='ENCRYPT_DECRYPT',
+                Origin='AWS_KMS'
+            )
+            test_keys.append(key_response['KeyMetadata']['KeyId'])
         
-        # Create key aliases for easier testing
+        # Create aliases for keys
         for i, key_id in enumerate(test_keys):
             alias_name = f'alias/test-key-{i+1}'
             kms_client.create_alias(
@@ -445,1583 +254,1238 @@ def mock_kms_service(mock_aws_credentials):
                 TargetKeyId=key_id
             )
         
+        # Add performance and usage tracking
+        kms_client._performance_metrics = {
+            'encrypt_times': [],
+            'decrypt_times': [],
+            'operation_counts': {'encrypt': 0, 'decrypt': 0, 'generate_data_key': 0}
+        }
+        
+        original_encrypt = kms_client.encrypt
+        original_decrypt = kms_client.decrypt
+        original_generate_data_key = kms_client.generate_data_key
+        
+        def tracked_encrypt(*args, **kwargs):
+            start_time = time.time()
+            result = original_encrypt(*args, **kwargs)
+            kms_client._performance_metrics['encrypt_times'].append(time.time() - start_time)
+            kms_client._performance_metrics['operation_counts']['encrypt'] += 1
+            return result
+        
+        def tracked_decrypt(*args, **kwargs):
+            start_time = time.time()
+            result = original_decrypt(*args, **kwargs)
+            kms_client._performance_metrics['decrypt_times'].append(time.time() - start_time)
+            kms_client._performance_metrics['operation_counts']['decrypt'] += 1
+            return result
+        
+        def tracked_generate_data_key(*args, **kwargs):
+            start_time = time.time()
+            result = original_generate_data_key(*args, **kwargs)
+            kms_client._performance_metrics['operation_counts']['generate_data_key'] += 1
+            return result
+        
+        kms_client.encrypt = tracked_encrypt
+        kms_client.decrypt = tracked_decrypt
+        kms_client.generate_data_key = tracked_generate_data_key
+        
         logger.info(
-            "kms_mock_service_initialized",
-            keys_created=len(test_keys),
-            aliases_created=len(test_keys),
-            component="external_service_mocks"
+            "Mock KMS client initialized",
+            test_keys=len(test_keys),
+            performance_tracking=True
         )
         
         yield kms_client
 
 
-# ================================================================================================
-# HTTP CLIENT MOCK FIXTURES - Section 3.2.3 HTTP Client Integration
-# ================================================================================================
+@pytest.fixture
+def mock_cloudwatch_client(aws_credentials):
+    """
+    Mock AWS CloudWatch client for metrics and monitoring testing per Section 6.3.5.
+    
+    Provides realistic CloudWatch behavior for custom metrics submission,
+    log group management, and dashboard integration supporting monitoring
+    requirements.
+    """
+    with mock_cloudwatch():
+        # Create mock CloudWatch client
+        cloudwatch_client = boto3.client('cloudwatch', region_name='us-east-1')
+        
+        # Create test log groups
+        logs_client = boto3.client('logs', region_name='us-east-1')
+        test_log_groups = [
+            '/aws/lambda/flask-app-function',
+            '/flask-app/application-logs',
+            '/flask-app/performance-logs',
+            '/flask-app/security-logs'
+        ]
+        
+        for log_group in test_log_groups:
+            try:
+                logs_client.create_log_group(logGroupName=log_group)
+            except logs_client.exceptions.ResourceAlreadyExistsException:
+                pass
+        
+        # Add performance tracking for CloudWatch operations
+        cloudwatch_client._performance_metrics = {
+            'put_metric_times': [],
+            'operation_counts': {'put_metric_data': 0, 'get_metric_statistics': 0}
+        }
+        
+        original_put_metric_data = cloudwatch_client.put_metric_data
+        original_get_metric_statistics = cloudwatch_client.get_metric_statistics
+        
+        def tracked_put_metric_data(*args, **kwargs):
+            start_time = time.time()
+            result = original_put_metric_data(*args, **kwargs)
+            cloudwatch_client._performance_metrics['put_metric_times'].append(time.time() - start_time)
+            cloudwatch_client._performance_metrics['operation_counts']['put_metric_data'] += 1
+            return result
+        
+        def tracked_get_metric_statistics(*args, **kwargs):
+            start_time = time.time()
+            result = original_get_metric_statistics(*args, **kwargs)
+            cloudwatch_client._performance_metrics['operation_counts']['get_metric_statistics'] += 1
+            return result
+        
+        cloudwatch_client.put_metric_data = tracked_put_metric_data
+        cloudwatch_client.get_metric_statistics = tracked_get_metric_statistics
+        
+        logger.info(
+            "Mock CloudWatch client initialized", 
+            log_groups=test_log_groups,
+            performance_tracking=True
+        )
+        
+        yield cloudwatch_client
 
-@pytest.fixture(scope="function")
-def mock_requests_client():
+
+# =============================================================================
+# HTTP Client Mock Fixtures - requests 2.31+ and httpx 0.24+ per Section 3.2.3
+# =============================================================================
+
+@pytest.fixture
+def mock_requests_session():
     """
-    Comprehensive requests 2.31+ HTTP client mock fixture for synchronous API testing.
+    Mock requests session with comprehensive HTTP client behavior simulation.
     
-    Provides realistic HTTP response simulation with status codes, headers, timing patterns,
-    and error condition handling for external service integration testing per Section 0.1.2.
-    
-    Returns:
-        Mock: Configured requests mock with comprehensive response patterns
+    Provides realistic HTTP request/response patterns for external API testing
+    with support for retry logic, connection pooling, and performance monitoring
+    per Section 3.2.3 HTTP client integration.
     """
-    mock_session = Mock(spec=requests.Session)
+    session_mock = Mock(spec=requests.Session)
     
-    def create_response(status_code: int = 200, json_data: Optional[Dict] = None,
-                       text_data: Optional[str] = None, headers: Optional[Dict] = None,
-                       elapsed_seconds: float = 0.1) -> Mock:
-        """Create realistic HTTP response mock with timing and header simulation."""
+    # Configure default response behavior
+    def create_response(status_code=200, json_data=None, text=None, headers=None):
         response = Mock(spec=requests.Response)
         response.status_code = status_code
-        response.ok = 200 <= status_code < 300
-        response.headers = headers or {
-            'Content-Type': 'application/json',
-            'Server': 'nginx/1.18.0',
-            'Date': datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT'),
-            'X-Request-ID': str(uuid.uuid4())
-        }
+        response.ok = status_code < 400
+        response.json.return_value = json_data or {}
+        response.text = text or json.dumps(json_data or {})
+        response.headers = headers or {'Content-Type': 'application/json'}
+        response.elapsed = timedelta(milliseconds=150)  # Simulate realistic response time
+        return response
+    
+    # Configure different response scenarios
+    session_mock.get.return_value = create_response(200, {'status': 'success', 'data': []})
+    session_mock.post.return_value = create_response(201, {'status': 'created', 'id': 'test-123'})
+    session_mock.put.return_value = create_response(200, {'status': 'updated'})
+    session_mock.delete.return_value = create_response(204)
+    session_mock.patch.return_value = create_response(200, {'status': 'patched'})
+    
+    # Add performance tracking
+    session_mock._performance_metrics = {
+        'request_times': [],
+        'request_counts': {'GET': 0, 'POST': 0, 'PUT': 0, 'DELETE': 0, 'PATCH': 0},
+        'status_codes': {},
+        'connection_pool_hits': 0
+    }
+    
+    def track_request(method, url, **kwargs):
+        start_time = time.time()
         
-        if json_data is not None:
-            response.json.return_value = json_data
-            response.text = json.dumps(json_data)
-            response.content = response.text.encode('utf-8')
-        elif text_data is not None:
-            response.text = text_data
-            response.content = text_data.encode('utf-8')
-            response.json.side_effect = ValueError("No JSON object could be decoded")
+        # Simulate different response scenarios based on URL patterns
+        if 'error' in url:
+            response = create_response(500, {'error': 'Internal server error'})
+        elif 'timeout' in url:
+            raise Timeout("Request timeout")
+        elif 'connection-error' in url:
+            raise ConnectionError("Connection failed")
+        elif 'not-found' in url:
+            response = create_response(404, {'error': 'Not found'})
+        elif 'auth' in url and kwargs.get('headers', {}).get('Authorization') is None:
+            response = create_response(401, {'error': 'Unauthorized'})
         else:
-            response.text = ''
-            response.content = b''
-            response.json.side_effect = ValueError("No JSON object could be decoded")
+            response = create_response(200, {'status': 'success', 'url': url, 'method': method})
         
-        # Simulate request timing
-        response.elapsed = timedelta(seconds=elapsed_seconds)
+        # Track performance metrics
+        session_mock._performance_metrics['request_times'].append(time.time() - start_time)
+        session_mock._performance_metrics['request_counts'][method.upper()] += 1
+        session_mock._performance_metrics['status_codes'][response.status_code] = \
+            session_mock._performance_metrics['status_codes'].get(response.status_code, 0) + 1
+        session_mock._performance_metrics['connection_pool_hits'] += 1
         
         return response
     
-    def configure_endpoint(method: str, url: str, responses: List[Dict[str, Any]]):
-        """Configure multiple responses for endpoint testing scenarios."""
-        response_cycle = iter(responses)
-        
-        def side_effect(*args, **kwargs):
-            try:
-                response_config = next(response_cycle)
-                if 'exception' in response_config:
-                    raise response_config['exception']
-                return create_response(**response_config)
-            except StopIteration:
-                # Repeat last response if cycle exhausted
-                return create_response(**responses[-1])
-        
-        method_mock = getattr(mock_session, method.lower())
-        method_mock.side_effect = side_effect
+    session_mock.request.side_effect = track_request
     
-    # Configure common successful responses
-    mock_session.get.return_value = create_response(
-        status_code=200,
-        json_data={'message': 'GET request successful', 'timestamp': datetime.utcnow().isoformat()}
-    )
+    # Configure session properties
+    session_mock.adapters = {'http://': OptimizedHTTPAdapter(), 'https://': OptimizedHTTPAdapter()}
+    session_mock.headers = {'User-Agent': 'Flask-App/1.0.0'}
+    session_mock.timeout = 30.0
     
-    mock_session.post.return_value = create_response(
-        status_code=201,
-        json_data={'message': 'POST request successful', 'id': str(uuid.uuid4()), 'created_at': datetime.utcnow().isoformat()}
-    )
+    logger.info("Mock requests session initialized with performance tracking")
     
-    mock_session.put.return_value = create_response(
-        status_code=200,
-        json_data={'message': 'PUT request successful', 'updated_at': datetime.utcnow().isoformat()}
-    )
-    
-    mock_session.delete.return_value = create_response(
-        status_code=204,
-        headers={'Content-Type': 'application/json'}
-    )
-    
-    mock_session.patch.return_value = create_response(
-        status_code=200,
-        json_data={'message': 'PATCH request successful', 'updated_at': datetime.utcnow().isoformat()}
-    )
-    
-    # Add helper methods for dynamic configuration
-    mock_session.create_response = create_response
-    mock_session.configure_endpoint = configure_endpoint
-    
-    # Add connection pool simulation
-    mock_session.adapters = {
-        'http://': Mock(spec=requests.adapters.HTTPAdapter),
-        'https://': Mock(spec=requests.adapters.HTTPAdapter)
-    }
-    
-    # Configure realistic request preparation
-    mock_request = Mock(spec=requests.PreparedRequest)
-    mock_request.url = 'https://api.example.com/test'
-    mock_request.method = 'GET'
-    mock_request.headers = {}
-    mock_request.body = None
-    mock_session.prepare_request.return_value = mock_request
-    
-    logger.info(
-        "requests_mock_client_initialized",
-        methods_configured=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
-        component="external_service_mocks"
-    )
-    
-    return mock_session
+    return session_mock
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def mock_httpx_client():
     """
-    Comprehensive httpx 0.24+ async HTTP client mock fixture for asynchronous API testing.
+    Mock httpx async client with comprehensive HTTP client behavior simulation.
     
-    Provides realistic async HTTP response simulation with connection pooling, timeout handling,
-    and HTTP/2 support simulation for high-performance external service integration testing.
-    
-    Returns:
-        AsyncMock: Configured httpx async client mock with comprehensive async patterns
+    Provides realistic async HTTP request/response patterns for external API testing
+    with support for connection pooling, timeout management, and performance monitoring
+    per Section 3.2.3 async HTTP client integration.
     """
-    mock_client = AsyncMock(spec=httpx.AsyncClient)
+    client_mock = AsyncMock(spec=httpx.AsyncClient)
     
-    async def create_async_response(status_code: int = 200, json_data: Optional[Dict] = None,
-                                   text_data: Optional[str] = None, headers: Optional[Dict] = None,
-                                   elapsed_seconds: float = 0.05) -> Mock:
-        """Create realistic async HTTP response mock with performance simulation."""
+    # Configure default async response behavior
+    async def create_async_response(status_code=200, json_data=None, text=None, headers=None):
         response = Mock(spec=httpx.Response)
         response.status_code = status_code
-        response.is_success = 200 <= status_code < 300
+        response.is_success = status_code < 400
         response.is_error = status_code >= 400
-        response.headers = headers or {
-            'content-type': 'application/json',
-            'server': 'uvicorn',
-            'date': datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT'),
-            'x-request-id': str(uuid.uuid4()),
-            'x-response-time': f"{elapsed_seconds:.3f}s"
-        }
+        response.json.return_value = json_data or {}
+        response.text = text or json.dumps(json_data or {})
+        response.headers = headers or {'Content-Type': 'application/json'}
+        response.elapsed = timedelta(milliseconds=120)  # Simulate realistic async response time
+        return response
+    
+    # Configure different async response scenarios
+    client_mock.get.return_value = await create_async_response(200, {'status': 'success', 'data': []})
+    client_mock.post.return_value = await create_async_response(201, {'status': 'created', 'id': 'async-123'})
+    client_mock.put.return_value = await create_async_response(200, {'status': 'updated'})
+    client_mock.delete.return_value = await create_async_response(204)
+    client_mock.patch.return_value = await create_async_response(200, {'status': 'patched'})
+    
+    # Add performance tracking for async operations
+    client_mock._performance_metrics = {
+        'async_request_times': [],
+        'async_request_counts': {'GET': 0, 'POST': 0, 'PUT': 0, 'DELETE': 0, 'PATCH': 0},
+        'async_status_codes': {},
+        'connection_pool_usage': 0
+    }
+    
+    async def track_async_request(method, url, **kwargs):
+        start_time = time.time()
         
-        if json_data is not None:
-            response.json.return_value = json_data
-            response.text = json.dumps(json_data)
-            response.content = response.text.encode('utf-8')
-        elif text_data is not None:
-            response.text = text_data
-            response.content = text_data.encode('utf-8')
-            response.json.side_effect = ValueError("Response is not valid JSON")
+        # Simulate different async response scenarios
+        if 'async-error' in url:
+            response = await create_async_response(500, {'error': 'Async server error'})
+        elif 'async-timeout' in url:
+            raise httpx.TimeoutException("Async request timeout")
+        elif 'async-connection' in url:
+            raise httpx.ConnectError("Async connection failed")
+        elif 'async-not-found' in url:
+            response = await create_async_response(404, {'error': 'Async not found'})
         else:
-            response.text = ''
-            response.content = b''
-            response.json.side_effect = ValueError("Response is not valid JSON")
+            response = await create_async_response(200, {'status': 'async_success', 'url': url, 'method': method})
         
-        # Simulate request timing for performance testing
-        response.elapsed = timedelta(seconds=elapsed_seconds)
-        
-        # Add HTTP/2 and connection info simulation
-        response.http_version = 'HTTP/2.0'
-        response.url = 'https://api.example.com/test'
-        response.request = Mock(spec=httpx.Request)
-        response.request.method = 'GET'
-        response.request.url = response.url
-        
-        # Simulate async operations delay
-        await asyncio.sleep(elapsed_seconds / 10)  # Reduced delay for testing
+        # Track async performance metrics
+        client_mock._performance_metrics['async_request_times'].append(time.time() - start_time)
+        client_mock._performance_metrics['async_request_counts'][method.upper()] += 1
+        client_mock._performance_metrics['async_status_codes'][response.status_code] = \
+            client_mock._performance_metrics['async_status_codes'].get(response.status_code, 0) + 1
+        client_mock._performance_metrics['connection_pool_usage'] += 1
         
         return response
     
-    # Configure common async responses
-    mock_client.get.return_value = await create_async_response(
-        status_code=200,
-        json_data={'message': 'Async GET successful', 'timestamp': datetime.utcnow().isoformat()}
-    )
+    client_mock.request.side_effect = track_async_request
     
-    mock_client.post.return_value = await create_async_response(
-        status_code=201,
-        json_data={'message': 'Async POST successful', 'id': str(uuid.uuid4())}
-    )
+    # Configure async client properties
+    client_mock.timeout = httpx.Timeout(30.0, connect=10.0)
+    client_mock.limits = httpx.Limits(max_connections=100, max_keepalive_connections=50)
+    client_mock.headers = {'User-Agent': 'Flask-App-Async/1.0.0'}
     
-    mock_client.put.return_value = await create_async_response(
-        status_code=200,
-        json_data={'message': 'Async PUT successful', 'updated_at': datetime.utcnow().isoformat()}
-    )
+    logger.info("Mock httpx async client initialized with performance tracking")
     
-    mock_client.delete.return_value = await create_async_response(
-        status_code=204,
-        headers={'content-type': 'application/json'}
-    )
-    
-    mock_client.patch.return_value = await create_async_response(
-        status_code=200,
-        json_data={'message': 'Async PATCH successful', 'updated_at': datetime.utcnow().isoformat()}
-    )
-    
-    # Configure connection pool and limits simulation
-    mock_client.limits = Mock()
-    mock_client.limits.max_connections = 100
-    mock_client.limits.max_keepalive_connections = 50
-    mock_client.limits.keepalive_expiry = 30.0
-    
-    # Add helper methods for dynamic configuration
-    mock_client.create_response = create_async_response
-    
-    # Configure context manager behavior for async with statements
-    mock_client.__aenter__.return_value = mock_client
-    mock_client.__aexit__.return_value = AsyncMock()
-    
-    logger.info(
-        "httpx_mock_client_initialized",
-        methods_configured=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
-        http_version='HTTP/2.0',
-        component="external_service_mocks"
-    )
-    
-    return mock_client
+    return client_mock
 
 
-@pytest.fixture(scope="function")
-def mock_http_error_scenarios():
+@pytest.fixture
+def mock_http_client_manager(mock_requests_session, mock_httpx_client):
     """
-    HTTP error scenario simulation fixture for comprehensive error handling testing.
+    Mock HTTP client manager integrating both sync and async clients.
     
-    Provides realistic error condition simulation including timeout, connection errors,
-    rate limiting, and server errors for resilience pattern testing.
-    
-    Returns:
-        Dict[str, Callable]: Dictionary of error simulation functions
+    Provides comprehensive HTTP client management with performance monitoring,
+    connection pooling, and error handling per Section 3.2.3 HTTP client
+    integration requirements.
     """
-    def simulate_timeout(delay: float = 30.0):
-        """Simulate HTTP timeout scenarios for timeout handling testing."""
-        def timeout_error(*args, **kwargs):
-            time.sleep(delay / 1000)  # Reduced delay for testing
-            raise RequestException(f"Request timed out after {delay}s")
-        return timeout_error
+    manager_mock = Mock(spec=HTTPClientManager)
     
-    def simulate_connection_error():
-        """Simulate connection failure scenarios for connectivity testing."""
-        def connection_error(*args, **kwargs):
-            raise RequestsConnectionError("Failed to establish connection to remote host")
-        return connection_error
+    # Configure client manager with mocked clients
+    manager_mock.sync_client = mock_requests_session
+    manager_mock.async_client = mock_httpx_client
     
-    def simulate_rate_limit(retry_after: int = 60):
-        """Simulate rate limiting scenarios for rate limit handling testing."""
-        def rate_limit_error(*args, **kwargs):
-            response = Mock(spec=requests.Response)
-            response.status_code = 429
-            response.headers = {
-                'Retry-After': str(retry_after),
-                'X-RateLimit-Limit': '1000',
-                'X-RateLimit-Remaining': '0',
-                'X-RateLimit-Reset': str(int(time.time()) + retry_after)
-            }
-            response.json.return_value = {
-                'error': 'Rate limit exceeded',
-                'message': f'Rate limit exceeded. Try again in {retry_after} seconds.',
-                'retry_after': retry_after
-            }
-            response.text = json.dumps(response.json.return_value)
-            return response
-        return rate_limit_error
+    # Add manager-level performance tracking
+    manager_mock._performance_metrics = {
+        'total_requests': 0,
+        'sync_requests': 0,
+        'async_requests': 0,
+        'avg_response_time': 0.0,
+        'error_rate': 0.0,
+        'connection_pool_efficiency': 0.95
+    }
     
-    def simulate_server_error(status_code: int = 500):
-        """Simulate server error scenarios for error handling testing."""
-        def server_error(*args, **kwargs):
-            response = Mock(spec=requests.Response)
-            response.status_code = status_code
-            response.ok = False
-            response.headers = {
-                'Content-Type': 'application/json',
-                'X-Error-ID': str(uuid.uuid4())
-            }
-            response.json.return_value = {
-                'error': 'Internal Server Error',
-                'message': f'Server error occurred (HTTP {status_code})',
-                'status_code': status_code,
-                'timestamp': datetime.utcnow().isoformat()
-            }
-            response.text = json.dumps(response.json.return_value)
-            return response
-        return server_error
+    def track_sync_request(*args, **kwargs):
+        manager_mock._performance_metrics['total_requests'] += 1
+        manager_mock._performance_metrics['sync_requests'] += 1
+        return mock_requests_session.request(*args, **kwargs)
     
-    def simulate_auth_error():
-        """Simulate authentication error scenarios for auth handling testing."""
-        def auth_error(*args, **kwargs):
-            response = Mock(spec=requests.Response)
-            response.status_code = 401
-            response.ok = False
-            response.headers = {
-                'Content-Type': 'application/json',
-                'WWW-Authenticate': 'Bearer realm="api"'
-            }
-            response.json.return_value = {
-                'error': 'Unauthorized',
-                'message': 'Invalid or expired authentication token',
-                'status_code': 401
-            }
-            response.text = json.dumps(response.json.return_value)
-            return response
-        return auth_error
+    async def track_async_request(*args, **kwargs):
+        manager_mock._performance_metrics['total_requests'] += 1
+        manager_mock._performance_metrics['async_requests'] += 1
+        return await mock_httpx_client.request(*args, **kwargs)
     
-    def simulate_intermittent_failures(failure_rate: float = 0.3):
-        """Simulate intermittent failures for reliability testing."""
-        call_count = 0
-        
-        def intermittent_failure(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            
-            if call_count % int(1 / failure_rate) == 0:
-                raise RequestException("Intermittent service failure")
-            
-            response = Mock(spec=requests.Response)
-            response.status_code = 200
-            response.ok = True
-            response.json.return_value = {
-                'message': 'Request successful',
-                'call_count': call_count,
-                'timestamp': datetime.utcnow().isoformat()
-            }
-            response.text = json.dumps(response.json.return_value)
-            return response
-        
-        return intermittent_failure
+    manager_mock.make_request = track_sync_request
+    manager_mock.make_async_request = track_async_request
     
+    # Configure health check methods
+    manager_mock.check_health.return_value = {
+        'sync_client_healthy': True,
+        'async_client_healthy': True,
+        'connection_pools_available': True,
+        'total_connections': 150,
+        'active_connections': 45
+    }
+    
+    logger.info("Mock HTTP client manager initialized with dual client support")
+    
+    return manager_mock
+
+
+# =============================================================================
+# Circuit Breaker Mock Fixtures per Section 6.3.3
+# =============================================================================
+
+@pytest.fixture
+def mock_circuit_breaker_config():
+    """
+    Mock circuit breaker configuration for different service types.
+    
+    Provides realistic circuit breaker configuration patterns for Auth0,
+    AWS S3, external APIs, and database connections per Section 6.3.3
+    resilience patterns.
+    """
     return {
-        'timeout': simulate_timeout,
-        'connection_error': simulate_connection_error,
-        'rate_limit': simulate_rate_limit,
-        'server_error': simulate_server_error,
-        'auth_error': simulate_auth_error,
-        'intermittent_failures': simulate_intermittent_failures
+        'auth0': CircuitBreakerConfig(
+            service_name='auth0',
+            service_type=ExternalServiceType.AUTH_PROVIDER,
+            fail_max=5,
+            recovery_timeout=60,
+            expected_exception=(RequestException, ConnectionError, Timeout),
+            enable_metrics=True,
+            enable_health_monitoring=True,
+            fallback_enabled=True,
+            fallback_response={'error': 'Authentication service temporarily unavailable'}
+        ),
+        'aws_s3': CircuitBreakerConfig(
+            service_name='aws_s3',
+            service_type=ExternalServiceType.CLOUD_STORAGE,
+            fail_max=3,
+            recovery_timeout=120,
+            expected_exception=(ClientError, NoCredentialsError, ConnectionError),
+            enable_metrics=True,
+            enable_health_monitoring=True,
+            fallback_enabled=True,
+            fallback_response={'error': 'File storage service temporarily unavailable'}
+        ),
+        'external_api': CircuitBreakerConfig(
+            service_name='external_api',
+            service_type=ExternalServiceType.HTTP_API,
+            fail_max=10,
+            recovery_timeout=30,
+            expected_exception=(RequestException, HTTPError, Timeout),
+            enable_metrics=True,
+            enable_health_monitoring=True,
+            fallback_enabled=True,
+            fallback_response={'error': 'External API temporarily unavailable'}
+        ),
+        'redis_cache': CircuitBreakerConfig(
+            service_name='redis_cache',
+            service_type=ExternalServiceType.CACHE,
+            fail_max=15,
+            recovery_timeout=15,
+            expected_exception=(ConnectionError, TimeoutError),
+            enable_metrics=True,
+            enable_health_monitoring=True,
+            fallback_enabled=True,
+            fallback_response=None  # Cache failures should fallback to source
+        )
     }
 
 
-# ================================================================================================
-# CIRCUIT BREAKER MOCK FIXTURES - Section 6.3.3 Resilience Patterns
-# ================================================================================================
-
-@pytest.fixture(scope="function")
-def mock_circuit_breaker():
+@pytest.fixture
+def mock_circuit_breaker(mock_circuit_breaker_config):
     """
-    Circuit breaker pattern mock fixture for resilience testing per Section 6.3.3.
+    Mock enhanced circuit breaker with comprehensive state management.
     
-    Provides comprehensive circuit breaker behavior simulation including state transitions,
-    failure threshold management, and recovery automation testing for external service protection.
-    
-    Returns:
-        Mock: Configured circuit breaker mock with state management
+    Provides realistic circuit breaker behavior including state transitions,
+    failure counting, half-open testing, and metrics collection per Section 6.3.3
+    external service protection patterns.
     """
-    circuit_breaker = Mock()
+    circuit_breaker_mock = Mock(spec=EnhancedCircuitBreaker)
     
     # Initialize circuit breaker state
-    circuit_breaker.state = CircuitBreakerState.CLOSED
-    circuit_breaker.failure_count = 0
-    circuit_breaker.failure_threshold = 5
-    circuit_breaker.reset_timeout = 60
-    circuit_breaker.last_failure_time = None
-    circuit_breaker.call_count = 0
-    circuit_breaker.success_count = 0
+    circuit_breaker_mock._state = CircuitBreakerState.CLOSED
+    circuit_breaker_mock._failure_count = 0
+    circuit_breaker_mock._last_failure_time = None
+    circuit_breaker_mock._half_open_calls = 0
+    circuit_breaker_mock._config = mock_circuit_breaker_config['external_api']
     
-    def call_with_circuit_breaker(func: Callable, *args, **kwargs):
-        """Circuit breaker call wrapper with comprehensive state management."""
-        circuit_breaker.call_count += 1
-        current_time = time.time()
+    # Add comprehensive metrics tracking
+    circuit_breaker_mock._metrics = {
+        'total_calls': 0,
+        'successful_calls': 0,
+        'failed_calls': 0,
+        'state_transitions': [],
+        'fallback_activations': 0,
+        'circuit_open_duration': 0.0,
+        'recovery_attempts': 0
+    }
+    
+    def simulate_call(func, *args, **kwargs):
+        """Simulate circuit breaker protected function call."""
+        circuit_breaker_mock._metrics['total_calls'] += 1
         
-        # Check if circuit breaker should transition from OPEN to HALF_OPEN
-        if (circuit_breaker.state == CircuitBreakerState.OPEN and 
-            circuit_breaker.last_failure_time and
-            current_time - circuit_breaker.last_failure_time >= circuit_breaker.reset_timeout):
-            circuit_breaker.state = CircuitBreakerState.HALF_OPEN
-            logger.info(
-                "circuit_breaker_state_transition",
-                from_state="OPEN",
-                to_state="HALF_OPEN",
-                reset_timeout=circuit_breaker.reset_timeout,
-                component="external_service_mocks"
-            )
-        
-        # Handle circuit breaker states
-        if circuit_breaker.state == CircuitBreakerState.OPEN:
-            from src.integrations.circuit_breaker import CircuitBreakerOpenError
-            raise CircuitBreakerOpenError(
-                f"Circuit breaker is OPEN. Failure count: {circuit_breaker.failure_count}"
-            )
+        # Check circuit state
+        if circuit_breaker_mock._state == CircuitBreakerState.OPEN:
+            # Check if recovery timeout has passed
+            if (circuit_breaker_mock._last_failure_time and 
+                time.time() - circuit_breaker_mock._last_failure_time > circuit_breaker_mock._config.recovery_timeout):
+                circuit_breaker_mock._state = CircuitBreakerState.HALF_OPEN
+                circuit_breaker_mock._metrics['state_transitions'].append({
+                    'from': 'OPEN',
+                    'to': 'HALF_OPEN',
+                    'timestamp': time.time()
+                })
+            else:
+                # Circuit is open, activate fallback
+                circuit_breaker_mock._metrics['fallback_activations'] += 1
+                if circuit_breaker_mock._config.fallback_response:
+                    return circuit_breaker_mock._config.fallback_response
+                raise CircuitBreakerOpenError("Circuit breaker is open")
         
         try:
-            # Execute the function
-            result = func(*args, **kwargs)
+            # Simulate function execution
+            if 'error' in str(args) or 'error' in str(kwargs):
+                raise RequestException("Simulated external service error")
             
-            # Success handling
-            circuit_breaker.success_count += 1
+            result = func(*args, **kwargs) if callable(func) else {'status': 'success'}
             
-            if circuit_breaker.state == CircuitBreakerState.HALF_OPEN:
-                # Transition to CLOSED on successful call in HALF_OPEN state
-                circuit_breaker.state = CircuitBreakerState.CLOSED
-                circuit_breaker.failure_count = 0
-                logger.info(
-                    "circuit_breaker_recovery_successful",
-                    state="CLOSED",
-                    success_count=circuit_breaker.success_count,
-                    component="external_service_mocks"
-                )
+            # Successful call
+            circuit_breaker_mock._metrics['successful_calls'] += 1
+            circuit_breaker_mock._failure_count = 0
+            
+            # Transition from half-open to closed if needed
+            if circuit_breaker_mock._state == CircuitBreakerState.HALF_OPEN:
+                circuit_breaker_mock._half_open_calls += 1
+                if circuit_breaker_mock._half_open_calls >= circuit_breaker_mock._config.half_open_max_calls:
+                    circuit_breaker_mock._state = CircuitBreakerState.CLOSED
+                    circuit_breaker_mock._half_open_calls = 0
+                    circuit_breaker_mock._metrics['state_transitions'].append({
+                        'from': 'HALF_OPEN',
+                        'to': 'CLOSED',
+                        'timestamp': time.time()
+                    })
             
             return result
             
         except Exception as e:
-            # Failure handling
-            circuit_breaker.failure_count += 1
-            circuit_breaker.last_failure_time = current_time
+            # Failed call
+            circuit_breaker_mock._metrics['failed_calls'] += 1
+            circuit_breaker_mock._failure_count += 1
+            circuit_breaker_mock._last_failure_time = time.time()
             
-            if circuit_breaker.failure_count >= circuit_breaker.failure_threshold:
-                circuit_breaker.state = CircuitBreakerState.OPEN
-                logger.warning(
-                    "circuit_breaker_opened",
-                    failure_count=circuit_breaker.failure_count,
-                    failure_threshold=circuit_breaker.failure_threshold,
-                    component="external_service_mocks"
-                )
+            # Check if we should open the circuit
+            if circuit_breaker_mock._failure_count >= circuit_breaker_mock._config.fail_max:
+                if circuit_breaker_mock._state != CircuitBreakerState.OPEN:
+                    circuit_breaker_mock._state = CircuitBreakerState.OPEN
+                    circuit_breaker_mock._metrics['state_transitions'].append({
+                        'from': 'CLOSED' if circuit_breaker_mock._state != CircuitBreakerState.HALF_OPEN else 'HALF_OPEN',
+                        'to': 'OPEN',
+                        'timestamp': time.time()
+                    })
+            
+            # Reset half-open calls on failure
+            if circuit_breaker_mock._state == CircuitBreakerState.HALF_OPEN:
+                circuit_breaker_mock._half_open_calls = 0
             
             raise e
     
-    def reset_circuit_breaker():
-        """Reset circuit breaker to initial state for testing scenarios."""
-        circuit_breaker.state = CircuitBreakerState.CLOSED
-        circuit_breaker.failure_count = 0
-        circuit_breaker.last_failure_time = None
-        circuit_breaker.call_count = 0
-        circuit_breaker.success_count = 0
-        logger.info(
-            "circuit_breaker_reset",
-            state="CLOSED",
-            component="external_service_mocks"
-        )
+    circuit_breaker_mock.call = simulate_call
+    circuit_breaker_mock.state = property(lambda self: circuit_breaker_mock._state)
+    circuit_breaker_mock.failure_count = property(lambda self: circuit_breaker_mock._failure_count)
+    circuit_breaker_mock.metrics = property(lambda self: circuit_breaker_mock._metrics)
     
-    def get_circuit_breaker_stats():
-        """Get comprehensive circuit breaker statistics for testing validation."""
-        return {
-            'state': circuit_breaker.state,
-            'failure_count': circuit_breaker.failure_count,
-            'success_count': circuit_breaker.success_count,
-            'call_count': circuit_breaker.call_count,
-            'failure_threshold': circuit_breaker.failure_threshold,
-            'reset_timeout': circuit_breaker.reset_timeout,
-            'last_failure_time': circuit_breaker.last_failure_time,
-            'failure_rate': circuit_breaker.failure_count / circuit_breaker.call_count if circuit_breaker.call_count > 0 else 0,
-            'success_rate': circuit_breaker.success_count / circuit_breaker.call_count if circuit_breaker.call_count > 0 else 0
-        }
+    # Add utility methods
+    def reset_breaker():
+        circuit_breaker_mock._state = CircuitBreakerState.CLOSED
+        circuit_breaker_mock._failure_count = 0
+        circuit_breaker_mock._last_failure_time = None
+        circuit_breaker_mock._half_open_calls = 0
     
-    def configure_circuit_breaker(failure_threshold: int = 5, reset_timeout: int = 60):
-        """Configure circuit breaker parameters for specific testing scenarios."""
-        circuit_breaker.failure_threshold = failure_threshold
-        circuit_breaker.reset_timeout = reset_timeout
-        logger.info(
-            "circuit_breaker_configured",
-            failure_threshold=failure_threshold,
-            reset_timeout=reset_timeout,
-            component="external_service_mocks"
-        )
+    def force_open():
+        circuit_breaker_mock._state = CircuitBreakerState.OPEN
+        circuit_breaker_mock._last_failure_time = time.time()
     
-    # Attach methods to circuit breaker mock
-    circuit_breaker.call = call_with_circuit_breaker
-    circuit_breaker.reset = reset_circuit_breaker
-    circuit_breaker.stats = get_circuit_breaker_stats
-    circuit_breaker.configure = configure_circuit_breaker
+    circuit_breaker_mock.reset = reset_breaker
+    circuit_breaker_mock.force_open = force_open
     
-    logger.info(
-        "circuit_breaker_mock_initialized",
-        initial_state=circuit_breaker.state,
-        failure_threshold=circuit_breaker.failure_threshold,
-        reset_timeout=circuit_breaker.reset_timeout,
-        component="external_service_mocks"
-    )
+    logger.info("Mock circuit breaker initialized with comprehensive state management")
     
-    return circuit_breaker
+    return circuit_breaker_mock
 
 
-@pytest.fixture(scope="function")
-def mock_circuit_breaker_manager(mock_circuit_breaker):
-    """
-    Circuit breaker manager mock fixture for multi-service circuit breaker testing.
-    
-    Provides centralized circuit breaker management with service-specific configurations
-    and global state monitoring for comprehensive resilience pattern testing.
-    
-    Returns:
-        Mock: Circuit breaker manager with multi-service support
-    """
-    manager = Mock()
-    manager.circuit_breakers = {}
-    
-    def get_circuit_breaker(service_name: str, service_type: str = ServiceType.EXTERNAL_API):
-        """Get or create circuit breaker for specific service."""
-        if service_name not in manager.circuit_breakers:
-            # Create new circuit breaker with service-specific configuration
-            cb = Mock()
-            cb.state = CircuitBreakerState.CLOSED
-            cb.failure_count = 0
-            cb.success_count = 0
-            cb.call_count = 0
-            cb.service_name = service_name
-            cb.service_type = service_type
-            
-            # Service-specific thresholds per Section 6.3.5
-            thresholds = {
-                ServiceType.AUTH: {'failure_threshold': 5, 'reset_timeout': 60},
-                ServiceType.AWS: {'failure_threshold': 3, 'reset_timeout': 60},
-                ServiceType.DATABASE: {'failure_threshold': 10, 'reset_timeout': 120},
-                ServiceType.CACHE: {'failure_threshold': 10, 'reset_timeout': 30},
-                ServiceType.EXTERNAL_API: {'failure_threshold': 5, 'reset_timeout': 60}
-            }
-            
-            config = thresholds.get(service_type, thresholds[ServiceType.EXTERNAL_API])
-            cb.failure_threshold = config['failure_threshold']
-            cb.reset_timeout = config['reset_timeout']
-            
-            manager.circuit_breakers[service_name] = cb
-            
-            logger.info(
-                "circuit_breaker_created",
-                service_name=service_name,
-                service_type=service_type,
-                failure_threshold=cb.failure_threshold,
-                reset_timeout=cb.reset_timeout,
-                component="external_service_mocks"
-            )
-        
-        return manager.circuit_breakers[service_name]
-    
-    def get_all_circuit_breakers():
-        """Get status of all circuit breakers for monitoring."""
-        return {
-            name: {
-                'state': cb.state,
-                'failure_count': cb.failure_count,
-                'success_count': cb.success_count,
-                'call_count': cb.call_count,
-                'service_type': cb.service_type,
-                'failure_threshold': cb.failure_threshold,
-                'reset_timeout': cb.reset_timeout
-            }
-            for name, cb in manager.circuit_breakers.items()
-        }
-    
-    def reset_all_circuit_breakers():
-        """Reset all circuit breakers for testing scenarios."""
-        for cb in manager.circuit_breakers.values():
-            cb.state = CircuitBreakerState.CLOSED
-            cb.failure_count = 0
-            cb.success_count = 0
-            cb.call_count = 0
-        
-        logger.info(
-            "all_circuit_breakers_reset",
-            count=len(manager.circuit_breakers),
-            component="external_service_mocks"
-        )
-    
-    manager.get_circuit_breaker = get_circuit_breaker
-    manager.get_all = get_all_circuit_breakers
-    manager.reset_all = reset_all_circuit_breakers
-    
-    return manager
+# =============================================================================
+# Retry Logic Mock Fixtures per Section 4.2.3
+# =============================================================================
 
-
-# ================================================================================================
-# RETRY LOGIC MOCK FIXTURES - Section 4.2.3 Error Handling
-# ================================================================================================
-
-@pytest.fixture(scope="function")
+@pytest.fixture
 def mock_retry_manager():
     """
-    Retry logic mock fixture with exponential backoff testing per Section 4.2.3.
+    Mock retry manager with exponential backoff testing support.
     
-    Provides comprehensive retry pattern simulation including exponential backoff,
-    jitter implementation, and retry exhaustion testing for fault tolerance validation.
-    
-    Returns:
-        Mock: Retry manager with comprehensive retry pattern support
+    Provides realistic retry logic simulation with exponential backoff,
+    jitter implementation, and comprehensive retry statistics per Section 4.2.3
+    error handling and recovery patterns.
     """
-    retry_manager = Mock()
-    retry_manager.retry_attempts = {}
-    retry_manager.retry_stats = {}
+    retry_manager_mock = Mock()
     
-    def execute_with_retry(func: Callable, max_attempts: int = 3, 
-                          base_delay: float = 1.0, max_delay: float = 30.0,
-                          jitter: bool = True, exponential_base: float = 2.0,
-                          service_name: str = 'default') -> Any:
-        """Execute function with comprehensive retry logic and statistics tracking."""
+    # Initialize retry configuration
+    retry_manager_mock._config = {
+        'max_retries': 3,
+        'initial_delay': 1.0,
+        'max_delay': 30.0,
+        'exponential_base': 2.0,
+        'jitter_factor': 0.1,
+        'retry_on_exceptions': (RequestException, ConnectionError, Timeout, HTTPError)
+    }
+    
+    # Add retry statistics tracking
+    retry_manager_mock._statistics = {
+        'total_attempts': 0,
+        'successful_retries': 0,
+        'failed_retries': 0,
+        'retry_patterns': [],
+        'backoff_times': [],
+        'exception_counts': {}
+    }
+    
+    def simulate_retry_with_exponential_backoff(func, *args, **kwargs):
+        """Simulate retry logic with exponential backoff and jitter."""
+        max_retries = retry_manager_mock._config['max_retries']
+        initial_delay = retry_manager_mock._config['initial_delay']
+        max_delay = retry_manager_mock._config['max_delay']
+        exponential_base = retry_manager_mock._config['exponential_base']
+        jitter_factor = retry_manager_mock._config['jitter_factor']
         
-        if service_name not in retry_manager.retry_stats:
-            retry_manager.retry_stats[service_name] = {
-                'total_calls': 0,
-                'total_retries': 0,
-                'successful_calls': 0,
-                'failed_calls': 0,
-                'retry_exhausted': 0,
-                'average_attempts': 0.0,
-                'total_delay': 0.0
-            }
-        
-        stats = retry_manager.retry_stats[service_name]
-        stats['total_calls'] += 1
-        
-        attempt = 0
-        total_delay = 0.0
         last_exception = None
         
-        while attempt < max_attempts:
-            attempt += 1
+        for attempt in range(max_retries + 1):
+            retry_manager_mock._statistics['total_attempts'] += 1
             
             try:
-                if attempt > 1:
-                    # Calculate exponential backoff delay
-                    delay = min(base_delay * (exponential_base ** (attempt - 2)), max_delay)
-                    
-                    # Add jitter if enabled
-                    if jitter:
-                        import random
-                        jitter_factor = random.uniform(0.1, 1.0)
-                        delay *= jitter_factor
-                    
-                    # Simulate delay (reduced for testing)
-                    time.sleep(delay / 100)  # Reduced delay for testing
-                    total_delay += delay
-                    
-                    stats['total_retries'] += 1
-                    
-                    logger.info(
-                        "retry_attempt",
-                        service_name=service_name,
-                        attempt=attempt,
-                        max_attempts=max_attempts,
-                        delay=delay,
-                        total_delay=total_delay,
-                        component="external_service_mocks"
-                    )
+                # Simulate function execution
+                if 'permanent_error' in str(args) or 'permanent_error' in str(kwargs):
+                    raise ValueError("Permanent error - should not retry")
+                elif 'retry_success_on_attempt_2' in str(args) and attempt < 2:
+                    raise RequestException("Temporary error")
+                elif 'retry_success_on_attempt_3' in str(args) and attempt < 3:
+                    raise ConnectionError("Connection temporarily failed")
+                elif 'always_fail' in str(args):
+                    raise RequestException("Always failing request")
                 
-                # Execute the function
-                result = func()
+                # Successful execution
+                if attempt > 0:
+                    retry_manager_mock._statistics['successful_retries'] += 1
                 
-                # Success - update statistics
-                stats['successful_calls'] += 1
-                stats['total_delay'] += total_delay
-                stats['average_attempts'] = (stats['average_attempts'] * (stats['total_calls'] - 1) + attempt) / stats['total_calls']
-                
-                logger.info(
-                    "retry_success",
-                    service_name=service_name,
-                    attempts_used=attempt,
-                    total_delay=total_delay,
-                    component="external_service_mocks"
-                )
-                
-                return result
+                return func(*args, **kwargs) if callable(func) else {'status': 'success', 'attempts': attempt + 1}
                 
             except Exception as e:
                 last_exception = e
+                exception_type = type(e).__name__
+                retry_manager_mock._statistics['exception_counts'][exception_type] = \
+                    retry_manager_mock._statistics['exception_counts'].get(exception_type, 0) + 1
                 
-                logger.warning(
-                    "retry_attempt_failed",
-                    service_name=service_name,
-                    attempt=attempt,
-                    max_attempts=max_attempts,
-                    error=str(e),
-                    error_type=type(e).__name__,
-                    component="external_service_mocks"
-                )
-                
-                if attempt >= max_attempts:
+                # Check if exception is retryable
+                if not isinstance(e, retry_manager_mock._config['retry_on_exceptions']):
                     break
+                
+                # If this is not the last attempt, calculate backoff time
+                if attempt < max_retries:
+                    # Calculate exponential backoff with jitter
+                    delay = min(initial_delay * (exponential_base ** attempt), max_delay)
+                    jitter = delay * jitter_factor * (0.5 - time.time() % 1)  # Pseudo-random jitter
+                    final_delay = max(0, delay + jitter)
+                    
+                    retry_manager_mock._statistics['backoff_times'].append(final_delay)
+                    retry_manager_mock._statistics['retry_patterns'].append({
+                        'attempt': attempt + 1,
+                        'exception': exception_type,
+                        'delay': final_delay,
+                        'timestamp': time.time()
+                    })
+                    
+                    # Simulate delay (in tests we don't actually wait)
+                    time.sleep(0.001)  # Minimal delay for testing
         
-        # Retry exhausted - update statistics
-        stats['failed_calls'] += 1
-        stats['retry_exhausted'] += 1
-        stats['total_delay'] += total_delay
-        stats['average_attempts'] = (stats['average_attempts'] * (stats['total_calls'] - 1) + attempt) / stats['total_calls']
-        
-        logger.error(
-            "retry_exhausted",
-            service_name=service_name,
-            max_attempts=max_attempts,
-            total_delay=total_delay,
-            final_error=str(last_exception),
-            component="external_service_mocks"
-        )
-        
-        from src.integrations.exceptions import RetryExhaustedError
-        raise RetryExhaustedError(
-            f"Retry exhausted after {max_attempts} attempts for service {service_name}. Last error: {last_exception}"
-        )
+        # All retries exhausted
+        retry_manager_mock._statistics['failed_retries'] += 1
+        raise RetryExhaustedError(f"Max retries exceeded. Last exception: {last_exception}")
     
-    def get_retry_stats(service_name: str = None) -> Dict[str, Any]:
-        """Get comprehensive retry statistics for performance analysis."""
-        if service_name:
-            return retry_manager.retry_stats.get(service_name, {})
-        return retry_manager.retry_stats
+    retry_manager_mock.retry_with_backoff = simulate_retry_with_exponential_backoff
     
-    def reset_retry_stats(service_name: str = None):
-        """Reset retry statistics for testing scenarios."""
-        if service_name:
-            if service_name in retry_manager.retry_stats:
-                retry_manager.retry_stats[service_name] = {
-                    'total_calls': 0,
-                    'total_retries': 0,
-                    'successful_calls': 0,
-                    'failed_calls': 0,
-                    'retry_exhausted': 0,
-                    'average_attempts': 0.0,
-                    'total_delay': 0.0
-                }
+    # Add utility methods
+    def get_retry_statistics():
+        stats = retry_manager_mock._statistics.copy()
+        if stats['total_attempts'] > 0:
+            stats['success_rate'] = (stats['total_attempts'] - stats['failed_retries']) / stats['total_attempts']
+            stats['avg_backoff_time'] = sum(stats['backoff_times']) / len(stats['backoff_times']) if stats['backoff_times'] else 0
+        return stats
+    
+    def reset_statistics():
+        retry_manager_mock._statistics = {
+            'total_attempts': 0,
+            'successful_retries': 0,
+            'failed_retries': 0,
+            'retry_patterns': [],
+            'backoff_times': [],
+            'exception_counts': {}
+        }
+    
+    retry_manager_mock.get_statistics = get_retry_statistics
+    retry_manager_mock.reset_statistics = reset_statistics
+    
+    logger.info("Mock retry manager initialized with exponential backoff simulation")
+    
+    return retry_manager_mock
+
+
+# =============================================================================
+# Third-Party API Mock Fixtures per Section 0.1.4
+# =============================================================================
+
+@pytest.fixture
+def mock_auth0_api_client():
+    """
+    Mock Auth0 API client maintaining API contracts per Section 0.1.4.
+    
+    Provides realistic Auth0 behavior for token validation, user management,
+    and OAuth flows while maintaining identical API contracts from the
+    Node.js implementation.
+    """
+    auth0_client_mock = Mock()
+    
+    # Configure Auth0 API endpoints
+    auth0_client_mock.base_url = "https://test-tenant.auth0.com"
+    auth0_client_mock.api_version = "v2"
+    
+    # Mock token validation
+    def validate_token(token):
+        if token == "valid_jwt_token":
+            return {
+                "sub": "auth0|test-user-123",
+                "email": "test@example.com",
+                "email_verified": True,
+                "name": "Test User",
+                "picture": "https://example.com/avatar.jpg",
+                "iss": "https://test-tenant.auth0.com/",
+                "aud": "test-client-id",
+                "iat": int(time.time()),
+                "exp": int(time.time()) + 3600,
+                "scope": "openid profile email"
+            }
+        elif token == "expired_jwt_token":
+            raise HTTPError("Token has expired")
+        elif token == "invalid_signature_token":
+            raise HTTPError("Invalid token signature")
         else:
-            retry_manager.retry_stats = {}
-        
-        logger.info(
-            "retry_stats_reset",
-            service_name=service_name or "all",
-            component="external_service_mocks"
-        )
+            raise HTTPError("Invalid token")
     
-    def configure_retry_policy(service_name: str, max_attempts: int = 3,
-                              base_delay: float = 1.0, max_delay: float = 30.0,
-                              exponential_base: float = 2.0, jitter: bool = True):
-        """Configure service-specific retry policy for testing scenarios."""
-        if service_name not in retry_manager.retry_attempts:
-            retry_manager.retry_attempts[service_name] = {}
-        
-        retry_manager.retry_attempts[service_name] = {
-            'max_attempts': max_attempts,
-            'base_delay': base_delay,
-            'max_delay': max_delay,
-            'exponential_base': exponential_base,
-            'jitter': jitter
-        }
-        
-        logger.info(
-            "retry_policy_configured",
-            service_name=service_name,
-            max_attempts=max_attempts,
-            base_delay=base_delay,
-            max_delay=max_delay,
-            component="external_service_mocks"
-        )
+    auth0_client_mock.validate_token = validate_token
     
-    retry_manager.execute = execute_with_retry
-    retry_manager.get_stats = get_retry_stats
-    retry_manager.reset_stats = reset_retry_stats
-    retry_manager.configure_policy = configure_retry_policy
-    
-    logger.info(
-        "retry_manager_mock_initialized",
-        component="external_service_mocks"
-    )
-    
-    return retry_manager
-
-
-# ================================================================================================
-# THIRD-PARTY API MOCK FIXTURES - Section 0.1.4 API Surface Changes
-# ================================================================================================
-
-@pytest.fixture(scope="function")
-def mock_auth0_service():
-    """
-    Auth0 authentication service mock fixture maintaining API contracts per Section 0.1.4.
-    
-    Provides comprehensive Auth0 service simulation including JWT token validation,
-    user management, and OAuth2 flow testing for authentication integration testing.
-    
-    Returns:
-        Mock: Auth0 service mock with comprehensive authentication patterns
-    """
-    auth0_mock = Mock()
-    
-    # Mock JWT tokens for testing
-    valid_jwt_token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImtpZCI6InRlc3Qta2V5LWlkIn0.eyJpc3MiOiJodHRwczovL3Rlc3QtZG9tYWluLmF1dGgwLmNvbS8iLCJzdWIiOiJhdXRoMHx0ZXN0LXVzZXItaWQiLCJhdWQiOlsiaHR0cHM6Ly9hcGkuZXhhbXBsZS5jb20iLCJodHRwczovL3Rlc3QtZG9tYWluLmF1dGgwLmNvbS91c2VyaW5mbyJdLCJpYXQiOjE2MzQ2NDcyMDAsImV4cCI6OTk5OTk5OTk5OSwiYXpwIjoidGVzdC1jbGllbnQtaWQiLCJzY29wZSI6Im9wZW5pZCBwcm9maWxlIGVtYWlsIiwicGVybWlzc2lvbnMiOlsicmVhZDp1c2VycyIsIndyaXRlOnVzZXJzIiwicmVhZDpkYXRhIiwid3JpdGU6ZGF0YSJdfQ"
-    
-    expired_jwt_token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImtpZCI6InRlc3Qta2V5LWlkIn0.eyJpc3MiOiJodHRwczovL3Rlc3QtZG9tYWluLmF1dGgwLmNvbS8iLCJzdWIiOiJhdXRoMHx0ZXN0LXVzZXItaWQiLCJhdWQiOlsiaHR0cHM6Ly9hcGkuZXhhbXBsZS5jb20iLCJodHRwczovL3Rlc3QtZG9tYWluLmF1dGgwLmNvbS91c2VyaW5mbyJdLCJpYXQiOjE2MzQ2NDcyMDAsImV4cCI6MTYzNDY0NzIwMSwiYXpwIjoidGVzdC1jbGllbnQtaWQiLCJzY29wZSI6Im9wZW5pZCBwcm9maWxlIGVtYWlsIiwicGVybWlzc2lvbnMiOlsicmVhZDp1c2VycyJdfQ"
-    
-    def validate_token(token: str) -> Dict[str, Any]:
-        """Mock JWT token validation with comprehensive response patterns."""
-        if not token or token == "invalid":
+    # Mock user management endpoints
+    def get_user(user_id):
+        if user_id == "auth0|test-user-123":
             return {
-                'valid': False,
-                'error': 'Invalid token',
-                'error_code': 'invalid_token',
-                'timestamp': datetime.utcnow().isoformat()
-            }
-        
-        if token == expired_jwt_token:
-            return {
-                'valid': False,
-                'error': 'Token expired',
-                'error_code': 'token_expired',
-                'timestamp': datetime.utcnow().isoformat()
-            }
-        
-        if token == valid_jwt_token:
-            return {
-                'valid': True,
-                'decoded': {
-                    'iss': 'https://test-domain.auth0.com/',
-                    'sub': 'auth0|test-user-id',
-                    'aud': ['https://api.example.com', 'https://test-domain.auth0.com/userinfo'],
-                    'iat': 1634647200,
-                    'exp': 9999999999,
-                    'azp': 'test-client-id',
-                    'scope': 'openid profile email',
-                    'permissions': ['read:users', 'write:users', 'read:data', 'write:data']
-                },
-                'user_id': 'auth0|test-user-id',
-                'client_id': 'test-client-id',
-                'permissions': ['read:users', 'write:users', 'read:data', 'write:data'],
-                'timestamp': datetime.utcnow().isoformat()
-            }
-        
-        # Default valid token response for other tokens
-        return {
-            'valid': True,
-            'decoded': {
-                'iss': 'https://test-domain.auth0.com/',
-                'sub': 'auth0|generic-user-id',
-                'aud': ['https://api.example.com'],
-                'iat': int(time.time()),
-                'exp': int(time.time()) + 3600,
-                'azp': 'test-client-id',
-                'scope': 'openid profile email',
-                'permissions': ['read:data']
-            },
-            'user_id': 'auth0|generic-user-id',
-            'client_id': 'test-client-id',
-            'permissions': ['read:data'],
-            'timestamp': datetime.utcnow().isoformat()
-        }
-    
-    def get_user_info(user_id: str) -> Dict[str, Any]:
-        """Mock Auth0 user information retrieval."""
-        if user_id == 'auth0|test-user-id':
-            return {
-                'user_id': user_id,
-                'email': 'test.user@example.com',
-                'email_verified': True,
-                'name': 'Test User',
-                'nickname': 'testuser',
-                'picture': 'https://gravatar.com/avatar/test',
-                'created_at': '2023-01-01T00:00:00.000Z',
-                'updated_at': datetime.utcnow().isoformat(),
-                'last_login': datetime.utcnow().isoformat(),
-                'logins_count': 42,
-                'app_metadata': {
-                    'roles': ['user'],
-                    'permissions': ['read:users', 'write:users', 'read:data', 'write:data']
-                },
-                'user_metadata': {
-                    'preferences': {
-                        'theme': 'light',
-                        'language': 'en'
-                    }
-                }
-            }
-        elif user_id == 'auth0|admin-user-id':
-            return {
-                'user_id': user_id,
-                'email': 'admin.user@example.com',
-                'email_verified': True,
-                'name': 'Admin User',
-                'nickname': 'adminuser',
-                'picture': 'https://gravatar.com/avatar/admin',
-                'created_at': '2023-01-01T00:00:00.000Z',
-                'updated_at': datetime.utcnow().isoformat(),
-                'last_login': datetime.utcnow().isoformat(),
-                'logins_count': 128,
-                'app_metadata': {
-                    'roles': ['admin', 'user'],
-                    'permissions': ['read:users', 'write:users', 'read:data', 'write:data', 'admin:system']
-                },
-                'user_metadata': {
-                    'preferences': {
-                        'theme': 'dark',
-                        'language': 'en'
-                    }
-                }
+                "user_id": user_id,
+                "email": "test@example.com",
+                "email_verified": True,
+                "name": "Test User",
+                "picture": "https://example.com/avatar.jpg",
+                "created_at": "2023-01-01T00:00:00.000Z",
+                "updated_at": "2023-12-01T00:00:00.000Z",
+                "app_metadata": {},
+                "user_metadata": {"preferences": {"theme": "dark"}}
             }
         else:
+            raise HTTPError("User not found", response=Mock(status_code=404))
+    
+    def update_user(user_id, user_data):
+        if user_id == "auth0|test-user-123":
             return {
-                'error': 'User not found',
-                'error_code': 'user_not_found',
-                'user_id': user_id,
-                'timestamp': datetime.utcnow().isoformat()
+                "user_id": user_id,
+                **user_data,
+                "updated_at": datetime.utcnow().isoformat() + "Z"
             }
-    
-    def exchange_code_for_token(authorization_code: str, redirect_uri: str) -> Dict[str, Any]:
-        """Mock OAuth2 authorization code exchange for token."""
-        if not authorization_code or authorization_code == 'invalid':
-            return {
-                'error': 'invalid_grant',
-                'error_description': 'Invalid authorization code',
-                'timestamp': datetime.utcnow().isoformat()
-            }
-        
-        return {
-            'access_token': valid_jwt_token,
-            'refresh_token': 'test-refresh-token-' + str(uuid.uuid4()),
-            'id_token': valid_jwt_token,
-            'token_type': 'Bearer',
-            'expires_in': 3600,
-            'scope': 'openid profile email',
-            'timestamp': datetime.utcnow().isoformat()
-        }
-    
-    def refresh_token(refresh_token: str) -> Dict[str, Any]:
-        """Mock token refresh operation."""
-        if not refresh_token or refresh_token == 'invalid':
-            return {
-                'error': 'invalid_grant',
-                'error_description': 'Invalid refresh token',
-                'timestamp': datetime.utcnow().isoformat()
-            }
-        
-        return {
-            'access_token': valid_jwt_token,
-            'refresh_token': 'new-refresh-token-' + str(uuid.uuid4()),
-            'id_token': valid_jwt_token,
-            'token_type': 'Bearer',
-            'expires_in': 3600,
-            'scope': 'openid profile email',
-            'timestamp': datetime.utcnow().isoformat()
-        }
-    
-    def get_jwks() -> Dict[str, Any]:
-        """Mock JWKS (JSON Web Key Set) endpoint for token verification."""
-        return {
-            'keys': [
-                {
-                    'kty': 'RSA',
-                    'use': 'sig',
-                    'kid': 'test-key-id',
-                    'x5t': 'test-x5t',
-                    'n': 'test-modulus',
-                    'e': 'AQAB',
-                    'x5c': ['test-certificate'],
-                    'issuer': 'https://test-domain.auth0.com/'
-                }
-            ]
-        }
-    
-    # Attach methods to Auth0 mock
-    auth0_mock.validate_token = validate_token
-    auth0_mock.get_user_info = get_user_info
-    auth0_mock.exchange_code_for_token = exchange_code_for_token
-    auth0_mock.refresh_token = refresh_token
-    auth0_mock.get_jwks = get_jwks
-    
-    # Add token constants for easy testing
-    auth0_mock.VALID_TOKEN = valid_jwt_token
-    auth0_mock.EXPIRED_TOKEN = expired_jwt_token
-    auth0_mock.INVALID_TOKEN = "invalid"
-    
-    logger.info(
-        "auth0_service_mock_initialized",
-        features=['token_validation', 'user_info', 'oauth2_flow', 'token_refresh', 'jwks'],
-        component="external_service_mocks"
-    )
-    
-    return auth0_mock
-
-
-@pytest.fixture(scope="function")
-def mock_third_party_apis():
-    """
-    Third-party API integration mock fixture for comprehensive API testing.
-    
-    Provides realistic third-party service simulation including webhook handling,
-    file processing APIs, and payment gateway integration for external dependency testing.
-    
-    Returns:
-        Dict[str, Mock]: Dictionary of third-party API service mocks
-    """
-    
-    # Payment Gateway Mock
-    payment_gateway = Mock()
-    
-    def process_payment(amount: float, currency: str = 'USD', 
-                       payment_method: str = 'card') -> Dict[str, Any]:
-        """Mock payment processing with realistic response patterns."""
-        if amount <= 0:
-            return {
-                'success': False,
-                'error': 'Invalid amount',
-                'error_code': 'invalid_amount',
-                'timestamp': datetime.utcnow().isoformat()
-            }
-        
-        if amount > 10000:  # Simulate large amount failure
-            return {
-                'success': False,
-                'error': 'Amount exceeds limit',
-                'error_code': 'amount_limit_exceeded',
-                'limit': 10000,
-                'timestamp': datetime.utcnow().isoformat()
-            }
-        
-        transaction_id = str(uuid.uuid4())
-        return {
-            'success': True,
-            'transaction_id': transaction_id,
-            'amount': amount,
-            'currency': currency,
-            'payment_method': payment_method,
-            'status': 'completed',
-            'fee': amount * 0.029 + 0.30,  # Simulate processing fee
-            'net_amount': amount - (amount * 0.029 + 0.30),
-            'reference': f'PAY_{int(time.time())}_{transaction_id[:8]}',
-            'timestamp': datetime.utcnow().isoformat()
-        }
-    
-    payment_gateway.process_payment = process_payment
-    
-    # Notification Service Mock
-    notification_service = Mock()
-    
-    def send_notification(notification_type: str, recipient: str, 
-                         message: str, metadata: Dict = None) -> Dict[str, Any]:
-        """Mock notification service with delivery simulation."""
-        notification_id = str(uuid.uuid4())
-        
-        # Simulate delivery failure for certain patterns
-        if 'fail' in recipient.lower() or 'invalid' in recipient.lower():
-            return {
-                'success': False,
-                'notification_id': notification_id,
-                'error': 'Delivery failed',
-                'error_code': 'delivery_failed',
-                'recipient': recipient,
-                'timestamp': datetime.utcnow().isoformat()
-            }
-        
-        return {
-            'success': True,
-            'notification_id': notification_id,
-            'type': notification_type,
-            'recipient': recipient,
-            'status': 'delivered',
-            'delivery_time': datetime.utcnow().isoformat(),
-            'metadata': metadata or {},
-            'timestamp': datetime.utcnow().isoformat()
-        }
-    
-    notification_service.send_notification = send_notification
-    
-    # File Processing Service Mock
-    file_processing_service = Mock()
-    
-    def process_file(file_content: bytes, file_type: str, 
-                    processing_options: Dict = None) -> Dict[str, Any]:
-        """Mock file processing service with realistic processing simulation."""
-        processing_id = str(uuid.uuid4())
-        
-        # Simulate processing time based on file size
-        processing_time = len(file_content) / 10000  # Simulated processing speed
-        
-        if len(file_content) > 100 * 1024 * 1024:  # 100MB limit
-            return {
-                'success': False,
-                'processing_id': processing_id,
-                'error': 'File too large',
-                'error_code': 'file_too_large',
-                'max_size': 100 * 1024 * 1024,
-                'file_size': len(file_content),
-                'timestamp': datetime.utcnow().isoformat()
-            }
-        
-        # Simulate unsupported file type
-        supported_types = ['pdf', 'jpg', 'png', 'docx', 'txt']
-        if file_type.lower() not in supported_types:
-            return {
-                'success': False,
-                'processing_id': processing_id,
-                'error': 'Unsupported file type',
-                'error_code': 'unsupported_file_type',
-                'supported_types': supported_types,
-                'provided_type': file_type,
-                'timestamp': datetime.utcnow().isoformat()
-            }
-        
-        return {
-            'success': True,
-            'processing_id': processing_id,
-            'file_type': file_type,
-            'file_size': len(file_content),
-            'processing_time': processing_time,
-            'status': 'completed',
-            'result_url': f'https://files.example.com/processed/{processing_id}',
-            'expires_at': (datetime.utcnow() + timedelta(hours=24)).isoformat(),
-            'metadata': {
-                'processed_at': datetime.utcnow().isoformat(),
-                'processing_options': processing_options or {}
-            },
-            'timestamp': datetime.utcnow().isoformat()
-        }
-    
-    file_processing_service.process_file = process_file
-    
-    # Analytics Service Mock
-    analytics_service = Mock()
-    
-    def track_event(event_name: str, properties: Dict = None, 
-                   user_id: str = None) -> Dict[str, Any]:
-        """Mock analytics event tracking service."""
-        event_id = str(uuid.uuid4())
-        
-        return {
-            'success': True,
-            'event_id': event_id,
-            'event_name': event_name,
-            'properties': properties or {},
-            'user_id': user_id,
-            'timestamp': datetime.utcnow().isoformat(),
-            'session_id': str(uuid.uuid4()),
-            'ip_address': '127.0.0.1',
-            'user_agent': 'TestAgent/1.0'
-        }
-    
-    analytics_service.track_event = track_event
-    
-    logger.info(
-        "third_party_apis_mock_initialized",
-        services=['payment_gateway', 'notification_service', 'file_processing_service', 'analytics_service'],
-        component="external_service_mocks"
-    )
-    
-    return {
-        'payment_gateway': payment_gateway,
-        'notification_service': notification_service,
-        'file_processing_service': file_processing_service,
-        'analytics_service': analytics_service
-    }
-
-
-# ================================================================================================
-# MONITORING AND PERFORMANCE MOCK FIXTURES - Section 6.3.5
-# ================================================================================================
-
-@pytest.fixture(scope="function")
-def mock_performance_monitor():
-    """
-    Performance monitoring mock fixture for external service performance testing per Section 6.3.5.
-    
-    Provides comprehensive performance metrics collection and baseline comparison simulation
-    for validating ≤10% variance requirement from Node.js implementation.
-    
-    Returns:
-        Mock: Performance monitor with comprehensive metrics collection
-    """
-    monitor = Mock()
-    monitor.metrics = {}
-    monitor.baselines = {}
-    
-    def record_request_metrics(service_name: str, endpoint: str, method: str,
-                             response_time: float, status_code: int,
-                             request_size: int = 0, response_size: int = 0) -> Dict[str, Any]:
-        """Record request metrics for performance analysis."""
-        
-        metric_key = f"{service_name}:{endpoint}:{method}"
-        
-        if metric_key not in monitor.metrics:
-            monitor.metrics[metric_key] = {
-                'service_name': service_name,
-                'endpoint': endpoint,
-                'method': method,
-                'request_count': 0,
-                'total_response_time': 0.0,
-                'min_response_time': float('inf'),
-                'max_response_time': 0.0,
-                'error_count': 0,
-                'success_count': 0,
-                'total_request_size': 0,
-                'total_response_size': 0,
-                'status_codes': {},
-                'response_times': []
-            }
-        
-        metrics = monitor.metrics[metric_key]
-        metrics['request_count'] += 1
-        metrics['total_response_time'] += response_time
-        metrics['min_response_time'] = min(metrics['min_response_time'], response_time)
-        metrics['max_response_time'] = max(metrics['max_response_time'], response_time)
-        metrics['total_request_size'] += request_size
-        metrics['total_response_size'] += response_size
-        metrics['response_times'].append(response_time)
-        
-        # Keep only recent response times for percentile calculation
-        if len(metrics['response_times']) > 1000:
-            metrics['response_times'] = metrics['response_times'][-1000:]
-        
-        if 200 <= status_code < 400:
-            metrics['success_count'] += 1
         else:
-            metrics['error_count'] += 1
-        
-        status_key = str(status_code)
-        metrics['status_codes'][status_key] = metrics['status_codes'].get(status_key, 0) + 1
-        
-        # Calculate percentiles
-        sorted_times = sorted(metrics['response_times'])
-        count = len(sorted_times)
-        if count > 0:
-            p50_idx = int(count * 0.5)
-            p95_idx = int(count * 0.95)
-            p99_idx = int(count * 0.99)
-            
-            metrics['p50_response_time'] = sorted_times[p50_idx]
-            metrics['p95_response_time'] = sorted_times[p95_idx] if p95_idx < count else sorted_times[-1]
-            metrics['p99_response_time'] = sorted_times[p99_idx] if p99_idx < count else sorted_times[-1]
-            metrics['avg_response_time'] = metrics['total_response_time'] / metrics['request_count']
-        
-        return {
-            'recorded': True,
-            'metric_key': metric_key,
-            'response_time': response_time,
-            'status_code': status_code,
-            'timestamp': datetime.utcnow().isoformat()
-        }
+            raise HTTPError("User not found", response=Mock(status_code=404))
     
-    def set_baseline(service_name: str, endpoint: str, method: str,
-                    baseline_metrics: Dict[str, float]):
-        """Set performance baseline for Node.js comparison."""
-        baseline_key = f"{service_name}:{endpoint}:{method}"
-        monitor.baselines[baseline_key] = {
-            **baseline_metrics,
-            'set_at': datetime.utcnow().isoformat()
-        }
-        
-        logger.info(
-            "performance_baseline_set",
-            service_name=service_name,
-            endpoint=endpoint,
-            method=method,
-            baseline_metrics=baseline_metrics,
-            component="external_service_mocks"
-        )
+    auth0_client_mock.get_user = get_user
+    auth0_client_mock.update_user = update_user
     
-    def compare_with_baseline(service_name: str, endpoint: str, method: str) -> Dict[str, Any]:
-        """Compare current metrics with Node.js baseline per Section 0.3.2."""
-        metric_key = f"{service_name}:{endpoint}:{method}"
-        baseline_key = metric_key
-        
-        if baseline_key not in monitor.baselines:
+    # Mock OAuth flows
+    def get_access_token(client_credentials):
+        if client_credentials.get('client_secret') == 'valid_secret':
             return {
-                'comparison_available': False,
-                'error': 'No baseline set for this endpoint',
-                'metric_key': metric_key
+                "access_token": "mock_access_token_" + str(uuid.uuid4()),
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "scope": "read:users update:users"
             }
-        
-        if metric_key not in monitor.metrics:
-            return {
-                'comparison_available': False,
-                'error': 'No current metrics available',
-                'metric_key': metric_key
-            }
-        
-        current = monitor.metrics[metric_key]
-        baseline = monitor.baselines[baseline_key]
-        
-        # Calculate variance percentages
-        def calculate_variance(current_val: float, baseline_val: float) -> float:
-            if baseline_val == 0:
-                return 0.0
-            return ((current_val - baseline_val) / baseline_val) * 100
-        
-        avg_response_time_variance = calculate_variance(
-            current.get('avg_response_time', 0),
-            baseline.get('avg_response_time', 0)
-        )
-        
-        p95_response_time_variance = calculate_variance(
-            current.get('p95_response_time', 0),
-            baseline.get('p95_response_time', 0)
-        )
-        
-        error_rate_current = (current['error_count'] / current['request_count']) * 100 if current['request_count'] > 0 else 0
-        error_rate_baseline = baseline.get('error_rate', 0)
-        error_rate_variance = calculate_variance(error_rate_current, error_rate_baseline)
-        
-        # Check ≤10% variance requirement
-        variance_compliant = (
-            abs(avg_response_time_variance) <= 10 and
-            abs(p95_response_time_variance) <= 10 and
-            abs(error_rate_variance) <= 10
-        )
-        
-        comparison = {
-            'comparison_available': True,
-            'variance_compliant': variance_compliant,
-            'variance_threshold': 10.0,
-            'current_metrics': {
-                'avg_response_time': current.get('avg_response_time', 0),
-                'p95_response_time': current.get('p95_response_time', 0),
-                'error_rate': error_rate_current,
-                'request_count': current['request_count']
-            },
-            'baseline_metrics': {
-                'avg_response_time': baseline.get('avg_response_time', 0),
-                'p95_response_time': baseline.get('p95_response_time', 0),
-                'error_rate': error_rate_baseline
-            },
-            'variance_analysis': {
-                'avg_response_time_variance': avg_response_time_variance,
-                'p95_response_time_variance': p95_response_time_variance,
-                'error_rate_variance': error_rate_variance
-            },
-            'timestamp': datetime.utcnow().isoformat()
-        }
-        
-        if not variance_compliant:
-            logger.warning(
-                "performance_variance_exceeded",
-                service_name=service_name,
-                endpoint=endpoint,
-                avg_variance=avg_response_time_variance,
-                p95_variance=p95_response_time_variance,
-                error_rate_variance=error_rate_variance,
-                component="external_service_mocks"
-            )
-        
-        return comparison
-    
-    def get_all_metrics() -> Dict[str, Any]:
-        """Get comprehensive metrics for all monitored services."""
-        return {
-            'metrics': monitor.metrics,
-            'baselines': monitor.baselines,
-            'total_services': len(set(key.split(':')[0] for key in monitor.metrics.keys())),
-            'total_endpoints': len(monitor.metrics),
-            'timestamp': datetime.utcnow().isoformat()
-        }
-    
-    def reset_metrics(service_name: str = None):
-        """Reset metrics for testing scenarios."""
-        if service_name:
-            # Reset metrics for specific service
-            keys_to_remove = [key for key in monitor.metrics.keys() if key.startswith(f"{service_name}:")]
-            for key in keys_to_remove:
-                del monitor.metrics[key]
         else:
-            monitor.metrics = {}
-        
-        logger.info(
-            "performance_metrics_reset",
-            service_name=service_name or "all",
-            component="external_service_mocks"
-        )
+            raise HTTPError("Invalid client credentials")
     
-    # Set some default baselines for common scenarios
-    default_baselines = [
-        ('auth_service', '/validate', 'POST', {'avg_response_time': 150.0, 'p95_response_time': 300.0, 'error_rate': 1.0}),
-        ('aws_s3', '/upload', 'POST', {'avg_response_time': 500.0, 'p95_response_time': 1000.0, 'error_rate': 2.0}),
-        ('external_api', '/users', 'GET', {'avg_response_time': 200.0, 'p95_response_time': 400.0, 'error_rate': 0.5}),
-    ]
+    auth0_client_mock.get_access_token = get_access_token
     
-    for service, endpoint, method, metrics in default_baselines:
-        set_baseline(service, endpoint, method, metrics)
-    
-    monitor.record_request = record_request_metrics
-    monitor.set_baseline = set_baseline
-    monitor.compare_with_baseline = compare_with_baseline
-    monitor.get_all_metrics = get_all_metrics
-    monitor.reset_metrics = reset_metrics
-    
-    logger.info(
-        "performance_monitor_mock_initialized",
-        default_baselines_count=len(default_baselines),
-        variance_threshold=10.0,
-        component="external_service_mocks"
-    )
-    
-    return monitor
-
-
-# ================================================================================================
-# COMPOSITE FIXTURE - Integration of All External Service Mocks
-# ================================================================================================
-
-@pytest.fixture(scope="function")
-def external_service_mocks(mock_s3_operations, mock_httpx_client, mock_requests_client,
-                          mock_circuit_breaker_manager, mock_retry_manager,
-                          mock_auth0_service, mock_third_party_apis,
-                          mock_performance_monitor):
-    """
-    Comprehensive external service mocks fixture integrating all mock services.
-    
-    Provides a unified interface to all external service mocks for comprehensive
-    integration testing scenarios with realistic service behavior simulation.
-    
-    Returns:
-        Dict[str, Any]: Complete external service mock environment
-    """
-    
-    comprehensive_mocks = {
-        # AWS Services
-        'aws': {
-            's3': mock_s3_operations,
-        },
-        
-        # HTTP Clients
-        'http': {
-            'sync_client': mock_requests_client,
-            'async_client': mock_httpx_client,
-        },
-        
-        # Resilience Patterns
-        'resilience': {
-            'circuit_breaker': mock_circuit_breaker_manager,
-            'retry_manager': mock_retry_manager,
-        },
-        
-        # Authentication Services
-        'auth': {
-            'auth0': mock_auth0_service,
-        },
-        
-        # Third-party APIs
-        'third_party': mock_third_party_apis,
-        
-        # Monitoring and Performance
-        'monitoring': {
-            'performance': mock_performance_monitor,
-        }
+    # Add performance and usage tracking
+    auth0_client_mock._performance_metrics = {
+        'token_validations': 0,
+        'user_requests': 0,
+        'oauth_requests': 0,
+        'avg_response_time': 0.0,
+        'error_count': 0
     }
     
-    # Add helper methods for comprehensive testing scenarios
-    def simulate_complete_workflow(workflow_type: str = 'file_upload') -> Dict[str, Any]:
-        """Simulate complete workflow with all external services."""
-        if workflow_type == 'file_upload':
-            # Simulate complete file upload workflow
-            auth_result = mock_auth0_service.validate_token(mock_auth0_service.VALID_TOKEN)
-            
-            if auth_result['valid']:
-                # Record performance metrics
+    # Wrap methods with performance tracking
+    original_validate_token = auth0_client_mock.validate_token
+    original_get_user = auth0_client_mock.get_user
+    original_get_access_token = auth0_client_mock.get_access_token
+    
+    def tracked_validate_token(token):
+        start_time = time.time()
+        try:
+            result = original_validate_token(token)
+            auth0_client_mock._performance_metrics['token_validations'] += 1
+            return result
+        except Exception as e:
+            auth0_client_mock._performance_metrics['error_count'] += 1
+            raise e
+        finally:
+            auth0_client_mock._performance_metrics['avg_response_time'] = time.time() - start_time
+    
+    def tracked_get_user(user_id):
+        start_time = time.time()
+        try:
+            result = original_get_user(user_id)
+            auth0_client_mock._performance_metrics['user_requests'] += 1
+            return result
+        except Exception as e:
+            auth0_client_mock._performance_metrics['error_count'] += 1
+            raise e
+        finally:
+            auth0_client_mock._performance_metrics['avg_response_time'] = time.time() - start_time
+    
+    def tracked_get_access_token(client_credentials):
+        start_time = time.time()
+        try:
+            result = original_get_access_token(client_credentials)
+            auth0_client_mock._performance_metrics['oauth_requests'] += 1
+            return result
+        except Exception as e:
+            auth0_client_mock._performance_metrics['error_count'] += 1
+            raise e
+        finally:
+            auth0_client_mock._performance_metrics['avg_response_time'] = time.time() - start_time
+    
+    auth0_client_mock.validate_token = tracked_validate_token
+    auth0_client_mock.get_user = tracked_get_user
+    auth0_client_mock.get_access_token = tracked_get_access_token
+    
+    logger.info("Mock Auth0 API client initialized with performance tracking")
+    
+    return auth0_client_mock
+
+
+@pytest.fixture
+def mock_external_api_client():
+    """
+    Mock generic external API client for third-party service integration testing.
+    
+    Provides configurable external API behavior for testing various third-party
+    integrations while maintaining API contracts per Section 0.1.4 API surface
+    compatibility requirements.
+    """
+    api_client_mock = Mock()
+    
+    # Configure API client properties
+    api_client_mock.base_url = "https://api.external-service.com"
+    api_client_mock.api_version = "v1"
+    api_client_mock.timeout = 30.0
+    
+    # Mock API operations
+    def api_get(endpoint, params=None, headers=None):
+        """Mock GET request to external API."""
+        if 'health' in endpoint:
+            return {'status': 'healthy', 'version': '1.0.0', 'timestamp': time.time()}
+        elif 'users' in endpoint:
+            return {
+                'users': [
+                    {'id': 1, 'name': 'John Doe', 'email': 'john@example.com'},
+                    {'id': 2, 'name': 'Jane Smith', 'email': 'jane@example.com'}
+                ],
+                'total': 2,
+                'page': 1
+            }
+        elif 'data' in endpoint:
+            return {'data': list(range(10)), 'metadata': {'generated_at': time.time()}}
+        else:
+            return {'status': 'success', 'endpoint': endpoint, 'params': params}
+    
+    def api_post(endpoint, data=None, json=None, headers=None):
+        """Mock POST request to external API."""
+        if 'webhook' in endpoint:
+            return {'webhook_id': str(uuid.uuid4()), 'status': 'registered'}
+        elif 'users' in endpoint:
+            user_data = json or data or {}
+            return {
+                'id': 123,
+                'created_at': datetime.utcnow().isoformat(),
+                **user_data
+            }
+        else:
+            return {'status': 'created', 'id': str(uuid.uuid4()), 'data': json or data}
+    
+    def api_put(endpoint, data=None, json=None, headers=None):
+        """Mock PUT request to external API."""
+        return {
+            'status': 'updated',
+            'endpoint': endpoint,
+            'updated_at': datetime.utcnow().isoformat(),
+            'data': json or data
+        }
+    
+    def api_delete(endpoint, headers=None):
+        """Mock DELETE request to external API."""
+        return {'status': 'deleted', 'endpoint': endpoint}
+    
+    api_client_mock.get = api_get
+    api_client_mock.post = api_post
+    api_client_mock.put = api_put
+    api_client_mock.delete = api_delete
+    
+    # Add webhook validation simulation
+    def validate_webhook_signature(payload, signature, secret):
+        """Mock webhook signature validation."""
+        expected_signature = hmac.new(
+            secret.encode(),
+            payload.encode() if isinstance(payload, str) else payload,
+            hashlib.sha256
+        ).hexdigest()
+        return f"sha256={expected_signature}" == signature
+    
+    api_client_mock.validate_webhook_signature = validate_webhook_signature
+    
+    # Add file processing simulation
+    def process_file(file_data, processing_options=None):
+        """Mock file processing operation."""
+        return {
+            'file_id': str(uuid.uuid4()),
+            'size': len(file_data) if file_data else 0,
+            'processed_at': datetime.utcnow().isoformat(),
+            'options': processing_options or {},
+            'status': 'processed'
+        }
+    
+    api_client_mock.process_file = process_file
+    
+    # Add performance tracking
+    api_client_mock._performance_metrics = {
+        'api_calls': {'GET': 0, 'POST': 0, 'PUT': 0, 'DELETE': 0},
+        'response_times': [],
+        'error_count': 0,
+        'webhook_validations': 0,
+        'file_processes': 0
+    }
+    
+    # Wrap methods with performance tracking
+    for method_name in ['get', 'post', 'put', 'delete']:
+        original_method = getattr(api_client_mock, method_name)
+        
+        def create_tracked_method(method, original):
+            def tracked_method(*args, **kwargs):
                 start_time = time.time()
-                
-                # Simulate S3 upload
-                upload_result = mock_s3_operations['upload_file'](
-                    'test-file-uploads',
-                    'workflow-test/sample.pdf',
-                    b'Sample workflow file content'
-                )
-                
-                end_time = time.time()
-                response_time = (end_time - start_time) * 1000  # Convert to milliseconds
-                
-                # Record metrics
-                mock_performance_monitor.record_request(
-                    'aws_s3', '/upload', 'POST', response_time, 200
-                )
-                
-                return {
-                    'workflow': 'file_upload',
-                    'success': True,
-                    'auth_result': auth_result,
-                    'upload_result': upload_result,
-                    'performance': {
-                        'response_time': response_time,
-                        'recorded': True
-                    },
-                    'timestamp': datetime.utcnow().isoformat()
-                }
-            else:
-                return {
-                    'workflow': 'file_upload',
-                    'success': False,
-                    'error': 'Authentication failed',
-                    'auth_result': auth_result,
-                    'timestamp': datetime.utcnow().isoformat()
-                }
+                try:
+                    result = original(*args, **kwargs)
+                    api_client_mock._performance_metrics['api_calls'][method.upper()] += 1
+                    api_client_mock._performance_metrics['response_times'].append(time.time() - start_time)
+                    return result
+                except Exception as e:
+                    api_client_mock._performance_metrics['error_count'] += 1
+                    raise e
+            return tracked_method
+        
+        setattr(api_client_mock, method_name, create_tracked_method(method_name, original_method))
+    
+    logger.info("Mock external API client initialized with comprehensive features")
+    
+    return api_client_mock
+
+
+# =============================================================================
+# Performance Monitoring Mock Fixtures per Section 6.3.5
+# =============================================================================
+
+@pytest.fixture
+def mock_external_service_monitor():
+    """
+    Mock external service monitor for performance testing per Section 6.3.5.
+    
+    Provides comprehensive external service monitoring simulation with health
+    checks, performance metrics collection, and service state management
+    supporting the ≤10% variance requirement.
+    """
+    monitor_mock = Mock(spec=ExternalServiceMonitor)
+    
+    # Initialize monitoring state
+    monitor_mock._services = {}
+    monitor_mock._health_states = {}
+    monitor_mock._performance_baselines = {}
+    
+    # Add comprehensive metrics tracking
+    monitor_mock._metrics = {
+        'total_health_checks': 0,
+        'healthy_services': 0,
+        'degraded_services': 0,
+        'unhealthy_services': 0,
+        'avg_response_times': {},
+        'error_rates': {},
+        'uptime_percentages': {},
+        'performance_variance': {}
+    }
+    
+    def register_service(service_name, service_type, health_endpoint=None, baseline_metrics=None):
+        """Register a service for monitoring."""
+        monitor_mock._services[service_name] = {
+            'service_type': service_type,
+            'health_endpoint': health_endpoint,
+            'registered_at': time.time(),
+            'baseline_metrics': baseline_metrics or {}
+        }
+        monitor_mock._health_states[service_name] = ServiceHealthState.HEALTHY
+        monitor_mock._performance_baselines[service_name] = baseline_metrics or {
+            'avg_response_time': 100.0,  # 100ms baseline
+            'error_rate': 0.01,  # 1% error rate baseline
+            'throughput': 1000.0  # 1000 req/s baseline
+        }
+        
+        logger.info(f"Service {service_name} registered for monitoring")
+    
+    def check_service_health(service_name):
+        """Perform health check for a specific service."""
+        monitor_mock._metrics['total_health_checks'] += 1
+        
+        if service_name not in monitor_mock._services:
+            return {
+                'service_name': service_name,
+                'status': 'unknown',
+                'error': 'Service not registered'
+            }
+        
+        # Simulate health check logic
+        service_info = monitor_mock._services[service_name]
+        baseline = monitor_mock._performance_baselines[service_name]
+        
+        # Simulate realistic health check results
+        current_response_time = baseline['avg_response_time'] * (0.8 + 0.4 * time.time() % 1)  # ±20% variance
+        current_error_rate = baseline['error_rate'] * (0.5 + 1.0 * time.time() % 1)  # 0.5x - 1.5x variance
+        
+        # Calculate performance variance from baseline
+        response_time_variance = abs(current_response_time - baseline['avg_response_time']) / baseline['avg_response_time']
+        error_rate_variance = abs(current_error_rate - baseline['error_rate']) / baseline['error_rate'] if baseline['error_rate'] > 0 else 0
+        
+        # Determine health state based on performance variance
+        if response_time_variance > 0.1 or error_rate_variance > 0.5:  # >10% response time variance or >50% error rate variance
+            health_state = ServiceHealthState.DEGRADED
+            monitor_mock._metrics['degraded_services'] += 1
+        elif response_time_variance > 0.2 or error_rate_variance > 1.0:  # >20% response time variance or >100% error rate variance
+            health_state = ServiceHealthState.UNHEALTHY
+            monitor_mock._metrics['unhealthy_services'] += 1
+        else:
+            health_state = ServiceHealthState.HEALTHY
+            monitor_mock._metrics['healthy_services'] += 1
+        
+        monitor_mock._health_states[service_name] = health_state
+        
+        # Update performance metrics
+        monitor_mock._metrics['avg_response_times'][service_name] = current_response_time
+        monitor_mock._metrics['error_rates'][service_name] = current_error_rate
+        monitor_mock._metrics['performance_variance'][service_name] = {
+            'response_time_variance': response_time_variance,
+            'error_rate_variance': error_rate_variance,
+            'within_tolerance': response_time_variance <= 0.1  # ≤10% variance requirement
+        }
         
         return {
-            'workflow': workflow_type,
-            'success': False,
-            'error': f'Unknown workflow type: {workflow_type}',
-            'timestamp': datetime.utcnow().isoformat()
-        }
-    
-    def get_health_status() -> Dict[str, Any]:
-        """Get comprehensive health status of all mock services."""
-        return {
-            'status': 'healthy',
-            'services': {
-                'aws_s3': {'status': 'healthy', 'operations': len(mock_s3_operations)},
-                'http_clients': {'status': 'healthy', 'sync_configured': True, 'async_configured': True},
-                'auth0': {'status': 'healthy', 'token_validation': True},
-                'circuit_breakers': {'status': 'healthy', 'active_breakers': len(mock_circuit_breaker_manager.circuit_breakers)},
-                'retry_manager': {'status': 'healthy', 'services_tracked': len(mock_retry_manager.retry_stats)},
-                'third_party_apis': {'status': 'healthy', 'services': len(mock_third_party_apis)},
-                'performance_monitor': {'status': 'healthy', 'metrics_tracked': len(mock_performance_monitor.metrics)}
+            'service_name': service_name,
+            'status': health_state.value,
+            'response_time_ms': current_response_time,
+            'error_rate': current_error_rate,
+            'performance_variance': {
+                'response_time': f"{response_time_variance:.2%}",
+                'error_rate': f"{error_rate_variance:.2%}",
+                'within_tolerance': response_time_variance <= 0.1
             },
-            'timestamp': datetime.utcnow().isoformat()
+            'baseline_metrics': baseline,
+            'timestamp': time.time()
         }
     
-    comprehensive_mocks['simulate_workflow'] = simulate_complete_workflow
-    comprehensive_mocks['get_health'] = get_health_status
+    def check_all_services_health():
+        """Perform health check for all registered services."""
+        results = {}
+        overall_status = 'healthy'
+        
+        for service_name in monitor_mock._services:
+            service_health = check_service_health(service_name)
+            results[service_name] = service_health
+            
+            if service_health['status'] == 'unhealthy':
+                overall_status = 'unhealthy'
+            elif service_health['status'] == 'degraded' and overall_status == 'healthy':
+                overall_status = 'degraded'
+        
+        return {
+            'overall_status': overall_status,
+            'services': results,
+            'summary': {
+                'total_services': len(monitor_mock._services),
+                'healthy': sum(1 for r in results.values() if r['status'] == 'healthy'),
+                'degraded': sum(1 for r in results.values() if r['status'] == 'degraded'),
+                'unhealthy': sum(1 for r in results.values() if r['status'] == 'unhealthy')
+            }
+        }
     
-    logger.info(
-        "comprehensive_external_service_mocks_initialized",
-        mock_categories=['aws', 'http', 'resilience', 'auth', 'third_party', 'monitoring'],
-        features=['workflow_simulation', 'health_monitoring', 'performance_tracking'],
-        component="external_service_mocks"
-    )
+    def get_performance_report():
+        """Generate comprehensive performance report."""
+        total_variance = []
+        services_within_tolerance = 0
+        
+        for service_name, variance_data in monitor_mock._metrics['performance_variance'].items():
+            total_variance.append(variance_data['response_time_variance'])
+            if variance_data['within_tolerance']:
+                services_within_tolerance += 1
+        
+        avg_variance = sum(total_variance) / len(total_variance) if total_variance else 0
+        
+        return {
+            'overall_performance': {
+                'avg_variance_from_baseline': f"{avg_variance:.2%}",
+                'within_10_percent_tolerance': avg_variance <= 0.1,
+                'services_within_tolerance': services_within_tolerance,
+                'total_services': len(monitor_mock._services)
+            },
+            'service_details': monitor_mock._metrics['performance_variance'],
+            'monitoring_summary': {
+                'total_health_checks': monitor_mock._metrics['total_health_checks'],
+                'healthy_services': monitor_mock._metrics['healthy_services'],
+                'degraded_services': monitor_mock._metrics['degraded_services'],
+                'unhealthy_services': monitor_mock._metrics['unhealthy_services']
+            }
+        }
     
-    return comprehensive_mocks
+    monitor_mock.register_service = register_service
+    monitor_mock.check_service_health = check_service_health
+    monitor_mock.check_all_services_health = check_all_services_health
+    monitor_mock.get_performance_report = get_performance_report
+    
+    # Pre-register common services for testing
+    monitor_mock.register_service('auth0', ExternalServiceType.AUTH_PROVIDER, '/health')
+    monitor_mock.register_service('aws_s3', ExternalServiceType.CLOUD_STORAGE, None)
+    monitor_mock.register_service('external_api', ExternalServiceType.HTTP_API, '/health')
+    monitor_mock.register_service('redis_cache', ExternalServiceType.CACHE, '/ping')
+    
+    logger.info("Mock external service monitor initialized with performance tracking")
+    
+    return monitor_mock
 
 
-# ================================================================================================
-# MODULE-LEVEL EXPORTS AND DOCUMENTATION
-# ================================================================================================
+# =============================================================================
+# Integration Test Utilities
+# =============================================================================
 
+@pytest.fixture
+def external_service_test_context(
+    mock_s3_client,
+    mock_kms_client,
+    mock_cloudwatch_client,
+    mock_requests_session,
+    mock_httpx_client,
+    mock_http_client_manager,
+    mock_circuit_breaker,
+    mock_retry_manager,
+    mock_auth0_api_client,
+    mock_external_api_client,
+    mock_external_service_monitor
+):
+    """
+    Comprehensive external service test context providing all mock fixtures.
+    
+    Provides a complete testing environment for external service integrations
+    with performance monitoring, circuit breaker protection, and comprehensive
+    API client simulation per Section 6.6.1 testing strategy.
+    """
+    return {
+        'aws_services': {
+            's3_client': mock_s3_client,
+            'kms_client': mock_kms_client,
+            'cloudwatch_client': mock_cloudwatch_client
+        },
+        'http_clients': {
+            'requests_session': mock_requests_session,
+            'httpx_client': mock_httpx_client,
+            'client_manager': mock_http_client_manager
+        },
+        'resilience_patterns': {
+            'circuit_breaker': mock_circuit_breaker,
+            'retry_manager': mock_retry_manager
+        },
+        'api_clients': {
+            'auth0_client': mock_auth0_api_client,
+            'external_api_client': mock_external_api_client
+        },
+        'monitoring': {
+            'service_monitor': mock_external_service_monitor
+        }
+    }
+
+
+@pytest.fixture
+def performance_baseline_context():
+    """
+    Performance baseline context for testing ≤10% variance requirement.
+    
+    Provides baseline metrics and performance validation utilities for ensuring
+    the Python implementation maintains performance parity with the Node.js
+    baseline per Section 0.3.2 performance monitoring requirements.
+    """
+    return {
+        'baseline_metrics': {
+            'auth0_response_time': 150.0,  # 150ms
+            'aws_s3_upload_time': 2000.0,  # 2s
+            'external_api_response_time': 300.0,  # 300ms
+            'circuit_breaker_overhead': 5.0,  # 5ms
+            'retry_logic_overhead': 10.0  # 10ms
+        },
+        'tolerance_thresholds': {
+            'acceptable_variance': 0.10,  # 10%
+            'warning_variance': 0.08,  # 8%
+            'critical_variance': 0.15  # 15%
+        },
+        'performance_validation': {
+            'track_response_times': True,
+            'validate_variance': True,
+            'log_performance_metrics': True,
+            'alert_on_threshold_breach': True
+        }
+    }
+
+
+# =============================================================================
+# Cleanup and Utility Functions
+# =============================================================================
+
+@pytest.fixture(autouse=True)
+def cleanup_external_service_mocks():
+    """Automatically cleanup external service mocks after each test."""
+    yield
+    
+    # Reset any global state or registries
+    logger.info("Cleaning up external service mocks after test")
+
+
+def create_mock_api_response(status_code=200, data=None, headers=None, response_time=0.1):
+    """
+    Utility function to create standardized mock API responses.
+    
+    Args:
+        status_code: HTTP status code
+        data: Response data
+        headers: Response headers
+        response_time: Simulated response time
+        
+    Returns:
+        Mock response object with standardized structure
+    """
+    response = Mock()
+    response.status_code = status_code
+    response.ok = status_code < 400
+    response.json.return_value = data or {}
+    response.text = json.dumps(data or {})
+    response.headers = headers or {'Content-Type': 'application/json'}
+    response.elapsed = timedelta(seconds=response_time)
+    return response
+
+
+def simulate_external_service_latency(min_latency=0.05, max_latency=0.5):
+    """
+    Utility function to simulate realistic external service latency.
+    
+    Args:
+        min_latency: Minimum latency in seconds
+        max_latency: Maximum latency in seconds
+        
+    Returns:
+        Simulated latency value
+    """
+    import random
+    return random.uniform(min_latency, max_latency)
+
+
+# Export all fixtures for use in tests
 __all__ = [
     # AWS Service Mocks
-    'mock_aws_credentials',
-    'mock_s3_service',
-    'mock_s3_operations',
-    'mock_kms_service',
+    'aws_credentials',
+    'mock_s3_client',
+    'mock_kms_client', 
+    'mock_cloudwatch_client',
     
     # HTTP Client Mocks
-    'mock_requests_client',
+    'mock_requests_session',
     'mock_httpx_client',
-    'mock_http_error_scenarios',
+    'mock_http_client_manager',
     
-    # Resilience Pattern Mocks
+    # Circuit Breaker Mocks
+    'mock_circuit_breaker_config',
     'mock_circuit_breaker',
-    'mock_circuit_breaker_manager',
+    
+    # Retry Logic Mocks
     'mock_retry_manager',
     
-    # Third-party Service Mocks
-    'mock_auth0_service',
-    'mock_third_party_apis',
+    # Third-Party API Mocks
+    'mock_auth0_api_client',
+    'mock_external_api_client',
     
-    # Monitoring and Performance Mocks
-    'mock_performance_monitor',
+    # Performance Monitoring Mocks
+    'mock_external_service_monitor',
     
-    # Comprehensive Integration Mock
-    'external_service_mocks'
+    # Integration Test Context
+    'external_service_test_context',
+    'performance_baseline_context',
+    
+    # Utilities
+    'cleanup_external_service_mocks',
+    'create_mock_api_response',
+    'simulate_external_service_latency'
 ]
-
-# Module initialization logging
-logger.info(
-    "external_service_mocks_module_loaded",
-    fixtures_available=len(__all__),
-    coverage_areas=[
-        "aws_services",
-        "http_clients", 
-        "resilience_patterns",
-        "third_party_apis",
-        "performance_monitoring"
-    ],
-    compliance_requirements=[
-        "section_0_1_2_external_integration",
-        "section_6_3_3_resilience_patterns", 
-        "section_6_3_5_performance_monitoring",
-        "section_0_3_2_variance_requirement"
-    ],
-    component="external_service_mocks"
-)
