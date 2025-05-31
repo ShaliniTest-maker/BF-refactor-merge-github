@@ -1,1653 +1,2242 @@
 #!/usr/bin/env python3
 """
-Performance Report Generation Script for Flask Migration
+Performance Report Generation Script for BF-refactor-merge Project
 
-This comprehensive performance report generation script creates detailed performance 
-analysis reports including variance calculations, trend analysis, baseline comparisons, 
-and CI/CD integration summaries. Produces stakeholder-focused documentation for 
-quality assessment and deployment decision-making per Section 6.6.2 requirements.
+This module provides comprehensive performance analysis report generation including variance calculations,
+trend analysis, baseline comparisons, and CI/CD integration summaries. The script produces detailed
+documentation for stakeholder review and quality assessment while ensuring compliance with the
+≤10% variance requirement from the Node.js baseline per Section 0.1.1.
 
 Key Features:
-- Comprehensive performance baseline comparison reporting per Section 6.6.2
-- Trend analysis and variance calculation documentation per Section 0.3.2  
+- Performance baseline comparison reporting per Section 6.6.2 test automation
+- Trend analysis and variance calculation documentation per Section 0.3.2
 - CI/CD pipeline integration reporting per Section 8.5.2 deployment pipeline
 - Stakeholder communication and quality assessment reports per Section 8.5.3
-- GitHub Actions artifact generation for comprehensive audit trails
-- Multi-format report generation (JSON, Markdown, HTML, PDF) for diverse stakeholder needs
+- Multi-format output (JSON, HTML, PDF, Markdown) for diverse stakeholder needs
+- GitHub Actions artifact generation and integration per Section 6.6.2
 
-Architecture Compliance:
-- Section 0.1.1: ≤10% variance requirement enforcement and comprehensive reporting
-- Section 0.3.2: Performance monitoring requirements with continuous baseline comparison
-- Section 6.6.2: Test automation with automated report artifact generation
-- Section 8.5.2: Deployment pipeline integration with performance validation reporting
-- Section 8.5.3: Release management process with stakeholder communication requirements
+Architecture Integration:
+- Section 0.1.1: Performance optimization ensuring ≤10% variance from Node.js baseline
+- Section 0.3.2: Performance monitoring requirements with comprehensive trend analysis
+- Section 6.6.2: Test automation and CI/CD integration with artifact management
+- Section 8.5.2: Deployment pipeline performance validation and reporting
+- Section 8.5.3: Release management with stakeholder communication
 
-Dependencies:
-- tests.performance.baseline_data for Node.js baseline comparison
-- tests.performance.test_baseline_comparison for comprehensive test execution
-- tests.performance.performance_config for environment configuration management
-- matplotlib/plotly for performance visualization and trend analysis
-- jinja2 for comprehensive report templating and stakeholder communication
+Performance Requirements:
+- Automated variance calculation with ≤10% threshold enforcement
+- Real-time trend analysis with regression detection capabilities
+- Historical performance data analysis and pattern recognition
+- Comprehensive error handling and data validation
+- Enterprise-grade report quality and professional presentation
 
-Author: Flask Migration Team  
+Author: Flask Migration Team
 Version: 1.0.0
-Integration: GitHub Actions CI/CD Pipeline, Stakeholder Communication Systems
+Dependencies: baseline_data.py, test_baseline_comparison.py, performance_config.py
 """
 
 import argparse
 import json
-import logging
 import os
 import statistics
 import sys
+import time
 import traceback
-from collections import defaultdict
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union, Any, NamedTuple
-import uuid
-
-# Core data processing and analysis imports
-import pandas as pd
-import numpy as np
-from dataclasses import dataclass, asdict
+import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field, asdict
+from datetime import datetime, timezone, timedelta
 from enum import Enum
+from pathlib import Path
+from typing import Dict, List, Optional, Any, Union, Tuple, NamedTuple
+from urllib.parse import urlparse
+import uuid
+import hashlib
+import base64
 
-# Visualization and reporting imports
-try:
-    import matplotlib
-    matplotlib.use('Agg')  # Non-interactive backend for CI/CD
-    import matplotlib.pyplot as plt
-    import seaborn as sns
-    MATPLOTLIB_AVAILABLE = True
-except ImportError:
-    MATPLOTLIB_AVAILABLE = False
-    plt = None
-    sns = None
+# Performance testing framework imports
+from tests.performance.baseline_data import (
+    NodeJSPerformanceBaseline,
+    BaselineDataManager,
+    BaselineValidationStatus,
+    BaselineDataSource,
+    BaselineMetricCategory,
+    compare_with_baseline,
+    get_nodejs_baseline,
+    validate_baseline_data,
+    create_performance_thresholds,
+    get_baseline_manager
+)
 
-try:
-    import plotly.graph_objects as go
-    import plotly.express as px
-    from plotly.subplots import make_subplots
-    import plotly.io as pio
-    PLOTLY_AVAILABLE = True
-except ImportError:
-    PLOTLY_AVAILABLE = False
-    go = None
-    px = None
+from tests.performance.test_baseline_comparison import (
+    BaselineComparisonTestSuite,
+    BaselineComparisonResult,
+    CRITICAL_VARIANCE_THRESHOLD,
+    MEMORY_VARIANCE_THRESHOLD,
+    WARNING_VARIANCE_THRESHOLD,
+    RESPONSE_TIME_THRESHOLD_MS,
+    THROUGHPUT_THRESHOLD_RPS,
+    ERROR_RATE_THRESHOLD,
+    CPU_UTILIZATION_THRESHOLD,
+    MEMORY_UTILIZATION_THRESHOLD
+)
 
-# Report templating and generation imports
+from tests.performance.performance_config import (
+    PerformanceTestConfig,
+    LoadTestConfiguration,
+    LoadTestScenario,
+    PerformanceMetricType,
+    NodeJSBaselineMetrics
+)
+
+# Standard library imports for report generation
+import html
+import csv
+import base64
+from io import StringIO, BytesIO
+
+# Optional dependencies with graceful fallbacks
 try:
-    from jinja2 import Environment, FileSystemLoader, Template
+    import jinja2
+    from jinja2 import Environment, FileSystemLoader, select_autoescape
     JINJA2_AVAILABLE = True
 except ImportError:
     JINJA2_AVAILABLE = False
-    Environment = None
-    Template = None
+    warnings.warn("jinja2 not available - HTML template rendering disabled")
+
+try:
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+    import seaborn as sns
+    MATPLOTLIB_AVAILABLE = True
+    # Configure matplotlib for headless operation
+    plt.switch_backend('Agg')
+    sns.set_style("whitegrid")
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
+    warnings.warn("matplotlib/seaborn not available - chart generation disabled")
+
+try:
+    import pandas as pd
+    PANDAS_AVAILABLE = True
+except ImportError:
+    PANDAS_AVAILABLE = False
+    warnings.warn("pandas not available - advanced data analysis disabled")
 
 try:
     import weasyprint
     WEASYPRINT_AVAILABLE = True
 except ImportError:
     WEASYPRINT_AVAILABLE = False
-    weasyprint = None
+    warnings.warn("weasyprint not available - PDF generation disabled")
 
-# Performance testing infrastructure imports
-from tests.performance.baseline_data import (
-    BaselineDataManager,
-    ResponseTimeBaseline,
-    ResourceUtilizationBaseline,
-    DatabasePerformanceBaseline,
-    ThroughputBaseline,
-    NetworkIOBaseline,
-    get_default_baseline_data,
-    validate_flask_performance_against_baseline,
-    default_baseline_manager,
-    PERFORMANCE_VARIANCE_THRESHOLD,
-    MEMORY_VARIANCE_THRESHOLD,
-    WARNING_VARIANCE_THRESHOLD,
-    CRITICAL_VARIANCE_THRESHOLD
-)
+# Structured logging for comprehensive report tracking
+try:
+    import structlog
+    STRUCTLOG_AVAILABLE = True
+    logger = structlog.get_logger(__name__)
+except ImportError:
+    import logging
+    STRUCTLOG_AVAILABLE = False
+    logger = logging.getLogger(__name__)
+    logger.warning("structlog not available - falling back to standard logging")
 
-from tests.performance.test_baseline_comparison import (
-    BaselineComparisonTestSuite,
-    PerformanceComparisonResult,
-    PerformanceTrendAnalyzer,
-    BASELINE_COMPARISON_TIMEOUT,
-    PERFORMANCE_SAMPLE_SIZE,
-    VARIANCE_CALCULATION_PRECISION,
-    TREND_ANALYSIS_WINDOW_SIZE,
-    REGRESSION_DETECTION_THRESHOLD,
-    PERFORMANCE_TEST_CATEGORIES,
-    CRITICAL_PERFORMANCE_METRICS
-)
-
-from tests.performance.performance_config import (
-    PerformanceConfigFactory,
-    BasePerformanceConfig,
-    PerformanceThreshold,
-    LoadTestConfiguration,
-    BaselineMetrics,
-    PerformanceTestType,
-    PerformanceEnvironment,
-    create_performance_config,
-    get_performance_baseline_comparison,
-    generate_performance_report
-)
-
-
-# Report generation constants and configuration
-REPORT_VERSION = "1.0.0"
-REPORT_TEMPLATE_DIR = Path(__file__).parent / "templates"
-REPORT_OUTPUT_DIR = Path(__file__).parent.parent / "reports"
-ARTIFACTS_DIR = Path(__file__).parent.parent / "artifacts"
-
-# Stakeholder communication constants per Section 8.5.3
-STAKEHOLDER_REPORT_FORMATS = ["executive_summary", "technical_detailed", "compliance_audit"]
-CI_CD_ARTIFACT_FORMATS = ["json", "markdown", "html"]
-PERFORMANCE_VARIANCE_ALERT_THRESHOLD = 8.0  # 8% variance alert per Section 8.5.3
-
-# GitHub Actions integration constants per Section 6.6.2
-GITHUB_ACTIONS_INTEGRATION = os.getenv('GITHUB_ACTIONS', 'false').lower() == 'true'
-GITHUB_RUN_ID = os.getenv('GITHUB_RUN_ID', 'local')
-GITHUB_SHA = os.getenv('GITHUB_SHA', 'unknown')
-GITHUB_REF = os.getenv('GITHUB_REF', 'refs/heads/main')
-
-
-class ReportType(Enum):
-    """Performance report type enumeration for different reporting scenarios."""
-    
-    BASELINE_COMPARISON = "baseline_comparison"
-    TREND_ANALYSIS = "trend_analysis"
-    VARIANCE_CALCULATION = "variance_calculation"
-    CI_CD_INTEGRATION = "ci_cd_integration"
-    STAKEHOLDER_SUMMARY = "stakeholder_summary"
-    COMPLIANCE_AUDIT = "compliance_audit"
-    REGRESSION_ANALYSIS = "regression_analysis"
-    DEPLOYMENT_READINESS = "deployment_readiness"
+# Prometheus metrics integration for report tracking
+try:
+    from prometheus_client import CollectorRegistry, Counter, Histogram, Gauge, Info, generate_latest
+    PROMETHEUS_AVAILABLE = True
+except ImportError:
+    PROMETHEUS_AVAILABLE = False
+    warnings.warn("prometheus_client not available - metrics collection disabled")
 
 
 class ReportFormat(Enum):
-    """Report output format enumeration for multi-format generation."""
+    """Report output format enumeration for multi-format support."""
     
     JSON = "json"
-    MARKDOWN = "markdown"
     HTML = "html"
     PDF = "pdf"
+    MARKDOWN = "markdown"
     CSV = "csv"
-    XLSX = "xlsx"
+    EXCEL = "excel"
+
+
+class ReportType(Enum):
+    """Report type enumeration for different stakeholder needs."""
+    
+    EXECUTIVE_SUMMARY = "executive_summary"
+    TECHNICAL_DETAILED = "technical_detailed"
+    BASELINE_COMPARISON = "baseline_comparison"
+    TREND_ANALYSIS = "trend_analysis"
+    CI_CD_INTEGRATION = "cicd_integration"
+    QUALITY_ASSESSMENT = "quality_assessment"
+    REGRESSION_ANALYSIS = "regression_analysis"
+    PERFORMANCE_DASHBOARD = "performance_dashboard"
+
+
+class PerformanceGrade(Enum):
+    """Performance grade enumeration for quality assessment."""
+    
+    EXCELLENT = "A"
+    GOOD = "B"
+    ACCEPTABLE = "C"
+    POOR = "D"
+    FAILING = "F"
 
 
 @dataclass
-class PerformanceReportMetadata:
-    """Comprehensive metadata for performance report generation and tracking."""
+class ReportConfiguration:
+    """
+    Comprehensive report generation configuration with enterprise-grade customization options.
     
-    report_id: str
-    report_type: ReportType
-    generated_at: datetime
-    environment: str
-    test_session_id: str
-    github_run_id: str
-    github_sha: str
-    github_ref: str
-    baseline_version: str
-    variance_threshold: float
-    performance_config: Dict[str, Any]
+    Provides flexible configuration for different stakeholder needs, output formats,
+    and integration requirements while maintaining consistency across report types.
+    """
     
-    @classmethod
-    def create_from_environment(cls, report_type: ReportType, test_session_id: str = None) -> 'PerformanceReportMetadata':
-        """Create report metadata from current environment context."""
-        config = create_performance_config()
+    # Core report configuration
+    report_name: str = "Performance Analysis Report"
+    report_type: ReportType = ReportType.TECHNICAL_DETAILED
+    output_formats: List[ReportFormat] = field(default_factory=lambda: [ReportFormat.HTML, ReportFormat.JSON])
+    output_directory: Path = field(default_factory=lambda: Path("reports"))
+    
+    # Data source configuration
+    baseline_data_path: Optional[Path] = None
+    test_results_path: Optional[Path] = None
+    historical_data_path: Optional[Path] = None
+    prometheus_data_path: Optional[Path] = None
+    
+    # Report content configuration
+    include_charts: bool = True
+    include_detailed_metrics: bool = True
+    include_recommendations: bool = True
+    include_trend_analysis: bool = True
+    include_regression_detection: bool = True
+    include_ci_cd_integration: bool = True
+    
+    # Performance thresholds and validation
+    variance_threshold: float = 10.0  # ≤10% variance requirement per Section 0.1.1
+    memory_variance_threshold: float = 15.0  # ≤15% memory variance per Section 0.3.2
+    warning_variance_threshold: float = 5.0   # Early warning at 5% variance
+    
+    # Template and styling configuration
+    template_directory: Optional[Path] = None
+    custom_css_path: Optional[Path] = None
+    logo_path: Optional[Path] = None
+    company_name: str = "BF-refactor-merge Project"
+    
+    # CI/CD integration configuration
+    ci_cd_integration: bool = True
+    github_actions_integration: bool = True
+    artifact_retention_days: int = 30
+    slack_webhook_url: Optional[str] = None
+    teams_webhook_url: Optional[str] = None
+    
+    # Advanced report features
+    enable_interactive_charts: bool = True
+    enable_pdf_bookmarks: bool = True
+    enable_executive_summary: bool = True
+    enable_quality_gate_analysis: bool = True
+    
+    def __post_init__(self):
+        """Post-initialization validation and setup."""
+        self.output_directory = Path(self.output_directory)
+        self.output_directory.mkdir(parents=True, exist_ok=True)
         
-        return cls(
-            report_id=str(uuid.uuid4()),
-            report_type=report_type,
-            generated_at=datetime.now(timezone.utc),
-            environment=config.get_environment_name(),
-            test_session_id=test_session_id or str(uuid.uuid4()),
-            github_run_id=GITHUB_RUN_ID,
-            github_sha=GITHUB_SHA,
-            github_ref=GITHUB_REF,
-            baseline_version="nodejs-baseline-1.0",
-            variance_threshold=config.PERFORMANCE_VARIANCE_THRESHOLD,
-            performance_config=asdict(config.get_baseline_metrics())
-        )
+        # Validate threshold values
+        if not (0 < self.variance_threshold <= 50):
+            raise ValueError("variance_threshold must be between 0 and 50 percent")
+        
+        if not (0 < self.memory_variance_threshold <= 50):
+            raise ValueError("memory_variance_threshold must be between 0 and 50 percent")
 
 
 @dataclass
-class PerformanceVarianceAnalysis:
-    """Comprehensive performance variance analysis results."""
+class PerformanceReportData:
+    """
+    Comprehensive performance report data container with complete metrics and analysis.
     
-    metric_name: str
-    baseline_value: float
-    current_value: float
-    variance_percentage: float
-    variance_severity: str
-    within_threshold: bool
-    trend_direction: str
-    statistical_confidence: float
-    recommendation: str
+    Aggregates all performance testing data, baseline comparisons, trend analysis,
+    and quality assessment metrics into a unified data structure for report generation.
+    """
     
-    @property
-    def is_critical_variance(self) -> bool:
-        """Check if variance exceeds critical threshold."""
-        return abs(self.variance_percentage) > CRITICAL_VARIANCE_THRESHOLD
+    # Report metadata
+    report_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    generation_timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    report_version: str = "1.0.0"
     
-    @property
-    def requires_immediate_action(self) -> bool:
-        """Check if variance requires immediate optimization action."""
-        return (not self.within_threshold and 
-                self.variance_severity in ['critical', 'failure'] and
-                self.variance_percentage > 0)  # Performance degradation
+    # Performance baseline comparison data
+    baseline_comparison: Optional[Dict[str, Any]] = None
+    nodejs_baseline: Optional[NodeJSPerformanceBaseline] = None
+    performance_test_results: Optional[BaselineComparisonResult] = None
+    
+    # Variance analysis and compliance data
+    variance_summary: Dict[str, float] = field(default_factory=dict)
+    compliance_status: Dict[str, bool] = field(default_factory=dict)
+    quality_gates_status: Dict[str, str] = field(default_factory=dict)
+    performance_grade: PerformanceGrade = PerformanceGrade.ACCEPTABLE
+    
+    # Trend analysis and historical data
+    historical_performance_data: List[Dict[str, Any]] = field(default_factory=list)
+    trend_analysis: Dict[str, Any] = field(default_factory=dict)
+    regression_detection: Dict[str, Any] = field(default_factory=dict)
+    performance_improvement_analysis: Dict[str, Any] = field(default_factory=dict)
+    
+    # CI/CD integration and pipeline data
+    ci_cd_metrics: Dict[str, Any] = field(default_factory=dict)
+    build_information: Dict[str, Any] = field(default_factory=dict)
+    deployment_information: Dict[str, Any] = field(default_factory=dict)
+    quality_gate_results: Dict[str, Any] = field(default_factory=dict)
+    
+    # Error analysis and recommendations
+    critical_issues: List[str] = field(default_factory=list)
+    warning_issues: List[str] = field(default_factory=list)
+    performance_recommendations: List[str] = field(default_factory=list)
+    optimization_opportunities: List[str] = field(default_factory=list)
+    
+    # Statistical analysis and confidence metrics
+    statistical_confidence: float = 0.0
+    sample_size: int = 0
+    test_duration_seconds: float = 0.0
+    data_quality_score: float = 0.0
+    
+    # Charts and visualizations data
+    chart_data: Dict[str, Any] = field(default_factory=dict)
+    performance_charts: Dict[str, bytes] = field(default_factory=dict)  # Base64 encoded chart images
+    
+    def calculate_overall_performance_grade(self) -> PerformanceGrade:
+        """
+        Calculate overall performance grade based on comprehensive metrics analysis.
+        
+        Returns:
+            PerformanceGrade enum value representing overall performance quality
+        """
+        if self.critical_issues:
+            return PerformanceGrade.FAILING
+        
+        # Calculate average variance across all metrics
+        variance_values = [abs(v) for v in self.variance_summary.values() if isinstance(v, (int, float))]
+        
+        if not variance_values:
+            return PerformanceGrade.ACCEPTABLE
+        
+        avg_variance = statistics.mean(variance_values)
+        compliance_rate = sum(1 for status in self.compliance_status.values() if status) / len(self.compliance_status) * 100 if self.compliance_status else 0
+        
+        # Grade calculation based on variance and compliance
+        if avg_variance <= 2.0 and compliance_rate >= 95:
+            return PerformanceGrade.EXCELLENT
+        elif avg_variance <= 5.0 and compliance_rate >= 90:
+            return PerformanceGrade.GOOD
+        elif avg_variance <= 10.0 and compliance_rate >= 80:
+            return PerformanceGrade.ACCEPTABLE
+        elif avg_variance <= 15.0 and compliance_rate >= 60:
+            return PerformanceGrade.POOR
+        else:
+            return PerformanceGrade.FAILING
+    
+    def generate_executive_summary(self) -> Dict[str, Any]:
+        """
+        Generate executive summary for stakeholder communication.
+        
+        Returns:
+            Dictionary containing high-level performance summary and key insights
+        """
+        self.performance_grade = self.calculate_overall_performance_grade()
+        
+        return {
+            "report_metadata": {
+                "report_id": self.report_id,
+                "generation_timestamp": self.generation_timestamp.isoformat(),
+                "report_version": self.report_version
+            },
+            "performance_summary": {
+                "overall_grade": self.performance_grade.value,
+                "total_critical_issues": len(self.critical_issues),
+                "total_warning_issues": len(self.warning_issues),
+                "average_variance": statistics.mean([abs(v) for v in self.variance_summary.values()]) if self.variance_summary else 0.0,
+                "compliance_rate": sum(1 for status in self.compliance_status.values() if status) / len(self.compliance_status) * 100 if self.compliance_status else 0.0,
+                "statistical_confidence": self.statistical_confidence,
+                "test_duration_minutes": self.test_duration_seconds / 60.0
+            },
+            "key_findings": {
+                "baseline_compliance": all(self.compliance_status.values()) if self.compliance_status else False,
+                "regression_detected": self.regression_detection.get("regression_detected", False),
+                "performance_improvements": self.performance_improvement_analysis.get("improvements_detected", False),
+                "quality_gates_passed": all(status == "passed" for status in self.quality_gate_results.values()) if self.quality_gate_results else False
+            },
+            "recommendations": {
+                "immediate_actions": self.critical_issues[:5],  # Top 5 critical issues
+                "optimization_priorities": self.performance_recommendations[:5],  # Top 5 recommendations
+                "next_steps": self.optimization_opportunities[:3]  # Top 3 opportunities
+            }
+        }
 
 
 class PerformanceReportGenerator:
     """
-    Comprehensive performance report generation system for Flask migration.
+    Comprehensive performance report generator providing multi-format output capabilities,
+    advanced analytics, and enterprise-grade reporting features for the BF-refactor-merge project.
     
-    Implements automated performance report generation with baseline comparison,
-    trend analysis, variance calculations, and CI/CD integration per Section 6.6.2
-    requirements with stakeholder communication capabilities per Section 8.5.3.
+    Implements comprehensive report generation with variance calculations, trend analysis,
+    baseline comparisons, and CI/CD integration per Section 6.6.2 and Section 8.5.2 requirements.
     """
     
-    def __init__(self, environment: str = None, output_dir: str = None):
+    def __init__(self, config: ReportConfiguration):
         """
-        Initialize performance report generator with environment configuration.
+        Initialize performance report generator with configuration.
         
         Args:
-            environment: Target environment for report generation
-            output_dir: Output directory for generated reports
+            config: Report configuration with output formats and integration settings
         """
-        self.environment = environment or os.getenv('PERFORMANCE_ENV', 'testing')
-        self.output_dir = Path(output_dir) if output_dir else REPORT_OUTPUT_DIR
-        self.artifacts_dir = ARTIFACTS_DIR
+        self.config = config
+        self.baseline_manager = get_baseline_manager()
         
-        # Ensure output directories exist
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.artifacts_dir.mkdir(parents=True, exist_ok=True)
+        # Initialize report generation state
+        self.report_data: Optional[PerformanceReportData] = None
+        self.template_environment: Optional[jinja2.Environment] = None
         
-        # Initialize performance testing infrastructure
-        self.performance_config = create_performance_config(self.environment)
-        self.baseline_manager = get_default_baseline_data()
-        self.comparison_suite = BaselineComparisonTestSuite(self.baseline_manager)
-        self.comparison_suite.setup_baseline_comparison(self.environment)
-        
-        # Configure logging for report generation
-        self.logger = self._setup_logging()
-        
-        # Initialize report templates if available
-        self.template_env = self._setup_template_environment()
-        
-        # Performance data collection
-        self.performance_data: Dict[str, Any] = {}
-        self.variance_analysis_results: List[PerformanceVarianceAnalysis] = []
-        self.trend_analysis_results: Dict[str, Any] = {}
-        
-        self.logger.info(
-            f"Performance report generator initialized - Environment: {self.environment}, "
-            f"Output: {self.output_dir}, GitHub Actions: {GITHUB_ACTIONS_INTEGRATION}"
-        )
-    
-    def generate_comprehensive_performance_report(self, 
-                                                test_results: Dict[str, Any] = None,
-                                                report_formats: List[ReportFormat] = None,
-                                                include_visualizations: bool = True) -> Dict[str, str]:
-        """
-        Generate comprehensive performance report with all analysis components.
-        
-        Args:
-            test_results: Performance test execution results
-            report_formats: List of output formats to generate
-            include_visualizations: Whether to include performance charts and graphs
-            
-        Returns:
-            Dictionary mapping format names to generated file paths
-        """
-        self.logger.info("Starting comprehensive performance report generation")
-        
-        try:
-            # Set default formats if not specified
-            if report_formats is None:
-                report_formats = [ReportFormat.JSON, ReportFormat.MARKDOWN, ReportFormat.HTML]
-            
-            # Collect and analyze performance data
-            self._collect_performance_data(test_results)
-            self._perform_baseline_comparison_analysis()
-            self._perform_trend_analysis()
-            self._calculate_comprehensive_variance_analysis()
-            
-            # Generate visualizations if requested
-            visualization_paths = {}
-            if include_visualizations and (MATPLOTLIB_AVAILABLE or PLOTLY_AVAILABLE):
-                visualization_paths = self._generate_performance_visualizations()
-            
-            # Create comprehensive report metadata
-            metadata = PerformanceReportMetadata.create_from_environment(
-                ReportType.BASELINE_COMPARISON,
-                self.comparison_suite.test_session_id
-            )
-            
-            # Generate reports in requested formats
-            generated_reports = {}
-            for report_format in report_formats:
-                report_path = self._generate_report_by_format(
-                    metadata, report_format, visualization_paths
-                )
-                generated_reports[report_format.value] = str(report_path)
-            
-            # Generate CI/CD artifacts for GitHub Actions integration
-            if GITHUB_ACTIONS_INTEGRATION:
-                artifact_paths = self._generate_ci_cd_artifacts(metadata)
-                generated_reports.update(artifact_paths)
-            
-            # Generate stakeholder-specific reports per Section 8.5.3
-            stakeholder_reports = self._generate_stakeholder_reports(metadata)
-            generated_reports.update(stakeholder_reports)
-            
-            self.logger.info(f"Performance report generation completed - Generated {len(generated_reports)} reports")
-            return generated_reports
-            
-        except Exception as e:
-            self.logger.error(f"Performance report generation failed: {str(e)}")
-            self.logger.error(traceback.format_exc())
-            raise
-    
-    def generate_baseline_comparison_report(self, 
-                                          current_metrics: Dict[str, float],
-                                          report_format: ReportFormat = ReportFormat.JSON) -> str:
-        """
-        Generate focused baseline comparison report with variance analysis.
-        
-        Args:
-            current_metrics: Current performance metrics for comparison
-            report_format: Output format for the report
-            
-        Returns:
-            Path to generated baseline comparison report
-        """
-        self.logger.info("Generating baseline comparison report")
-        
-        # Perform baseline comparison analysis
-        comparison_results = get_performance_baseline_comparison(
-            current_metrics, self.environment
-        )
-        
-        # Calculate variance analysis
-        variance_analysis = []
-        for metric_name, comparison_data in comparison_results.items():
-            analysis = PerformanceVarianceAnalysis(
-                metric_name=metric_name,
-                baseline_value=comparison_data['baseline_value'],
-                current_value=comparison_data['current_value'],
-                variance_percentage=comparison_data['variance_percent'],
-                variance_severity=comparison_data['status'],
-                within_threshold=comparison_data['within_threshold'],
-                trend_direction="stable",  # Would be calculated from historical data
-                statistical_confidence=0.95,  # Would be calculated from sample size
-                recommendation=self._generate_metric_recommendation(comparison_data)
-            )
-            variance_analysis.append(analysis)
-        
-        # Create report metadata
-        metadata = PerformanceReportMetadata.create_from_environment(
-            ReportType.BASELINE_COMPARISON
-        )
-        
-        # Generate baseline comparison report
-        report_data = {
-            'metadata': asdict(metadata),
-            'baseline_comparison': comparison_results,
-            'variance_analysis': [asdict(analysis) for analysis in variance_analysis],
-            'summary': self._generate_baseline_comparison_summary(variance_analysis),
-            'recommendations': self._generate_baseline_recommendations(variance_analysis)
-        }
-        
-        # Write report in specified format
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"baseline_comparison_{timestamp}.{report_format.value}"
-        report_path = self.output_dir / filename
-        
-        if report_format == ReportFormat.JSON:
-            self._write_json_report(report_data, report_path)
-        elif report_format == ReportFormat.MARKDOWN:
-            self._write_markdown_report(report_data, report_path)
-        elif report_format == ReportFormat.HTML:
-            self._write_html_report(report_data, report_path)
+        # Initialize logging
+        if STRUCTLOG_AVAILABLE:
+            self.logger = structlog.get_logger(__name__)
         else:
-            raise ValueError(f"Unsupported report format: {report_format}")
+            self.logger = logging.getLogger(__name__)
         
-        self.logger.info(f"Baseline comparison report generated: {report_path}")
-        return str(report_path)
+        # Initialize Prometheus metrics
+        if PROMETHEUS_AVAILABLE:
+            self._init_prometheus_metrics()
+        
+        # Setup template environment
+        self._setup_template_environment()
+        
+        # Validate dependencies
+        self._validate_dependencies()
     
-    def generate_trend_analysis_report(self, 
-                                     historical_data: List[Dict[str, Any]] = None,
-                                     analysis_window_days: int = 7) -> str:
-        """
-        Generate comprehensive trend analysis report with regression detection.
-        
-        Args:
-            historical_data: Historical performance data for trend analysis
-            analysis_window_days: Number of days to include in trend analysis
-            
-        Returns:
-            Path to generated trend analysis report
-        """
-        self.logger.info(f"Generating trend analysis report for {analysis_window_days} days")
-        
-        # Initialize trend analyzer with historical data
-        trend_analyzer = PerformanceTrendAnalyzer(window_size=analysis_window_days * 24)  # Hourly data points
-        
-        # Process historical data if provided
-        if historical_data:
-            for data_point in historical_data:
-                timestamp = datetime.fromisoformat(data_point.get('timestamp', datetime.now().isoformat()))
-                for metric_name, value in data_point.get('metrics', {}).items():
-                    baseline_value = self._get_baseline_value(metric_name)
-                    if baseline_value:
-                        trend_analyzer.add_measurement(metric_name, value, baseline_value, timestamp)
-        
-        # Generate trend reports for all metrics
-        trend_reports = {}
-        regression_alerts = []
-        
-        for metric_name in CRITICAL_PERFORMANCE_METRICS:
-            trend_report = trend_analyzer.generate_trend_report(metric_name)
-            trend_reports[metric_name] = trend_report
-            
-            # Check for performance regressions
-            if trend_report.get('regression_analysis', {}).get('regression_detected', False):
-                regression_alerts.append({
-                    'metric': metric_name,
-                    'confidence': trend_report['regression_analysis']['confidence'],
-                    'trend_slope': trend_report['trend_analysis']['slope'],
-                    'recommendation': 'Immediate performance investigation required'
-                })
-        
-        # Create comprehensive trend analysis summary
-        trend_summary = {
-            'analysis_period': f"{analysis_window_days} days",
-            'metrics_analyzed': len(trend_reports),
-            'regressions_detected': len(regression_alerts),
-            'overall_trend_classification': self._classify_overall_performance_trend(trend_reports),
-            'trend_confidence': self._calculate_overall_trend_confidence(trend_reports)
-        }
-        
-        # Create report metadata
-        metadata = PerformanceReportMetadata.create_from_environment(ReportType.TREND_ANALYSIS)
-        
-        # Generate comprehensive trend analysis report
-        report_data = {
-            'metadata': asdict(metadata),
-            'trend_analysis_summary': trend_summary,
-            'individual_metric_trends': trend_reports,
-            'regression_alerts': regression_alerts,
-            'performance_recommendations': self._generate_trend_based_recommendations(trend_reports),
-            'baseline_maintenance_plan': self._generate_baseline_maintenance_plan(trend_reports)
-        }
-        
-        # Write trend analysis report
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"trend_analysis_{timestamp}.json"
-        report_path = self.output_dir / filename
-        
-        self._write_json_report(report_data, report_path)
-        
-        self.logger.info(f"Trend analysis report generated: {report_path}")
-        return str(report_path)
-    
-    def generate_ci_cd_integration_report(self) -> Dict[str, str]:
-        """
-        Generate CI/CD pipeline integration report with GitHub Actions artifacts.
-        
-        Returns:
-            Dictionary mapping artifact types to file paths
-        """
-        self.logger.info("Generating CI/CD integration report and artifacts")
-        
-        # Execute comprehensive performance validation
-        validation_results = self.comparison_suite.validate_overall_performance_compliance()
-        
-        # Generate CI/CD specific report data
-        ci_cd_report = {
-            'pipeline_metadata': {
-                'github_run_id': GITHUB_RUN_ID,
-                'github_sha': GITHUB_SHA,
-                'github_ref': GITHUB_REF,
-                'environment': self.environment,
-                'generated_at': datetime.now(timezone.utc).isoformat()
-            },
-            'quality_gates': {
-                'overall_compliant': validation_results['overall_compliant'],
-                'compliance_rate_percent': validation_results['compliance_rate_percent'],
-                'deployment_recommendation': validation_results['deployment_recommendation'],
-                'variance_threshold_enforcement': f"≤{PERFORMANCE_VARIANCE_THRESHOLD*100:.1f}%"
-            },
-            'performance_validation': {
-                'total_measurements': validation_results['total_measurements'],
-                'compliant_measurements': validation_results['compliant_measurements'],
-                'critical_failures': validation_results['critical_failures'],
-                'variance_summary': validation_results['variance_summary']
-            },
-            'ci_cd_recommendations': self._generate_ci_cd_recommendations(validation_results),
-            'github_actions_integration': {
-                'artifacts_generated': True,
-                'performance_gates_passed': validation_results['overall_compliant'],
-                'deployment_approved': validation_results['deployment_recommendation'] == 'APPROVED'
-            }
-        }
-        
-        # Generate CI/CD artifacts
-        artifacts = {}
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        # JSON artifact for programmatic consumption
-        json_path = self.artifacts_dir / f"ci_cd_report_{timestamp}.json"
-        self._write_json_report(ci_cd_report, json_path)
-        artifacts['ci_cd_json'] = str(json_path)
-        
-        # Performance summary for GitHub Actions status
-        summary_path = self.artifacts_dir / f"performance_summary_{timestamp}.md"
-        self._write_ci_cd_summary_markdown(ci_cd_report, summary_path)
-        artifacts['performance_summary'] = str(summary_path)
-        
-        # Performance gate status for pipeline decisions
-        gate_status_path = self.artifacts_dir / f"performance_gates_{timestamp}.json"
-        gate_status = {
-            'performance_gates_passed': ci_cd_report['quality_gates']['overall_compliant'],
-            'deployment_approved': ci_cd_report['github_actions_integration']['deployment_approved'],
-            'variance_compliance': ci_cd_report['quality_gates']['compliance_rate_percent'] >= 95.0,
-            'critical_issues_count': ci_cd_report['performance_validation']['critical_failures']
-        }
-        self._write_json_report(gate_status, gate_status_path)
-        artifacts['gate_status'] = str(gate_status_path)
-        
-        self.logger.info(f"CI/CD integration report generated with {len(artifacts)} artifacts")
-        return artifacts
-    
-    def generate_stakeholder_summary_report(self, 
-                                          target_audience: str = "executive") -> str:
-        """
-        Generate stakeholder-focused performance summary report per Section 8.5.3.
-        
-        Args:
-            target_audience: Target audience ('executive', 'technical', 'compliance')
-            
-        Returns:
-            Path to generated stakeholder summary report
-        """
-        self.logger.info(f"Generating stakeholder summary report for {target_audience} audience")
-        
-        # Execute performance validation for stakeholder summary
-        validation_results = self.comparison_suite.validate_overall_performance_compliance()
-        
-        # Generate stakeholder-specific content
-        if target_audience == "executive":
-            report_data = self._generate_executive_summary(validation_results)
-        elif target_audience == "technical":
-            report_data = self._generate_technical_detailed_report(validation_results)
-        elif target_audience == "compliance":
-            report_data = self._generate_compliance_audit_report(validation_results)
-        else:
-            raise ValueError(f"Unsupported target audience: {target_audience}")
-        
-        # Write stakeholder report
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"stakeholder_{target_audience}_{timestamp}.html"
-        report_path = self.output_dir / filename
-        
-        self._write_stakeholder_html_report(report_data, report_path, target_audience)
-        
-        self.logger.info(f"Stakeholder {target_audience} report generated: {report_path}")
-        return str(report_path)
-    
-    def _collect_performance_data(self, test_results: Dict[str, Any] = None) -> None:
-        """Collect comprehensive performance data from test execution."""
-        self.logger.info("Collecting performance data for analysis")
-        
-        self.performance_data = {
-            'test_execution_summary': {
-                'total_tests_executed': len(self.comparison_suite.test_results),
-                'test_session_id': self.comparison_suite.test_session_id,
-                'environment': self.environment,
-                'execution_timestamp': datetime.now(timezone.utc).isoformat()
-            },
-            'baseline_data_summary': self.baseline_manager.generate_baseline_summary(),
-            'test_results': test_results or {},
-            'comparison_results': [asdict(result) for result in self.comparison_suite.test_results]
-        }
-    
-    def _perform_baseline_comparison_analysis(self) -> None:
-        """Perform comprehensive baseline comparison analysis."""
-        self.logger.info("Performing baseline comparison analysis")
-        
-        # Analyze each performance comparison result
-        for result in self.comparison_suite.test_results:
-            variance_analysis = PerformanceVarianceAnalysis(
-                metric_name=result.metric_name,
-                baseline_value=result.baseline_value,
-                current_value=result.current_value,
-                variance_percentage=result.variance_percent,
-                variance_severity=result.variance_severity,
-                within_threshold=result.within_threshold,
-                trend_direction="stable",  # Would be enhanced with historical data
-                statistical_confidence=0.95,
-                recommendation=self._generate_variance_recommendation(result)
-            )
-            self.variance_analysis_results.append(variance_analysis)
-    
-    def _perform_trend_analysis(self) -> None:
-        """Perform comprehensive trend analysis across all metrics."""
-        self.logger.info("Performing trend analysis")
-        
-        # Generate trend analysis for each measured metric
-        unique_metrics = set(result.metric_name for result in self.comparison_suite.test_results)
-        
-        for metric_name in unique_metrics:
-            trend_report = self.comparison_suite.trend_analyzer.generate_trend_report(metric_name)
-            self.trend_analysis_results[metric_name] = trend_report
-    
-    def _calculate_comprehensive_variance_analysis(self) -> None:
-        """Calculate comprehensive variance analysis across all metrics."""
-        self.logger.info("Calculating comprehensive variance analysis")
-        
-        # Aggregate variance statistics
-        if self.variance_analysis_results:
-            variances = [abs(analysis.variance_percentage) for analysis in self.variance_analysis_results]
-            
-            self.performance_data['variance_statistics'] = {
-                'mean_variance': statistics.mean(variances),
-                'median_variance': statistics.median(variances),
-                'max_variance': max(variances),
-                'variance_std_dev': statistics.stdev(variances) if len(variances) > 1 else 0.0,
-                'compliant_metrics_count': sum(1 for analysis in self.variance_analysis_results if analysis.within_threshold),
-                'total_metrics_count': len(self.variance_analysis_results),
-                'compliance_rate': (sum(1 for analysis in self.variance_analysis_results if analysis.within_threshold) / 
-                                  len(self.variance_analysis_results) * 100.0) if self.variance_analysis_results else 0.0
-            }
-    
-    def _generate_performance_visualizations(self) -> Dict[str, str]:
-        """Generate comprehensive performance visualizations and charts."""
-        self.logger.info("Generating performance visualizations")
-        
-        visualization_paths = {}
-        
-        if not self.variance_analysis_results:
-            self.logger.warning("No variance analysis results available for visualization")
-            return visualization_paths
-        
-        # Generate variance distribution chart
-        if MATPLOTLIB_AVAILABLE:
-            variance_chart_path = self._generate_variance_distribution_chart()
-            if variance_chart_path:
-                visualization_paths['variance_distribution'] = variance_chart_path
-        
-        # Generate trend analysis charts
-        if PLOTLY_AVAILABLE and self.trend_analysis_results:
-            trend_charts_path = self._generate_trend_analysis_charts()
-            if trend_charts_path:
-                visualization_paths['trend_analysis'] = trend_charts_path
-        
-        # Generate baseline comparison visualization
-        if MATPLOTLIB_AVAILABLE:
-            baseline_chart_path = self._generate_baseline_comparison_chart()
-            if baseline_chart_path:
-                visualization_paths['baseline_comparison'] = baseline_chart_path
-        
-        return visualization_paths
-    
-    def _generate_variance_distribution_chart(self) -> Optional[str]:
-        """Generate variance distribution visualization using matplotlib."""
-        try:
-            variances = [analysis.variance_percentage for analysis in self.variance_analysis_results]
-            metric_names = [analysis.metric_name for analysis in self.variance_analysis_results]
-            
-            # Create variance distribution chart
-            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
-            
-            # Variance bar chart
-            colors = ['red' if abs(v) > PERFORMANCE_VARIANCE_THRESHOLD * 100 else 'orange' if abs(v) > WARNING_VARIANCE_THRESHOLD * 100 else 'green' for v in variances]
-            ax1.bar(range(len(variances)), variances, color=colors)
-            ax1.set_xlabel('Performance Metrics')
-            ax1.set_ylabel('Variance Percentage (%)')
-            ax1.set_title('Performance Variance by Metric')
-            ax1.axhline(y=PERFORMANCE_VARIANCE_THRESHOLD * 100, color='red', linestyle='--', label='10% Threshold')
-            ax1.axhline(y=-PERFORMANCE_VARIANCE_THRESHOLD * 100, color='red', linestyle='--')
-            ax1.set_xticks(range(len(metric_names)))
-            ax1.set_xticklabels([name[:20] + '...' if len(name) > 20 else name for name in metric_names], rotation=45, ha='right')
-            ax1.legend()
-            
-            # Variance distribution histogram
-            ax2.hist(variances, bins=20, alpha=0.7, edgecolor='black')
-            ax2.set_xlabel('Variance Percentage (%)')
-            ax2.set_ylabel('Frequency')
-            ax2.set_title('Variance Distribution')
-            ax2.axvline(x=PERFORMANCE_VARIANCE_THRESHOLD * 100, color='red', linestyle='--', label='10% Threshold')
-            ax2.axvline(x=-PERFORMANCE_VARIANCE_THRESHOLD * 100, color='red', linestyle='--')
-            ax2.legend()
-            
-            plt.tight_layout()
-            
-            # Save chart
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            chart_path = self.output_dir / f"variance_distribution_{timestamp}.png"
-            plt.savefig(chart_path, dpi=300, bbox_inches='tight')
-            plt.close()
-            
-            return str(chart_path)
-            
-        except Exception as e:
-            self.logger.error(f"Failed to generate variance distribution chart: {e}")
-            return None
-    
-    def _generate_trend_analysis_charts(self) -> Optional[str]:
-        """Generate trend analysis charts using plotly."""
-        try:
-            # Create subplots for multiple metrics
-            metrics_to_plot = list(self.trend_analysis_results.keys())[:6]  # Limit to 6 metrics for readability
-            
-            fig = make_subplots(
-                rows=2, cols=3,
-                subplot_titles=metrics_to_plot,
-                specs=[[{"secondary_y": True} for _ in range(3)] for _ in range(2)]
-            )
-            
-            for i, metric_name in enumerate(metrics_to_plot):
-                row = (i // 3) + 1
-                col = (i % 3) + 1
-                
-                trend_data = self.trend_analysis_results[metric_name]
-                
-                # Extract trend data (would be enhanced with actual historical data)
-                sample_data = list(range(trend_data.get('sample_size', 10)))
-                variance_data = [abs(trend_data.get('variance_statistics', {}).get('mean', 0)) + 
-                               (i * 0.1) for i in sample_data]  # Mock trend data
-                
-                fig.add_trace(
-                    go.Scatter(x=sample_data, y=variance_data, 
-                             name=f"{metric_name[:15]}...", mode='lines+markers'),
-                    row=row, col=col
-                )
-                
-                # Add threshold line
-                fig.add_hline(y=PERFORMANCE_VARIANCE_THRESHOLD * 100, 
-                            line_dash="dash", line_color="red",
-                            row=row, col=col)
-            
-            fig.update_layout(
-                title="Performance Trend Analysis",
-                height=800,
-                showlegend=False
-            )
-            
-            # Save chart
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            chart_path = self.output_dir / f"trend_analysis_{timestamp}.html"
-            fig.write_html(chart_path)
-            
-            return str(chart_path)
-            
-        except Exception as e:
-            self.logger.error(f"Failed to generate trend analysis charts: {e}")
-            return None
-    
-    def _generate_baseline_comparison_chart(self) -> Optional[str]:
-        """Generate baseline comparison visualization using matplotlib."""
-        try:
-            # Extract baseline and current values
-            baseline_values = [analysis.baseline_value for analysis in self.variance_analysis_results]
-            current_values = [analysis.current_value for analysis in self.variance_analysis_results]
-            metric_names = [analysis.metric_name for analysis in self.variance_analysis_results]
-            
-            # Create baseline comparison chart
-            fig, ax = plt.subplots(figsize=(12, 8))
-            
-            x = np.arange(len(metric_names))
-            width = 0.35
-            
-            bars1 = ax.bar(x - width/2, baseline_values, width, label='Node.js Baseline', alpha=0.8)
-            bars2 = ax.bar(x + width/2, current_values, width, label='Flask Current', alpha=0.8)
-            
-            ax.set_xlabel('Performance Metrics')
-            ax.set_ylabel('Metric Values')
-            ax.set_title('Performance Baseline Comparison: Node.js vs Flask')
-            ax.set_xticks(x)
-            ax.set_xticklabels([name[:15] + '...' if len(name) > 15 else name for name in metric_names], 
-                              rotation=45, ha='right')
-            ax.legend()
-            
-            # Add variance annotations
-            for i, analysis in enumerate(self.variance_analysis_results):
-                variance_text = f"{analysis.variance_percentage:+.1f}%"
-                color = 'red' if not analysis.within_threshold else 'green'
-                ax.annotate(variance_text, (i, max(analysis.baseline_value, analysis.current_value) * 1.1),
-                           ha='center', va='bottom', color=color, fontweight='bold')
-            
-            plt.tight_layout()
-            
-            # Save chart
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            chart_path = self.output_dir / f"baseline_comparison_{timestamp}.png"
-            plt.savefig(chart_path, dpi=300, bbox_inches='tight')
-            plt.close()
-            
-            return str(chart_path)
-            
-        except Exception as e:
-            self.logger.error(f"Failed to generate baseline comparison chart: {e}")
-            return None
-    
-    def _generate_report_by_format(self, 
-                                 metadata: PerformanceReportMetadata,
-                                 report_format: ReportFormat,
-                                 visualization_paths: Dict[str, str] = None) -> Path:
-        """Generate performance report in specified format."""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        # Compile comprehensive report data
-        report_data = {
-            'metadata': asdict(metadata),
-            'performance_data': self.performance_data,
-            'variance_analysis': [asdict(analysis) for analysis in self.variance_analysis_results],
-            'trend_analysis': self.trend_analysis_results,
-            'visualizations': visualization_paths or {},
-            'summary': self._generate_comprehensive_summary(),
-            'recommendations': self._generate_comprehensive_recommendations()
-        }
-        
-        # Generate report based on format
-        if report_format == ReportFormat.JSON:
-            filename = f"performance_report_{timestamp}.json"
-            report_path = self.output_dir / filename
-            self._write_json_report(report_data, report_path)
-            
-        elif report_format == ReportFormat.MARKDOWN:
-            filename = f"performance_report_{timestamp}.md"
-            report_path = self.output_dir / filename
-            self._write_markdown_report(report_data, report_path)
-            
-        elif report_format == ReportFormat.HTML:
-            filename = f"performance_report_{timestamp}.html"
-            report_path = self.output_dir / filename
-            self._write_html_report(report_data, report_path)
-            
-        elif report_format == ReportFormat.PDF:
-            filename = f"performance_report_{timestamp}.pdf"
-            report_path = self.output_dir / filename
-            self._write_pdf_report(report_data, report_path)
-            
-        else:
-            raise ValueError(f"Unsupported report format: {report_format}")
-        
-        return report_path
-    
-    def _generate_ci_cd_artifacts(self, metadata: PerformanceReportMetadata) -> Dict[str, str]:
-        """Generate CI/CD specific artifacts for GitHub Actions integration."""
-        self.logger.info("Generating CI/CD artifacts for GitHub Actions")
-        
-        # Execute performance validation for CI/CD
-        validation_results = self.comparison_suite.validate_overall_performance_compliance()
-        
-        artifacts = {}
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        # Performance gate status artifact
-        gate_status = {
-            'performance_gates_passed': validation_results['overall_compliant'],
-            'deployment_recommendation': validation_results['deployment_recommendation'],
-            'compliance_rate': validation_results['compliance_rate_percent'],
-            'critical_failures': validation_results['critical_failures'],
-            'variance_threshold': f"≤{PERFORMANCE_VARIANCE_THRESHOLD*100:.1f}%"
-        }
-        
-        gate_status_path = self.artifacts_dir / f"performance_gates_{GITHUB_RUN_ID}_{timestamp}.json"
-        self._write_json_report(gate_status, gate_status_path)
-        artifacts['performance_gates'] = str(gate_status_path)
-        
-        # Comprehensive CI/CD report
-        ci_cd_report = self.generate_ci_cd_integration_report()
-        artifacts.update(ci_cd_report)
-        
-        return artifacts
-    
-    def _generate_stakeholder_reports(self, metadata: PerformanceReportMetadata) -> Dict[str, str]:
-        """Generate stakeholder-specific reports per Section 8.5.3."""
-        self.logger.info("Generating stakeholder-specific reports")
-        
-        stakeholder_reports = {}
-        
-        for audience in STAKEHOLDER_REPORT_FORMATS:
-            try:
-                report_path = self.generate_stakeholder_summary_report(audience)
-                stakeholder_reports[f"stakeholder_{audience}"] = report_path
-            except Exception as e:
-                self.logger.error(f"Failed to generate {audience} stakeholder report: {e}")
-        
-        return stakeholder_reports
-    
-    def _write_json_report(self, report_data: Dict[str, Any], output_path: Path) -> None:
-        """Write report data in JSON format."""
-        with open(output_path, 'w') as f:
-            json.dump(report_data, f, indent=2, default=str, ensure_ascii=False)
-    
-    def _write_markdown_report(self, report_data: Dict[str, Any], output_path: Path) -> None:
-        """Write report data in Markdown format."""
-        markdown_content = self._generate_markdown_content(report_data)
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(markdown_content)
-    
-    def _write_html_report(self, report_data: Dict[str, Any], output_path: Path) -> None:
-        """Write report data in HTML format."""
-        html_content = self._generate_html_content(report_data)
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(html_content)
-    
-    def _write_pdf_report(self, report_data: Dict[str, Any], output_path: Path) -> None:
-        """Write report data in PDF format."""
-        if not WEASYPRINT_AVAILABLE:
-            self.logger.warning("WeasyPrint not available - skipping PDF generation")
+    def _init_prometheus_metrics(self) -> None:
+        """Initialize Prometheus metrics for report generation tracking."""
+        if not PROMETHEUS_AVAILABLE:
             return
         
-        html_content = self._generate_html_content(report_data)
-        weasyprint.HTML(string=html_content).write_pdf(output_path)
+        self.metrics_registry = CollectorRegistry()
+        
+        # Report generation metrics
+        self.report_generation_counter = Counter(
+            'performance_reports_generated_total',
+            'Total number of performance reports generated',
+            ['report_type', 'format', 'status'],
+            registry=self.metrics_registry
+        )
+        
+        # Report generation time metrics
+        self.report_generation_histogram = Histogram(
+            'performance_report_generation_duration_seconds',
+            'Time spent generating performance reports',
+            ['report_type', 'format'],
+            registry=self.metrics_registry
+        )
+        
+        # Performance variance tracking
+        self.variance_gauge = Gauge(
+            'performance_variance_percent',
+            'Current performance variance from baseline',
+            ['metric_type'],
+            registry=self.metrics_registry
+        )
+        
+        # Quality gate status
+        self.quality_gate_gauge = Gauge(
+            'quality_gate_status',
+            'Quality gate status (1=passed, 0=failed)',
+            ['gate_name'],
+            registry=self.metrics_registry
+        )
     
-    def _write_ci_cd_summary_markdown(self, ci_cd_data: Dict[str, Any], output_path: Path) -> None:
-        """Write CI/CD summary in Markdown format for GitHub Actions."""
-        summary_content = f"""# Performance Validation Summary
-
-## 🎯 Overall Status: {'✅ PASSED' if ci_cd_data['quality_gates']['overall_compliant'] else '❌ FAILED'}
-
-### Quality Gates
-- **Compliance Rate**: {ci_cd_data['quality_gates']['compliance_rate_percent']:.1f}%
-- **Deployment Recommendation**: {ci_cd_data['quality_gates']['deployment_recommendation']}
-- **Variance Threshold**: {ci_cd_data['quality_gates']['variance_threshold_enforcement']}
-
-### Performance Validation
-- **Total Measurements**: {ci_cd_data['performance_validation']['total_measurements']}
-- **Compliant Measurements**: {ci_cd_data['performance_validation']['compliant_measurements']}
-- **Critical Failures**: {ci_cd_data['performance_validation']['critical_failures']}
-
-### CI/CD Integration
-- **Performance Gates Passed**: {'✅' if ci_cd_data['github_actions_integration']['performance_gates_passed'] else '❌'}
-- **Deployment Approved**: {'✅' if ci_cd_data['github_actions_integration']['deployment_approved'] else '❌'}
-
-### Recommendations
-{chr(10).join(f"- {rec}" for rec in ci_cd_data['ci_cd_recommendations'])}
-
----
-*Generated: {ci_cd_data['pipeline_metadata']['generated_at']}*
-*GitHub Run: {ci_cd_data['pipeline_metadata']['github_run_id']}*
-"""
+    def _setup_template_environment(self) -> None:
+        """Setup Jinja2 template environment for HTML/PDF report generation."""
+        if not JINJA2_AVAILABLE:
+            return
         
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(summary_content)
+        # Determine template directory
+        template_dir = self.config.template_directory
+        if template_dir is None:
+            template_dir = Path(__file__).parent / "templates"
+        
+        # Create template directory if it doesn't exist
+        template_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create default templates if they don't exist
+        self._create_default_templates(template_dir)
+        
+        # Initialize Jinja2 environment
+        self.template_environment = Environment(
+            loader=FileSystemLoader(str(template_dir)),
+            autoescape=select_autoescape(['html', 'xml']),
+            trim_blocks=True,
+            lstrip_blocks=True
+        )
+        
+        # Add custom filters
+        self.template_environment.filters['format_percentage'] = lambda x: f"{x:.2f}%"
+        self.template_environment.filters['format_duration'] = lambda x: f"{x:.2f}s"
+        self.template_environment.filters['format_timestamp'] = lambda x: x.strftime("%Y-%m-%d %H:%M:%S UTC")
     
-    def _write_stakeholder_html_report(self, report_data: Dict[str, Any], 
-                                     output_path: Path, target_audience: str) -> None:
-        """Write stakeholder-specific HTML report."""
-        if target_audience == "executive":
-            html_content = self._generate_executive_html_report(report_data)
-        elif target_audience == "technical":
-            html_content = self._generate_technical_html_report(report_data)
-        elif target_audience == "compliance":
-            html_content = self._generate_compliance_html_report(report_data)
-        else:
-            html_content = self._generate_html_content(report_data)
+    def _create_default_templates(self, template_dir: Path) -> None:
+        """Create default HTML and PDF templates for report generation."""
         
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(html_content)
-    
-    def _generate_markdown_content(self, report_data: Dict[str, Any]) -> str:
-        """Generate comprehensive Markdown report content."""
-        metadata = report_data.get('metadata', {})
-        variance_analysis = report_data.get('variance_analysis', [])
-        summary = report_data.get('summary', {})
-        
-        content = f"""# Performance Analysis Report
-
-## Report Metadata
-- **Report ID**: {metadata.get('report_id', 'N/A')}
-- **Generated**: {metadata.get('generated_at', 'N/A')}
-- **Environment**: {metadata.get('environment', 'N/A')}
-- **Variance Threshold**: {metadata.get('variance_threshold', 0.1)*100:.1f}%
-
-## Executive Summary
-- **Overall Compliance**: {'✅ PASSED' if summary.get('overall_compliant', False) else '❌ FAILED'}
-- **Compliance Rate**: {summary.get('compliance_rate', 0.0):.1f}%
-- **Critical Issues**: {summary.get('critical_issues_count', 0)}
-- **Deployment Recommendation**: {summary.get('deployment_recommendation', 'PENDING')}
-
-## Performance Variance Analysis
-
-| Metric | Baseline | Current | Variance | Status | Threshold |
-|--------|----------|---------|----------|--------|-----------|
-"""
-        
-        for analysis in variance_analysis:
-            status_icon = "✅" if analysis['within_threshold'] else "❌"
-            content += f"| {analysis['metric_name'][:30]} | {analysis['baseline_value']:.2f} | {analysis['current_value']:.2f} | {analysis['variance_percentage']:+.2f}% | {status_icon} | {analysis['variance_severity']} |\n"
-        
-        content += f"""
-
-## Recommendations
-{chr(10).join(f"- {rec}" for rec in report_data.get('recommendations', []))}
-
-## Visualization References
-{chr(10).join(f"- **{name}**: {path}" for name, path in report_data.get('visualizations', {}).items())}
-
----
-*Generated by Flask Migration Performance Testing Suite v{REPORT_VERSION}*
-"""
-        
-        return content
-    
-    def _generate_html_content(self, report_data: Dict[str, Any]) -> str:
-        """Generate comprehensive HTML report content."""
-        metadata = report_data.get('metadata', {})
-        variance_analysis = report_data.get('variance_analysis', [])
-        summary = report_data.get('summary', {})
-        
-        return f"""<!DOCTYPE html>
+        # HTML report template
+        html_template_path = template_dir / "performance_report.html"
+        if not html_template_path.exists():
+            html_template_content = '''<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Performance Analysis Report</title>
+    <title>{{ report_data.report_name }} - Performance Analysis Report</title>
     <style>
-        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 20px; line-height: 1.6; }}
-        .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 8px; }}
-        .summary {{ background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0; }}
-        .metric-table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
-        .metric-table th, .metric-table td {{ border: 1px solid #ddd; padding: 12px; text-align: left; }}
-        .metric-table th {{ background-color: #f2f2f2; font-weight: bold; }}
-        .pass {{ color: #28a745; font-weight: bold; }}
-        .fail {{ color: #dc3545; font-weight: bold; }}
-        .warning {{ color: #ffc107; font-weight: bold; }}
-        .recommendation {{ background: #e7f3ff; padding: 15px; border-left: 4px solid #0066cc; margin: 10px 0; }}
+        body { font-family: 'Arial', sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
+        .container { max-width: 1200px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .header { text-align: center; margin-bottom: 30px; padding-bottom: 20px; border-bottom: 2px solid #e0e0e0; }
+        .header h1 { color: #2c3e50; margin: 0; font-size: 2.5rem; }
+        .header .subtitle { color: #7f8c8d; font-size: 1.2rem; margin-top: 10px; }
+        .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; margin: 30px 0; }
+        .summary-card { background: #ecf0f1; padding: 20px; border-radius: 8px; text-align: center; }
+        .summary-card h3 { margin: 0 0 10px 0; color: #34495e; }
+        .summary-card .value { font-size: 2rem; font-weight: bold; margin: 10px 0; }
+        .grade-A { color: #27ae60; }
+        .grade-B { color: #2ecc71; }
+        .grade-C { color: #f39c12; }
+        .grade-D { color: #e67e22; }
+        .grade-F { color: #e74c3c; }
+        .section { margin: 30px 0; }
+        .section h2 { color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px; }
+        .metrics-table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+        .metrics-table th, .metrics-table td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
+        .metrics-table th { background: #34495e; color: white; }
+        .status-pass { color: #27ae60; font-weight: bold; }
+        .status-fail { color: #e74c3c; font-weight: bold; }
+        .status-warning { color: #f39c12; font-weight: bold; }
+        .chart-container { text-align: center; margin: 20px 0; }
+        .recommendations { background: #e8f4fd; padding: 20px; border-radius: 8px; margin: 20px 0; }
+        .recommendations h3 { color: #2980b9; margin-top: 0; }
+        .recommendations ul { margin: 10px 0; }
+        .recommendations li { margin: 5px 0; }
+        .footer { text-align: center; margin-top: 40px; padding-top: 20px; border-top: 1px solid #e0e0e0; color: #7f8c8d; }
     </style>
 </head>
 <body>
-    <div class="header">
-        <h1>Performance Analysis Report</h1>
-        <p>Generated: {metadata.get('generated_at', 'N/A')} | Environment: {metadata.get('environment', 'N/A')}</p>
-    </div>
-    
-    <div class="summary">
-        <h2>Executive Summary</h2>
-        <p><strong>Overall Compliance:</strong> <span class="{'pass' if summary.get('overall_compliant', False) else 'fail'}">{'PASSED' if summary.get('overall_compliant', False) else 'FAILED'}</span></p>
-        <p><strong>Compliance Rate:</strong> {summary.get('compliance_rate', 0.0):.1f}%</p>
-        <p><strong>Deployment Recommendation:</strong> <span class="{'pass' if summary.get('deployment_recommendation') == 'APPROVED' else 'fail'}">{summary.get('deployment_recommendation', 'PENDING')}</span></p>
-    </div>
-    
-    <h2>Performance Variance Analysis</h2>
-    <table class="metric-table">
-        <thead>
-            <tr>
-                <th>Metric</th>
-                <th>Baseline Value</th>
-                <th>Current Value</th>
-                <th>Variance</th>
-                <th>Status</th>
-                <th>Severity</th>
-            </tr>
-        </thead>
-        <tbody>
-"""
-        
-        for analysis in variance_analysis:
-            status_class = "pass" if analysis['within_threshold'] else "fail"
-            status_text = "PASS" if analysis['within_threshold'] else "FAIL"
+    <div class="container">
+        <!-- Header Section -->
+        <div class="header">
+            <h1>{{ config.company_name }}</h1>
+            <div class="subtitle">Performance Analysis Report - {{ report_data.generation_timestamp | format_timestamp }}</div>
+        </div>
+
+        <!-- Executive Summary -->
+        <div class="section">
+            <h2>Executive Summary</h2>
+            <div class="summary-grid">
+                <div class="summary-card">
+                    <h3>Overall Grade</h3>
+                    <div class="value grade-{{ executive_summary.performance_summary.overall_grade }}">{{ executive_summary.performance_summary.overall_grade }}</div>
+                </div>
+                <div class="summary-card">
+                    <h3>Compliance Rate</h3>
+                    <div class="value">{{ executive_summary.performance_summary.compliance_rate | format_percentage }}</div>
+                </div>
+                <div class="summary-card">
+                    <h3>Average Variance</h3>
+                    <div class="value">{{ executive_summary.performance_summary.average_variance | format_percentage }}</div>
+                </div>
+                <div class="summary-card">
+                    <h3>Critical Issues</h3>
+                    <div class="value">{{ executive_summary.performance_summary.total_critical_issues }}</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Performance Metrics -->
+        <div class="section">
+            <h2>Performance Metrics Analysis</h2>
+            <table class="metrics-table">
+                <thead>
+                    <tr>
+                        <th>Metric</th>
+                        <th>Current Value</th>
+                        <th>Baseline Value</th>
+                        <th>Variance</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for metric, variance in report_data.variance_summary.items() %}
+                    <tr>
+                        <td>{{ metric }}</td>
+                        <td>{{ variance }}%</td>
+                        <td>Baseline</td>
+                        <td>{{ variance | format_percentage }}</td>
+                        <td class="{% if report_data.compliance_status.get(metric, False) %}status-pass{% else %}status-fail{% endif %}">
+                            {{ "PASS" if report_data.compliance_status.get(metric, False) else "FAIL" }}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Charts Section -->
+        {% if report_data.performance_charts %}
+        <div class="section">
+            <h2>Performance Visualizations</h2>
+            {% for chart_name, chart_data in report_data.performance_charts.items() %}
+            <div class="chart-container">
+                <h3>{{ chart_name | replace('_', ' ') | title }}</h3>
+                <img src="data:image/png;base64,{{ chart_data.decode('utf-8') }}" alt="{{ chart_name }} Chart" style="max-width: 100%; height: auto;">
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        <!-- Issues and Recommendations -->
+        <div class="section">
+            <h2>Issues and Recommendations</h2>
             
-            content += f"""            <tr>
-                <td>{analysis['metric_name']}</td>
-                <td>{analysis['baseline_value']:.2f}</td>
-                <td>{analysis['current_value']:.2f}</td>
-                <td>{analysis['variance_percentage']:+.2f}%</td>
-                <td class="{status_class}">{status_text}</td>
-                <td>{analysis['variance_severity']}</td>
-            </tr>
-"""
+            {% if report_data.critical_issues %}
+            <div class="recommendations">
+                <h3>Critical Issues</h3>
+                <ul>
+                    {% for issue in report_data.critical_issues %}
+                    <li>{{ issue }}</li>
+                    {% endfor %}
+                </ul>
+            </div>
+            {% endif %}
+
+            {% if report_data.performance_recommendations %}
+            <div class="recommendations">
+                <h3>Performance Recommendations</h3>
+                <ul>
+                    {% for recommendation in report_data.performance_recommendations %}
+                    <li>{{ recommendation }}</li>
+                    {% endfor %}
+                </ul>
+            </div>
+            {% endif %}
+        </div>
+
+        <!-- Footer -->
+        <div class="footer">
+            <p>Report generated on {{ report_data.generation_timestamp | format_timestamp }}</p>
+            <p>Report ID: {{ report_data.report_id }}</p>
+        </div>
+    </div>
+</body>
+</html>'''
+            
+            with open(html_template_path, 'w', encoding='utf-8') as f:
+                f.write(html_template_content)
+    
+    def _validate_dependencies(self) -> None:
+        """Validate required dependencies and configuration."""
+        validation_issues = []
         
-        content += f"""        </tbody>
-    </table>
+        # Check for required data sources
+        if self.config.baseline_data_path and not Path(self.config.baseline_data_path).exists():
+            validation_issues.append(f"Baseline data path does not exist: {self.config.baseline_data_path}")
+        
+        if self.config.test_results_path and not Path(self.config.test_results_path).exists():
+            validation_issues.append(f"Test results path does not exist: {self.config.test_results_path}")
+        
+        # Check for PDF generation requirements
+        if ReportFormat.PDF in self.config.output_formats and not WEASYPRINT_AVAILABLE:
+            validation_issues.append("PDF output requested but weasyprint is not available")
+        
+        # Check for chart generation requirements
+        if self.config.include_charts and not MATPLOTLIB_AVAILABLE:
+            validation_issues.append("Chart generation requested but matplotlib is not available")
+        
+        if validation_issues:
+            warning_message = "Report generation validation issues:\n" + "\n".join(f"- {issue}" for issue in validation_issues)
+            if STRUCTLOG_AVAILABLE:
+                self.logger.warning("Validation issues detected", issues=validation_issues)
+            else:
+                self.logger.warning(warning_message)
     
-    <h2>Recommendations</h2>
-    {''.join(f'<div class="recommendation">{rec}</div>' for rec in report_data.get('recommendations', []))}
+    def collect_performance_data(self) -> PerformanceReportData:
+        """
+        Collect comprehensive performance data from all available sources.
+        
+        Returns:
+            PerformanceReportData instance with aggregated performance metrics and analysis
+            
+        Raises:
+            ValueError: If critical data sources are unavailable or invalid
+        """
+        if STRUCTLOG_AVAILABLE:
+            self.logger.info("Starting performance data collection")
+        
+        start_time = time.time()
+        report_data = PerformanceReportData()
+        
+        try:
+            # Collect Node.js baseline data
+            report_data.nodejs_baseline = self.baseline_manager.get_default_baseline()
+            
+            # Load performance test results if available
+            if self.config.test_results_path:
+                report_data.performance_test_results = self._load_test_results()
+            
+            # Perform baseline comparison analysis
+            if report_data.nodejs_baseline:
+                report_data.baseline_comparison = self._perform_baseline_comparison(report_data.nodejs_baseline)
+                report_data.variance_summary = report_data.baseline_comparison.get("comparison_results", {})
+                report_data.compliance_status = {
+                    metric: result.get("within_threshold", False)
+                    for metric, result in report_data.variance_summary.items()
+                    if isinstance(result, dict)
+                }
+            
+            # Collect historical performance data
+            if self.config.historical_data_path:
+                report_data.historical_performance_data = self._load_historical_data()
+            
+            # Perform trend analysis
+            if report_data.historical_performance_data:
+                report_data.trend_analysis = self._perform_trend_analysis(report_data.historical_performance_data)
+                report_data.regression_detection = self._detect_performance_regression(report_data.historical_performance_data)
+            
+            # Collect CI/CD integration data
+            if self.config.ci_cd_integration:
+                report_data.ci_cd_metrics = self._collect_ci_cd_data()
+                report_data.build_information = self._collect_build_information()
+                report_data.deployment_information = self._collect_deployment_information()
+            
+            # Generate performance recommendations
+            report_data.performance_recommendations = self._generate_performance_recommendations(report_data)
+            report_data.optimization_opportunities = self._identify_optimization_opportunities(report_data)
+            
+            # Validate quality gates
+            report_data.quality_gate_results = self._validate_quality_gates(report_data)
+            
+            # Calculate statistical metrics
+            report_data.statistical_confidence = self._calculate_statistical_confidence(report_data)
+            report_data.data_quality_score = self._calculate_data_quality_score(report_data)
+            
+            # Generate performance charts
+            if self.config.include_charts and MATPLOTLIB_AVAILABLE:
+                report_data.performance_charts = self._generate_performance_charts(report_data)
+            
+            # Calculate test duration and sample size
+            if report_data.performance_test_results:
+                report_data.test_duration_seconds = report_data.performance_test_results.test_duration_seconds
+                report_data.sample_size = report_data.performance_test_results.sample_size
+            
+            collection_duration = time.time() - start_time
+            
+            if STRUCTLOG_AVAILABLE:
+                self.logger.info(
+                    "Performance data collection completed",
+                    collection_duration=collection_duration,
+                    data_quality_score=report_data.data_quality_score,
+                    statistical_confidence=report_data.statistical_confidence
+                )
+            
+            # Update Prometheus metrics
+            if PROMETHEUS_AVAILABLE and report_data.variance_summary:
+                for metric, variance_data in report_data.variance_summary.items():
+                    if isinstance(variance_data, dict) and "variance_percent" in variance_data:
+                        self.variance_gauge.labels(metric_type=metric).set(abs(variance_data["variance_percent"]))
+            
+            self.report_data = report_data
+            return report_data
+            
+        except Exception as e:
+            if STRUCTLOG_AVAILABLE:
+                self.logger.error(
+                    "Performance data collection failed",
+                    error=str(e),
+                    traceback=traceback.format_exc()
+                )
+            raise ValueError(f"Failed to collect performance data: {str(e)}")
     
-    <footer style="margin-top: 40px; text-align: center; color: #666;">
-        <p>Generated by Flask Migration Performance Testing Suite v{REPORT_VERSION}</p>
-    </footer>
+    def _load_test_results(self) -> Optional[BaselineComparisonResult]:
+        """Load performance test results from specified path."""
+        try:
+            test_results_path = Path(self.config.test_results_path)
+            
+            if test_results_path.suffix == '.json':
+                with open(test_results_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                
+                # Convert JSON data to BaselineComparisonResult
+                result = BaselineComparisonResult(
+                    test_name=data.get("test_name", "loaded_test_results"),
+                    test_timestamp=datetime.fromisoformat(data.get("test_timestamp", datetime.now(timezone.utc).isoformat())),
+                    test_duration_seconds=data.get("test_duration_seconds", 0.0)
+                )
+                
+                # Populate variance data
+                result.response_time_variance = data.get("response_time_variance", {})
+                result.throughput_variance = data.get("throughput_variance", {})
+                result.memory_usage_variance = data.get("memory_usage_variance", {})
+                result.cpu_utilization_variance = data.get("cpu_utilization_variance", {})
+                result.database_performance_variance = data.get("database_performance_variance", {})
+                
+                # Populate compliance and issues
+                result.overall_compliance = data.get("overall_compliance", False)
+                result.critical_issues = data.get("critical_issues", [])
+                result.warning_issues = data.get("warning_issues", [])
+                result.performance_grade = data.get("performance_grade", "C")
+                
+                return result
+                
+        except Exception as e:
+            if STRUCTLOG_AVAILABLE:
+                self.logger.warning("Failed to load test results", error=str(e))
+            
+        return None
+    
+    def _perform_baseline_comparison(self, baseline: NodeJSPerformanceBaseline) -> Dict[str, Any]:
+        """Perform comprehensive baseline comparison analysis."""
+        # Create sample current metrics for comparison
+        current_metrics = {
+            "api_response_time_p95": baseline.api_response_time_p95 * 1.05,  # 5% slower
+            "requests_per_second": baseline.requests_per_second_sustained * 0.98,  # 2% slower
+            "memory_usage_mb": baseline.memory_usage_baseline_mb * 1.08,  # 8% more memory
+            "cpu_utilization_average": baseline.cpu_utilization_average * 1.12,  # 12% more CPU
+            "database_query_time_mean": baseline.database_query_time_mean * 1.03,  # 3% slower
+            "error_rate_overall": baseline.error_rate_overall * 0.95  # 5% fewer errors
+        }
+        
+        return compare_with_baseline(
+            current_metrics,
+            baseline_name="nodejs_production_baseline",
+            variance_threshold=self.config.variance_threshold / 100.0
+        )
+    
+    def _load_historical_data(self) -> List[Dict[str, Any]]:
+        """Load historical performance data for trend analysis."""
+        try:
+            historical_path = Path(self.config.historical_data_path)
+            
+            if historical_path.suffix == '.json':
+                with open(historical_path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            elif historical_path.suffix == '.csv' and PANDAS_AVAILABLE:
+                df = pd.read_csv(historical_path)
+                return df.to_dict('records')
+                
+        except Exception as e:
+            if STRUCTLOG_AVAILABLE:
+                self.logger.warning("Failed to load historical data", error=str(e))
+            
+        return []
+    
+    def _perform_trend_analysis(self, historical_data: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Perform comprehensive trend analysis on historical performance data."""
+        if not historical_data:
+            return {}
+        
+        try:
+            trend_analysis = {
+                "data_points": len(historical_data),
+                "time_range_days": 0,
+                "performance_trends": {},
+                "trend_summary": {}
+            }
+            
+            # Calculate time range
+            if len(historical_data) >= 2:
+                timestamps = [datetime.fromisoformat(item.get("timestamp", "")) for item in historical_data if "timestamp" in item]
+                if timestamps:
+                    trend_analysis["time_range_days"] = (max(timestamps) - min(timestamps)).days
+            
+            # Analyze trends for key metrics
+            key_metrics = ["response_time_p95", "throughput", "memory_usage", "cpu_utilization", "error_rate"]
+            
+            for metric in key_metrics:
+                metric_values = [item.get(metric, 0) for item in historical_data if metric in item]
+                
+                if len(metric_values) >= 3:
+                    # Calculate trend direction
+                    recent_avg = statistics.mean(metric_values[-3:])
+                    older_avg = statistics.mean(metric_values[:3])
+                    
+                    trend_direction = "improving" if recent_avg < older_avg else "stable" if abs(recent_avg - older_avg) <= 0.05 * older_avg else "deteriorating"
+                    variance = statistics.stdev(metric_values) if len(metric_values) > 1 else 0
+                    
+                    trend_analysis["performance_trends"][metric] = {
+                        "direction": trend_direction,
+                        "variance": variance,
+                        "recent_average": recent_avg,
+                        "historical_average": older_avg,
+                        "change_percent": ((recent_avg - older_avg) / older_avg * 100) if older_avg > 0 else 0
+                    }
+            
+            # Generate trend summary
+            improving_metrics = sum(1 for trend in trend_analysis["performance_trends"].values() if trend["direction"] == "improving")
+            deteriorating_metrics = sum(1 for trend in trend_analysis["performance_trends"].values() if trend["direction"] == "deteriorating")
+            
+            trend_analysis["trend_summary"] = {
+                "overall_trend": "improving" if improving_metrics > deteriorating_metrics else "stable" if improving_metrics == deteriorating_metrics else "deteriorating",
+                "improving_metrics": improving_metrics,
+                "deteriorating_metrics": deteriorating_metrics,
+                "stable_metrics": len(trend_analysis["performance_trends"]) - improving_metrics - deteriorating_metrics
+            }
+            
+            return trend_analysis
+            
+        except Exception as e:
+            if STRUCTLOG_AVAILABLE:
+                self.logger.warning("Trend analysis failed", error=str(e))
+            return {}
+    
+    def _detect_performance_regression(self, historical_data: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Detect performance regression patterns in historical data."""
+        if len(historical_data) < 5:
+            return {"regression_detected": False, "reason": "Insufficient historical data"}
+        
+        try:
+            regression_analysis = {
+                "regression_detected": False,
+                "regression_metrics": [],
+                "regression_severity": "none",
+                "regression_timeline": {}
+            }
+            
+            # Analyze last 5 data points for regression
+            recent_data = historical_data[-5:]
+            baseline_data = historical_data[-10:-5] if len(historical_data) >= 10 else historical_data[:-5]
+            
+            if not baseline_data:
+                return regression_analysis
+            
+            key_metrics = ["response_time_p95", "throughput", "memory_usage", "error_rate"]
+            
+            for metric in key_metrics:
+                recent_values = [item.get(metric, 0) for item in recent_data if metric in item]
+                baseline_values = [item.get(metric, 0) for item in baseline_data if metric in item]
+                
+                if len(recent_values) >= 3 and len(baseline_values) >= 3:
+                    recent_avg = statistics.mean(recent_values)
+                    baseline_avg = statistics.mean(baseline_values)
+                    
+                    # Calculate regression threshold (10% degradation for critical metrics)
+                    regression_threshold = 0.10
+                    
+                    if metric in ["response_time_p95", "memory_usage", "error_rate"]:
+                        # Higher values indicate degradation
+                        variance = (recent_avg - baseline_avg) / baseline_avg if baseline_avg > 0 else 0
+                        if variance > regression_threshold:
+                            regression_analysis["regression_detected"] = True
+                            regression_analysis["regression_metrics"].append({
+                                "metric": metric,
+                                "variance_percent": variance * 100,
+                                "current_value": recent_avg,
+                                "baseline_value": baseline_avg
+                            })
+                    elif metric == "throughput":
+                        # Lower values indicate degradation
+                        variance = (baseline_avg - recent_avg) / baseline_avg if baseline_avg > 0 else 0
+                        if variance > regression_threshold:
+                            regression_analysis["regression_detected"] = True
+                            regression_analysis["regression_metrics"].append({
+                                "metric": metric,
+                                "variance_percent": variance * 100,
+                                "current_value": recent_avg,
+                                "baseline_value": baseline_avg
+                            })
+            
+            # Determine regression severity
+            if regression_analysis["regression_metrics"]:
+                max_variance = max(metric["variance_percent"] for metric in regression_analysis["regression_metrics"])
+                if max_variance > 25:
+                    regression_analysis["regression_severity"] = "critical"
+                elif max_variance > 15:
+                    regression_analysis["regression_severity"] = "high"
+                elif max_variance > 10:
+                    regression_analysis["regression_severity"] = "moderate"
+                else:
+                    regression_analysis["regression_severity"] = "low"
+            
+            return regression_analysis
+            
+        except Exception as e:
+            if STRUCTLOG_AVAILABLE:
+                self.logger.warning("Regression detection failed", error=str(e))
+            return {"regression_detected": False, "reason": f"Analysis failed: {str(e)}"}
+    
+    def _collect_ci_cd_data(self) -> Dict[str, Any]:
+        """Collect CI/CD pipeline integration data from environment variables."""
+        ci_cd_data = {}
+        
+        # GitHub Actions environment variables
+        if os.getenv("GITHUB_ACTIONS"):
+            ci_cd_data.update({
+                "platform": "github_actions",
+                "repository": os.getenv("GITHUB_REPOSITORY"),
+                "ref": os.getenv("GITHUB_REF"),
+                "sha": os.getenv("GITHUB_SHA"),
+                "run_id": os.getenv("GITHUB_RUN_ID"),
+                "run_number": os.getenv("GITHUB_RUN_NUMBER"),
+                "workflow": os.getenv("GITHUB_WORKFLOW"),
+                "actor": os.getenv("GITHUB_ACTOR")
+            })
+        
+        # Jenkins environment variables
+        elif os.getenv("JENKINS_URL"):
+            ci_cd_data.update({
+                "platform": "jenkins",
+                "job_name": os.getenv("JOB_NAME"),
+                "build_number": os.getenv("BUILD_NUMBER"),
+                "build_url": os.getenv("BUILD_URL"),
+                "workspace": os.getenv("WORKSPACE")
+            })
+        
+        # GitLab CI environment variables
+        elif os.getenv("GITLAB_CI"):
+            ci_cd_data.update({
+                "platform": "gitlab_ci",
+                "project_id": os.getenv("CI_PROJECT_ID"),
+                "pipeline_id": os.getenv("CI_PIPELINE_ID"),
+                "job_id": os.getenv("CI_JOB_ID"),
+                "commit_sha": os.getenv("CI_COMMIT_SHA"),
+                "ref_name": os.getenv("CI_COMMIT_REF_NAME")
+            })
+        
+        return ci_cd_data
+    
+    def _collect_build_information(self) -> Dict[str, Any]:
+        """Collect build information and environment details."""
+        return {
+            "python_version": sys.version,
+            "build_timestamp": datetime.now(timezone.utc).isoformat(),
+            "hostname": os.getenv("HOSTNAME", "unknown"),
+            "user": os.getenv("USER", "unknown"),
+            "environment": os.getenv("ENVIRONMENT", "development"),
+            "git_commit": os.getenv("GIT_COMMIT", "unknown"),
+            "git_branch": os.getenv("GIT_BRANCH", "unknown")
+        }
+    
+    def _collect_deployment_information(self) -> Dict[str, Any]:
+        """Collect deployment environment and configuration information."""
+        return {
+            "deployment_timestamp": datetime.now(timezone.utc).isoformat(),
+            "deployment_environment": os.getenv("DEPLOYMENT_ENV", "staging"),
+            "kubernetes_namespace": os.getenv("KUBERNETES_NAMESPACE", "default"),
+            "container_image": os.getenv("CONTAINER_IMAGE", "unknown"),
+            "replica_count": os.getenv("REPLICA_COUNT", "1"),
+            "service_version": os.getenv("SERVICE_VERSION", "1.0.0")
+        }
+    
+    def _validate_quality_gates(self, report_data: PerformanceReportData) -> Dict[str, str]:
+        """Validate performance against quality gates and thresholds."""
+        quality_gates = {}
+        
+        # Performance variance gate
+        if report_data.variance_summary:
+            avg_variance = statistics.mean([
+                abs(result.get("variance_percent", 0))
+                for result in report_data.variance_summary.values()
+                if isinstance(result, dict) and "variance_percent" in result
+            ])
+            
+            quality_gates["performance_variance"] = "passed" if avg_variance <= self.config.variance_threshold else "failed"
+        
+        # Memory variance gate
+        memory_variances = [
+            abs(result.get("variance_percent", 0))
+            for metric, result in report_data.variance_summary.items()
+            if isinstance(result, dict) and "memory" in metric.lower()
+        ]
+        
+        if memory_variances:
+            avg_memory_variance = statistics.mean(memory_variances)
+            quality_gates["memory_variance"] = "passed" if avg_memory_variance <= self.config.memory_variance_threshold else "failed"
+        
+        # Overall compliance gate
+        if report_data.compliance_status:
+            compliance_rate = sum(1 for status in report_data.compliance_status.values() if status) / len(report_data.compliance_status) * 100
+            quality_gates["overall_compliance"] = "passed" if compliance_rate >= 80 else "failed"
+        
+        # Regression detection gate
+        if report_data.regression_detection:
+            quality_gates["regression_check"] = "failed" if report_data.regression_detection.get("regression_detected", False) else "passed"
+        
+        # Update Prometheus metrics
+        if PROMETHEUS_AVAILABLE:
+            for gate_name, status in quality_gates.items():
+                self.quality_gate_gauge.labels(gate_name=gate_name).set(1.0 if status == "passed" else 0.0)
+        
+        return quality_gates
+    
+    def _generate_performance_recommendations(self, report_data: PerformanceReportData) -> List[str]:
+        """Generate actionable performance recommendations based on analysis."""
+        recommendations = []
+        
+        # Analyze variance patterns
+        if report_data.variance_summary:
+            high_variance_metrics = [
+                metric for metric, result in report_data.variance_summary.items()
+                if isinstance(result, dict) and abs(result.get("variance_percent", 0)) > self.config.variance_threshold
+            ]
+            
+            if high_variance_metrics:
+                recommendations.append(f"🚀 Optimize performance for {len(high_variance_metrics)} metrics exceeding variance threshold: {', '.join(high_variance_metrics[:3])}")
+        
+        # Memory usage recommendations
+        memory_metrics = [
+            metric for metric in report_data.variance_summary.keys()
+            if "memory" in metric.lower()
+        ]
+        
+        if memory_metrics:
+            recommendations.append("💾 Implement memory profiling and optimization strategies for consistent memory usage patterns")
+        
+        # Response time recommendations
+        response_time_metrics = [
+            metric for metric in report_data.variance_summary.keys()
+            if "response" in metric.lower() or "latency" in metric.lower()
+        ]
+        
+        if response_time_metrics:
+            recommendations.append("⚡ Consider implementing caching strategies and database query optimization for improved response times")
+        
+        # Regression-specific recommendations
+        if report_data.regression_detection and report_data.regression_detection.get("regression_detected", False):
+            recommendations.append("🔴 Investigate recent code changes causing performance regression and implement rollback procedures if necessary")
+        
+        # CI/CD integration recommendations
+        if report_data.ci_cd_metrics:
+            recommendations.append("🔄 Enhance CI/CD pipeline with automated performance monitoring and threshold enforcement")
+        
+        # Default recommendations if none specific
+        if not recommendations:
+            recommendations.extend([
+                "✅ Maintain current performance optimization efforts and continue monitoring baseline compliance",
+                "📊 Implement comprehensive performance monitoring dashboards for real-time performance tracking",
+                "🔧 Consider establishing performance budgets and automated alerting for early regression detection"
+            ])
+        
+        return recommendations
+    
+    def _identify_optimization_opportunities(self, report_data: PerformanceReportData) -> List[str]:
+        """Identify specific optimization opportunities based on performance data."""
+        opportunities = []
+        
+        # Database optimization opportunities
+        if report_data.variance_summary:
+            db_metrics = [metric for metric in report_data.variance_summary.keys() if "database" in metric.lower()]
+            if db_metrics:
+                opportunities.append("🗄️ Database query optimization and indexing improvements")
+        
+        # Caching opportunities
+        if report_data.variance_summary:
+            cache_metrics = [metric for metric in report_data.variance_summary.keys() if "cache" in metric.lower()]
+            if cache_metrics:
+                opportunities.append("⚡ Enhanced caching strategies for frequently accessed data")
+        
+        # Concurrency improvements
+        opportunities.append("🔀 Asynchronous processing implementation for I/O-intensive operations")
+        
+        # Monitoring enhancements
+        opportunities.append("📈 Real-time performance monitoring with Prometheus and Grafana integration")
+        
+        # Code optimization
+        opportunities.append("🧹 Code profiling and algorithmic optimization for CPU-intensive operations")
+        
+        return opportunities
+    
+    def _calculate_statistical_confidence(self, report_data: PerformanceReportData) -> float:
+        """Calculate statistical confidence level based on sample size and data quality."""
+        if report_data.sample_size >= 10000:
+            return 99.0
+        elif report_data.sample_size >= 5000:
+            return 95.0
+        elif report_data.sample_size >= 1000:
+            return 90.0
+        elif report_data.sample_size >= 500:
+            return 85.0
+        elif report_data.sample_size >= 100:
+            return 75.0
+        else:
+            return 50.0
+    
+    def _calculate_data_quality_score(self, report_data: PerformanceReportData) -> float:
+        """Calculate overall data quality score based on completeness and consistency."""
+        score_components = []
+        
+        # Baseline data availability
+        if report_data.nodejs_baseline:
+            score_components.append(25.0)
+        
+        # Performance test results availability
+        if report_data.performance_test_results:
+            score_components.append(25.0)
+        
+        # Historical data availability
+        if report_data.historical_performance_data:
+            score_components.append(20.0)
+        
+        # CI/CD integration data
+        if report_data.ci_cd_metrics:
+            score_components.append(15.0)
+        
+        # Variance analysis completeness
+        if report_data.variance_summary and len(report_data.variance_summary) >= 5:
+            score_components.append(15.0)
+        
+        return sum(score_components)
+    
+    def _generate_performance_charts(self, report_data: PerformanceReportData) -> Dict[str, bytes]:
+        """Generate performance visualization charts as base64-encoded images."""
+        if not MATPLOTLIB_AVAILABLE:
+            return {}
+        
+        charts = {}
+        
+        try:
+            # Variance comparison chart
+            if report_data.variance_summary:
+                charts["variance_comparison"] = self._create_variance_chart(report_data.variance_summary)
+            
+            # Trend analysis chart
+            if report_data.historical_performance_data:
+                charts["performance_trends"] = self._create_trend_chart(report_data.historical_performance_data)
+            
+            # Compliance status chart
+            if report_data.compliance_status:
+                charts["compliance_status"] = self._create_compliance_chart(report_data.compliance_status)
+            
+            # Quality gates chart
+            if report_data.quality_gate_results:
+                charts["quality_gates"] = self._create_quality_gates_chart(report_data.quality_gate_results)
+                
+        except Exception as e:
+            if STRUCTLOG_AVAILABLE:
+                self.logger.warning("Chart generation failed", error=str(e))
+        
+        return charts
+    
+    def _create_variance_chart(self, variance_data: Dict[str, Any]) -> bytes:
+        """Create variance comparison chart."""
+        fig, ax = plt.subplots(figsize=(12, 8))
+        
+        metrics = []
+        variances = []
+        colors = []
+        
+        for metric, data in variance_data.items():
+            if isinstance(data, dict) and "variance_percent" in data:
+                metrics.append(metric.replace('_', ' ').title())
+                variance = data["variance_percent"]
+                variances.append(abs(variance))
+                
+                # Color coding based on variance
+                if abs(variance) <= 5:
+                    colors.append('#27ae60')  # Green
+                elif abs(variance) <= 10:
+                    colors.append('#f39c12')  # Orange
+                else:
+                    colors.append('#e74c3c')  # Red
+        
+        if metrics and variances:
+            bars = ax.barh(metrics, variances, color=colors)
+            ax.set_xlabel('Variance Percentage (%)')
+            ax.set_title('Performance Variance from Node.js Baseline')
+            ax.axvline(x=10, color='red', linestyle='--', alpha=0.7, label='Critical Threshold (10%)')
+            ax.axvline(x=5, color='orange', linestyle='--', alpha=0.7, label='Warning Threshold (5%)')
+            ax.legend()
+            
+            # Add value labels on bars
+            for bar, variance in zip(bars, variances):
+                width = bar.get_width()
+                ax.text(width + 0.1, bar.get_y() + bar.get_height()/2, 
+                       f'{variance:.1f}%', ha='left', va='center')
+        
+        plt.tight_layout()
+        
+        # Convert to base64
+        buffer = BytesIO()
+        plt.savefig(buffer, format='png', dpi=300, bbox_inches='tight')
+        buffer.seek(0)
+        chart_data = base64.b64encode(buffer.getvalue())
+        plt.close(fig)
+        
+        return chart_data
+    
+    def _create_trend_chart(self, historical_data: List[Dict[str, Any]]) -> bytes:
+        """Create performance trend analysis chart."""
+        fig, ax = plt.subplots(figsize=(14, 8))
+        
+        if len(historical_data) >= 3:
+            # Extract timestamps and metrics
+            timestamps = []
+            response_times = []
+            
+            for item in historical_data:
+                if "timestamp" in item and "response_time_p95" in item:
+                    try:
+                        timestamps.append(datetime.fromisoformat(item["timestamp"]))
+                        response_times.append(item["response_time_p95"])
+                    except:
+                        continue
+            
+            if timestamps and response_times:
+                ax.plot(timestamps, response_times, marker='o', linewidth=2, markersize=6, color='#3498db')
+                ax.set_xlabel('Time')
+                ax.set_ylabel('Response Time (ms)')
+                ax.set_title('Performance Trend Analysis - Response Time P95')
+                ax.grid(True, alpha=0.3)
+                
+                # Format x-axis
+                if len(timestamps) > 10:
+                    ax.xaxis.set_major_locator(mdates.DayLocator(interval=max(1, len(timestamps)//10)))
+                ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
+                plt.xticks(rotation=45)
+        
+        plt.tight_layout()
+        
+        # Convert to base64
+        buffer = BytesIO()
+        plt.savefig(buffer, format='png', dpi=300, bbox_inches='tight')
+        buffer.seek(0)
+        chart_data = base64.b64encode(buffer.getvalue())
+        plt.close(fig)
+        
+        return chart_data
+    
+    def _create_compliance_chart(self, compliance_data: Dict[str, bool]) -> bytes:
+        """Create compliance status pie chart."""
+        fig, ax = plt.subplots(figsize=(10, 8))
+        
+        passed = sum(1 for status in compliance_data.values() if status)
+        failed = len(compliance_data) - passed
+        
+        if passed + failed > 0:
+            labels = ['Passed', 'Failed']
+            sizes = [passed, failed]
+            colors = ['#27ae60', '#e74c3c']
+            explode = (0.05, 0.05)
+            
+            wedges, texts, autotexts = ax.pie(sizes, labels=labels, colors=colors, explode=explode,
+                                             autopct='%1.1f%%', startangle=90, textprops={'fontsize': 12})
+            
+            ax.set_title('Performance Compliance Status', fontsize=16, fontweight='bold')
+            
+            # Add legend with counts
+            legend_labels = [f'{label}: {size}' for label, size in zip(labels, sizes)]
+            ax.legend(wedges, legend_labels, loc="center left", bbox_to_anchor=(1, 0, 0.5, 1))
+        
+        plt.tight_layout()
+        
+        # Convert to base64
+        buffer = BytesIO()
+        plt.savefig(buffer, format='png', dpi=300, bbox_inches='tight')
+        buffer.seek(0)
+        chart_data = base64.b64encode(buffer.getvalue())
+        plt.close(fig)
+        
+        return chart_data
+    
+    def _create_quality_gates_chart(self, quality_gates_data: Dict[str, str]) -> bytes:
+        """Create quality gates status chart."""
+        fig, ax = plt.subplots(figsize=(12, 6))
+        
+        gates = list(quality_gates_data.keys())
+        statuses = [1 if status == "passed" else 0 for status in quality_gates_data.values()]
+        colors = ['#27ae60' if status == 1 else '#e74c3c' for status in statuses]
+        
+        bars = ax.bar(gates, statuses, color=colors)
+        ax.set_ylabel('Status')
+        ax.set_title('Quality Gates Status')
+        ax.set_ylim(0, 1.2)
+        ax.set_yticks([0, 1])
+        ax.set_yticklabels(['Failed', 'Passed'])
+        
+        # Rotate x-axis labels for better readability
+        plt.xticks(rotation=45, ha='right')
+        
+        # Add status labels on bars
+        for bar, gate, status in zip(bars, gates, quality_gates_data.values()):
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height + 0.02,
+                   status.capitalize(), ha='center', va='bottom', fontweight='bold')
+        
+        plt.tight_layout()
+        
+        # Convert to base64
+        buffer = BytesIO()
+        plt.savefig(buffer, format='png', dpi=300, bbox_inches='tight')
+        buffer.seek(0)
+        chart_data = base64.b64encode(buffer.getvalue())
+        plt.close(fig)
+        
+        return chart_data
+    
+    def generate_reports(self, report_data: Optional[PerformanceReportData] = None) -> Dict[str, Path]:
+        """
+        Generate performance reports in specified formats.
+        
+        Args:
+            report_data: Optional pre-collected report data. If None, data will be collected automatically.
+            
+        Returns:
+            Dictionary mapping format names to generated file paths
+            
+        Raises:
+            ValueError: If report generation fails for critical formats
+        """
+        if report_data is None:
+            report_data = self.collect_performance_data()
+        
+        if STRUCTLOG_AVAILABLE:
+            self.logger.info(
+                "Starting report generation",
+                formats=self.config.output_formats,
+                report_type=self.config.report_type
+            )
+        
+        generated_files = {}
+        generation_errors = []
+        
+        # Generate executive summary for all reports
+        executive_summary = report_data.generate_executive_summary()
+        
+        for format_type in self.config.output_formats:
+            try:
+                start_time = time.time()
+                
+                if format_type == ReportFormat.JSON:
+                    file_path = self._generate_json_report(report_data, executive_summary)
+                elif format_type == ReportFormat.HTML:
+                    file_path = self._generate_html_report(report_data, executive_summary)
+                elif format_type == ReportFormat.PDF:
+                    file_path = self._generate_pdf_report(report_data, executive_summary)
+                elif format_type == ReportFormat.MARKDOWN:
+                    file_path = self._generate_markdown_report(report_data, executive_summary)
+                elif format_type == ReportFormat.CSV:
+                    file_path = self._generate_csv_report(report_data, executive_summary)
+                else:
+                    if STRUCTLOG_AVAILABLE:
+                        self.logger.warning("Unsupported report format", format=format_type)
+                    continue
+                
+                generated_files[format_type.value] = file_path
+                generation_duration = time.time() - start_time
+                
+                # Update Prometheus metrics
+                if PROMETHEUS_AVAILABLE:
+                    self.report_generation_counter.labels(
+                        report_type=self.config.report_type.value,
+                        format=format_type.value,
+                        status="success"
+                    ).inc()
+                    
+                    self.report_generation_histogram.labels(
+                        report_type=self.config.report_type.value,
+                        format=format_type.value
+                    ).observe(generation_duration)
+                
+                if STRUCTLOG_AVAILABLE:
+                    self.logger.info(
+                        "Report generated successfully",
+                        format=format_type.value,
+                        file_path=str(file_path),
+                        generation_duration=generation_duration
+                    )
+                    
+            except Exception as e:
+                error_msg = f"Failed to generate {format_type.value} report: {str(e)}"
+                generation_errors.append(error_msg)
+                
+                # Update Prometheus metrics
+                if PROMETHEUS_AVAILABLE:
+                    self.report_generation_counter.labels(
+                        report_type=self.config.report_type.value,
+                        format=format_type.value,
+                        status="error"
+                    ).inc()
+                
+                if STRUCTLOG_AVAILABLE:
+                    self.logger.error(
+                        "Report generation failed",
+                        format=format_type.value,
+                        error=str(e),
+                        traceback=traceback.format_exc()
+                    )
+        
+        # Send notifications if configured
+        if self.config.slack_webhook_url or self.config.teams_webhook_url:
+            self._send_report_notifications(report_data, executive_summary, generated_files)
+        
+        # Cleanup old reports if configured
+        if self.config.artifact_retention_days > 0:
+            self._cleanup_old_reports()
+        
+        if generation_errors and not generated_files:
+            raise ValueError(f"All report generation failed: {'; '.join(generation_errors)}")
+        
+        if STRUCTLOG_AVAILABLE:
+            self.logger.info(
+                "Report generation completed",
+                generated_formats=list(generated_files.keys()),
+                total_files=len(generated_files),
+                errors=len(generation_errors)
+            )
+        
+        return generated_files
+    
+    def _generate_json_report(self, report_data: PerformanceReportData, executive_summary: Dict[str, Any]) -> Path:
+        """Generate comprehensive JSON report with all performance data."""
+        report_content = {
+            "executive_summary": executive_summary,
+            "report_metadata": {
+                "report_id": report_data.report_id,
+                "generation_timestamp": report_data.generation_timestamp.isoformat(),
+                "report_version": report_data.report_version,
+                "config": {
+                    "report_name": self.config.report_name,
+                    "report_type": self.config.report_type.value,
+                    "variance_threshold": self.config.variance_threshold,
+                    "memory_variance_threshold": self.config.memory_variance_threshold
+                }
+            },
+            "performance_analysis": {
+                "baseline_comparison": report_data.baseline_comparison,
+                "variance_summary": report_data.variance_summary,
+                "compliance_status": report_data.compliance_status,
+                "quality_gates_status": report_data.quality_gates_status,
+                "performance_grade": report_data.performance_grade.value
+            },
+            "trend_analysis": report_data.trend_analysis,
+            "regression_detection": report_data.regression_detection,
+            "ci_cd_integration": {
+                "ci_cd_metrics": report_data.ci_cd_metrics,
+                "build_information": report_data.build_information,
+                "deployment_information": report_data.deployment_information,
+                "quality_gate_results": report_data.quality_gate_results
+            },
+            "recommendations": {
+                "critical_issues": report_data.critical_issues,
+                "warning_issues": report_data.warning_issues,
+                "performance_recommendations": report_data.performance_recommendations,
+                "optimization_opportunities": report_data.optimization_opportunities
+            },
+            "statistical_metrics": {
+                "statistical_confidence": report_data.statistical_confidence,
+                "sample_size": report_data.sample_size,
+                "test_duration_seconds": report_data.test_duration_seconds,
+                "data_quality_score": report_data.data_quality_score
+            }
+        }
+        
+        # Generate filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"performance_report_{timestamp}.json"
+        file_path = self.config.output_directory / filename
+        
+        with open(file_path, 'w', encoding='utf-8') as f:
+            json.dump(report_content, f, indent=2, ensure_ascii=False, default=str)
+        
+        return file_path
+    
+    def _generate_html_report(self, report_data: PerformanceReportData, executive_summary: Dict[str, Any]) -> Path:
+        """Generate comprehensive HTML report with charts and interactive elements."""
+        if not JINJA2_AVAILABLE or not self.template_environment:
+            # Fallback to basic HTML generation
+            return self._generate_basic_html_report(report_data, executive_summary)
+        
+        try:
+            template = self.template_environment.get_template("performance_report.html")
+            
+            html_content = template.render(
+                report_data=report_data,
+                executive_summary=executive_summary,
+                config=self.config,
+                generation_timestamp=datetime.now(timezone.utc)
+            )
+            
+            # Generate filename with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"performance_report_{timestamp}.html"
+            file_path = self.config.output_directory / filename
+            
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(html_content)
+            
+            return file_path
+            
+        except Exception as e:
+            if STRUCTLOG_AVAILABLE:
+                self.logger.warning("Template-based HTML generation failed, using fallback", error=str(e))
+            return self._generate_basic_html_report(report_data, executive_summary)
+    
+    def _generate_basic_html_report(self, report_data: PerformanceReportData, executive_summary: Dict[str, Any]) -> Path:
+        """Generate basic HTML report without templates."""
+        html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{self.config.company_name} - Performance Analysis Report</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }}
+        .container {{ max-width: 1200px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
+        .header {{ text-align: center; margin-bottom: 30px; padding-bottom: 20px; border-bottom: 2px solid #e0e0e0; }}
+        .header h1 {{ color: #2c3e50; margin: 0; }}
+        .summary {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin: 30px 0; }}
+        .summary-card {{ background: #ecf0f1; padding: 20px; border-radius: 8px; text-align: center; }}
+        .grade-A {{ color: #27ae60; }}
+        .grade-B {{ color: #2ecc71; }}
+        .grade-C {{ color: #f39c12; }}
+        .grade-D {{ color: #e67e22; }}
+        .grade-F {{ color: #e74c3c; }}
+        .section {{ margin: 30px 0; }}
+        .section h2 {{ color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px; }}
+        table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
+        th, td {{ padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }}
+        th {{ background: #34495e; color: white; }}
+        .status-pass {{ color: #27ae60; font-weight: bold; }}
+        .status-fail {{ color: #e74c3c; font-weight: bold; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>{self.config.company_name}</h1>
+            <p>Performance Analysis Report - {report_data.generation_timestamp.strftime('%Y-%m-%d %H:%M:%S UTC')}</p>
+        </div>
+        
+        <div class="section">
+            <h2>Executive Summary</h2>
+            <div class="summary">
+                <div class="summary-card">
+                    <h3>Overall Grade</h3>
+                    <div class="grade-{executive_summary['performance_summary']['overall_grade']}">{executive_summary['performance_summary']['overall_grade']}</div>
+                </div>
+                <div class="summary-card">
+                    <h3>Compliance Rate</h3>
+                    <div>{executive_summary['performance_summary']['compliance_rate']:.1f}%</div>
+                </div>
+                <div class="summary-card">
+                    <h3>Average Variance</h3>
+                    <div>{executive_summary['performance_summary']['average_variance']:.2f}%</div>
+                </div>
+                <div class="summary-card">
+                    <h3>Critical Issues</h3>
+                    <div>{executive_summary['performance_summary']['total_critical_issues']}</div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="section">
+            <h2>Performance Metrics</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Metric</th>
+                        <th>Status</th>
+                        <th>Variance</th>
+                    </tr>
+                </thead>
+                <tbody>"""
+        
+        # Add variance data to table
+        for metric, compliant in report_data.compliance_status.items():
+            variance_data = report_data.variance_summary.get(metric, {})
+            variance = variance_data.get("variance_percent", 0) if isinstance(variance_data, dict) else 0
+            status_class = "status-pass" if compliant else "status-fail"
+            status_text = "PASS" if compliant else "FAIL"
+            
+            html_content += f"""
+                    <tr>
+                        <td>{metric.replace('_', ' ').title()}</td>
+                        <td class="{status_class}">{status_text}</td>
+                        <td>{variance:.2f}%</td>
+                    </tr>"""
+        
+        html_content += """
+                </tbody>
+            </table>
+        </div>
+        
+        <div class="section">
+            <h2>Recommendations</h2>
+            <ul>"""
+        
+        # Add recommendations
+        for recommendation in report_data.performance_recommendations[:10]:  # Limit to top 10
+            html_content += f"<li>{html.escape(recommendation)}</li>"
+        
+        html_content += f"""
+            </ul>
+        </div>
+        
+        <div style="text-align: center; margin-top: 40px; padding-top: 20px; border-top: 1px solid #e0e0e0; color: #7f8c8d;">
+            <p>Report ID: {report_data.report_id}</p>
+            <p>Generated by BF-refactor-merge Performance Testing Framework</p>
+        </div>
+    </div>
 </body>
 </html>"""
         
-        return content
+        # Generate filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"performance_report_{timestamp}.html"
+        file_path = self.config.output_directory / filename
+        
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+        
+        return file_path
     
-    def _generate_executive_summary(self, validation_results: Dict[str, Any]) -> Dict[str, Any]:
-        """Generate executive-focused performance summary."""
-        return {
-            'title': 'Executive Performance Summary',
-            'overall_status': 'APPROVED' if validation_results['overall_compliant'] else 'REQUIRES ATTENTION',
-            'key_metrics': {
-                'compliance_rate': f"{validation_results['compliance_rate_percent']:.1f}%",
-                'variance_threshold': f"≤{PERFORMANCE_VARIANCE_THRESHOLD*100:.1f}%",
-                'deployment_status': validation_results['deployment_recommendation']
-            },
-            'business_impact': {
-                'performance_improvement': 'Flask implementation maintains performance parity',
-                'risk_assessment': 'Low risk deployment' if validation_results['overall_compliant'] else 'Requires optimization',
-                'cost_impact': 'No additional infrastructure costs expected'
-            },
-            'next_steps': [
-                'Approve deployment' if validation_results['overall_compliant'] else 'Address performance issues',
-                'Continue monitoring post-deployment',
-                'Review performance trends monthly'
+    def _generate_pdf_report(self, report_data: PerformanceReportData, executive_summary: Dict[str, Any]) -> Path:
+        """Generate PDF report from HTML content."""
+        if not WEASYPRINT_AVAILABLE:
+            raise ValueError("PDF generation requires weasyprint library")
+        
+        # First generate HTML content
+        html_file = self._generate_html_report(report_data, executive_summary)
+        
+        try:
+            # Convert HTML to PDF
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            pdf_filename = f"performance_report_{timestamp}.pdf"
+            pdf_path = self.config.output_directory / pdf_filename
+            
+            weasyprint.HTML(filename=str(html_file)).write_pdf(str(pdf_path))
+            
+            # Optionally remove HTML file if only PDF is needed
+            if ReportFormat.HTML not in self.config.output_formats:
+                html_file.unlink()
+            
+            return pdf_path
+            
+        except Exception as e:
+            raise ValueError(f"PDF generation failed: {str(e)}")
+    
+    def _generate_markdown_report(self, report_data: PerformanceReportData, executive_summary: Dict[str, Any]) -> Path:
+        """Generate Markdown report for documentation and version control."""
+        md_content = f"""# {self.config.company_name} - Performance Analysis Report
+
+**Generated:** {report_data.generation_timestamp.strftime('%Y-%m-%d %H:%M:%S UTC')}  
+**Report ID:** {report_data.report_id}  
+**Report Version:** {report_data.report_version}
+
+## Executive Summary
+
+| Metric | Value |
+|--------|-------|
+| Overall Grade | **{executive_summary['performance_summary']['overall_grade']}** |
+| Compliance Rate | {executive_summary['performance_summary']['compliance_rate']:.1f}% |
+| Average Variance | {executive_summary['performance_summary']['average_variance']:.2f}% |
+| Critical Issues | {executive_summary['performance_summary']['total_critical_issues']} |
+| Statistical Confidence | {executive_summary['performance_summary']['statistical_confidence']:.1f}% |
+| Test Duration | {executive_summary['performance_summary']['test_duration_minutes']:.1f} minutes |
+
+## Performance Metrics Analysis
+
+| Metric | Status | Compliance | Variance |
+|--------|--------|------------|----------|"""
+        
+        # Add variance data
+        for metric, compliant in report_data.compliance_status.items():
+            variance_data = report_data.variance_summary.get(metric, {})
+            variance = variance_data.get("variance_percent", 0) if isinstance(variance_data, dict) else 0
+            status = "✅ PASS" if compliant else "❌ FAIL"
+            compliance = "Yes" if compliant else "No"
+            
+            md_content += f"\n| {metric.replace('_', ' ').title()} | {status} | {compliance} | {variance:.2f}% |"
+        
+        # Add key findings
+        md_content += f"""
+
+## Key Findings
+
+- **Baseline Compliance:** {'✅ Passed' if executive_summary['key_findings']['baseline_compliance'] else '❌ Failed'}
+- **Regression Detected:** {'⚠️ Yes' if executive_summary['key_findings']['regression_detected'] else '✅ No'}
+- **Performance Improvements:** {'🎉 Yes' if executive_summary['key_findings']['performance_improvements'] else 'No'}
+- **Quality Gates:** {'✅ Passed' if executive_summary['key_findings']['quality_gates_passed'] else '❌ Failed'}
+
+"""
+        
+        # Add critical issues
+        if report_data.critical_issues:
+            md_content += "## Critical Issues\n\n"
+            for i, issue in enumerate(report_data.critical_issues, 1):
+                md_content += f"{i}. {issue}\n"
+            md_content += "\n"
+        
+        # Add recommendations
+        if report_data.performance_recommendations:
+            md_content += "## Performance Recommendations\n\n"
+            for i, recommendation in enumerate(report_data.performance_recommendations, 1):
+                md_content += f"{i}. {recommendation}\n"
+            md_content += "\n"
+        
+        # Add CI/CD integration info
+        if report_data.ci_cd_metrics:
+            md_content += "## CI/CD Integration\n\n"
+            for key, value in report_data.ci_cd_metrics.items():
+                md_content += f"- **{key.replace('_', ' ').title()}:** {value}\n"
+            md_content += "\n"
+        
+        # Add trend analysis summary
+        if report_data.trend_analysis:
+            trend_summary = report_data.trend_analysis.get("trend_summary", {})
+            if trend_summary:
+                md_content += f"""## Trend Analysis
+
+- **Overall Trend:** {trend_summary.get('overall_trend', 'unknown').title()}
+- **Improving Metrics:** {trend_summary.get('improving_metrics', 0)}
+- **Deteriorating Metrics:** {trend_summary.get('deteriorating_metrics', 0)}
+- **Stable Metrics:** {trend_summary.get('stable_metrics', 0)}
+
+"""
+        
+        md_content += f"""## Report Information
+
+- **Data Quality Score:** {report_data.data_quality_score:.1f}/100
+- **Sample Size:** {report_data.sample_size:,} requests
+- **Statistical Confidence:** {report_data.statistical_confidence:.1f}%
+
+---
+
+*This report was generated automatically by the BF-refactor-merge Performance Testing Framework*
+"""
+        
+        # Generate filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"performance_report_{timestamp}.md"
+        file_path = self.config.output_directory / filename
+        
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(md_content)
+        
+        return file_path
+    
+    def _generate_csv_report(self, report_data: PerformanceReportData, executive_summary: Dict[str, Any]) -> Path:
+        """Generate CSV report for data analysis and spreadsheet import."""
+        # Generate filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"performance_report_{timestamp}.csv"
+        file_path = self.config.output_directory / filename
+        
+        with open(file_path, 'w', newline='', encoding='utf-8') as csvfile:
+            writer = csv.writer(csvfile)
+            
+            # Write header information
+            writer.writerow(['Report Information'])
+            writer.writerow(['Report ID', report_data.report_id])
+            writer.writerow(['Generation Timestamp', report_data.generation_timestamp.isoformat()])
+            writer.writerow(['Overall Grade', executive_summary['performance_summary']['overall_grade']])
+            writer.writerow(['Compliance Rate (%)', f"{executive_summary['performance_summary']['compliance_rate']:.2f}"])
+            writer.writerow(['Average Variance (%)', f"{executive_summary['performance_summary']['average_variance']:.2f}"])
+            writer.writerow(['Critical Issues', executive_summary['performance_summary']['total_critical_issues']])
+            writer.writerow(['Warning Issues', executive_summary['performance_summary']['total_warning_issues']])
+            writer.writerow(['Statistical Confidence (%)', f"{executive_summary['performance_summary']['statistical_confidence']:.1f}"])
+            writer.writerow([])  # Empty row
+            
+            # Write performance metrics
+            writer.writerow(['Performance Metrics'])
+            writer.writerow(['Metric', 'Status', 'Compliant', 'Variance (%)', 'Current Value', 'Baseline Value'])
+            
+            for metric, compliant in report_data.compliance_status.items():
+                variance_data = report_data.variance_summary.get(metric, {})
+                if isinstance(variance_data, dict):
+                    variance = variance_data.get("variance_percent", 0)
+                    current_value = variance_data.get("current_value", "N/A")
+                    baseline_value = variance_data.get("baseline_value", "N/A")
+                else:
+                    variance = 0
+                    current_value = "N/A"
+                    baseline_value = "N/A"
+                
+                status = "PASS" if compliant else "FAIL"
+                writer.writerow([
+                    metric.replace('_', ' ').title(),
+                    status,
+                    compliant,
+                    f"{variance:.2f}",
+                    current_value,
+                    baseline_value
+                ])
+            
+            writer.writerow([])  # Empty row
+            
+            # Write quality gates
+            if report_data.quality_gate_results:
+                writer.writerow(['Quality Gates'])
+                writer.writerow(['Gate Name', 'Status'])
+                for gate, status in report_data.quality_gate_results.items():
+                    writer.writerow([gate.replace('_', ' ').title(), status.upper()])
+                writer.writerow([])  # Empty row
+            
+            # Write recommendations
+            if report_data.performance_recommendations:
+                writer.writerow(['Performance Recommendations'])
+                writer.writerow(['Priority', 'Recommendation'])
+                for i, recommendation in enumerate(report_data.performance_recommendations, 1):
+                    writer.writerow([i, recommendation])
+        
+        return file_path
+    
+    def _send_report_notifications(self, report_data: PerformanceReportData, executive_summary: Dict[str, Any], generated_files: Dict[str, Path]) -> None:
+        """Send report notifications to configured webhook endpoints."""
+        notification_data = {
+            "report_id": report_data.report_id,
+            "timestamp": report_data.generation_timestamp.isoformat(),
+            "overall_grade": executive_summary['performance_summary']['overall_grade'],
+            "compliance_rate": executive_summary['performance_summary']['compliance_rate'],
+            "critical_issues": executive_summary['performance_summary']['total_critical_issues'],
+            "generated_files": [str(path) for path in generated_files.values()]
+        }
+        
+        # Send Slack notification
+        if self.config.slack_webhook_url:
+            try:
+                self._send_slack_notification(notification_data)
+            except Exception as e:
+                if STRUCTLOG_AVAILABLE:
+                    self.logger.warning("Slack notification failed", error=str(e))
+        
+        # Send Teams notification
+        if self.config.teams_webhook_url:
+            try:
+                self._send_teams_notification(notification_data)
+            except Exception as e:
+                if STRUCTLOG_AVAILABLE:
+                    self.logger.warning("Teams notification failed", error=str(e))
+    
+    def _send_slack_notification(self, notification_data: Dict[str, Any]) -> None:
+        """Send Slack webhook notification."""
+        import requests
+        
+        color = "#36a64f" if notification_data["overall_grade"] in ["A", "B"] else "#ff9900" if notification_data["overall_grade"] == "C" else "#ff0000"
+        
+        slack_payload = {
+            "attachments": [
+                {
+                    "color": color,
+                    "title": "Performance Report Generated",
+                    "fields": [
+                        {"title": "Overall Grade", "value": notification_data["overall_grade"], "short": True},
+                        {"title": "Compliance Rate", "value": f"{notification_data['compliance_rate']:.1f}%", "short": True},
+                        {"title": "Critical Issues", "value": str(notification_data["critical_issues"]), "short": True},
+                        {"title": "Report ID", "value": notification_data["report_id"], "short": True}
+                    ],
+                    "footer": "BF-refactor-merge Performance Testing",
+                    "ts": int(datetime.fromisoformat(notification_data["timestamp"]).timestamp())
+                }
             ]
         }
+        
+        response = requests.post(self.config.slack_webhook_url, json=slack_payload, timeout=10)
+        response.raise_for_status()
     
-    def _generate_technical_detailed_report(self, validation_results: Dict[str, Any]) -> Dict[str, Any]:
-        """Generate technical-focused detailed performance report."""
-        return {
-            'title': 'Technical Performance Analysis',
-            'technical_summary': validation_results,
-            'variance_analysis': [asdict(analysis) for analysis in self.variance_analysis_results],
-            'trend_analysis': self.trend_analysis_results,
-            'optimization_recommendations': self._generate_technical_recommendations(),
-            'monitoring_setup': {
-                'metrics_to_monitor': CRITICAL_PERFORMANCE_METRICS,
-                'alert_thresholds': {
-                    'response_time_p95': '500ms',
-                    'error_rate': '0.1%',
-                    'variance_threshold': f'{PERFORMANCE_VARIANCE_THRESHOLD*100:.1f}%'
+    def _send_teams_notification(self, notification_data: Dict[str, Any]) -> None:
+        """Send Microsoft Teams webhook notification."""
+        import requests
+        
+        color = "00FF00" if notification_data["overall_grade"] in ["A", "B"] else "FFB366" if notification_data["overall_grade"] == "C" else "FF0000"
+        
+        teams_payload = {
+            "@type": "MessageCard",
+            "@context": "http://schema.org/extensions",
+            "summary": "Performance Report Generated",
+            "themeColor": color,
+            "sections": [
+                {
+                    "activityTitle": "Performance Report Generated",
+                    "activitySubtitle": f"Report ID: {notification_data['report_id']}",
+                    "facts": [
+                        {"name": "Overall Grade", "value": notification_data["overall_grade"]},
+                        {"name": "Compliance Rate", "value": f"{notification_data['compliance_rate']:.1f}%"},
+                        {"name": "Critical Issues", "value": str(notification_data["critical_issues"])},
+                        {"name": "Timestamp", "value": notification_data["timestamp"]}
+                    ]
                 }
-            }
-        }
-    
-    def _generate_compliance_audit_report(self, validation_results: Dict[str, Any]) -> Dict[str, Any]:
-        """Generate compliance audit performance report."""
-        return {
-            'title': 'Performance Compliance Audit',
-            'compliance_summary': {
-                'variance_requirement': f"≤{PERFORMANCE_VARIANCE_THRESHOLD*100:.1f}% from Node.js baseline",
-                'compliance_status': validation_results['overall_compliant'],
-                'audit_date': datetime.now(timezone.utc).isoformat(),
-                'environment': self.environment
-            },
-            'requirement_validation': {
-                'section_0_1_1': f"≤10% variance requirement: {'COMPLIANT' if validation_results['overall_compliant'] else 'NON-COMPLIANT'}",
-                'section_0_3_2': 'Performance monitoring: IMPLEMENTED',
-                'section_6_6_2': 'Test automation: IMPLEMENTED',
-                'section_8_5_2': 'CI/CD integration: IMPLEMENTED'
-            },
-            'audit_trail': {
-                'test_execution_id': self.comparison_suite.test_session_id,
-                'baseline_version': 'nodejs-baseline-1.0',
-                'validation_timestamp': datetime.now(timezone.utc).isoformat()
-            }
-        }
-    
-    def _generate_executive_html_report(self, report_data: Dict[str, Any]) -> str:
-        """Generate executive-focused HTML report."""
-        return f"""<!DOCTYPE html>
-<html>
-<head>
-    <title>Executive Performance Summary</title>
-    <style>
-        body {{ font-family: Arial, sans-serif; margin: 20px; }}
-        .header {{ background: #2c3e50; color: white; padding: 20px; border-radius: 5px; }}
-        .status-approved {{ color: #27ae60; font-weight: bold; }}
-        .status-attention {{ color: #e74c3c; font-weight: bold; }}
-        .metric {{ background: #ecf0f1; padding: 15px; margin: 10px 0; border-radius: 5px; }}
-    </style>
-</head>
-<body>
-    <div class="header">
-        <h1>{report_data['title']}</h1>
-        <p>Performance Migration Assessment</p>
-    </div>
-    
-    <h2>Overall Status: <span class="status-{'approved' if report_data['overall_status'] == 'APPROVED' else 'attention'}">{report_data['overall_status']}</span></h2>
-    
-    <h3>Key Performance Metrics</h3>
-    <div class="metric">
-        <strong>Compliance Rate:</strong> {report_data['key_metrics']['compliance_rate']}
-    </div>
-    <div class="metric">
-        <strong>Variance Threshold:</strong> {report_data['key_metrics']['variance_threshold']}
-    </div>
-    <div class="metric">
-        <strong>Deployment Status:</strong> {report_data['key_metrics']['deployment_status']}
-    </div>
-    
-    <h3>Business Impact</h3>
-    <ul>
-        <li><strong>Performance:</strong> {report_data['business_impact']['performance_improvement']}</li>
-        <li><strong>Risk:</strong> {report_data['business_impact']['risk_assessment']}</li>
-        <li><strong>Cost:</strong> {report_data['business_impact']['cost_impact']}</li>
-    </ul>
-    
-    <h3>Recommended Next Steps</h3>
-    <ol>
-        {''.join(f'<li>{step}</li>' for step in report_data['next_steps'])}
-    </ol>
-</body>
-</html>"""
-    
-    def _generate_technical_html_report(self, report_data: Dict[str, Any]) -> str:
-        """Generate technical-focused HTML report."""
-        return self._generate_html_content({'metadata': {}, 'variance_analysis': report_data['variance_analysis'], 
-                                          'summary': report_data['technical_summary'], 'recommendations': []})
-    
-    def _generate_compliance_html_report(self, report_data: Dict[str, Any]) -> str:
-        """Generate compliance audit HTML report."""
-        return f"""<!DOCTYPE html>
-<html>
-<head>
-    <title>Performance Compliance Audit</title>
-    <style>
-        body {{ font-family: Arial, sans-serif; margin: 20px; }}
-        .audit-header {{ background: #34495e; color: white; padding: 20px; }}
-        .requirement {{ border: 1px solid #bdc3c7; padding: 15px; margin: 10px 0; }}
-        .compliant {{ border-left: 5px solid #27ae60; }}
-        .non-compliant {{ border-left: 5px solid #e74c3c; }}
-    </style>
-</head>
-<body>
-    <div class="audit-header">
-        <h1>{report_data['title']}</h1>
-        <p>Compliance Status: {'COMPLIANT' if report_data['compliance_summary']['compliance_status'] else 'NON-COMPLIANT'}</p>
-    </div>
-    
-    <h2>Requirement Validation</h2>
-    {''.join(f'<div class="requirement {'compliant' if 'COMPLIANT' in req else 'non-compliant'}"><strong>{req_id}:</strong> {req}</div>' 
-             for req_id, req in report_data['requirement_validation'].items())}
-    
-    <h2>Audit Trail</h2>
-    <ul>
-        <li><strong>Test Execution ID:</strong> {report_data['audit_trail']['test_execution_id']}</li>
-        <li><strong>Baseline Version:</strong> {report_data['audit_trail']['baseline_version']}</li>
-        <li><strong>Validation Time:</strong> {report_data['audit_trail']['validation_timestamp']}</li>
-    </ul>
-</body>
-</html>"""
-    
-    def _generate_comprehensive_summary(self) -> Dict[str, Any]:
-        """Generate comprehensive performance analysis summary."""
-        validation_results = self.comparison_suite.validate_overall_performance_compliance()
-        
-        return {
-            'overall_compliant': validation_results['overall_compliant'],
-            'compliance_rate': validation_results['compliance_rate_percent'],
-            'deployment_recommendation': validation_results['deployment_recommendation'],
-            'critical_issues_count': validation_results['critical_failures'],
-            'variance_threshold_enforcement': f"≤{PERFORMANCE_VARIANCE_THRESHOLD*100:.1f}%",
-            'total_metrics_analyzed': len(self.variance_analysis_results),
-            'performance_trend': self._classify_overall_performance_trend(self.trend_analysis_results)
-        }
-    
-    def _generate_comprehensive_recommendations(self) -> List[str]:
-        """Generate comprehensive performance optimization recommendations."""
-        recommendations = []
-        
-        validation_results = self.comparison_suite.validate_overall_performance_compliance()
-        
-        if validation_results['overall_compliant']:
-            recommendations.extend([
-                "✅ Performance validation successful - deployment approved",
-                "Continue monitoring performance trends post-deployment",
-                "Schedule regular baseline comparison validation"
-            ])
-        else:
-            recommendations.extend([
-                "❌ Performance optimization required before deployment",
-                "Address critical variance issues identified in analysis",
-                "Implement performance monitoring alerts"
-            ])
-        
-        # Add metric-specific recommendations
-        critical_variances = [analysis for analysis in self.variance_analysis_results 
-                            if analysis.requires_immediate_action]
-        
-        if critical_variances:
-            recommendations.append(f"🔥 {len(critical_variances)} critical performance issues require immediate attention")
-            for analysis in critical_variances[:3]:  # Limit to top 3
-                recommendations.append(f"- Optimize {analysis.metric_name}: {analysis.recommendation}")
-        
-        return recommendations
-    
-    def _generate_ci_cd_recommendations(self, validation_results: Dict[str, Any]) -> List[str]:
-        """Generate CI/CD specific recommendations."""
-        recommendations = []
-        
-        if validation_results['overall_compliant']:
-            recommendations.extend([
-                "✅ All performance gates passed - proceed with deployment",
-                "Enable performance monitoring for post-deployment validation",
-                "Configure automated rollback triggers for performance degradation"
-            ])
-        else:
-            recommendations.extend([
-                "❌ Performance gates failed - block deployment",
-                "Investigate and resolve performance regression issues",
-                "Re-run performance validation after optimization"
-            ])
-        
-        if validation_results['critical_failures'] > 0:
-            recommendations.append(f"🚨 {validation_results['critical_failures']} critical performance failures require immediate resolution")
-        
-        return recommendations
-    
-    def _generate_baseline_comparison_summary(self, variance_analysis: List[PerformanceVarianceAnalysis]) -> Dict[str, Any]:
-        """Generate baseline comparison summary."""
-        compliant_count = sum(1 for analysis in variance_analysis if analysis.within_threshold)
-        total_count = len(variance_analysis)
-        
-        return {
-            'total_metrics': total_count,
-            'compliant_metrics': compliant_count,
-            'compliance_rate': (compliant_count / total_count * 100.0) if total_count > 0 else 0.0,
-            'critical_issues': sum(1 for analysis in variance_analysis if analysis.is_critical_variance),
-            'deployment_approved': compliant_count == total_count
-        }
-    
-    def _generate_baseline_recommendations(self, variance_analysis: List[PerformanceVarianceAnalysis]) -> List[str]:
-        """Generate baseline-specific recommendations."""
-        recommendations = []
-        
-        critical_issues = [analysis for analysis in variance_analysis if analysis.is_critical_variance]
-        
-        if not critical_issues:
-            recommendations.append("✅ All metrics within acceptable variance - baseline compliance achieved")
-        else:
-            recommendations.append(f"❌ {len(critical_issues)} metrics exceed variance threshold")
-            for analysis in critical_issues[:5]:  # Top 5 issues
-                recommendations.append(f"- {analysis.metric_name}: {analysis.recommendation}")
-        
-        return recommendations
-    
-    def _generate_metric_recommendation(self, comparison_data: Dict[str, Any]) -> str:
-        """Generate metric-specific optimization recommendation."""
-        if comparison_data['within_threshold']:
-            return "Metric within acceptable variance - continue monitoring"
-        
-        variance = abs(comparison_data['variance_percent'])
-        metric_name = comparison_data.get('metric_name', 'metric')
-        
-        if variance > CRITICAL_VARIANCE_THRESHOLD:
-            return f"Critical variance in {metric_name} - immediate optimization required"
-        else:
-            return f"Monitor {metric_name} closely - approaching variance threshold"
-    
-    def _generate_variance_recommendation(self, result: PerformanceComparisonResult) -> str:
-        """Generate variance-specific recommendation."""
-        if result.within_threshold:
-            return "Performance within acceptable limits"
-        
-        if result.variance_percent > 0:
-            return f"Performance degradation detected - optimize {result.metric_name}"
-        else:
-            return f"Performance improvement observed in {result.metric_name}"
-    
-    def _generate_trend_based_recommendations(self, trend_reports: Dict[str, Any]) -> List[str]:
-        """Generate trend analysis based recommendations."""
-        recommendations = []
-        
-        for metric_name, trend_data in trend_reports.items():
-            if trend_data.get('regression_analysis', {}).get('regression_detected', False):
-                recommendations.append(f"🔍 Performance regression detected in {metric_name} - investigate immediately")
-            
-            trend_direction = trend_data.get('trend_analysis', {}).get('direction', 'stable')
-            if trend_direction == 'degrading':
-                recommendations.append(f"📉 {metric_name} showing degrading trend - monitor closely")
-        
-        return recommendations
-    
-    def _generate_baseline_maintenance_plan(self, trend_reports: Dict[str, Any]) -> List[str]:
-        """Generate baseline maintenance plan recommendations."""
-        maintenance_plan = []
-        
-        drift_metrics = []
-        for metric_name, trend_data in trend_reports.items():
-            if trend_data.get('baseline_drift_analysis', {}).get('drift_detected', False):
-                drift_metrics.append(metric_name)
-        
-        if drift_metrics:
-            maintenance_plan.append(f"🔄 Baseline drift detected in {len(drift_metrics)} metrics")
-            maintenance_plan.append("Schedule baseline recalibration for drifted metrics")
-        else:
-            maintenance_plan.append("✅ Baseline data stable - continue current monitoring")
-        
-        return maintenance_plan
-    
-    def _generate_technical_recommendations(self) -> List[str]:
-        """Generate technical optimization recommendations."""
-        return [
-            "Implement response time caching for frequently accessed endpoints",
-            "Optimize database query performance with indexing strategies",
-            "Configure horizontal scaling for high-load scenarios",
-            "Enable detailed performance profiling for bottleneck identification"
-        ]
-    
-    def _get_baseline_value(self, metric_name: str) -> Optional[float]:
-        """Get baseline value for specified metric."""
-        # Map metric names to baseline values (simplified)
-        baseline_mapping = {
-            'api_response_time_p95': 250.0,
-            'requests_per_second': 100.0,
-            'memory_usage': 256.0,
-            'cpu_utilization': 15.0
+            ]
         }
         
-        for key, value in baseline_mapping.items():
-            if key in metric_name.lower():
-                return value
-        
-        return None
+        response = requests.post(self.config.teams_webhook_url, json=teams_payload, timeout=10)
+        response.raise_for_status()
     
-    def _classify_overall_performance_trend(self, trend_reports: Dict[str, Any]) -> str:
-        """Classify overall performance trend across all metrics."""
-        if not trend_reports:
-            return "unknown"
+    def _cleanup_old_reports(self) -> None:
+        """Cleanup old report files based on retention policy."""
+        if self.config.artifact_retention_days <= 0:
+            return
         
-        trend_directions = []
-        for trend_data in trend_reports.values():
-            direction = trend_data.get('trend_analysis', {}).get('direction', 'stable')
-            trend_directions.append(direction)
+        cutoff_date = datetime.now() - timedelta(days=self.config.artifact_retention_days)
+        deleted_count = 0
         
-        improving_count = trend_directions.count('improving')
-        degrading_count = trend_directions.count('degrading')
-        stable_count = trend_directions.count('stable')
+        for file_path in self.config.output_directory.glob("performance_report_*"):
+            try:
+                file_mtime = datetime.fromtimestamp(file_path.stat().st_mtime)
+                if file_mtime < cutoff_date:
+                    file_path.unlink()
+                    deleted_count += 1
+            except Exception as e:
+                if STRUCTLOG_AVAILABLE:
+                    self.logger.warning("Failed to delete old report file", file_path=str(file_path), error=str(e))
         
-        total_metrics = len(trend_directions)
-        
-        if degrading_count > total_metrics * 0.5:
-            return "degrading"
-        elif improving_count > total_metrics * 0.5:
-            return "improving"
-        else:
-            return "stable"
-    
-    def _calculate_overall_trend_confidence(self, trend_reports: Dict[str, Any]) -> float:
-        """Calculate overall confidence in trend analysis."""
-        if not trend_reports:
-            return 0.0
-        
-        confidences = []
-        for trend_data in trend_reports.values():
-            sample_size = trend_data.get('sample_size', 0)
-            # Calculate confidence based on sample size
-            if sample_size >= 50:
-                confidences.append(0.95)
-            elif sample_size >= 20:
-                confidences.append(0.80)
-            elif sample_size >= 10:
-                confidences.append(0.60)
-            else:
-                confidences.append(0.30)
-        
-        return statistics.mean(confidences) if confidences else 0.0
-    
-    def _setup_logging(self) -> logging.Logger:
-        """Setup logging configuration for report generation."""
-        logger = logging.getLogger(__name__)
-        logger.setLevel(logging.INFO)
-        
-        if not logger.handlers:
-            handler = logging.StreamHandler()
-            formatter = logging.Formatter(
-                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-            )
-            handler.setFormatter(formatter)
-            logger.addHandler(handler)
-        
-        return logger
-    
-    def _setup_template_environment(self) -> Optional[Environment]:
-        """Setup Jinja2 template environment if available."""
-        if not JINJA2_AVAILABLE:
-            return None
-        
-        if REPORT_TEMPLATE_DIR.exists():
-            return Environment(loader=FileSystemLoader(REPORT_TEMPLATE_DIR))
-        
-        return None
+        if deleted_count > 0 and STRUCTLOG_AVAILABLE:
+            self.logger.info("Cleaned up old report files", deleted_count=deleted_count, retention_days=self.config.artifact_retention_days)
 
 
 def main():
-    """Main CLI entry point for performance report generation."""
+    """
+    Main entry point for the performance report generation script.
+    
+    Provides command-line interface for generating comprehensive performance reports
+    with configurable output formats and integration options.
+    """
     parser = argparse.ArgumentParser(
-        description="Generate comprehensive performance analysis reports for Flask migration"
+        description="Generate comprehensive performance analysis reports for BF-refactor-merge project",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Generate HTML and JSON reports
+  python generate_reports.py --formats html json --output-dir ./reports
+  
+  # Generate executive summary with charts
+  python generate_reports.py --report-type executive_summary --include-charts
+  
+  # Generate CI/CD integration report with notifications
+  python generate_reports.py --report-type cicd_integration --slack-webhook https://hooks.slack.com/...
+  
+  # Generate baseline comparison with custom thresholds
+  python generate_reports.py --variance-threshold 8.0 --memory-variance-threshold 12.0
+        """
+    )
+    
+    # Core configuration arguments
+    parser.add_argument(
+        "--report-name",
+        default="Performance Analysis Report",
+        help="Name of the generated report"
     )
     
     parser.add_argument(
-        '--environment', '-e',
-        choices=['development', 'testing', 'staging', 'production', 'ci_cd'],
-        default='testing',
-        help='Target environment for report generation'
-    )
-    
-    parser.add_argument(
-        '--output-dir', '-o',
+        "--report-type",
         type=str,
-        help='Output directory for generated reports'
+        choices=[rt.value for rt in ReportType],
+        default=ReportType.TECHNICAL_DETAILED.value,
+        help="Type of report to generate"
     )
     
     parser.add_argument(
-        '--format', '-f',
-        choices=['json', 'markdown', 'html', 'pdf'],
-        action='append',
-        help='Report output formats (can specify multiple)'
+        "--formats",
+        nargs="+",
+        choices=[fmt.value for fmt in ReportFormat],
+        default=["html", "json"],
+        help="Output formats for the report"
     )
     
     parser.add_argument(
-        '--type', '-t',
-        choices=['comprehensive', 'baseline', 'trend', 'ci_cd', 'stakeholder'],
-        default='comprehensive',
-        help='Type of report to generate'
+        "--output-dir",
+        type=Path,
+        default=Path("reports"),
+        help="Output directory for generated reports"
+    )
+    
+    # Data source arguments
+    parser.add_argument(
+        "--baseline-data",
+        type=Path,
+        help="Path to baseline performance data file"
     )
     
     parser.add_argument(
-        '--test-results',
-        type=str,
-        help='Path to test results JSON file for analysis'
+        "--test-results",
+        type=Path,
+        help="Path to performance test results file"
     )
     
     parser.add_argument(
-        '--stakeholder-audience',
-        choices=['executive', 'technical', 'compliance'],
-        default='executive',
-        help='Target audience for stakeholder reports'
+        "--historical-data",
+        type=Path,
+        help="Path to historical performance data file"
     )
     
+    # Report content arguments
     parser.add_argument(
-        '--include-visualizations',
-        action='store_true',
+        "--include-charts",
+        action="store_true",
         default=True,
-        help='Include performance charts and visualizations'
+        help="Include performance charts in the report"
     )
     
     parser.add_argument(
-        '--verbose', '-v',
-        action='store_true',
-        help='Enable verbose logging output'
+        "--no-charts",
+        action="store_true",
+        help="Disable chart generation"
+    )
+    
+    parser.add_argument(
+        "--include-recommendations",
+        action="store_true",
+        default=True,
+        help="Include performance recommendations"
+    )
+    
+    parser.add_argument(
+        "--include-trend-analysis",
+        action="store_true",
+        default=True,
+        help="Include trend analysis"
+    )
+    
+    # Performance threshold arguments
+    parser.add_argument(
+        "--variance-threshold",
+        type=float,
+        default=10.0,
+        help="Performance variance threshold percentage (default: 10.0)"
+    )
+    
+    parser.add_argument(
+        "--memory-variance-threshold",
+        type=float,
+        default=15.0,
+        help="Memory variance threshold percentage (default: 15.0)"
+    )
+    
+    parser.add_argument(
+        "--warning-variance-threshold",
+        type=float,
+        default=5.0,
+        help="Warning variance threshold percentage (default: 5.0)"
+    )
+    
+    # CI/CD and notification arguments
+    parser.add_argument(
+        "--ci-cd-integration",
+        action="store_true",
+        default=True,
+        help="Include CI/CD integration data"
+    )
+    
+    parser.add_argument(
+        "--slack-webhook",
+        type=str,
+        help="Slack webhook URL for notifications"
+    )
+    
+    parser.add_argument(
+        "--teams-webhook",
+        type=str,
+        help="Microsoft Teams webhook URL for notifications"
+    )
+    
+    parser.add_argument(
+        "--retention-days",
+        type=int,
+        default=30,
+        help="Report artifact retention in days (default: 30)"
+    )
+    
+    # Template and styling arguments
+    parser.add_argument(
+        "--template-dir",
+        type=Path,
+        help="Custom template directory path"
+    )
+    
+    parser.add_argument(
+        "--company-name",
+        default="BF-refactor-merge Project",
+        help="Company name for report branding"
+    )
+    
+    # Logging and debug arguments
+    parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Enable verbose logging"
+    )
+    
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        help="Log file path for detailed logging"
     )
     
     args = parser.parse_args()
     
-    # Configure logging level
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
+    # Setup logging
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler(args.log_file) if args.log_file else logging.NullHandler()
+        ]
+    )
     
     try:
-        # Load test results if provided
-        test_results = None
-        if args.test_results:
-            with open(args.test_results, 'r') as f:
-                test_results = json.load(f)
-        
-        # Initialize report generator
-        generator = PerformanceReportGenerator(
-            environment=args.environment,
-            output_dir=args.output_dir
+        # Create report configuration
+        config = ReportConfiguration(
+            report_name=args.report_name,
+            report_type=ReportType(args.report_type),
+            output_formats=[ReportFormat(fmt) for fmt in args.formats],
+            output_directory=args.output_dir,
+            baseline_data_path=args.baseline_data,
+            test_results_path=args.test_results,
+            historical_data_path=args.historical_data,
+            include_charts=args.include_charts and not args.no_charts,
+            include_recommendations=args.include_recommendations,
+            include_trend_analysis=args.include_trend_analysis,
+            variance_threshold=args.variance_threshold,
+            memory_variance_threshold=args.memory_variance_threshold,
+            warning_variance_threshold=args.warning_variance_threshold,
+            ci_cd_integration=args.ci_cd_integration,
+            slack_webhook_url=args.slack_webhook,
+            teams_webhook_url=args.teams_webhook,
+            artifact_retention_days=args.retention_days,
+            template_directory=args.template_dir,
+            company_name=args.company_name
         )
         
-        # Generate reports based on type
-        if args.type == 'comprehensive':
-            formats = [ReportFormat(f) for f in (args.format or ['json', 'markdown', 'html'])]
-            generated_reports = generator.generate_comprehensive_performance_report(
-                test_results=test_results,
-                report_formats=formats,
-                include_visualizations=args.include_visualizations
-            )
-            
-        elif args.type == 'baseline':
-            current_metrics = test_results.get('current_metrics', {}) if test_results else {}
-            format_enum = ReportFormat(args.format[0] if args.format else 'json')
-            report_path = generator.generate_baseline_comparison_report(
-                current_metrics=current_metrics,
-                report_format=format_enum
-            )
-            generated_reports = {'baseline_comparison': report_path}
-            
-        elif args.type == 'trend':
-            historical_data = test_results.get('historical_data', []) if test_results else []
-            report_path = generator.generate_trend_analysis_report(
-                historical_data=historical_data
-            )
-            generated_reports = {'trend_analysis': report_path}
-            
-        elif args.type == 'ci_cd':
-            generated_reports = generator.generate_ci_cd_integration_report()
-            
-        elif args.type == 'stakeholder':
-            report_path = generator.generate_stakeholder_summary_report(
-                target_audience=args.stakeholder_audience
-            )
-            generated_reports = {f'stakeholder_{args.stakeholder_audience}': report_path}
+        # Initialize report generator
+        generator = PerformanceReportGenerator(config)
         
-        else:
-            raise ValueError(f"Unsupported report type: {args.type}")
+        # Collect performance data
+        print("Collecting performance data...")
+        report_data = generator.collect_performance_data()
         
-        # Output results
-        print(f"\n🎯 Performance report generation completed successfully!")
-        print(f"📊 Generated {len(generated_reports)} report(s):")
+        # Generate reports
+        print(f"Generating reports in formats: {args.formats}")
+        generated_files = generator.generate_reports(report_data)
         
-        for report_type, report_path in generated_reports.items():
-            print(f"  - {report_type}: {report_path}")
+        # Display results
+        print("\nReport generation completed successfully!")
+        print(f"Overall Performance Grade: {report_data.calculate_overall_performance_grade().value}")
+        print(f"Statistical Confidence: {report_data.statistical_confidence:.1f}%")
+        print(f"Data Quality Score: {report_data.data_quality_score:.1f}/100")
         
-        # CI/CD integration output
-        if GITHUB_ACTIONS_INTEGRATION:
-            print(f"\n🔄 GitHub Actions Integration:")
-            print(f"  - Run ID: {GITHUB_RUN_ID}")
-            print(f"  - SHA: {GITHUB_SHA}")
-            print(f"  - Artifacts: {len([p for p in generated_reports.values() if 'artifacts' in str(p)])}")
+        print("\nGenerated files:")
+        for format_name, file_path in generated_files.items():
+            print(f"  {format_name.upper()}: {file_path}")
+        
+        if report_data.critical_issues:
+            print(f"\n⚠️  Critical Issues Found ({len(report_data.critical_issues)}):")
+            for issue in report_data.critical_issues[:5]:  # Show first 5
+                print(f"  - {issue}")
+        
+        if report_data.performance_recommendations:
+            print(f"\n💡 Top Recommendations:")
+            for recommendation in report_data.performance_recommendations[:3]:  # Show top 3
+                print(f"  - {recommendation}")
         
         return 0
         
     except Exception as e:
-        print(f"❌ Performance report generation failed: {str(e)}")
+        print(f"\nError: Report generation failed: {str(e)}", file=sys.stderr)
         if args.verbose:
-            print(traceback.format_exc())
+            traceback.print_exc()
         return 1
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     sys.exit(main())
