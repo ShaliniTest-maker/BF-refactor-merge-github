@@ -1,0 +1,307 @@
+{
+  "version": "1.0.0",
+  "description": "Performance validation thresholds and limits configuration for Node.js to Python/Flask migration project",
+  "updated": "2024-03-15T00:00:00Z",
+  "baseline_requirements": {
+    "variance_tolerance": {
+      "description": "Critical ≤10% variance requirement from Node.js baseline per Section 0.1.1 primary objective",
+      "response_time_variance_max": 0.10,
+      "memory_usage_variance_max": 0.15,
+      "database_performance_variance_max": 0.10,
+      "concurrent_capacity_variance_max": 0.10,
+      "throughput_variance_min": -0.10,
+      "throughput_variance_max": 0.10,
+      "enforcement_level": "deployment_blocking"
+    }
+  },
+  "response_time_thresholds": {
+    "description": "HTTP response time validation thresholds per Section 4.6.3 performance metrics",
+    "global_limits": {
+      "p95_response_time_ms": 500,
+      "p99_response_time_ms": 1000,
+      "avg_response_time_ms": 200,
+      "max_response_time_ms": 2000
+    },
+    "endpoint_categories": {
+      "authentication": {
+        "p95_response_time_ms": 300,
+        "p99_response_time_ms": 600,
+        "avg_response_time_ms": 150
+      },
+      "api_read_operations": {
+        "p95_response_time_ms": 400,
+        "p99_response_time_ms": 800,
+        "avg_response_time_ms": 180
+      },
+      "api_write_operations": {
+        "p95_response_time_ms": 600,
+        "p99_response_time_ms": 1200,
+        "avg_response_time_ms": 250
+      },
+      "health_checks": {
+        "p95_response_time_ms": 100,
+        "p99_response_time_ms": 200,
+        "avg_response_time_ms": 50
+      }
+    },
+    "enforcement_level": "critical_requirement"
+  },
+  "throughput_requirements": {
+    "description": "Request throughput validation per Section 4.6.3 performance specifications",
+    "minimum_sustained_rps": 100,
+    "target_sustained_rps": 500,
+    "peak_capacity_rps": 1000,
+    "test_duration_minutes": 30,
+    "ramp_up_duration_minutes": 5,
+    "enforcement_level": "deployment_blocking"
+  },
+  "resource_utilization_limits": {
+    "description": "System resource constraints per Section 4.6.3 load testing parameters",
+    "cpu_utilization": {
+      "normal_load_max_percent": 70,
+      "peak_load_max_percent": 85,
+      "sustained_load_max_percent": 75,
+      "alert_threshold_percent": 60
+    },
+    "memory_utilization": {
+      "normal_load_max_percent": 80,
+      "peak_load_max_percent": 90,
+      "sustained_load_max_percent": 85,
+      "alert_threshold_percent": 70
+    },
+    "database_connections": {
+      "max_connection_pool_size": 50,
+      "connection_timeout_ms": 5000,
+      "query_timeout_ms": 10000,
+      "idle_connection_timeout_ms": 300000
+    },
+    "redis_connections": {
+      "max_connection_pool_size": 20,
+      "connection_timeout_ms": 2000,
+      "operation_timeout_ms": 5000,
+      "health_check_interval_ms": 30000
+    },
+    "enforcement_level": "performance_gate"
+  },
+  "error_rate_thresholds": {
+    "description": "Error rate limits per Section 4.6.3 performance metrics and Section 6.6.3 quality gates",
+    "normal_load": {
+      "max_error_rate_percent": 0.1,
+      "http_4xx_max_percent": 0.05,
+      "http_5xx_max_percent": 0.05,
+      "timeout_max_percent": 0.02
+    },
+    "peak_load": {
+      "max_error_rate_percent": 0.5,
+      "http_4xx_max_percent": 0.3,
+      "http_5xx_max_percent": 0.2,
+      "timeout_max_percent": 0.1
+    },
+    "production_gates": {
+      "max_error_rate_percent": 1.0,
+      "circuit_breaker_threshold_percent": 5.0,
+      "alert_threshold_percent": 0.5
+    },
+    "enforcement_level": "critical_requirement"
+  },
+  "concurrent_user_limits": {
+    "description": "Progressive scaling limits per Section 4.6.3 load testing parameters",
+    "progressive_scaling": {
+      "initial_users": 10,
+      "scaling_steps": [25, 50, 100, 250, 500, 750, 1000],
+      "step_duration_minutes": 5,
+      "max_concurrent_users": 1000
+    },
+    "user_ramp_patterns": {
+      "gradual_ramp": {
+        "users_per_second": 2,
+        "max_users": 500
+      },
+      "stress_test": {
+        "users_per_second": 10,
+        "max_users": 1000
+      },
+      "spike_test": {
+        "spike_users": 500,
+        "spike_duration_seconds": 60,
+        "baseline_users": 100
+      }
+    },
+    "enforcement_level": "load_testing_requirement"
+  },
+  "database_performance_thresholds": {
+    "description": "Database operation performance limits per Section 6.6.3 database performance requirements",
+    "mongodb_operations": {
+      "query_execution_time_ms": {
+        "simple_find_max": 50,
+        "complex_aggregation_max": 500,
+        "index_scan_max": 100,
+        "full_collection_scan_max": 2000
+      },
+      "connection_metrics": {
+        "connection_establishment_max_ms": 1000,
+        "connection_pool_exhaustion_threshold": 0.8,
+        "query_timeout_ms": 10000
+      }
+    },
+    "redis_operations": {
+      "cache_operation_time_ms": {
+        "get_operation_max": 5,
+        "set_operation_max": 10,
+        "delete_operation_max": 5,
+        "pipeline_operation_max": 50
+      },
+      "connection_metrics": {
+        "connection_establishment_max_ms": 500,
+        "operation_timeout_ms": 2000,
+        "reconnection_attempts": 3
+      }
+    },
+    "enforcement_level": "performance_gate"
+  },
+  "quality_gates": {
+    "description": "Automated quality enforcement criteria per Section 6.6.3 quality gates",
+    "pre_merge_gates": {
+      "code_coverage_min_percent": 90,
+      "unit_test_success_rate_percent": 100,
+      "static_analysis_errors": 0,
+      "critical_security_findings": 0,
+      "performance_compliance_required": true
+    },
+    "deployment_gates": {
+      "integration_test_success_rate_min_percent": 99,
+      "response_time_variance_max_percent": 10,
+      "memory_usage_variance_max_percent": 15,
+      "concurrency_baseline_match_required": true,
+      "security_scan_approval_required": true,
+      "maintainability_compliance_required": true
+    },
+    "production_gates": {
+      "health_check_success_required": true,
+      "error_rate_max_percent": 1.0,
+      "security_posture_validation_required": true,
+      "monitoring_integration_required": true
+    },
+    "release_gates": {
+      "e2e_validation_success_rate_percent": 100,
+      "performance_baseline_compliance_required": true,
+      "security_audit_approval_required": true,
+      "complexity_threshold_compliance_required": true
+    },
+    "enforcement_actions": {
+      "pipeline_termination_triggers": [
+        "static_analysis_failures",
+        "critical_security_findings",
+        "performance_variance_exceeded"
+      ],
+      "deployment_blocking_triggers": [
+        "integration_test_failures",
+        "performance_degradation",
+        "resource_utilization_exceeded"
+      ],
+      "rollback_triggers": [
+        "error_rate_exceeded",
+        "response_time_degradation",
+        "health_check_failures"
+      ]
+    }
+  },
+  "monitoring_thresholds": {
+    "description": "Continuous monitoring alert thresholds per Section 0.3.2 performance monitoring requirements",
+    "alert_levels": {
+      "warning": {
+        "response_time_increase_percent": 5,
+        "cpu_utilization_percent": 60,
+        "memory_utilization_percent": 70,
+        "error_rate_percent": 0.5
+      },
+      "critical": {
+        "response_time_increase_percent": 8,
+        "cpu_utilization_percent": 75,
+        "memory_utilization_percent": 85,
+        "error_rate_percent": 1.0
+      },
+      "emergency": {
+        "response_time_increase_percent": 10,
+        "cpu_utilization_percent": 85,
+        "memory_utilization_percent": 90,
+        "error_rate_percent": 2.0
+      }
+    },
+    "baseline_drift_detection": {
+      "measurement_window_minutes": 15,
+      "comparison_periods": 7,
+      "drift_threshold_percent": 5,
+      "trend_analysis_required": true
+    }
+  },
+  "test_environment_thresholds": {
+    "description": "Environment-specific performance expectations",
+    "development": {
+      "response_time_multiplier": 1.5,
+      "resource_utilization_relaxed": true,
+      "error_rate_tolerance_multiplier": 2.0
+    },
+    "staging": {
+      "response_time_multiplier": 1.2,
+      "resource_utilization_relaxed": false,
+      "error_rate_tolerance_multiplier": 1.5
+    },
+    "production": {
+      "response_time_multiplier": 1.0,
+      "resource_utilization_relaxed": false,
+      "error_rate_tolerance_multiplier": 1.0
+    }
+  },
+  "validation_framework": {
+    "description": "Automated threshold validation configuration",
+    "tools_integration": {
+      "locust_load_testing": {
+        "enabled": true,
+        "version_min": "2.0.0",
+        "test_duration_minutes": 30,
+        "report_format": "json"
+      },
+      "apache_bench_performance": {
+        "enabled": true,
+        "concurrent_connections": 50,
+        "total_requests": 10000,
+        "baseline_comparison_required": true
+      },
+      "pytest_performance_tests": {
+        "enabled": true,
+        "timeout_multiplier": 2.0,
+        "parallel_execution": true
+      }
+    },
+    "reporting_requirements": {
+      "baseline_comparison_required": true,
+      "trend_analysis_required": true,
+      "variance_calculation_required": true,
+      "threshold_violation_alerting": true,
+      "historical_data_retention_days": 90
+    }
+  },
+  "compliance_validation": {
+    "description": "Migration success criteria validation per Section 0.1.1",
+    "critical_success_factors": [
+      "response_time_variance_within_10_percent",
+      "memory_usage_equivalent_to_nodejs",
+      "concurrent_capacity_preserved",
+      "api_compatibility_100_percent",
+      "zero_functional_regressions"
+    ],
+    "automated_validation": {
+      "variance_calculation_formula": "((python_metric - nodejs_baseline) / nodejs_baseline) * 100",
+      "acceptable_variance_range": {
+        "min_percent": -10,
+        "max_percent": 10
+      },
+      "validation_frequency": {
+        "ci_cd_pipeline": "every_commit",
+        "scheduled_regression": "daily",
+        "release_validation": "pre_deployment"
+      }
+    }
+  }
+}
