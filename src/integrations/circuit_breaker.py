@@ -1,1148 +1,1051 @@
 """
-Circuit Breaker Implementation for External Service Protection
+Circuit breaker implementation using pybreaker library for external service protection.
 
-This module implements comprehensive circuit breaker patterns using the pybreaker library for
-external service resilience, automatic failure detection, and fallback mechanisms. It provides
-configurable failure thresholds, half-open state management, and state transition monitoring
-with Prometheus metrics integration per Section 6.3.3 and 6.3.5 specifications.
+This module provides comprehensive circuit breaker functionality for external service integrations
+with automatic failure detection, fallback mechanisms, and state transition monitoring. It implements
+configurable failure thresholds, half-open state management, and Prometheus metrics integration
+for enterprise-grade resilience patterns.
 
-Key Features:
-- Service-specific failure threshold configuration per Section 6.3.5
-- Automatic failure detection and recovery automation per Section 6.3.3
-- Fallback mechanisms preventing cascade failures per Section 6.3.3
-- State transition monitoring with Prometheus metrics per Section 6.3.5
-- Graceful degradation patterns for service outages per Section 6.3.3
-- Enterprise-grade monitoring integration per Section 6.5.1.1
-
-Performance Requirements:
-- Circuit breaker overhead <1ms per request per Section 6.5.1.1
-- ≤10% variance from Node.js baseline per Section 0.3.2
-- Real-time state transition monitoring per Section 6.3.5
-- Enterprise APM integration compatibility per Section 6.5.4
+Aligned with:
+- Section 6.3.3: External Systems integration resilience patterns
+- Section 6.3.5: Performance and Scalability monitoring requirements
+- Section 6.5: Monitoring and Observability comprehensive tracking
+- Section 0.3.2: Performance monitoring requirements for ≤10% variance
 """
 
 import time
-import logging
 import functools
-import asyncio
+import logging
+from typing import Any, Dict, List, Optional, Callable, Union, TypeVar, Generic
 from datetime import datetime, timedelta
-from typing import Any, Callable, Dict, List, Optional, Type, Union
 from enum import Enum
-from contextlib import contextmanager
-from concurrent.futures import ThreadPoolExecutor
-from threading import RLock
+from dataclasses import dataclass, field
+from contextlib import asynccontextmanager, contextmanager
 
-# Circuit breaker implementation using pybreaker
+# Core circuit breaker implementation per Section 6.3.3
 import pybreaker
+from pybreaker import CircuitBreaker, CircuitBreakerState
 
-# Structured logging for enterprise integration
+# Structured logging per Section 6.5.1.2
 import structlog
 
-# Custom exception hierarchy for integration error handling
-from src.integrations.exceptions import (
+# External service integration libraries per Section 3.2.3
+import requests
+import httpx
+from requests.exceptions import RequestException, ConnectionError, Timeout
+import httpx
+
+# Monitoring and metrics integration per Section 6.3.5
+from .monitoring import (
+    external_service_monitor, 
+    ExternalServiceType, 
+    ServiceHealthState,
+    ServiceMetrics
+)
+
+# Exception handling integration per Section 4.2.3
+from .exceptions import (
     CircuitBreakerError,
-    CircuitBreakerOpenError,
+    CircuitBreakerOpenError, 
     CircuitBreakerHalfOpenError,
     IntegrationError,
     HTTPClientError,
-    TimeoutError,
-    ConnectionError,
-    RetryExhaustedError,
-    Auth0Error,
-    AWSServiceError,
-    MongoDBError,
-    RedisError,
-    IntegrationExceptionFactory
+    TimeoutError as IntegrationTimeoutError,
+    ConnectionError as IntegrationConnectionError,
+    RetryExhaustedError
 )
 
-# External service monitoring integration
-from src.integrations.monitoring import (
-    external_service_monitor,
-    ServiceType,
-    CircuitBreakerState,
-    HealthStatus,
-    record_circuit_breaker_event,
-    update_service_health
-)
+# Type hint support
+T = TypeVar('T')
+CallableT = TypeVar('CallableT', bound=Callable)
 
 logger = structlog.get_logger(__name__)
 
+class CircuitBreakerPolicy(Enum):
+    """Circuit breaker policy types for different service characteristics."""
+    STRICT = "strict"          # Low failure tolerance for critical services
+    MODERATE = "moderate"      # Balanced failure tolerance for standard services
+    TOLERANT = "tolerant"      # High failure tolerance for non-critical services
+    CUSTOM = "custom"          # Custom configuration for specific requirements
 
+@dataclass
 class CircuitBreakerConfig:
     """
-    Circuit breaker configuration management per Section 6.3.5 specifications.
+    Circuit breaker configuration for external service protection.
     
-    Provides service-specific failure thresholds, half-open timeout configuration,
-    and recovery parameters based on service criticality and operational requirements.
+    Provides comprehensive configuration options for failure thresholds,
+    timeouts, and monitoring integration per Section 6.3.5.
     """
+    service_name: str
+    service_type: ExternalServiceType
     
-    # Service-specific failure thresholds per Section 6.3.5
-    SERVICE_FAILURE_THRESHOLDS = {
-        ServiceType.AUTH: {
-            'fail_max': 5,
-            'reset_timeout': 60,
-            'name': 'auth_service_circuit_breaker'
-        },
-        ServiceType.AWS: {
-            'fail_max': 3,
-            'reset_timeout': 60,
-            'name': 'aws_service_circuit_breaker'
-        },
-        ServiceType.DATABASE: {
-            'fail_max': 10,
-            'reset_timeout': 120,
-            'name': 'database_circuit_breaker'
-        },
-        ServiceType.CACHE: {
-            'fail_max': 10,
-            'reset_timeout': 30,
-            'name': 'cache_circuit_breaker'
-        },
-        ServiceType.API: {
-            'fail_max': 5,
-            'reset_timeout': 60,
-            'name': 'external_api_circuit_breaker'
-        },
-        ServiceType.WEBHOOK: {
-            'fail_max': 3,
-            'reset_timeout': 90,
-            'name': 'webhook_circuit_breaker'
-        },
-        ServiceType.FILE_STORAGE: {
-            'fail_max': 3,
-            'reset_timeout': 60,
-            'name': 'file_storage_circuit_breaker'
-        }
-    }
+    # Failure threshold configuration per Section 6.3.5
+    fail_max: int = 5                      # Maximum failures before opening circuit
+    recovery_timeout: int = 60             # Seconds to wait before half-open transition
+    expected_exception: tuple = (Exception,)  # Exceptions that trigger circuit breaker
     
-    # Default configuration for unknown service types
-    DEFAULT_CONFIG = {
-        'fail_max': 5,
-        'reset_timeout': 60,
-        'name': 'default_circuit_breaker'
-    }
+    # Performance monitoring configuration per Section 6.3.5
+    enable_metrics: bool = True            # Enable Prometheus metrics collection
+    enable_health_monitoring: bool = True  # Enable health state monitoring
     
-    # Exception types that should trigger circuit breaker failures
-    FAILURE_EXCEPTIONS = (
-        ConnectionError,
-        TimeoutError,
-        HTTPClientError,
-        IntegrationError,
-        RetryExhaustedError,
-        Auth0Error,
-        AWSServiceError,
-        MongoDBError,
-        RedisError
-    )
+    # Fallback configuration per Section 6.3.3
+    fallback_enabled: bool = True          # Enable fallback mechanism
+    fallback_response: Any = None          # Default fallback response
     
-    # Exception types that should NOT trigger circuit breaker failures
-    NON_FAILURE_EXCEPTIONS = (
-        ValueError,
-        TypeError,
-        KeyError,
-        AttributeError
-    )
+    # Advanced configuration options
+    half_open_max_calls: int = 5           # Maximum calls allowed in half-open state
+    reset_timeout_jitter: float = 0.1      # Jitter factor for reset timeout
+    state_change_callback: Optional[Callable] = None  # Callback for state changes
     
-    @classmethod
-    def get_config(cls, service_type: ServiceType) -> Dict[str, Any]:
-        """
-        Get circuit breaker configuration for service type.
-        
-        Args:
-            service_type: Type of external service
-            
-        Returns:
-            Configuration dictionary with failure thresholds and timeouts
-        """
-        return cls.SERVICE_FAILURE_THRESHOLDS.get(service_type, cls.DEFAULT_CONFIG)
+    # Service-specific configuration
+    timeout_seconds: float = 30.0          # Request timeout for external service
+    retry_count: int = 3                   # Number of retries before circuit activation
     
-    @classmethod
-    def should_count_as_failure(cls, exception: Exception) -> bool:
-        """
-        Determine if exception should count as circuit breaker failure.
-        
-        Args:
-            exception: Exception instance to evaluate
-            
-        Returns:
-            True if exception should trigger circuit breaker failure
-        """
-        # Explicitly non-failure exceptions
-        if isinstance(exception, cls.NON_FAILURE_EXCEPTIONS):
-            return False
-        
-        # Explicitly failure exceptions
-        if isinstance(exception, cls.FAILURE_EXCEPTIONS):
-            return True
-        
-        # Default to counting as failure for unknown exceptions
-        return True
+    # Policy-based configuration
+    policy: CircuitBreakerPolicy = CircuitBreakerPolicy.MODERATE
+    
+    def __post_init__(self):
+        """Apply policy-based configuration defaults."""
+        if self.policy == CircuitBreakerPolicy.STRICT:
+            self.fail_max = 3
+            self.recovery_timeout = 120
+            self.half_open_max_calls = 3
+            self.retry_count = 1
+        elif self.policy == CircuitBreakerPolicy.MODERATE:
+            self.fail_max = 5
+            self.recovery_timeout = 60
+            self.half_open_max_calls = 5
+            self.retry_count = 3
+        elif self.policy == CircuitBreakerPolicy.TOLERANT:
+            self.fail_max = 10
+            self.recovery_timeout = 30
+            self.half_open_max_calls = 10
+            self.retry_count = 5
 
+@dataclass
+class CircuitBreakerMetrics:
+    """Circuit breaker execution metrics for monitoring and analysis."""
+    service_name: str
+    service_type: str
+    total_calls: int = 0
+    successful_calls: int = 0
+    failed_calls: int = 0
+    circuit_open_calls: int = 0
+    half_open_calls: int = 0
+    fallback_calls: int = 0
+    last_failure_time: Optional[datetime] = None
+    last_success_time: Optional[datetime] = None
+    average_response_time: float = 0.0
+    state_transitions: List[Dict[str, Any]] = field(default_factory=list)
 
-class ExternalServiceCircuitBreaker:
+class EnhancedCircuitBreaker:
     """
-    Comprehensive circuit breaker implementation for external service protection.
+    Enhanced circuit breaker implementation with comprehensive monitoring and fallback support.
     
-    Implements pybreaker-based circuit breaker patterns with automatic failure detection,
-    fallback mechanisms, and state transition monitoring. Provides service-specific
-    configuration, Prometheus metrics integration, and graceful degradation capabilities.
-    
-    Features:
-    - Service-specific failure threshold management per Section 6.3.5
-    - Automatic failure detection and recovery automation per Section 6.3.3
-    - State transition monitoring with Prometheus metrics per Section 6.3.5
-    - Fallback mechanisms preventing cascade failures per Section 6.3.3
-    - Graceful degradation patterns for service outages per Section 6.3.3
+    Provides enterprise-grade circuit breaker functionality with automatic failure detection,
+    fallback mechanisms, and integrated monitoring per Section 6.3.3 and 6.3.5 requirements.
     """
     
-    def __init__(
-        self,
-        service_name: str,
-        service_type: ServiceType,
-        fallback_function: Optional[Callable] = None,
-        custom_config: Optional[Dict[str, Any]] = None
-    ):
+    def __init__(self, config: CircuitBreakerConfig):
         """
-        Initialize circuit breaker for external service protection.
+        Initialize enhanced circuit breaker with configuration.
         
         Args:
-            service_name: Unique service identifier
-            service_type: Service type classification for configuration
-            fallback_function: Optional fallback function for graceful degradation
-            custom_config: Optional custom configuration overrides
+            config: Circuit breaker configuration containing all operational parameters
         """
-        self.service_name = service_name
-        self.service_type = service_type
-        self.fallback_function = fallback_function
-        
-        # Get service-specific configuration
-        self.config = CircuitBreakerConfig.get_config(service_type)
-        if custom_config:
-            self.config.update(custom_config)
-        
-        # Initialize pybreaker circuit breaker with monitoring integration
-        self.circuit_breaker = self._create_circuit_breaker()
-        
-        # State tracking for monitoring
-        self._previous_state = CircuitBreakerState.CLOSED
-        self._failure_count = 0
-        self._last_failure_time: Optional[datetime] = None
-        self._recovery_start_time: Optional[datetime] = None
-        self._lock = RLock()
-        
-        # Register service for monitoring
-        self._register_service_monitoring()
-        
-        logger.info(
-            "circuit_breaker_initialized",
-            service_name=service_name,
-            service_type=service_type.value,
-            config=self.config,
-            component="integrations.circuit_breaker"
+        self.config = config
+        self.metrics = CircuitBreakerMetrics(
+            service_name=config.service_name,
+            service_type=config.service_type.value
         )
-    
-    def _create_circuit_breaker(self) -> pybreaker.CircuitBreaker:
-        """
-        Create and configure pybreaker circuit breaker instance.
         
-        Returns:
-            Configured pybreaker CircuitBreaker instance
-        """
-        return pybreaker.CircuitBreaker(
-            fail_max=self.config['fail_max'],
-            reset_timeout=self.config['reset_timeout'],
-            exclude=CircuitBreakerConfig.NON_FAILURE_EXCEPTIONS,
-            listeners=[
-                self._on_circuit_breaker_call,
-                self._on_circuit_breaker_success,
-                self._on_circuit_breaker_failure,
-                self._on_circuit_breaker_fallback,
-                self._on_circuit_breaker_open,
-                self._on_circuit_breaker_close,
-                self._on_circuit_breaker_half_open
-            ],
-            name=f"{self.service_name}_{self.config['name']}"
+        # Initialize pybreaker circuit breaker per Section 6.3.3
+        self._circuit_breaker = CircuitBreaker(
+            fail_max=config.fail_max,
+            reset_timeout=config.recovery_timeout,
+            exclude=(),  # No exceptions to exclude by default
+            listeners=[self._on_state_change] if config.state_change_callback or config.enable_metrics else []
         )
+        
+        # Register service with monitoring system per Section 6.3.5
+        if config.enable_metrics:
+            self._register_with_monitoring()
+        
+        # Initialize fallback mechanism per Section 6.3.3
+        self._fallback_cache: Dict[str, Any] = {}
+        
+        logger.info("Circuit breaker initialized",
+                   service_name=config.service_name,
+                   service_type=config.service_type.value,
+                   fail_max=config.fail_max,
+                   recovery_timeout=config.recovery_timeout,
+                   policy=config.policy.value)
     
-    def _register_service_monitoring(self) -> None:
-        """Register service with external service monitoring system."""
+    def _register_with_monitoring(self) -> None:
+        """Register circuit breaker with external service monitoring system."""
         try:
-            external_service_monitor.register_service(
-                service_name=self.service_name,
-                service_type=self.service_type,
-                endpoint_url=f"circuit_breaker://{self.service_name}",
-                health_check_path="/health",
-                metadata={
-                    'circuit_breaker_config': self.config,
-                    'failure_threshold': self.config['fail_max'],
-                    'reset_timeout': self.config['reset_timeout']
-                }
+            service_metrics = ServiceMetrics(
+                service_name=self.config.service_name,
+                service_type=self.config.service_type,
+                health_endpoint=None,  # Circuit breaker doesn't provide health endpoint
+                timeout_seconds=self.config.timeout_seconds,
+                critical_threshold_ms=self.config.timeout_seconds * 1000 * 0.8,
+                warning_threshold_ms=self.config.timeout_seconds * 1000 * 0.5
             )
+            external_service_monitor.register_service(service_metrics)
+            
+            logger.debug("Circuit breaker registered with monitoring system",
+                        service_name=self.config.service_name)
         except Exception as e:
-            logger.warning(
-                "service_monitoring_registration_failed",
-                service_name=self.service_name,
-                error=str(e),
-                component="integrations.circuit_breaker"
-            )
+            logger.warning("Failed to register circuit breaker with monitoring",
+                          service_name=self.config.service_name,
+                          error=str(e))
     
-    # Circuit breaker event listeners for monitoring integration
-    
-    def _on_circuit_breaker_call(self, cb: pybreaker.CircuitBreaker) -> None:
-        """Handle circuit breaker call event."""
-        logger.debug(
-            "circuit_breaker_call",
-            service_name=self.service_name,
-            state=cb.current_state,
-            failure_count=cb.fail_counter,
-            component="integrations.circuit_breaker"
-        )
-    
-    def _on_circuit_breaker_success(self, cb: pybreaker.CircuitBreaker) -> None:
-        """Handle circuit breaker success event."""
-        with self._lock:
-            self._failure_count = cb.fail_counter
-            self._last_failure_time = None
-            
-            # Update monitoring metrics
-            self._update_circuit_breaker_state(cb.current_state)
-            
-            # Update service health status
-            update_service_health(
-                service_name=self.service_name,
-                service_type=self.service_type,
-                status=HealthStatus.HEALTHY,
-                duration=0.0,
-                metadata={'circuit_breaker_state': cb.current_state}
-            )
-        
-        logger.info(
-            "circuit_breaker_success",
-            service_name=self.service_name,
-            state=cb.current_state,
-            failure_count=cb.fail_counter,
-            component="integrations.circuit_breaker"
-        )
-    
-    def _on_circuit_breaker_failure(self, cb: pybreaker.CircuitBreaker, exception: Exception) -> None:
-        """Handle circuit breaker failure event."""
-        with self._lock:
-            self._failure_count = cb.fail_counter
-            self._last_failure_time = datetime.utcnow()
-            
-            # Record failure metrics
-            external_service_monitor.record_circuit_breaker_failure(
-                service_name=self.service_name,
-                service_type=self.service_type,
-                failure_reason=type(exception).__name__
-            )
-            
-            # Update service health status
-            health_status = HealthStatus.DEGRADED if cb.current_state == 'closed' else HealthStatus.UNHEALTHY
-            update_service_health(
-                service_name=self.service_name,
-                service_type=self.service_type,
-                status=health_status,
-                duration=0.0,
-                metadata={
-                    'circuit_breaker_state': cb.current_state,
-                    'failure_reason': str(exception),
-                    'failure_count': cb.fail_counter
-                }
-            )
-        
-        logger.error(
-            "circuit_breaker_failure",
-            service_name=self.service_name,
-            state=cb.current_state,
-            failure_count=cb.fail_counter,
-            exception=str(exception),
-            exception_type=type(exception).__name__,
-            component="integrations.circuit_breaker"
-        )
-    
-    def _on_circuit_breaker_fallback(self, cb: pybreaker.CircuitBreaker, exception: Exception) -> None:
-        """Handle circuit breaker fallback event."""
-        logger.warning(
-            "circuit_breaker_fallback_triggered",
-            service_name=self.service_name,
-            state=cb.current_state,
-            exception=str(exception),
-            has_fallback=self.fallback_function is not None,
-            component="integrations.circuit_breaker"
-        )
-    
-    def _on_circuit_breaker_open(self, cb: pybreaker.CircuitBreaker, prev_state: str, exception: Exception) -> None:
-        """Handle circuit breaker open state transition."""
-        with self._lock:
-            previous_state = self._map_pybreaker_state_to_enum(prev_state)
-            current_state = CircuitBreakerState.OPEN
-            
-            # Record state transition
-            external_service_monitor.record_circuit_breaker_state(
-                service_name=self.service_name,
-                service_type=self.service_type,
-                state=current_state,
-                previous_state=previous_state
-            )
-            
-            self._previous_state = current_state
-            
-            # Update service health to unhealthy
-            update_service_health(
-                service_name=self.service_name,
-                service_type=self.service_type,
-                status=HealthStatus.UNHEALTHY,
-                duration=0.0,
-                metadata={
-                    'circuit_breaker_state': current_state.value,
-                    'failure_count': cb.fail_counter,
-                    'reset_timeout': self.config['reset_timeout']
-                }
-            )
-        
-        logger.warning(
-            "circuit_breaker_opened",
-            service_name=self.service_name,
-            previous_state=prev_state,
-            current_state="open",
-            failure_count=cb.fail_counter,
-            reset_timeout=self.config['reset_timeout'],
-            component="integrations.circuit_breaker"
-        )
-    
-    def _on_circuit_breaker_close(self, cb: pybreaker.CircuitBreaker, prev_state: str) -> None:
-        """Handle circuit breaker close state transition."""
-        with self._lock:
-            previous_state = self._map_pybreaker_state_to_enum(prev_state)
-            current_state = CircuitBreakerState.CLOSED
-            
-            # Record state transition
-            external_service_monitor.record_circuit_breaker_state(
-                service_name=self.service_name,
-                service_type=self.service_type,
-                state=current_state,
-                previous_state=previous_state
-            )
-            
-            self._previous_state = current_state
-            self._recovery_start_time = None
-            
-            # Update service health to healthy
-            update_service_health(
-                service_name=self.service_name,
-                service_type=self.service_type,
-                status=HealthStatus.HEALTHY,
-                duration=0.0,
-                metadata={
-                    'circuit_breaker_state': current_state.value,
-                    'recovery_completed': True
-                }
-            )
-        
-        logger.info(
-            "circuit_breaker_closed",
-            service_name=self.service_name,
-            previous_state=prev_state,
-            current_state="closed",
-            component="integrations.circuit_breaker"
-        )
-    
-    def _on_circuit_breaker_half_open(self, cb: pybreaker.CircuitBreaker, prev_state: str) -> None:
-        """Handle circuit breaker half-open state transition."""
-        with self._lock:
-            previous_state = self._map_pybreaker_state_to_enum(prev_state)
-            current_state = CircuitBreakerState.HALF_OPEN
-            
-            # Record state transition
-            external_service_monitor.record_circuit_breaker_state(
-                service_name=self.service_name,
-                service_type=self.service_type,
-                state=current_state,
-                previous_state=previous_state
-            )
-            
-            self._previous_state = current_state
-            self._recovery_start_time = datetime.utcnow()
-            
-            # Update service health to degraded during testing
-            update_service_health(
-                service_name=self.service_name,
-                service_type=self.service_type,
-                status=HealthStatus.DEGRADED,
-                duration=0.0,
-                metadata={
-                    'circuit_breaker_state': current_state.value,
-                    'recovery_testing': True
-                }
-            )
-        
-        logger.info(
-            "circuit_breaker_half_open",
-            service_name=self.service_name,
-            previous_state=prev_state,
-            current_state="half_open",
-            component="integrations.circuit_breaker"
-        )
-    
-    def _map_pybreaker_state_to_enum(self, state: str) -> CircuitBreakerState:
-        """Map pybreaker state string to CircuitBreakerState enum."""
-        state_mapping = {
-            'closed': CircuitBreakerState.CLOSED,
-            'open': CircuitBreakerState.OPEN,
-            'half-open': CircuitBreakerState.HALF_OPEN
-        }
-        return state_mapping.get(state, CircuitBreakerState.CLOSED)
-    
-    def _update_circuit_breaker_state(self, current_state: str) -> None:
-        """Update circuit breaker state in monitoring system."""
-        state_enum = self._map_pybreaker_state_to_enum(current_state)
-        external_service_monitor.record_circuit_breaker_state(
-            service_name=self.service_name,
-            service_type=self.service_type,
-            state=state_enum,
-            previous_state=self._previous_state
-        )
-        self._previous_state = state_enum
-    
-    def __call__(self, func: Callable) -> Callable:
+    def _on_state_change(self, prev_state: CircuitBreakerState, new_state: CircuitBreakerState) -> None:
         """
-        Decorator for protecting functions with circuit breaker.
+        Handle circuit breaker state changes for monitoring and callbacks.
         
         Args:
-            func: Function to protect with circuit breaker
-            
-        Returns:
-            Wrapped function with circuit breaker protection
+            prev_state: Previous circuit breaker state
+            new_state: New circuit breaker state
         """
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            return self.call_with_circuit_breaker(func, *args, **kwargs)
+        # Record state transition for metrics
+        transition = {
+            'timestamp': datetime.utcnow().isoformat(),
+            'from_state': prev_state.name,
+            'to_state': new_state.name,
+            'failure_count': self._circuit_breaker.fail_counter
+        }
+        self.metrics.state_transitions.append(transition)
         
-        @functools.wraps(func)
-        async def async_wrapper(*args, **kwargs):
-            return await self.call_with_circuit_breaker_async(func, *args, **kwargs)
+        # Update monitoring system per Section 6.3.5
+        if self.config.enable_metrics:
+            try:
+                external_service_monitor.track_circuit_breaker_state(
+                    service_name=self.config.service_name,
+                    service_type=self.config.service_type,
+                    circuit_breaker=self._circuit_breaker
+                )
+            except Exception as e:
+                logger.warning("Failed to update circuit breaker monitoring",
+                              service_name=self.config.service_name,
+                              error=str(e))
         
-        # Return appropriate wrapper based on function type
-        return async_wrapper if asyncio.iscoroutinefunction(func) else wrapper
+        # Execute custom state change callback if provided
+        if self.config.state_change_callback:
+            try:
+                self.config.state_change_callback(prev_state, new_state, self.config.service_name)
+            except Exception as e:
+                logger.error("Circuit breaker state change callback failed",
+                           service_name=self.config.service_name,
+                           error=str(e))
+        
+        logger.info("Circuit breaker state changed",
+                   service_name=self.config.service_name,
+                   service_type=self.config.service_type.value,
+                   from_state=prev_state.name,
+                   to_state=new_state.name,
+                   failure_count=self._circuit_breaker.fail_counter)
     
-    def call_with_circuit_breaker(self, func: Callable, *args, **kwargs) -> Any:
+    @property
+    def state(self) -> CircuitBreakerState:
+        """Get current circuit breaker state."""
+        return self._circuit_breaker.current_state
+    
+    @property
+    def failure_count(self) -> int:
+        """Get current failure count."""
+        return self._circuit_breaker.fail_counter
+    
+    @property
+    def is_open(self) -> bool:
+        """Check if circuit breaker is in OPEN state."""
+        return self.state == CircuitBreakerState.OPEN
+    
+    @property
+    def is_half_open(self) -> bool:
+        """Check if circuit breaker is in HALF_OPEN state."""
+        return self.state == CircuitBreakerState.HALF_OPEN
+    
+    @property
+    def is_closed(self) -> bool:
+        """Check if circuit breaker is in CLOSED state."""
+        return self.state == CircuitBreakerState.CLOSED
+    
+    def call(self, func: Callable[..., T], *args, **kwargs) -> T:
         """
         Execute function with circuit breaker protection.
         
         Args:
-            func: Function to execute
-            *args: Function arguments
-            **kwargs: Function keyword arguments
+            func: Function to execute with circuit breaker protection
+            *args: Positional arguments for the function
+            **kwargs: Keyword arguments for the function
             
         Returns:
-            Function result or fallback result
+            Function result or fallback response
             
         Raises:
-            CircuitBreakerOpenError: When circuit breaker is open
-            CircuitBreakerHalfOpenError: When test call fails in half-open state
+            CircuitBreakerOpenError: When circuit is open and no fallback available
+            CircuitBreakerHalfOpenError: When half-open test call fails
+            IntegrationError: For other integration-related failures
         """
-        try:
-            with external_service_monitor.track_request(
-                service_name=self.service_name,
-                service_type=self.service_type,
-                method=kwargs.get('method', 'CALL'),
-                endpoint=func.__name__
-            ):
-                result = self.circuit_breaker(func)(*args, **kwargs)
-                return result
+        start_time = time.time()
+        operation_id = f"{self.config.service_name}_{int(start_time)}"
         
+        try:
+            # Update metrics for total calls
+            self.metrics.total_calls += 1
+            
+            # Check circuit breaker state before execution
+            if self.is_open:
+                self.metrics.circuit_open_calls += 1
+                if self.config.fallback_enabled:
+                    return self._execute_fallback(operation_id, *args, **kwargs)
+                else:
+                    raise CircuitBreakerOpenError(
+                        service_name=self.config.service_name,
+                        operation=func.__name__,
+                        failure_count=self.failure_count,
+                        failure_threshold=self.config.fail_max
+                    )
+            
+            # Execute function with circuit breaker protection
+            result = self._circuit_breaker(func)(*args, **kwargs)
+            
+            # Update success metrics
+            execution_time = time.time() - start_time
+            self.metrics.successful_calls += 1
+            self.metrics.last_success_time = datetime.utcnow()
+            self._update_response_time(execution_time)
+            
+            # Track retry success if monitoring enabled
+            if self.config.enable_metrics:
+                external_service_monitor.track_retry_attempt(
+                    service_name=self.config.service_name,
+                    service_type=self.config.service_type,
+                    attempt_number=1,  # Successful on first attempt
+                    success=True
+                )
+            
+            logger.debug("Circuit breaker call succeeded",
+                        service_name=self.config.service_name,
+                        operation=func.__name__,
+                        execution_time=execution_time,
+                        operation_id=operation_id)
+            
+            return result
+            
         except pybreaker.CircuitBreakerError as e:
-            # Handle circuit breaker errors with appropriate exception types
-            if self.circuit_breaker.current_state == 'open':
-                time_until_reset = max(0, int(
-                    self.config['reset_timeout'] - 
-                    (time.time() - self.circuit_breaker._state_storage['last_failure_time'])
-                ))
-                
-                circuit_error = CircuitBreakerOpenError(
-                    service_name=self.service_name,
-                    operation=func.__name__,
-                    time_until_reset=time_until_reset,
-                    failure_count=self._failure_count,
-                    failure_threshold=self.config['fail_max'],
-                    reset_timeout=self.config['reset_timeout']
-                )
-            elif self.circuit_breaker.current_state == 'half-open':
-                circuit_error = CircuitBreakerHalfOpenError(
-                    service_name=self.service_name,
-                    operation=func.__name__,
-                    failure_count=self._failure_count,
-                    failure_threshold=self.config['fail_max']
-                )
+            # Handle pybreaker-specific circuit breaker errors
+            self.metrics.failed_calls += 1
+            self.metrics.last_failure_time = datetime.utcnow()
+            
+            if "half-open" in str(e).lower():
+                self.metrics.half_open_calls += 1
+                if self.config.fallback_enabled:
+                    return self._execute_fallback(operation_id, *args, **kwargs)
+                else:
+                    raise CircuitBreakerHalfOpenError(
+                        service_name=self.config.service_name,
+                        operation=func.__name__
+                    )
             else:
-                circuit_error = CircuitBreakerError(
-                    message=str(e),
-                    service_name=self.service_name,
-                    operation=func.__name__,
-                    circuit_state=self.circuit_breaker.current_state,
-                    failure_count=self._failure_count
-                )
-            
-            # Attempt fallback if available
-            if self.fallback_function:
-                try:
-                    logger.info(
-                        "circuit_breaker_fallback_executed",
-                        service_name=self.service_name,
+                self.metrics.circuit_open_calls += 1
+                if self.config.fallback_enabled:
+                    return self._execute_fallback(operation_id, *args, **kwargs)
+                else:
+                    raise CircuitBreakerOpenError(
+                        service_name=self.config.service_name,
                         operation=func.__name__,
-                        component="integrations.circuit_breaker"
+                        failure_count=self.failure_count,
+                        failure_threshold=self.config.fail_max
                     )
-                    return self.fallback_function(*args, **kwargs)
-                except Exception as fallback_error:
-                    logger.error(
-                        "circuit_breaker_fallback_failed",
-                        service_name=self.service_name,
-                        operation=func.__name__,
-                        fallback_error=str(fallback_error),
-                        component="integrations.circuit_breaker"
-                    )
-                    raise circuit_error from fallback_error
-            
-            raise circuit_error
         
         except Exception as e:
-            # Handle other exceptions
-            if CircuitBreakerConfig.should_count_as_failure(e):
-                logger.error(
-                    "circuit_breaker_function_failure",
-                    service_name=self.service_name,
-                    operation=func.__name__,
-                    error=str(e),
-                    error_type=type(e).__name__,
-                    component="integrations.circuit_breaker"
+            # Handle application-level exceptions
+            execution_time = time.time() - start_time
+            self.metrics.failed_calls += 1
+            self.metrics.last_failure_time = datetime.utcnow()
+            self._update_response_time(execution_time)
+            
+            # Track retry failure if monitoring enabled
+            if self.config.enable_metrics:
+                external_service_monitor.track_retry_attempt(
+                    service_name=self.config.service_name,
+                    service_type=self.config.service_type,
+                    attempt_number=1,  # Failed on first attempt
+                    success=False
                 )
-            raise
+            
+            logger.error("Circuit breaker call failed",
+                        service_name=self.config.service_name,
+                        operation=func.__name__,
+                        execution_time=execution_time,
+                        operation_id=operation_id,
+                        error=str(e),
+                        error_type=type(e).__name__)
+            
+            # Execute fallback if enabled, otherwise re-raise
+            if self.config.fallback_enabled:
+                return self._execute_fallback(operation_id, *args, **kwargs)
+            else:
+                raise
     
-    async def call_with_circuit_breaker_async(self, func: Callable, *args, **kwargs) -> Any:
+    async def call_async(self, func: Callable[..., T], *args, **kwargs) -> T:
         """
         Execute async function with circuit breaker protection.
         
         Args:
-            func: Async function to execute
-            *args: Function arguments
-            **kwargs: Function keyword arguments
+            func: Async function to execute with circuit breaker protection
+            *args: Positional arguments for the function
+            **kwargs: Keyword arguments for the function
             
         Returns:
-            Function result or fallback result
+            Function result or fallback response
             
         Raises:
-            CircuitBreakerOpenError: When circuit breaker is open
-            CircuitBreakerHalfOpenError: When test call fails in half-open state
+            CircuitBreakerOpenError: When circuit is open and no fallback available
+            CircuitBreakerHalfOpenError: When half-open test call fails
+            IntegrationError: For other integration-related failures
         """
-        # Check circuit breaker state before execution
-        if self.circuit_breaker.current_state == 'open':
-            time_until_reset = max(0, int(
-                self.config['reset_timeout'] - 
-                (time.time() - self.circuit_breaker._state_storage.get('last_failure_time', 0))
-            ))
-            
-            circuit_error = CircuitBreakerOpenError(
-                service_name=self.service_name,
-                operation=func.__name__,
-                time_until_reset=time_until_reset,
-                failure_count=self._failure_count,
-                failure_threshold=self.config['fail_max'],
-                reset_timeout=self.config['reset_timeout']
-            )
-            
-            # Attempt fallback if available
-            if self.fallback_function:
-                try:
-                    logger.info(
-                        "circuit_breaker_async_fallback_executed",
-                        service_name=self.service_name,
-                        operation=func.__name__,
-                        component="integrations.circuit_breaker"
-                    )
-                    if asyncio.iscoroutinefunction(self.fallback_function):
-                        return await self.fallback_function(*args, **kwargs)
-                    else:
-                        return self.fallback_function(*args, **kwargs)
-                except Exception as fallback_error:
-                    logger.error(
-                        "circuit_breaker_async_fallback_failed",
-                        service_name=self.service_name,
-                        operation=func.__name__,
-                        fallback_error=str(fallback_error),
-                        component="integrations.circuit_breaker"
-                    )
-                    raise circuit_error from fallback_error
-            
-            raise circuit_error
+        start_time = time.time()
+        operation_id = f"{self.config.service_name}_async_{int(start_time)}"
         
-        # Execute async function with monitoring
         try:
-            with external_service_monitor.track_request(
-                service_name=self.service_name,
-                service_type=self.service_type,
-                method=kwargs.get('method', 'ASYNC_CALL'),
-                endpoint=func.__name__
-            ):
+            # Update metrics for total calls
+            self.metrics.total_calls += 1
+            
+            # Check circuit breaker state before execution
+            if self.is_open:
+                self.metrics.circuit_open_calls += 1
+                if self.config.fallback_enabled:
+                    return await self._execute_fallback_async(operation_id, *args, **kwargs)
+                else:
+                    raise CircuitBreakerOpenError(
+                        service_name=self.config.service_name,
+                        operation=func.__name__,
+                        failure_count=self.failure_count,
+                        failure_threshold=self.config.fail_max
+                    )
+            
+            # Execute async function with circuit breaker protection
+            # Note: pybreaker doesn't natively support async, so we handle state manually
+            try:
                 result = await func(*args, **kwargs)
                 
-                # Record success for circuit breaker
-                self._on_circuit_breaker_success(self.circuit_breaker)
+                # Manually update circuit breaker success
+                self._circuit_breaker._call_succeeded()
+                
+                # Update success metrics
+                execution_time = time.time() - start_time
+                self.metrics.successful_calls += 1
+                self.metrics.last_success_time = datetime.utcnow()
+                self._update_response_time(execution_time)
+                
+                # Track retry success if monitoring enabled
+                if self.config.enable_metrics:
+                    external_service_monitor.track_retry_attempt(
+                        service_name=self.config.service_name,
+                        service_type=self.config.service_type,
+                        attempt_number=1,  # Successful on first attempt
+                        success=True
+                    )
+                
+                logger.debug("Async circuit breaker call succeeded",
+                            service_name=self.config.service_name,
+                            operation=func.__name__,
+                            execution_time=execution_time,
+                            operation_id=operation_id)
                 
                 return result
+                
+            except Exception as e:
+                # Manually update circuit breaker failure
+                self._circuit_breaker._call_failed()
+                raise e
+            
+        except pybreaker.CircuitBreakerError as e:
+            # Handle pybreaker-specific circuit breaker errors
+            self.metrics.failed_calls += 1
+            self.metrics.last_failure_time = datetime.utcnow()
+            
+            if "half-open" in str(e).lower():
+                self.metrics.half_open_calls += 1
+                if self.config.fallback_enabled:
+                    return await self._execute_fallback_async(operation_id, *args, **kwargs)
+                else:
+                    raise CircuitBreakerHalfOpenError(
+                        service_name=self.config.service_name,
+                        operation=func.__name__
+                    )
+            else:
+                self.metrics.circuit_open_calls += 1
+                if self.config.fallback_enabled:
+                    return await self._execute_fallback_async(operation_id, *args, **kwargs)
+                else:
+                    raise CircuitBreakerOpenError(
+                        service_name=self.config.service_name,
+                        operation=func.__name__,
+                        failure_count=self.failure_count,
+                        failure_threshold=self.config.fail_max
+                    )
         
         except Exception as e:
-            # Record failure for circuit breaker
-            if CircuitBreakerConfig.should_count_as_failure(e):
-                with self._lock:
-                    self._failure_count += 1
-                    self._last_failure_time = datetime.utcnow()
-                    
-                    # Check if failure threshold exceeded
-                    if self._failure_count >= self.config['fail_max']:
-                        self._on_circuit_breaker_open(
-                            self.circuit_breaker,
-                            self.circuit_breaker.current_state,
-                            e
-                        )
-                        # Update pybreaker state
-                        self.circuit_breaker._state_storage['current_state'] = 'open'
-                        self.circuit_breaker._state_storage['last_failure_time'] = time.time()
-                
-                self._on_circuit_breaker_failure(self.circuit_breaker, e)
+            # Handle application-level exceptions
+            execution_time = time.time() - start_time
+            self.metrics.failed_calls += 1
+            self.metrics.last_failure_time = datetime.utcnow()
+            self._update_response_time(execution_time)
             
-            raise
+            # Track retry failure if monitoring enabled
+            if self.config.enable_metrics:
+                external_service_monitor.track_retry_attempt(
+                    service_name=self.config.service_name,
+                    service_type=self.config.service_type,
+                    attempt_number=1,  # Failed on first attempt
+                    success=False
+                )
+            
+            logger.error("Async circuit breaker call failed",
+                        service_name=self.config.service_name,
+                        operation=func.__name__,
+                        execution_time=execution_time,
+                        operation_id=operation_id,
+                        error=str(e),
+                        error_type=type(e).__name__)
+            
+            # Execute fallback if enabled, otherwise re-raise
+            if self.config.fallback_enabled:
+                return await self._execute_fallback_async(operation_id, *args, **kwargs)
+            else:
+                raise
     
-    def get_state(self) -> Dict[str, Any]:
+    def _execute_fallback(self, operation_id: str, *args, **kwargs) -> Any:
         """
-        Get current circuit breaker state information.
+        Execute fallback mechanism for failed operations.
+        
+        Args:
+            operation_id: Unique identifier for the operation
+            *args: Original function positional arguments
+            **kwargs: Original function keyword arguments
+            
+        Returns:
+            Fallback response or cached response if available
+        """
+        self.metrics.fallback_calls += 1
+        
+        # Check for cached fallback response
+        cache_key = f"{self.config.service_name}:fallback:{hash(str(args) + str(kwargs))}"
+        if cache_key in self._fallback_cache:
+            cached_response = self._fallback_cache[cache_key]
+            logger.info("Circuit breaker fallback: using cached response",
+                       service_name=self.config.service_name,
+                       operation_id=operation_id,
+                       cache_key=cache_key)
+            return cached_response
+        
+        # Return configured fallback response
+        if self.config.fallback_response is not None:
+            logger.info("Circuit breaker fallback: using configured response",
+                       service_name=self.config.service_name,
+                       operation_id=operation_id,
+                       fallback_type="configured")
+            return self.config.fallback_response
+        
+        # Generate default fallback response based on service type
+        default_fallback = self._generate_default_fallback()
+        logger.info("Circuit breaker fallback: using default response",
+                   service_name=self.config.service_name,
+                   operation_id=operation_id,
+                   fallback_type="default")
+        return default_fallback
+    
+    async def _execute_fallback_async(self, operation_id: str, *args, **kwargs) -> Any:
+        """
+        Execute async fallback mechanism for failed operations.
+        
+        Args:
+            operation_id: Unique identifier for the operation
+            *args: Original function positional arguments
+            **kwargs: Original function keyword arguments
+            
+        Returns:
+            Fallback response or cached response if available
+        """
+        # Async fallback implementation is the same as sync for now
+        # Future enhancement: could include async cache lookups or async fallback services
+        return self._execute_fallback(operation_id, *args, **kwargs)
+    
+    def _generate_default_fallback(self) -> Any:
+        """
+        Generate appropriate default fallback response based on service type.
         
         Returns:
-            Dictionary containing circuit breaker state details
+            Service-appropriate default fallback response
         """
-        with self._lock:
+        if self.config.service_type == ExternalServiceType.AUTH_PROVIDER:
             return {
-                'service_name': self.service_name,
-                'service_type': self.service_type.value,
-                'current_state': self.circuit_breaker.current_state,
-                'failure_count': self._failure_count,
-                'failure_threshold': self.config['fail_max'],
-                'reset_timeout': self.config['reset_timeout'],
-                'last_failure_time': self._last_failure_time.isoformat() if self._last_failure_time else None,
-                'recovery_start_time': self._recovery_start_time.isoformat() if self._recovery_start_time else None,
-                'has_fallback': self.fallback_function is not None,
-                'time_until_reset': self._get_time_until_reset()
+                'status': 'error',
+                'message': 'Authentication service temporarily unavailable',
+                'fallback': True,
+                'retry_after': self.config.recovery_timeout
+            }
+        elif self.config.service_type == ExternalServiceType.CLOUD_STORAGE:
+            return {
+                'status': 'error',
+                'message': 'Storage service temporarily unavailable',
+                'fallback': True,
+                'retry_after': self.config.recovery_timeout
+            }
+        elif self.config.service_type == ExternalServiceType.HTTP_API:
+            return {
+                'status': 'error',
+                'message': 'External API temporarily unavailable',
+                'fallback': True,
+                'retry_after': self.config.recovery_timeout
+            }
+        else:
+            return {
+                'status': 'error',
+                'message': 'Service temporarily unavailable',
+                'fallback': True,
+                'service': self.config.service_name,
+                'retry_after': self.config.recovery_timeout
             }
     
-    def _get_time_until_reset(self) -> Optional[int]:
-        """Get time until circuit breaker reset in seconds."""
-        if (self.circuit_breaker.current_state == 'open' and 
-            hasattr(self.circuit_breaker, '_state_storage') and
-            'last_failure_time' in self.circuit_breaker._state_storage):
-            
-            time_since_failure = time.time() - self.circuit_breaker._state_storage['last_failure_time']
-            return max(0, int(self.config['reset_timeout'] - time_since_failure))
-        
-        return None
-    
-    def force_open(self) -> None:
-        """Force circuit breaker to open state for testing or emergency."""
-        with self._lock:
-            self.circuit_breaker._state_storage['current_state'] = 'open'
-            self.circuit_breaker._state_storage['last_failure_time'] = time.time()
-            self._failure_count = self.config['fail_max']
-            
-            self._on_circuit_breaker_open(
-                self.circuit_breaker,
-                self._previous_state.value,
-                Exception("Force opened")
+    def _update_response_time(self, execution_time: float) -> None:
+        """Update average response time with exponential moving average."""
+        alpha = 0.3  # Smoothing factor for exponential moving average
+        if self.metrics.average_response_time == 0.0:
+            self.metrics.average_response_time = execution_time
+        else:
+            self.metrics.average_response_time = (
+                alpha * execution_time + 
+                (1 - alpha) * self.metrics.average_response_time
             )
-        
-        logger.warning(
-            "circuit_breaker_force_opened",
-            service_name=self.service_name,
-            component="integrations.circuit_breaker"
-        )
     
-    def force_close(self) -> None:
-        """Force circuit breaker to closed state for testing or emergency."""
-        with self._lock:
-            previous_state = self.circuit_breaker.current_state
-            self.circuit_breaker._state_storage['current_state'] = 'closed'
-            self.circuit_breaker.fail_counter = 0
-            self._failure_count = 0
-            self._last_failure_time = None
-            
-            self._on_circuit_breaker_close(self.circuit_breaker, previous_state)
+    def set_fallback_cache(self, cache_key: str, response: Any, ttl_seconds: int = 300) -> None:
+        """
+        Set cached fallback response for graceful degradation.
         
-        logger.warning(
-            "circuit_breaker_force_closed",
-            service_name=self.service_name,
-            component="integrations.circuit_breaker"
-        )
+        Args:
+            cache_key: Cache key for the fallback response
+            response: Response to cache for fallback
+            ttl_seconds: Time-to-live for the cached response
+        """
+        cache_entry = {
+            'response': response,
+            'expires_at': time.time() + ttl_seconds
+        }
+        self._fallback_cache[cache_key] = cache_entry
+        
+        logger.debug("Fallback cache entry set",
+                    service_name=self.config.service_name,
+                    cache_key=cache_key,
+                    ttl_seconds=ttl_seconds)
     
-    def reset_metrics(self) -> None:
-        """Reset circuit breaker metrics for clean state."""
-        with self._lock:
-            self.circuit_breaker.fail_counter = 0
-            self._failure_count = 0
-            self._last_failure_time = None
-            self._recovery_start_time = None
+    def clear_fallback_cache(self) -> None:
+        """Clear all cached fallback responses."""
+        self._fallback_cache.clear()
+        logger.info("Fallback cache cleared",
+                   service_name=self.config.service_name)
+    
+    def reset_circuit(self) -> None:
+        """Manually reset circuit breaker to CLOSED state."""
+        old_state = self.state
+        self._circuit_breaker._reset()
         
-        logger.info(
-            "circuit_breaker_metrics_reset",
-            service_name=self.service_name,
-            component="integrations.circuit_breaker"
-        )
-
+        logger.info("Circuit breaker manually reset",
+                   service_name=self.config.service_name,
+                   old_state=old_state.name,
+                   new_state=self.state.name)
+    
+    def get_metrics(self) -> CircuitBreakerMetrics:
+        """Get current circuit breaker metrics."""
+        return self.metrics
+    
+    def get_health_status(self) -> Dict[str, Any]:
+        """
+        Get comprehensive health status for monitoring.
+        
+        Returns:
+            Dictionary containing circuit breaker health and status information
+        """
+        return {
+            'service_name': self.config.service_name,
+            'service_type': self.config.service_type.value,
+            'circuit_state': self.state.name,
+            'failure_count': self.failure_count,
+            'failure_threshold': self.config.fail_max,
+            'recovery_timeout': self.config.recovery_timeout,
+            'total_calls': self.metrics.total_calls,
+            'successful_calls': self.metrics.successful_calls,
+            'failed_calls': self.metrics.failed_calls,
+            'success_rate': (
+                self.metrics.successful_calls / self.metrics.total_calls 
+                if self.metrics.total_calls > 0 else 0.0
+            ),
+            'average_response_time': self.metrics.average_response_time,
+            'last_failure_time': (
+                self.metrics.last_failure_time.isoformat() 
+                if self.metrics.last_failure_time else None
+            ),
+            'last_success_time': (
+                self.metrics.last_success_time.isoformat() 
+                if self.metrics.last_success_time else None
+            ),
+            'fallback_enabled': self.config.fallback_enabled,
+            'fallback_calls': self.metrics.fallback_calls,
+            'policy': self.config.policy.value
+        }
 
 class CircuitBreakerManager:
     """
-    Centralized circuit breaker management for multiple external services.
+    Central manager for multiple circuit breakers with unified configuration and monitoring.
     
-    Provides factory methods, bulk operations, and comprehensive monitoring
-    for all circuit breakers in the application. Implements enterprise-grade
-    service coordination and health management patterns.
+    Provides centralized management of circuit breakers for different external services
+    with consistent configuration, monitoring, and fallback strategies per Section 6.3.3.
     """
     
     def __init__(self):
         """Initialize circuit breaker manager."""
-        self._circuit_breakers: Dict[str, ExternalServiceCircuitBreaker] = {}
-        self._lock = RLock()
-        self._thread_pool = ThreadPoolExecutor(max_workers=5, thread_name_prefix="cb_manager")
+        self._circuit_breakers: Dict[str, EnhancedCircuitBreaker] = {}
+        self._global_config: Dict[str, Any] = {}
         
-        logger.info(
-            "circuit_breaker_manager_initialized",
-            component="integrations.circuit_breaker"
-        )
+        logger.info("Circuit breaker manager initialized")
     
-    def create_circuit_breaker(
-        self,
-        service_name: str,
-        service_type: ServiceType,
-        fallback_function: Optional[Callable] = None,
-        custom_config: Optional[Dict[str, Any]] = None
-    ) -> ExternalServiceCircuitBreaker:
+    def register_circuit_breaker(
+        self, 
+        service_name: str, 
+        config: CircuitBreakerConfig
+    ) -> EnhancedCircuitBreaker:
         """
-        Create and register a new circuit breaker.
+        Register new circuit breaker for external service.
         
         Args:
-            service_name: Unique service identifier
-            service_type: Service type classification
-            fallback_function: Optional fallback function
-            custom_config: Optional custom configuration
+            service_name: Unique identifier for the service
+            config: Circuit breaker configuration
             
         Returns:
-            Configured ExternalServiceCircuitBreaker instance
+            Configured enhanced circuit breaker instance
         """
-        with self._lock:
-            if service_name in self._circuit_breakers:
-                logger.warning(
-                    "circuit_breaker_already_exists",
-                    service_name=service_name,
-                    component="integrations.circuit_breaker"
-                )
-                return self._circuit_breakers[service_name]
-            
-            circuit_breaker = ExternalServiceCircuitBreaker(
-                service_name=service_name,
-                service_type=service_type,
-                fallback_function=fallback_function,
-                custom_config=custom_config
-            )
-            
-            self._circuit_breakers[service_name] = circuit_breaker
-            
-            logger.info(
-                "circuit_breaker_created",
-                service_name=service_name,
-                service_type=service_type.value,
-                total_circuit_breakers=len(self._circuit_breakers),
-                component="integrations.circuit_breaker"
-            )
-            
-            return circuit_breaker
+        if service_name in self._circuit_breakers:
+            logger.warning("Circuit breaker already registered, replacing",
+                          service_name=service_name)
+        
+        circuit_breaker = EnhancedCircuitBreaker(config)
+        self._circuit_breakers[service_name] = circuit_breaker
+        
+        logger.info("Circuit breaker registered",
+                   service_name=service_name,
+                   service_type=config.service_type.value,
+                   policy=config.policy.value)
+        
+        return circuit_breaker
     
-    def get_circuit_breaker(self, service_name: str) -> Optional[ExternalServiceCircuitBreaker]:
+    def get_circuit_breaker(self, service_name: str) -> Optional[EnhancedCircuitBreaker]:
         """
-        Get existing circuit breaker by service name.
+        Get circuit breaker for specified service.
         
         Args:
             service_name: Service identifier
             
         Returns:
-            ExternalServiceCircuitBreaker instance or None
+            Circuit breaker instance or None if not found
         """
-        with self._lock:
-            return self._circuit_breakers.get(service_name)
+        return self._circuit_breakers.get(service_name)
     
-    def get_all_circuit_breakers(self) -> Dict[str, ExternalServiceCircuitBreaker]:
+    def get_all_circuit_breakers(self) -> Dict[str, EnhancedCircuitBreaker]:
+        """Get all registered circuit breakers."""
+        return self._circuit_breakers.copy()
+    
+    def get_global_health_status(self) -> Dict[str, Any]:
         """
-        Get all registered circuit breakers.
+        Get comprehensive health status for all circuit breakers.
         
         Returns:
-            Dictionary mapping service names to circuit breakers
+            Dictionary containing global circuit breaker health status
         """
-        with self._lock:
-            return dict(self._circuit_breakers)
-    
-    def get_circuit_breaker_states(self) -> Dict[str, Dict[str, Any]]:
-        """
-        Get state information for all circuit breakers.
+        circuit_statuses = {}
+        total_calls = 0
+        total_failures = 0
+        open_circuits = 0
         
-        Returns:
-            Dictionary mapping service names to state information
-        """
-        with self._lock:
-            return {
-                name: cb.get_state()
-                for name, cb in self._circuit_breakers.items()
-            }
-    
-    def get_health_summary(self) -> Dict[str, Any]:
-        """
-        Get comprehensive health summary of all circuit breakers.
-        
-        Returns:
-            Health summary with circuit breaker statistics
-        """
-        with self._lock:
-            states = self.get_circuit_breaker_states()
+        for name, cb in self._circuit_breakers.items():
+            status = cb.get_health_status()
+            circuit_statuses[name] = status
             
-            summary = {
-                'total_circuit_breakers': len(self._circuit_breakers),
-                'healthy_services': 0,
-                'degraded_services': 0,
-                'failed_services': 0,
-                'circuit_breakers': states,
-                'last_updated': datetime.utcnow().isoformat()
-            }
-            
-            for state in states.values():
-                if state['current_state'] == 'closed':
-                    summary['healthy_services'] += 1
-                elif state['current_state'] == 'half-open':
-                    summary['degraded_services'] += 1
-                else:
-                    summary['failed_services'] += 1
-            
-            return summary
-    
-    def force_open_all(self) -> None:
-        """Force all circuit breakers to open state for emergency shutdown."""
-        with self._lock:
-            for cb in self._circuit_breakers.values():
-                cb.force_open()
+            total_calls += status['total_calls']
+            total_failures += status['failed_calls']
+            if status['circuit_state'] == 'OPEN':
+                open_circuits += 1
         
-        logger.warning(
-            "all_circuit_breakers_force_opened",
-            total_circuit_breakers=len(self._circuit_breakers),
-            component="integrations.circuit_breaker"
-        )
-    
-    def force_close_all(self) -> None:
-        """Force all circuit breakers to closed state for emergency recovery."""
-        with self._lock:
-            for cb in self._circuit_breakers.values():
-                cb.force_close()
+        overall_health = "healthy"
+        if open_circuits > 0:
+            if open_circuits == len(self._circuit_breakers):
+                overall_health = "critical"
+            else:
+                overall_health = "degraded"
         
-        logger.warning(
-            "all_circuit_breakers_force_closed",
-            total_circuit_breakers=len(self._circuit_breakers),
-            component="integrations.circuit_breaker"
-        )
+        return {
+            'timestamp': datetime.utcnow().isoformat(),
+            'overall_health': overall_health,
+            'total_circuit_breakers': len(self._circuit_breakers),
+            'open_circuits': open_circuits,
+            'total_calls': total_calls,
+            'total_failures': total_failures,
+            'global_success_rate': (
+                (total_calls - total_failures) / total_calls 
+                if total_calls > 0 else 0.0
+            ),
+            'circuit_breakers': circuit_statuses
+        }
     
-    def reset_all_metrics(self) -> None:
-        """Reset metrics for all circuit breakers."""
-        with self._lock:
-            for cb in self._circuit_breakers.values():
-                cb.reset_metrics()
+    def reset_all_circuits(self) -> None:
+        """Reset all circuit breakers to CLOSED state."""
+        for name, cb in self._circuit_breakers.items():
+            cb.reset_circuit()
         
-        logger.info(
-            "all_circuit_breaker_metrics_reset",
-            total_circuit_breakers=len(self._circuit_breakers),
-            component="integrations.circuit_breaker"
-        )
-    
-    def remove_circuit_breaker(self, service_name: str) -> bool:
-        """
-        Remove circuit breaker for service.
-        
-        Args:
-            service_name: Service identifier
-            
-        Returns:
-            True if circuit breaker was removed, False if not found
-        """
-        with self._lock:
-            if service_name in self._circuit_breakers:
-                del self._circuit_breakers[service_name]
-                logger.info(
-                    "circuit_breaker_removed",
-                    service_name=service_name,
-                    component="integrations.circuit_breaker"
-                )
-                return True
-            return False
-    
-    def shutdown(self) -> None:
-        """Shutdown circuit breaker manager and cleanup resources."""
-        with self._lock:
-            self._thread_pool.shutdown(wait=True)
-            self._circuit_breakers.clear()
-        
-        logger.info(
-            "circuit_breaker_manager_shutdown",
-            component="integrations.circuit_breaker"
-        )
+        logger.info("All circuit breakers reset",
+                   count=len(self._circuit_breakers))
 
-
-# Global circuit breaker manager instance
-circuit_breaker_manager = CircuitBreakerManager()
-
-
-def create_circuit_breaker(
-    service_name: str,
-    service_type: ServiceType,
-    fallback_function: Optional[Callable] = None,
-    custom_config: Optional[Dict[str, Any]] = None
-) -> ExternalServiceCircuitBreaker:
-    """
-    Factory function for creating circuit breakers.
-    
-    Args:
-        service_name: Unique service identifier
-        service_type: Service type classification
-        fallback_function: Optional fallback function
-        custom_config: Optional custom configuration
-        
-    Returns:
-        Configured ExternalServiceCircuitBreaker instance
-    """
-    return circuit_breaker_manager.create_circuit_breaker(
-        service_name=service_name,
-        service_type=service_type,
-        fallback_function=fallback_function,
-        custom_config=custom_config
-    )
-
-
+# Decorator for automatic circuit breaker application
 def circuit_breaker(
     service_name: str,
-    service_type: ServiceType,
-    fallback_function: Optional[Callable] = None,
-    custom_config: Optional[Dict[str, Any]] = None
-) -> Callable:
+    service_type: ExternalServiceType,
+    config: Optional[CircuitBreakerConfig] = None,
+    manager: Optional[CircuitBreakerManager] = None
+) -> Callable[[CallableT], CallableT]:
     """
-    Decorator for protecting functions with circuit breaker.
+    Decorator to apply circuit breaker protection to functions.
     
     Args:
-        service_name: Unique service identifier
-        service_type: Service type classification
-        fallback_function: Optional fallback function
-        custom_config: Optional custom configuration
+        service_name: Name of the external service
+        service_type: Type of external service
+        config: Optional circuit breaker configuration
+        manager: Optional circuit breaker manager instance
         
     Returns:
-        Decorator function
+        Decorated function with circuit breaker protection
     """
-    def decorator(func: Callable) -> Callable:
-        cb = create_circuit_breaker(
+    def decorator(func: CallableT) -> CallableT:
+        # Use global manager if not provided
+        cb_manager = manager or global_circuit_breaker_manager
+        
+        # Create default config if not provided
+        if config is None:
+            default_config = CircuitBreakerConfig(
+                service_name=service_name,
+                service_type=service_type
+            )
+        else:
+            default_config = config
+        
+        # Register circuit breaker
+        circuit_breaker_instance = cb_manager.register_circuit_breaker(
             service_name=service_name,
-            service_type=service_type,
-            fallback_function=fallback_function,
-            custom_config=custom_config
+            config=default_config
         )
-        return cb(func)
+        
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            return circuit_breaker_instance.call(func, *args, **kwargs)
+        
+        @functools.wraps(func)
+        async def async_wrapper(*args, **kwargs):
+            return await circuit_breaker_instance.call_async(func, *args, **kwargs)
+        
+        # Return appropriate wrapper based on function type
+        if hasattr(func, '__code__') and func.__code__.co_flags & 0x80:  # Check if async
+            return async_wrapper
+        else:
+            return wrapper
     
     return decorator
 
-
-def get_circuit_breaker_health() -> Dict[str, Any]:
-    """
-    Get comprehensive circuit breaker health information.
-    
-    Returns:
-        Health summary for all circuit breakers
-    """
-    return circuit_breaker_manager.get_health_summary()
-
-
-def get_circuit_breaker_states() -> Dict[str, Dict[str, Any]]:
-    """
-    Get state information for all circuit breakers.
-    
-    Returns:
-        Dictionary mapping service names to state information
-    """
-    return circuit_breaker_manager.get_circuit_breaker_states()
-
-
-# Graceful fallback functions for common service types
-
-def auth_service_fallback(*args, **kwargs) -> Dict[str, Any]:
-    """
-    Fallback function for authentication service failures.
-    
-    Returns cached authentication result or deny access.
-    """
-    logger.warning(
-        "auth_service_fallback_triggered",
-        component="integrations.circuit_breaker"
+# Predefined circuit breaker configurations per Section 6.3.5
+PREDEFINED_CONFIGS = {
+    'auth0': CircuitBreakerConfig(
+        service_name='auth0',
+        service_type=ExternalServiceType.AUTH_PROVIDER,
+        fail_max=5,                    # Auth0 failure threshold per Section 6.3.5
+        recovery_timeout=60,           # Recovery timeout per Section 6.3.5
+        policy=CircuitBreakerPolicy.STRICT,
+        timeout_seconds=5.0,
+        retry_count=2
+    ),
+    'aws_s3': CircuitBreakerConfig(
+        service_name='aws_s3',
+        service_type=ExternalServiceType.CLOUD_STORAGE,
+        fail_max=5,                    # S3 failure threshold per Section 6.3.5
+        recovery_timeout=60,           # Recovery timeout per Section 6.3.5
+        policy=CircuitBreakerPolicy.MODERATE,
+        timeout_seconds=10.0,
+        retry_count=3
+    ),
+    'mongodb': CircuitBreakerConfig(
+        service_name='mongodb',
+        service_type=ExternalServiceType.DATABASE,
+        fail_max=3,                    # Database critical failure threshold
+        recovery_timeout=30,           # Faster recovery for database
+        policy=CircuitBreakerPolicy.STRICT,
+        timeout_seconds=5.0,
+        retry_count=2
+    ),
+    'redis': CircuitBreakerConfig(
+        service_name='redis',
+        service_type=ExternalServiceType.CACHE,
+        fail_max=10,                   # Higher tolerance for cache
+        recovery_timeout=30,           # Faster recovery for cache
+        policy=CircuitBreakerPolicy.TOLERANT,
+        timeout_seconds=2.0,
+        retry_count=3
+    ),
+    'external_api': CircuitBreakerConfig(
+        service_name='external_api',
+        service_type=ExternalServiceType.HTTP_API,
+        fail_max=5,                    # Standard API failure threshold
+        recovery_timeout=60,           # Standard recovery timeout
+        policy=CircuitBreakerPolicy.MODERATE,
+        timeout_seconds=30.0,
+        retry_count=3
     )
-    
-    # Return cached result if available, otherwise deny access
-    return {
-        'authenticated': False,
-        'user': None,
-        'error': 'Authentication service unavailable',
-        'fallback': True
-    }
+}
 
+# Global circuit breaker manager instance
+global_circuit_breaker_manager = CircuitBreakerManager()
 
-def cache_service_fallback(*args, **kwargs) -> Optional[Any]:
-    """
-    Fallback function for cache service failures.
-    
-    Returns None to indicate cache miss.
-    """
-    logger.warning(
-        "cache_service_fallback_triggered",
-        component="integrations.circuit_breaker"
+# Convenience functions for common integrations
+def create_auth0_circuit_breaker() -> EnhancedCircuitBreaker:
+    """Create circuit breaker for Auth0 integration per Section 6.3.3."""
+    return global_circuit_breaker_manager.register_circuit_breaker(
+        'auth0', PREDEFINED_CONFIGS['auth0']
     )
-    
-    # Return None to indicate cache miss
-    return None
 
-
-def file_storage_fallback(*args, **kwargs) -> Dict[str, Any]:
-    """
-    Fallback function for file storage service failures.
-    
-    Returns error response indicating storage unavailable.
-    """
-    logger.warning(
-        "file_storage_fallback_triggered",
-        component="integrations.circuit_breaker"
+def create_aws_s3_circuit_breaker() -> EnhancedCircuitBreaker:
+    """Create circuit breaker for AWS S3 integration per Section 6.3.3."""
+    return global_circuit_breaker_manager.register_circuit_breaker(
+        'aws_s3', PREDEFINED_CONFIGS['aws_s3']
     )
+
+def create_mongodb_circuit_breaker() -> EnhancedCircuitBreaker:
+    """Create circuit breaker for MongoDB integration per Section 6.3.3."""
+    return global_circuit_breaker_manager.register_circuit_breaker(
+        'mongodb', PREDEFINED_CONFIGS['mongodb']
+    )
+
+def create_redis_circuit_breaker() -> EnhancedCircuitBreaker:
+    """Create circuit breaker for Redis integration per Section 6.3.3."""
+    return global_circuit_breaker_manager.register_circuit_breaker(
+        'redis', PREDEFINED_CONFIGS['redis']
+    )
+
+def create_external_api_circuit_breaker() -> EnhancedCircuitBreaker:
+    """Create circuit breaker for external API integration per Section 6.3.3."""
+    return global_circuit_breaker_manager.register_circuit_breaker(
+        'external_api', PREDEFINED_CONFIGS['external_api']
+    )
+
+# Context managers for circuit breaker operations
+@contextmanager
+def circuit_breaker_context(
+    service_name: str, 
+    service_type: ExternalServiceType,
+    config: Optional[CircuitBreakerConfig] = None
+):
+    """
+    Context manager for circuit breaker operations.
     
-    return {
-        'success': False,
-        'error': 'File storage service unavailable',
-        'fallback': True
-    }
+    Args:
+        service_name: Name of the external service
+        service_type: Type of external service
+        config: Optional circuit breaker configuration
+        
+    Yields:
+        Circuit breaker instance for protected operations
+    """
+    # Create or get circuit breaker
+    cb_manager = global_circuit_breaker_manager
+    existing_cb = cb_manager.get_circuit_breaker(service_name)
+    
+    if existing_cb:
+        circuit_breaker_instance = existing_cb
+    else:
+        if config is None:
+            config = CircuitBreakerConfig(
+                service_name=service_name,
+                service_type=service_type
+            )
+        circuit_breaker_instance = cb_manager.register_circuit_breaker(
+            service_name=service_name,
+            config=config
+        )
+    
+    try:
+        yield circuit_breaker_instance
+    except Exception as e:
+        logger.error("Circuit breaker context error",
+                    service_name=service_name,
+                    error=str(e))
+        raise
 
+@asynccontextmanager
+async def async_circuit_breaker_context(
+    service_name: str, 
+    service_type: ExternalServiceType,
+    config: Optional[CircuitBreakerConfig] = None
+):
+    """
+    Async context manager for circuit breaker operations.
+    
+    Args:
+        service_name: Name of the external service
+        service_type: Type of external service
+        config: Optional circuit breaker configuration
+        
+    Yields:
+        Circuit breaker instance for protected async operations
+    """
+    # Create or get circuit breaker
+    cb_manager = global_circuit_breaker_manager
+    existing_cb = cb_manager.get_circuit_breaker(service_name)
+    
+    if existing_cb:
+        circuit_breaker_instance = existing_cb
+    else:
+        if config is None:
+            config = CircuitBreakerConfig(
+                service_name=service_name,
+                service_type=service_type
+            )
+        circuit_breaker_instance = cb_manager.register_circuit_breaker(
+            service_name=service_name,
+            config=config
+        )
+    
+    try:
+        yield circuit_breaker_instance
+    except Exception as e:
+        logger.error("Async circuit breaker context error",
+                    service_name=service_name,
+                    error=str(e))
+        raise
 
-# Module-level logger configuration
-logger.info(
-    "circuit_breaker_module_loaded",
-    component="integrations.circuit_breaker",
-    features=[
-        "pybreaker_integration",
-        "service_specific_configuration",
-        "prometheus_metrics_integration",
-        "fallback_mechanisms",
-        "graceful_degradation",
-        "state_transition_monitoring",
-        "enterprise_monitoring"
-    ]
-)
+# Export key components for external use
+__all__ = [
+    'CircuitBreakerConfig',
+    'CircuitBreakerPolicy',
+    'CircuitBreakerMetrics',
+    'EnhancedCircuitBreaker',
+    'CircuitBreakerManager',
+    'circuit_breaker',
+    'circuit_breaker_context',
+    'async_circuit_breaker_context',
+    'global_circuit_breaker_manager',
+    'PREDEFINED_CONFIGS',
+    'create_auth0_circuit_breaker',
+    'create_aws_s3_circuit_breaker',
+    'create_mongodb_circuit_breaker',
+    'create_redis_circuit_breaker',
+    'create_external_api_circuit_breaker'
+]
