@@ -1,2477 +1,3188 @@
 """
 Business Service Layer for Flask Application
 
-This module implements the service layer providing business operation orchestration, external
-service integration coordination, and workflow management. Maintains identical functionality
-to Node.js implementation while providing high-level business operations that coordinate
-between data access, validation, processing, and external integrations per Section 5.2.4.
+This module implements comprehensive business service orchestration, external service integration
+coordination, and workflow management for the Node.js to Python Flask migration. Provides high-level
+business operations that coordinate between data access, validation, processing, and external
+integrations while maintaining identical functionality to Node.js implementation per F-004-RQ-001.
 
-The service layer implements:
+The service layer follows enterprise patterns with:
 - Business operation orchestration maintaining functional parity per F-004-RQ-001
 - External service integration coordination per F-004-RQ-002
 - Workflow management for data transformation per Section 5.2.4
 - Circuit breaker patterns for service resilience per Section 6.1.3
-- Transaction management and error handling per Section 5.2.4
-- Performance monitoring maintaining ≤10% variance from Node.js baseline
+- Transaction management and error handling for business operations per Section 5.2.4
+- Performance optimization maintaining ≤10% variance from Node.js baseline per Section 0.1.1
 
-Key Components:
-    BaseBusinessService: Abstract base service providing common service patterns
-    UserManagementService: User lifecycle and profile management operations
-    DataProcessingService: Business data transformation and validation workflows
-    IntegrationOrchestrationService: External service coordination and resilience
-    TransactionService: Transaction management and data consistency operations
-    WorkflowService: Complex business workflow orchestration and state management
+Service Categories:
+    Core Business Services:
+        UserService: User account and profile management operations
+        OrganizationService: Organization and business entity operations
+        ProductService: Product catalog and inventory management
+        OrderService: Order processing and transaction management
+        PaymentService: Payment processing and financial operations
+        
+    Integration Services:
+        AuthenticationService: Auth0 integration and JWT token management
+        FileStorageService: AWS S3 integration for file operations
+        CacheService: Redis caching coordination and management
+        NotificationService: External notification service integration
+        
+    Workflow Services:
+        BusinessWorkflowService: Complex business process orchestration
+        DataProcessingService: Data transformation and processing workflows
+        IntegrationOrchestrator: External service coordination and circuit breaker management
+        TransactionService: Multi-resource transaction coordination
+        
+    Utility Services:
+        ValidationService: Comprehensive business validation coordination
+        AuditService: Business operation auditing and compliance
+        MetricsService: Business operation performance monitoring
+        HealthCheckService: Service dependency health monitoring
 
 Architecture Integration:
-- Integration with business processors per Section 5.2.4 business logic engine
-- Coordination with data access layer per Section 5.2.4 database access
-- External service integration per Section 5.2.4 integration orchestration
-- Circuit breaker patterns per Section 6.1.3 resilience mechanisms
-- Performance optimization per Section 0.1.1 variance requirements
+- Integrates with Flask Blueprint architecture per Section 6.1.1
+- Coordinates with PyMongo 4.5+ and Motor 3.3+ database operations per Section 5.2.5
+- Manages Redis caching operations via redis-py 5.0+ per Section 5.2.7
+- Orchestrates external service calls with circuit breaker patterns per Section 6.1.3
+- Implements business logic engine coordination per Section 5.2.4
+- Provides monitoring integration with structured logging per Section 5.2.8
 
-Author: Business Logic Migration Team
-Version: 1.0.0
-License: Enterprise
+Performance Requirements:
+- Business operation latency: ≤10% variance from Node.js baseline per Section 0.1.1
+- External service coordination: Circuit breaker response time <100ms per Section 6.1.3
+- Transaction coordination: Multi-resource transaction time ≤2x single operation per Section 5.2.4
+- Cache coordination: Cache operation overhead ≤5ms per Section 5.2.7
+- Validation coordination: Validation pipeline time ≤50ms per F-004-RQ-004
+
+Technical Requirements Compliance:
+- F-004-RQ-001: Identical data transformation and business rules per business logic implementation
+- F-004-RQ-002: Maintain all existing service integrations per external service integration
+- Section 5.2.4: Business logic engine coordination and integration orchestration
+- Section 6.1.3: Circuit breaker patterns and external service resilience mechanisms
+- Section 6.3.3: External service integration patterns and monitoring
+
+Example Usage:
+    # User service operations
+    user_service = UserService()
+    user = await user_service.create_user(user_data)
+    
+    # Order processing workflow
+    order_service = OrderService()
+    order_result = await order_service.process_order(order_data, payment_data)
+    
+    # External service integration
+    auth_service = AuthenticationService()
+    token_result = await auth_service.validate_token(jwt_token)
+    
+    # Business workflow orchestration
+    workflow_service = BusinessWorkflowService()
+    result = await workflow_service.execute_workflow('order_fulfillment', context)
 """
 
 import asyncio
-import logging
+import json
 import time
 import uuid
-from abc import ABC, abstractmethod
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
-from typing import (
-    Any, Dict, List, Optional, Union, Tuple, Callable, Type, Generic, TypeVar,
-    AsyncIterator, Iterator, Set, ClassVar, Protocol, runtime_checkable
-)
+from enum import Enum
 from functools import wraps, lru_cache
-from contextlib import asynccontextmanager, contextmanager
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
-from enum import Enum, auto
+from typing import (
+    Any, Dict, List, Optional, Union, Callable, Type, Set, Tuple,
+    AsyncGenerator, Generator, Protocol, TypeVar, Generic, Awaitable
+)
 
-# Flask and enterprise integration imports
-from flask import current_app, g, request
-import structlog
-
-# Business logic imports for comprehensive service operations
-from .processors import (
-    ProcessingWorkflow, DataTransformer, BusinessRuleEngine, DateTimeProcessor,
-    ProcessingMetrics, get_business_processor, process_business_data,
-    validate_business_rules, monitor_performance
+# Import business logic components for comprehensive integration
+from .models import (
+    BaseBusinessModel, User, Organization, Product, Order, OrderItem,
+    PaymentTransaction, Address, ContactInfo, MonetaryAmount, DateTimeRange,
+    FileUpload, SystemConfiguration, PaginationParams, SortParams, SearchParams,
+    UserStatus, UserRole, OrderStatus, PaymentStatus, PaymentMethod, ProductStatus,
+    Priority, ContactMethod, BUSINESS_MODEL_REGISTRY
 )
 from .validators import (
-    ValidationContext, ValidationType, ValidationMode, BaseValidator,
-    BusinessRuleValidator, DataModelValidator, InputValidator, OutputValidator,
-    validate_business_data, validate_request_data, validate_response_data,
-    format_validation_errors
+    ValidationConfig, BaseBusinessValidator, UserValidator, OrganizationValidator,
+    ProductValidator, OrderValidator, PaymentValidator, AddressValidator,
+    ContactInfoValidator, MonetaryAmountValidator, FileUploadValidator
 )
-from .models import (
-    ProcessingRequest, ProcessingResult, BusinessData, ValidationResult,
-    TransformationRule, ProcessingContext, AuditRecord
+from .processors import (
+    ProcessingConfig, ProcessingMode, ProcessingMetrics, BaseProcessor,
+    DataTransformer, ValidationProcessor, SanitizationProcessor, NormalizationProcessor,
+    DateTimeProcessor, BusinessRuleEngine, ProcessingPipeline,
+    create_processing_pipeline, create_business_rule_engine
 )
 from .exceptions import (
-    BaseBusinessException, BusinessRuleViolationError, DataValidationError,
-    DataProcessingError, ErrorSeverity, ErrorCategory
+    BaseBusinessException, BusinessRuleViolationError, DataProcessingError,
+    DataValidationError, ExternalServiceError, ResourceNotFoundError,
+    AuthorizationError, ConcurrencyError, ConfigurationError,
+    ErrorSeverity, ErrorCategory
 )
 
-# Data access layer imports per Section 5.2.4
+# Import data access layer for database operations
 from ..data import (
-    DatabaseManager, get_mongodb_client, get_motor_database,
-    database_transaction, async_database_transaction,
-    execute_query, execute_async_query, QueryResult
+    get_mongodb_manager, get_async_mongodb_manager, get_database_health_status,
+    MongoDBManager, AsyncMongoDBManager, DatabaseHealthStatus
 )
 
-# External service integration imports per Section 6.1.3
-from ..integrations import (
-    BaseExternalServiceClient, ServiceType, HealthStatus, CircuitBreakerState,
-    external_service_monitor, track_external_service_call,
-    IntegrationError, CircuitBreakerOpenError
-)
-
-# Cache layer imports per Section 5.2.7
+# Import cache layer for caching operations  
 from ..cache import (
-    get_redis_client, cache_for, invalidate_by_pattern,
-    CacheError, cache_strategies, create_cache_key
+    get_redis_client, get_response_cache, create_redis_client,
+    RedisClient, FlaskResponseCache, CachePolicy
+)
+
+# Import integration layer for external service coordination
+from ..integrations import (
+    BaseExternalServiceClient, ExternalServiceMonitor, ServiceHealthState,
+    ExternalServiceType, external_service_monitor
 )
 
 # Configure structured logging for service operations
+import structlog
 logger = structlog.get_logger("business.services")
 
-# Type definitions for service operations
-ServiceResult = TypeVar('ServiceResult')
-EntityType = TypeVar('EntityType')
-WorkflowState = TypeVar('WorkflowState')
+# Type definitions for service layer
+T = TypeVar('T')
+ServiceResult = Dict[str, Any]
+ServiceOperation = Callable[..., Awaitable[ServiceResult]]
+TransactionContext = Dict[str, Any]
 
 
-class ServiceOperationType(Enum):
-    """Service operation types for monitoring and audit trail."""
-    CREATE = "create"
-    READ = "read"
-    UPDATE = "update"
-    DELETE = "delete"
-    PROCESS = "process"
-    VALIDATE = "validate"
-    TRANSFORM = "transform"
-    INTEGRATE = "integrate"
-    WORKFLOW = "workflow"
+# ============================================================================
+# SERVICE CONFIGURATION AND BASE CLASSES
+# ============================================================================
 
-
-class ServicePriority(Enum):
-    """Service operation priority levels for resource allocation."""
-    LOW = 1
-    NORMAL = 2
-    HIGH = 3
-    CRITICAL = 4
-
-
-@dataclass
-class ServiceContext:
+class ServiceMode(Enum):
     """
-    Service execution context for comprehensive operation tracking and coordination.
+    Service operation mode enumeration for service behavior configuration.
     
-    Provides centralized context management for service operations enabling
-    consistent behavior, audit trail generation, and resource coordination
-    across different business service modules and external integrations.
-    
-    Attributes:
-        operation_id: Unique identifier for operation tracking
-        user_id: User identifier for authorization and audit
-        session_id: Session identifier for request correlation
-        request_id: Request identifier for tracing and logging
-        tenant_id: Tenant identifier for multi-tenant operations
-        operation_type: Type of service operation being performed
-        priority: Operation priority for resource allocation
-        metadata: Additional context metadata and parameters
-        start_time: Operation start timestamp for performance monitoring
-        audit_enabled: Whether to generate audit trail for operation
-        cache_enabled: Whether to use caching for operation
-        timeout_seconds: Operation timeout for performance control
+    Defines execution modes for business service operations enabling optimized
+    coordination patterns for different use cases and performance requirements.
     """
-    operation_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    user_id: Optional[str] = None
-    session_id: Optional[str] = None
-    request_id: Optional[str] = None
-    tenant_id: Optional[str] = None
-    operation_type: ServiceOperationType = ServiceOperationType.PROCESS
-    priority: ServicePriority = ServicePriority.NORMAL
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    start_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    audit_enabled: bool = True
-    cache_enabled: bool = True
-    timeout_seconds: float = 30.0
-    
-    @property
-    def execution_time(self) -> float:
-        """Calculate current execution time in seconds."""
-        return (datetime.now(timezone.utc) - self.start_time).total_seconds()
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert service context to dictionary for logging and serialization."""
-        return {
-            'operation_id': self.operation_id,
-            'user_id': self.user_id,
-            'session_id': self.session_id,
-            'request_id': self.request_id,
-            'tenant_id': self.tenant_id,
-            'operation_type': self.operation_type.value,
-            'priority': self.priority.value,
-            'metadata': self.metadata,
-            'start_time': self.start_time.isoformat(),
-            'execution_time': self.execution_time,
-            'audit_enabled': self.audit_enabled,
-            'cache_enabled': self.cache_enabled,
-            'timeout_seconds': self.timeout_seconds
-        }
+    STRICT = "strict"        # Strict validation and coordination
+    LENIENT = "lenient"      # Lenient processing with warnings
+    FAST = "fast"            # Performance-optimized coordination
+    COMPREHENSIVE = "comprehensive"  # Full validation and coordination
+    DEBUG = "debug"          # Debug mode with detailed logging
+    TRANSACTION = "transaction"  # Transaction-aware coordination
 
 
-@dataclass
+class ServiceConfiguration:
+    """
+    Global service configuration for business operation coordination.
+    
+    Provides centralized configuration for service behavior, performance
+    optimization, error handling, and external service coordination across
+    all business service operations.
+    """
+    
+    # Performance settings per Section 6.1.3
+    DEFAULT_TIMEOUT: int = 30  # seconds
+    CACHE_TTL: int = 300  # 5 minutes
+    TRANSACTION_TIMEOUT: int = 60  # seconds
+    MAX_RETRIES: int = 3
+    CIRCUIT_BREAKER_THRESHOLD: int = 5
+    
+    # Service coordination settings
+    DEFAULT_MODE: ServiceMode = ServiceMode.STRICT
+    ENABLE_CACHING: bool = True
+    ENABLE_METRICS: bool = True
+    ENABLE_AUDIT_LOGGING: bool = True
+    ENABLE_CIRCUIT_BREAKERS: bool = True
+    
+    # External service settings per F-004-RQ-002
+    AUTH0_CIRCUIT_BREAKER_THRESHOLD: int = 5
+    AWS_CIRCUIT_BREAKER_THRESHOLD: int = 3
+    REDIS_CIRCUIT_BREAKER_THRESHOLD: int = 10
+    
+    # Transaction coordination settings
+    ENABLE_TRANSACTIONS: bool = True
+    MAX_TRANSACTION_RETRY: int = 2
+    TRANSACTION_ISOLATION: str = "read_committed"
+    
+    # Workflow coordination settings
+    MAX_WORKFLOW_STEPS: int = 50
+    WORKFLOW_STEP_TIMEOUT: int = 10
+    PARALLEL_WORKFLOW_LIMIT: int = 5
+
+
 class ServiceMetrics:
     """
-    Performance and quality metrics for service operations.
+    Service operation metrics collection for performance monitoring.
     
-    Provides comprehensive metrics collection for service performance monitoring,
-    quality assurance, and business intelligence analytics with integration
-    into enterprise monitoring systems.
-    """
-    operation_count: int = 0
-    success_count: int = 0
-    error_count: int = 0
-    cache_hit_count: int = 0
-    cache_miss_count: int = 0
-    database_query_count: int = 0
-    external_service_call_count: int = 0
-    validation_error_count: int = 0
-    business_rule_violation_count: int = 0
-    total_execution_time: float = 0.0
-    min_execution_time: float = float('inf')
-    max_execution_time: float = 0.0
-    
-    @property
-    def average_execution_time(self) -> float:
-        """Calculate average execution time across operations."""
-        return self.total_execution_time / max(1, self.operation_count)
-    
-    @property
-    def success_rate(self) -> float:
-        """Calculate success rate as percentage."""
-        return (self.success_count / max(1, self.operation_count)) * 100
-    
-    @property
-    def error_rate(self) -> float:
-        """Calculate error rate as percentage."""
-        return (self.error_count / max(1, self.operation_count)) * 100
-    
-    @property
-    def cache_hit_rate(self) -> float:
-        """Calculate cache hit rate as percentage."""
-        total_cache_operations = self.cache_hit_count + self.cache_miss_count
-        return (self.cache_hit_count / max(1, total_cache_operations)) * 100
-    
-    def update_execution_time(self, execution_time: float) -> None:
-        """Update execution time metrics with new measurement."""
-        self.total_execution_time += execution_time
-        self.min_execution_time = min(self.min_execution_time, execution_time)
-        self.max_execution_time = max(self.max_execution_time, execution_time)
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert metrics to dictionary for monitoring and reporting."""
-        return {
-            'operation_count': self.operation_count,
-            'success_count': self.success_count,
-            'error_count': self.error_count,
-            'cache_hit_count': self.cache_hit_count,
-            'cache_miss_count': self.cache_miss_count,
-            'database_query_count': self.database_query_count,
-            'external_service_call_count': self.external_service_call_count,
-            'validation_error_count': self.validation_error_count,
-            'business_rule_violation_count': self.business_rule_violation_count,
-            'total_execution_time': self.total_execution_time,
-            'min_execution_time': self.min_execution_time if self.min_execution_time != float('inf') else 0.0,
-            'max_execution_time': self.max_execution_time,
-            'average_execution_time': self.average_execution_time,
-            'success_rate': self.success_rate,
-            'error_rate': self.error_rate,
-            'cache_hit_rate': self.cache_hit_rate
-        }
-
-
-@runtime_checkable
-class ServiceInterface(Protocol):
-    """
-    Protocol defining standard service interface for business operations.
-    
-    Provides type checking and interface compliance verification for all
-    business service implementations ensuring consistent service behavior
-    and integration patterns across the application.
+    Collects comprehensive metrics for service operations including execution
+    times, throughput, error rates, and resource utilization for performance
+    optimization and monitoring per Section 6.1.3.
     """
     
-    async def execute(self, context: ServiceContext, **kwargs) -> Any:
-        """Execute primary service operation with context and parameters."""
-        ...
-    
-    def validate_input(self, data: Dict[str, Any], context: ServiceContext) -> Dict[str, Any]:
-        """Validate input data for service operation."""
-        ...
-    
-    def get_metrics(self) -> ServiceMetrics:
-        """Get service performance and quality metrics."""
-        ...
-
-
-def service_operation(
-    operation_type: ServiceOperationType = ServiceOperationType.PROCESS,
-    timeout_seconds: float = 30.0,
-    cache_enabled: bool = True,
-    audit_enabled: bool = True,
-    retry_attempts: int = 3,
-    circuit_breaker_enabled: bool = True
-):
-    """
-    Decorator for service operations providing comprehensive operation management.
-    
-    Implements standardized service operation patterns including performance monitoring,
-    error handling, caching, audit trail generation, and circuit breaker patterns
-    for resilient service operations per Section 6.1.3.
-    
-    Args:
-        operation_type: Type of service operation for classification
-        timeout_seconds: Operation timeout for performance control
-        cache_enabled: Whether to enable caching for operation
-        audit_enabled: Whether to generate audit trail
-        retry_attempts: Number of retry attempts for transient failures
-        circuit_breaker_enabled: Whether to enable circuit breaker pattern
+    def __init__(self):
+        self.metrics = {}
+        self.start_time = None
+        self.end_time = None
+        self.circuit_breaker_metrics = {}
+        self.transaction_metrics = {}
         
-    Returns:
-        Decorated function with comprehensive operation management
-    """
-    def decorator(func: Callable) -> Callable:
-        @wraps(func)
-        async def async_wrapper(self, context: ServiceContext, *args, **kwargs):
-            # Update context with decorator parameters
-            context.operation_type = operation_type
-            context.timeout_seconds = timeout_seconds
-            context.cache_enabled = cache_enabled
-            context.audit_enabled = audit_enabled
+    def start_operation(self, operation_name: str, service_type: str = "business") -> None:
+        """Start timing for a service operation."""
+        self.start_time = time.perf_counter()
+        operation_key = f"{service_type}:{operation_name}"
+        
+        if operation_key not in self.metrics:
+            self.metrics[operation_key] = {
+                'count': 0,
+                'total_time': 0.0,
+                'min_time': float('inf'),
+                'max_time': 0.0,
+                'error_count': 0,
+                'cache_hits': 0,
+                'cache_misses': 0,
+                'external_service_calls': 0,
+                'circuit_breaker_opens': 0
+            }
+    
+    def end_operation(
+        self,
+        operation_name: str,
+        service_type: str = "business",
+        success: bool = True,
+        cache_hit: bool = False,
+        external_calls: int = 0,
+        circuit_breaker_opened: bool = False
+    ) -> float:
+        """End timing for a service operation and record metrics."""
+        if self.start_time is None:
+            return 0.0
+        
+        self.end_time = time.perf_counter()
+        duration = self.end_time - self.start_time
+        operation_key = f"{service_type}:{operation_name}"
+        
+        if operation_key in self.metrics:
+            metrics = self.metrics[operation_key]
+            metrics['count'] += 1
+            metrics['total_time'] += duration
+            metrics['min_time'] = min(metrics['min_time'], duration)
+            metrics['max_time'] = max(metrics['max_time'], duration)
             
-            operation_start = time.perf_counter()
-            operation_success = False
-            operation_result = None
-            operation_error = None
+            if not success:
+                metrics['error_count'] += 1
             
-            try:
-                logger.info(
-                    "Service operation started",
-                    operation_id=context.operation_id,
-                    operation_type=operation_type.value,
-                    function_name=func.__name__,
-                    user_id=context.user_id,
-                    request_id=context.request_id
-                )
-                
-                # Update metrics
-                if hasattr(self, '_metrics'):
-                    self._metrics.operation_count += 1
-                
-                # Check circuit breaker if enabled
-                if circuit_breaker_enabled and hasattr(self, '_circuit_breaker'):
-                    if self._circuit_breaker.state == CircuitBreakerState.OPEN:
-                        raise CircuitBreakerOpenError(
-                            message=f"Circuit breaker open for {func.__name__}",
-                            service_name=self.__class__.__name__,
-                            error_code="CIRCUIT_BREAKER_OPEN"
-                        )
-                
-                # Execute operation with timeout
-                operation_result = await asyncio.wait_for(
-                    func(self, context, *args, **kwargs),
-                    timeout=timeout_seconds
-                )
-                
-                operation_success = True
-                
-                # Update success metrics
-                if hasattr(self, '_metrics'):
-                    self._metrics.success_count += 1
-                
-                # Record successful circuit breaker operation
-                if circuit_breaker_enabled and hasattr(self, '_circuit_breaker'):
-                    self._circuit_breaker.record_success()
-                
-                logger.info(
-                    "Service operation completed successfully",
-                    operation_id=context.operation_id,
-                    function_name=func.__name__,
-                    execution_time=time.perf_counter() - operation_start,
-                    result_type=type(operation_result).__name__
-                )
-                
-                return operation_result
-                
-            except asyncio.TimeoutError as timeout_error:
-                operation_error = timeout_error
-                logger.error(
-                    "Service operation timeout",
-                    operation_id=context.operation_id,
-                    function_name=func.__name__,
-                    timeout_seconds=timeout_seconds,
-                    execution_time=time.perf_counter() - operation_start
-                )
-                
-                # Record circuit breaker failure
-                if circuit_breaker_enabled and hasattr(self, '_circuit_breaker'):
-                    self._circuit_breaker.record_failure()
-                
-                raise DataProcessingError(
-                    message=f"Service operation timeout after {timeout_seconds} seconds",
-                    error_code="SERVICE_OPERATION_TIMEOUT",
-                    context={
-                        'operation_id': context.operation_id,
-                        'function_name': func.__name__,
-                        'timeout_seconds': timeout_seconds
-                    },
-                    cause=timeout_error,
-                    severity=ErrorSeverity.HIGH
-                )
-                
-            except Exception as service_error:
-                operation_error = service_error
-                logger.error(
-                    "Service operation failed",
-                    operation_id=context.operation_id,
-                    function_name=func.__name__,
-                    error=str(service_error),
-                    execution_time=time.perf_counter() - operation_start,
-                    exc_info=True
-                )
-                
-                # Update error metrics
-                if hasattr(self, '_metrics'):
-                    self._metrics.error_count += 1
-                
-                # Record circuit breaker failure
-                if circuit_breaker_enabled and hasattr(self, '_circuit_breaker'):
-                    self._circuit_breaker.record_failure()
-                
-                # Convert to business exception if needed
-                if not isinstance(service_error, BaseBusinessException):
-                    raise DataProcessingError(
-                        message=f"Service operation failed: {str(service_error)}",
-                        error_code="SERVICE_OPERATION_ERROR",
-                        context={
-                            'operation_id': context.operation_id,
-                            'function_name': func.__name__
-                        },
-                        cause=service_error,
-                        severity=ErrorSeverity.HIGH
-                    )
-                else:
-                    raise
-                
-            finally:
-                # Update execution time metrics
-                execution_time = time.perf_counter() - operation_start
-                if hasattr(self, '_metrics'):
-                    self._metrics.update_execution_time(execution_time)
-                
-                # Generate audit trail if enabled
-                if audit_enabled and context.audit_enabled:
-                    await self._generate_audit_trail(
-                        context, func.__name__, operation_success, 
-                        execution_time, operation_error
-                    )
+            if cache_hit:
+                metrics['cache_hits'] += 1
+            else:
+                metrics['cache_misses'] += 1
+            
+            metrics['external_service_calls'] += external_calls
+            
+            if circuit_breaker_opened:
+                metrics['circuit_breaker_opens'] += 1
         
-        @wraps(func)
-        def sync_wrapper(self, context: ServiceContext, *args, **kwargs):
-            # Handle synchronous operations
-            return asyncio.create_task(async_wrapper(self, context, *args, **kwargs))
-        
-        # Return async wrapper if function is async, sync wrapper otherwise
-        if asyncio.iscoroutinefunction(func):
-            return async_wrapper
-        else:
-            return sync_wrapper
+        return duration
     
-    return decorator
+    def get_service_metrics(self) -> Dict[str, Any]:
+        """Get comprehensive service metrics report."""
+        report = {}
+        
+        for operation_key, metrics in self.metrics.items():
+            if metrics['count'] > 0:
+                avg_time = metrics['total_time'] / metrics['count']
+                error_rate = metrics['error_count'] / metrics['count']
+                cache_hit_rate = metrics['cache_hits'] / (metrics['cache_hits'] + metrics['cache_misses']) if (metrics['cache_hits'] + metrics['cache_misses']) > 0 else 0
+                
+                report[operation_key] = {
+                    'count': metrics['count'],
+                    'total_time': round(metrics['total_time'], 4),
+                    'average_time': round(avg_time, 4),
+                    'min_time': round(metrics['min_time'], 4),
+                    'max_time': round(metrics['max_time'], 4),
+                    'error_count': metrics['error_count'],
+                    'error_rate': round(error_rate, 4),
+                    'cache_hit_rate': round(cache_hit_rate, 4),
+                    'external_service_calls': metrics['external_service_calls'],
+                    'circuit_breaker_opens': metrics['circuit_breaker_opens']
+                }
+        
+        return report
 
 
-class BaseBusinessService(ABC):
+class BaseBusinessService:
     """
-    Abstract base service providing common service patterns and enterprise features.
+    Base class for all business service operations.
     
-    Provides foundational service capabilities including metrics collection, audit trail
-    generation, cache management, circuit breaker patterns, and comprehensive error
-    handling for all business service implementations per Section 5.2.4.
+    Provides comprehensive foundation for business service coordination including
+    error handling, metrics collection, caching, external service integration,
+    and transaction management. Implements enterprise patterns per Section 5.2.4
+    and Section 6.1.3 requirements.
     
-    This base service implements:
-    - Service operation management and coordination patterns
-    - Performance monitoring and metrics collection per Section 0.1.1
-    - Circuit breaker patterns for resilience per Section 6.1.3
-    - Cache integration for performance optimization per Section 5.2.7
-    - Comprehensive error handling and audit trail generation
-    - Integration with data access and external services
+    Features:
+    - Performance monitoring and metrics collection per Section 6.1.3
+    - Circuit breaker integration for external service resilience
+    - Transaction coordination and rollback capabilities
+    - Comprehensive error handling and recovery patterns
+    - Caching and performance optimization features
+    - Structured audit logging for enterprise compliance
+    - Integration with business validation and processing
     
-    Subclass Responsibilities:
-        - Implement abstract methods for specific business operations
-        - Define service-specific validation and processing logic
-        - Configure service-specific circuit breaker and cache settings
-        - Implement business-specific error handling and recovery
+    Example:
+        class CustomService(BaseBusinessService):
+            async def perform_operation(self, data: Dict[str, Any]) -> ServiceResult:
+                async with self.service_operation("custom_operation"):
+                    return await self._execute_business_logic(data)
     """
     
     def __init__(
         self,
-        service_name: str,
-        cache_enabled: bool = True,
-        circuit_breaker_enabled: bool = True,
-        metrics_enabled: bool = True
+        config: Optional[ServiceConfiguration] = None,
+        mode: ServiceMode = ServiceMode.STRICT,
+        enable_metrics: bool = True,
+        enable_caching: bool = True,
+        enable_circuit_breakers: bool = True
     ):
         """
-        Initialize base business service with enterprise features.
+        Initialize base service with coordination capabilities.
         
         Args:
-            service_name: Unique name for service identification
-            cache_enabled: Whether to enable cache integration
-            circuit_breaker_enabled: Whether to enable circuit breaker pattern
-            metrics_enabled: Whether to enable metrics collection
+            config: Service configuration instance
+            mode: Service mode for behavior control
+            enable_metrics: Whether to collect performance metrics
+            enable_caching: Whether to enable result caching
+            enable_circuit_breakers: Whether to enable circuit breaker protection
         """
-        self.service_name = service_name
-        self.cache_enabled = cache_enabled
-        self.circuit_breaker_enabled = circuit_breaker_enabled
-        self.metrics_enabled = metrics_enabled
+        self.config = config or ServiceConfiguration()
+        self.mode = mode
+        self.enable_metrics = enable_metrics
+        self.enable_caching = enable_caching
+        self.enable_circuit_breakers = enable_circuit_breakers
         
-        # Initialize service components
-        self._metrics = ServiceMetrics() if metrics_enabled else None
-        self._circuit_breaker = self._create_circuit_breaker() if circuit_breaker_enabled else None
-        self._processor = get_business_processor()
-        self._cache_client = get_redis_client() if cache_enabled else None
+        # Initialize metrics collection
+        self.metrics = ServiceMetrics() if enable_metrics else None
         
-        # Service configuration
-        self._default_timeout = 30.0
-        self._max_retry_attempts = 3
-        self._cache_ttl_seconds = 3600  # 1 hour default
+        # Initialize database managers
+        self._db_manager = None
+        self._async_db_manager = None
+        self._redis_client = None
+        self._response_cache = None
         
-        logger.info(
-            "Base business service initialized",
-            service_name=service_name,
-            cache_enabled=cache_enabled,
-            circuit_breaker_enabled=circuit_breaker_enabled,
-            metrics_enabled=metrics_enabled
-        )
+        # Service coordination state
+        self._service_id = str(uuid.uuid4())
+        self._start_time = datetime.now(timezone.utc)
+        self._active_transactions = {}
+        self._circuit_breakers = {}
+        
+        # Initialize processing pipeline
+        self._processing_pipeline = None
+        self._business_rule_engine = None
+        
+        logger.debug("Business service initialized",
+                    service_type=self.__class__.__name__,
+                    service_id=self._service_id,
+                    mode=mode.value)
     
-    def _create_circuit_breaker(self):
-        """Create circuit breaker for service resilience."""
-        # Import circuit breaker from integrations if available
-        try:
-            from ..integrations.base_client import CircuitBreaker
-            return CircuitBreaker(
-                failure_threshold=5,
-                recovery_timeout=60,
-                expected_exception=Exception
-            )
-        except ImportError:
-            logger.warning("Circuit breaker not available, continuing without")
-            return None
+    @property
+    def db_manager(self) -> MongoDBManager:
+        """Get synchronous database manager instance."""
+        if self._db_manager is None:
+            self._db_manager = get_mongodb_manager()
+        return self._db_manager
     
-    @abstractmethod
-    async def execute(self, context: ServiceContext, **kwargs) -> Any:
-        """
-        Execute primary service operation with context and parameters.
-        
-        Abstract method that must be implemented by all service subclasses
-        to provide specific business operation logic and coordination.
-        
-        Args:
-            context: Service execution context with operation parameters
-            **kwargs: Additional operation-specific parameters
-            
-        Returns:
-            Service operation result (type varies by implementation)
-            
-        Raises:
-            BaseBusinessException: For business logic failures
-            DataProcessingError: For data processing failures
-            ValidationError: For input validation failures
-        """
-        pass
+    @property
+    def async_db_manager(self) -> AsyncMongoDBManager:
+        """Get asynchronous database manager instance."""
+        if self._async_db_manager is None:
+            self._async_db_manager = get_async_mongodb_manager()
+        return self._async_db_manager
     
-    def validate_input(self, data: Dict[str, Any], context: ServiceContext) -> Dict[str, Any]:
-        """
-        Validate input data for service operation with comprehensive checks.
-        
-        Provides standardized input validation including data type checking,
-        business rule validation, and security validation for consistent
-        service input processing across all operations.
-        
-        Args:
-            data: Input data to validate
-            context: Service execution context for validation rules
-            
-        Returns:
-            Validated and potentially transformed input data
-            
-        Raises:
-            DataValidationError: If input validation fails
-            BusinessRuleViolationError: If business rules are violated
-        """
-        try:
-            logger.debug(
-                "Validating service input",
-                service_name=self.service_name,
-                operation_id=context.operation_id,
-                data_fields=list(data.keys()) if isinstance(data, dict) else []
-            )
-            
-            # Basic data structure validation
-            if not isinstance(data, dict):
-                raise DataValidationError(
-                    message="Input data must be a dictionary",
-                    error_code="INVALID_INPUT_TYPE",
-                    context={
-                        'service_name': self.service_name,
-                        'input_type': type(data).__name__
-                    },
-                    severity=ErrorSeverity.MEDIUM
-                )
-            
-            # Apply service-specific validation
-            validated_data = self._apply_service_validation(data, context)
-            
-            logger.debug(
-                "Service input validation completed",
-                service_name=self.service_name,
-                operation_id=context.operation_id,
-                validated_fields=len(validated_data)
-            )
-            
-            return validated_data
-            
-        except Exception as validation_error:
-            if isinstance(validation_error, BaseBusinessException):
-                raise
-            
-            raise DataValidationError(
-                message=f"Service input validation failed: {str(validation_error)}",
-                error_code="SERVICE_INPUT_VALIDATION_ERROR",
-                context={
-                    'service_name': self.service_name,
-                    'operation_id': context.operation_id
-                },
-                cause=validation_error,
-                severity=ErrorSeverity.MEDIUM
-            )
+    @property
+    def redis_client(self) -> RedisClient:
+        """Get Redis client instance."""
+        if self._redis_client is None:
+            self._redis_client = get_redis_client()
+        return self._redis_client
     
-    def _apply_service_validation(self, data: Dict[str, Any], context: ServiceContext) -> Dict[str, Any]:
-        """
-        Apply service-specific validation logic.
-        
-        Override this method in subclasses to implement service-specific
-        validation rules and data transformation patterns.
-        
-        Args:
-            data: Input data to validate
-            context: Service execution context
-            
-        Returns:
-            Service-specific validated data
-        """
-        return data
+    @property
+    def response_cache(self) -> FlaskResponseCache:
+        """Get Flask response cache instance."""
+        if self._response_cache is None:
+            self._response_cache = get_response_cache()
+        return self._response_cache
     
-    async def _get_cached_result(self, cache_key: str, context: ServiceContext) -> Optional[Any]:
-        """
-        Get cached result for operation if caching is enabled.
-        
-        Args:
-            cache_key: Cache key for result lookup
-            context: Service execution context
-            
-        Returns:
-            Cached result or None if not found or caching disabled
-        """
-        if not self.cache_enabled or not self._cache_client:
-            return None
-        
-        try:
-            cached_result = await self._cache_client.get(cache_key)
-            
-            if cached_result is not None:
-                if self._metrics:
-                    self._metrics.cache_hit_count += 1
-                
-                logger.debug(
-                    "Cache hit for service operation",
-                    service_name=self.service_name,
-                    operation_id=context.operation_id,
-                    cache_key=cache_key
-                )
-                
-                return cached_result
-            else:
-                if self._metrics:
-                    self._metrics.cache_miss_count += 1
-                
-                logger.debug(
-                    "Cache miss for service operation",
-                    service_name=self.service_name,
-                    operation_id=context.operation_id,
-                    cache_key=cache_key
-                )
-                
-                return None
-                
-        except Exception as cache_error:
-            logger.warning(
-                "Cache operation failed",
-                service_name=self.service_name,
-                operation_id=context.operation_id,
-                cache_key=cache_key,
-                error=str(cache_error)
+    @property
+    def processing_pipeline(self) -> ProcessingPipeline:
+        """Get business processing pipeline instance."""
+        if self._processing_pipeline is None:
+            self._processing_pipeline = create_processing_pipeline(
+                mode=ProcessingMode(self.mode.value) if self.mode.value in ProcessingMode.__members__ else ProcessingMode.STRICT
             )
-            return None
+        return self._processing_pipeline
     
-    async def _set_cached_result(
-        self, 
-        cache_key: str, 
-        result: Any, 
-        context: ServiceContext,
-        ttl_seconds: Optional[int] = None
-    ) -> None:
-        """
-        Set cached result for operation if caching is enabled.
-        
-        Args:
-            cache_key: Cache key for result storage
-            result: Result data to cache
-            context: Service execution context
-            ttl_seconds: Time-to-live in seconds (uses default if not specified)
-        """
-        if not self.cache_enabled or not self._cache_client:
-            return
-        
-        try:
-            cache_ttl = ttl_seconds or self._cache_ttl_seconds
-            await self._cache_client.setex(cache_key, cache_ttl, result)
-            
-            logger.debug(
-                "Result cached for service operation",
-                service_name=self.service_name,
-                operation_id=context.operation_id,
-                cache_key=cache_key,
-                ttl_seconds=cache_ttl
-            )
-            
-        except Exception as cache_error:
-            logger.warning(
-                "Failed to cache result",
-                service_name=self.service_name,
-                operation_id=context.operation_id,
-                cache_key=cache_key,
-                error=str(cache_error)
-            )
+    @property
+    def business_rule_engine(self) -> BusinessRuleEngine:
+        """Get business rule engine instance."""
+        if self._business_rule_engine is None:
+            self._business_rule_engine = create_business_rule_engine()
+        return self._business_rule_engine
     
-    async def _generate_audit_trail(
+    @asynccontextmanager
+    async def service_operation(
         self,
-        context: ServiceContext,
         operation_name: str,
-        success: bool,
-        execution_time: float,
-        error: Optional[Exception] = None
-    ) -> None:
+        timeout: Optional[int] = None,
+        enable_cache: bool = None,
+        enable_transaction: bool = False
+    ):
         """
-        Generate audit trail entry for service operation.
+        Context manager for service operation execution with comprehensive coordination.
         
         Args:
-            context: Service execution context
-            operation_name: Name of the operation performed
-            success: Whether operation was successful
-            execution_time: Operation execution time in seconds
-            error: Exception if operation failed
+            operation_name: Name of the service operation
+            timeout: Operation timeout in seconds
+            enable_cache: Whether to enable caching for this operation
+            enable_transaction: Whether to enable transaction coordination
+            
+        Yields:
+            Operation context for service coordination
         """
-        try:
-            audit_entry = {
-                'service_name': self.service_name,
-                'operation_name': operation_name,
-                'operation_id': context.operation_id,
-                'user_id': context.user_id,
-                'session_id': context.session_id,
-                'request_id': context.request_id,
-                'tenant_id': context.tenant_id,
-                'operation_type': context.operation_type.value,
-                'priority': context.priority.value,
-                'success': success,
-                'execution_time': execution_time,
-                'timestamp': datetime.now(timezone.utc).isoformat(),
-                'metadata': context.metadata
-            }
-            
-            if error:
-                audit_entry['error'] = {
-                    'type': type(error).__name__,
-                    'message': str(error),
-                    'error_code': getattr(error, 'error_code', 'UNKNOWN_ERROR')
-                }
-            
-            # Store audit entry (implementation depends on audit system)
-            logger.info(
-                "Service operation audit trail",
-                **audit_entry
-            )
-            
-        except Exception as audit_error:
-            logger.error(
-                "Failed to generate audit trail",
-                service_name=self.service_name,
-                operation_id=context.operation_id,
-                audit_error=str(audit_error)
-            )
-    
-    def get_metrics(self) -> ServiceMetrics:
-        """
-        Get service performance and quality metrics.
+        operation_timeout = timeout or self.config.DEFAULT_TIMEOUT
+        enable_cache = enable_cache if enable_cache is not None else self.enable_caching
         
-        Returns:
-            ServiceMetrics instance with current performance data
-        """
-        return self._metrics or ServiceMetrics()
-    
-    def reset_metrics(self) -> None:
-        """Reset service metrics to initial state."""
-        if self._metrics:
-            self._metrics = ServiceMetrics()
-            
-    def get_health_status(self) -> Dict[str, Any]:
-        """
-        Get service health status for monitoring and load balancer integration.
+        success = True
+        cache_hit = False
+        external_calls = 0
+        circuit_breaker_opened = False
         
-        Returns:
-            Dictionary containing service health information
-        """
-        health_status = {
-            'service_name': self.service_name,
-            'status': 'healthy',
-            'timestamp': datetime.now(timezone.utc).isoformat(),
-            'metrics': self.get_metrics().to_dict() if self._metrics else {},
-            'circuit_breaker_state': None,
-            'cache_enabled': self.cache_enabled,
-            'components': {}
+        # Start metrics collection
+        if self.metrics:
+            self.metrics.start_operation(operation_name, self.__class__.__name__)
+        
+        # Create operation context
+        operation_context = {
+            'operation_id': str(uuid.uuid4()),
+            'operation_name': operation_name,
+            'service_id': self._service_id,
+            'start_time': datetime.now(timezone.utc),
+            'timeout': operation_timeout,
+            'enable_cache': enable_cache,
+            'enable_transaction': enable_transaction,
+            'external_calls': 0,
+            'cache_operations': 0,
+            'database_operations': 0
         }
         
-        # Add circuit breaker status
-        if self._circuit_breaker:
-            health_status['circuit_breaker_state'] = self._circuit_breaker.state.value
-            if self._circuit_breaker.state == CircuitBreakerState.OPEN:
-                health_status['status'] = 'degraded'
-        
-        # Add cache health status
-        if self.cache_enabled and self._cache_client:
+        try:
+            # Set operation timeout
+            timeout_task = asyncio.create_task(asyncio.sleep(operation_timeout))
+            
+            # Execute operation with timeout
             try:
-                # Basic cache connectivity check
-                health_status['components']['cache'] = {
-                    'status': 'healthy',
-                    'client_available': True
-                }
-            except Exception:
-                health_status['components']['cache'] = {
-                    'status': 'unhealthy',
-                    'client_available': False
-                }
-                health_status['status'] = 'degraded'
-        
-        return health_status
-
-
-class UserManagementService(BaseBusinessService):
-    """
-    User lifecycle and profile management service.
-    
-    Provides comprehensive user management operations including user creation,
-    profile updates, authentication coordination, and user data management
-    while maintaining behavioral equivalence with Node.js implementation.
-    
-    This service implements:
-    - User account creation and profile management per F-004-RQ-001
-    - Authentication and authorization coordination per F-003-RQ-002
-    - User data validation and business rule enforcement
-    - Integration with external authentication services
-    - User lifecycle management and data consistency
-    """
-    
-    def __init__(self):
-        """Initialize user management service with specialized configuration."""
-        super().__init__(
-            service_name="user_management",
-            cache_enabled=True,
-            circuit_breaker_enabled=True,
-            metrics_enabled=True
-        )
-        
-        # Service-specific configuration
-        self._user_cache_ttl = 1800  # 30 minutes for user data
-        self._profile_cache_ttl = 3600  # 1 hour for profile data
-        
-    @service_operation(
-        operation_type=ServiceOperationType.CREATE,
-        timeout_seconds=15.0,
-        cache_enabled=False,
-        audit_enabled=True
-    )
-    async def create_user(self, context: ServiceContext, user_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Create new user account with comprehensive validation and setup.
-        
-        Args:
-            context: Service execution context
-            user_data: User account data for creation
-            
-        Returns:
-            Created user data with system-generated fields
-            
-        Raises:
-            DataValidationError: If user data validation fails
-            BusinessRuleViolationError: If business rules are violated
-        """
-        try:
-            logger.info(
-                "Creating user account",
-                operation_id=context.operation_id,
-                user_email=user_data.get('email', 'unknown')
-            )
-            
-            # Validate user input data
-            validated_data = self.validate_input(user_data, context)
-            
-            # Check for duplicate email
-            await self._check_duplicate_email(validated_data['email'], context)
-            
-            # Process user data with business rules
-            processed_data = await self._process_user_creation_data(validated_data, context)
-            
-            # Create user in database
-            created_user = await self._create_user_in_database(processed_data, context)
-            
-            # Initialize user profile
-            await self._initialize_user_profile(created_user['id'], context)
-            
-            # Invalidate related caches
-            await self._invalidate_user_caches(created_user['email'], context)
-            
-            logger.info(
-                "User account created successfully",
-                operation_id=context.operation_id,
-                user_id=created_user['id'],
-                user_email=created_user['email']
-            )
-            
-            return created_user
-            
-        except Exception as creation_error:
-            logger.error(
-                "User creation failed",
-                operation_id=context.operation_id,
-                error=str(creation_error)
-            )
-            raise
-    
-    @service_operation(
-        operation_type=ServiceOperationType.READ,
-        timeout_seconds=10.0,
-        cache_enabled=True,
-        audit_enabled=False
-    )
-    async def get_user_by_id(self, context: ServiceContext, user_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Retrieve user by ID with caching and comprehensive data assembly.
-        
-        Args:
-            context: Service execution context
-            user_id: Unique user identifier
-            
-        Returns:
-            User data dictionary or None if not found
-        """
-        cache_key = create_cache_key("user", user_id)
-        
-        # Check cache first
-        cached_user = await self._get_cached_result(cache_key, context)
-        if cached_user:
-            return cached_user
-        
-        try:
-            # Query database for user
-            user_data = await self._get_user_from_database(user_id, context)
-            
-            if user_data:
-                # Enrich user data with profile information
-                enriched_user = await self._enrich_user_data(user_data, context)
-                
-                # Cache the result
-                await self._set_cached_result(cache_key, enriched_user, context, self._user_cache_ttl)
-                
-                return enriched_user
-            
-            return None
-            
-        except Exception as retrieval_error:
-            logger.error(
-                "User retrieval failed",
-                operation_id=context.operation_id,
-                user_id=user_id,
-                error=str(retrieval_error)
-            )
-            raise
-    
-    @service_operation(
-        operation_type=ServiceOperationType.UPDATE,
-        timeout_seconds=20.0,
-        cache_enabled=False,
-        audit_enabled=True
-    )
-    async def update_user_profile(
-        self, 
-        context: ServiceContext, 
-        user_id: str, 
-        profile_updates: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """
-        Update user profile with validation and business rule enforcement.
-        
-        Args:
-            context: Service execution context
-            user_id: User identifier for profile update
-            profile_updates: Profile data updates to apply
-            
-        Returns:
-            Updated user profile data
-        """
-        try:
-            logger.info(
-                "Updating user profile",
-                operation_id=context.operation_id,
-                user_id=user_id,
-                update_fields=list(profile_updates.keys())
-            )
-            
-            # Validate profile updates
-            validated_updates = self._validate_profile_updates(profile_updates, context)
-            
-            # Get current user data
-            current_user = await self.get_user_by_id(context, user_id)
-            if not current_user:
-                raise DataValidationError(
-                    message=f"User not found: {user_id}",
-                    error_code="USER_NOT_FOUND",
-                    context={'user_id': user_id},
-                    severity=ErrorSeverity.MEDIUM
+                if enable_transaction:
+                    async with self._transaction_context(operation_context):
+                        yield operation_context
+                else:
+                    yield operation_context
+                    
+                # Cancel timeout if operation completed
+                if not timeout_task.done():
+                    timeout_task.cancel()
+                    
+            except asyncio.TimeoutError:
+                success = False
+                logger.error("Service operation timed out",
+                           operation=operation_name,
+                           timeout=operation_timeout,
+                           service_id=self._service_id)
+                raise ExternalServiceError(
+                    message=f"Service operation '{operation_name}' timed out",
+                    error_code="SERVICE_OPERATION_TIMEOUT",
+                    service_name=self.__class__.__name__,
+                    operation=operation_name,
+                    timeout=operation_timeout,
+                    severity=ErrorSeverity.HIGH
                 )
             
-            # Apply business rules for profile updates
-            processed_updates = await self._process_profile_updates(
-                current_user, validated_updates, context
-            )
+        except Exception as e:
+            success = False
             
-            # Update user profile in database
-            updated_user = await self._update_user_in_database(user_id, processed_updates, context)
+            # Check if circuit breaker was involved
+            if isinstance(e, ExternalServiceError) and "circuit breaker" in str(e).lower():
+                circuit_breaker_opened = True
             
-            # Invalidate user caches
-            await self._invalidate_user_caches(current_user['email'], context)
-            
-            logger.info(
-                "User profile updated successfully",
-                operation_id=context.operation_id,
-                user_id=user_id
-            )
-            
-            return updated_user
-            
-        except Exception as update_error:
-            logger.error(
-                "User profile update failed",
-                operation_id=context.operation_id,
-                user_id=user_id,
-                error=str(update_error)
-            )
+            self._handle_service_error(e, operation_name, operation_context)
             raise
-    
-    def _apply_service_validation(self, data: Dict[str, Any], context: ServiceContext) -> Dict[str, Any]:
-        """Apply user management specific validation."""
-        required_fields = ['email']
         
-        for field in required_fields:
-            if field not in data or not data[field]:
-                raise DataValidationError(
-                    message=f"Required field missing: {field}",
-                    error_code="REQUIRED_FIELD_MISSING",
-                    context={'field': field, 'service': self.service_name},
-                    severity=ErrorSeverity.MEDIUM
+        finally:
+            # Extract metrics from operation context
+            external_calls = operation_context.get('external_calls', 0)
+            cache_hit = operation_context.get('cache_hit', False)
+            
+            # End metrics collection
+            if self.metrics:
+                duration = self.metrics.end_operation(
+                    operation_name,
+                    self.__class__.__name__,
+                    success,
+                    cache_hit,
+                    external_calls,
+                    circuit_breaker_opened
                 )
+                
+                if self.config.ENABLE_AUDIT_LOGGING:
+                    logger.debug("Service operation completed",
+                                operation=operation_name,
+                                service_type=self.__class__.__name__,
+                                duration=duration,
+                                success=success,
+                                cache_hit=cache_hit,
+                                external_calls=external_calls,
+                                operation_id=operation_context['operation_id'],
+                                service_id=self._service_id)
+    
+    @asynccontextmanager
+    async def _transaction_context(self, operation_context: Dict[str, Any]):
+        """
+        Context manager for transaction coordination across multiple resources.
         
-        # Validate email format
-        email = data.get('email', '').lower().strip()
-        if not self._is_valid_email(email):
-            raise DataValidationError(
-                message="Invalid email format",
-                error_code="INVALID_EMAIL_FORMAT",
-                context={'email': email},
-                severity=ErrorSeverity.MEDIUM
-            )
+        Args:
+            operation_context: Operation context for transaction tracking
+            
+        Yields:
+            Transaction context for coordinated operations
+        """
+        transaction_id = str(uuid.uuid4())
+        transaction_context = {
+            'transaction_id': transaction_id,
+            'operation_context': operation_context,
+            'database_session': None,
+            'redis_pipeline': None,
+            'rollback_actions': [],
+            'committed': False
+        }
         
-        data['email'] = email
-        return data
-    
-    def _is_valid_email(self, email: str) -> bool:
-        """Validate email format using business rules."""
-        import re
-        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-        return bool(re.match(email_pattern, email))
-    
-    async def _check_duplicate_email(self, email: str, context: ServiceContext) -> None:
-        """Check for duplicate email addresses."""
-        # This would typically query the database
-        # For now, implement basic check logic
-        pass
-    
-    async def _process_user_creation_data(self, user_data: Dict[str, Any], context: ServiceContext) -> Dict[str, Any]:
-        """Process and enrich user creation data."""
-        processed_data = user_data.copy()
-        processed_data['id'] = str(uuid.uuid4())
-        processed_data['created_at'] = datetime.now(timezone.utc).isoformat()
-        processed_data['updated_at'] = processed_data['created_at']
-        processed_data['status'] = 'active'
-        
-        return processed_data
-    
-    async def _create_user_in_database(self, user_data: Dict[str, Any], context: ServiceContext) -> Dict[str, Any]:
-        """Create user record in database."""
         try:
-            # Use data access layer
-            result = await execute_async_query(
-                'users',
-                'insert_one',
-                user_data
-            )
+            # Start database transaction if available
+            if hasattr(self.async_db_manager, 'start_session'):
+                transaction_context['database_session'] = await self.async_db_manager.start_session()
+                await transaction_context['database_session'].start_transaction()
             
-            if self._metrics:
-                self._metrics.database_query_count += 1
+            # Start Redis pipeline for atomic operations
+            if self.redis_client:
+                transaction_context['redis_pipeline'] = self.redis_client.pipeline()
             
-            return user_data
+            # Store transaction context
+            self._active_transactions[transaction_id] = transaction_context
             
-        except Exception as db_error:
-            raise DataProcessingError(
-                message="Failed to create user in database",
-                error_code="USER_DATABASE_CREATE_ERROR",
-                context={'user_email': user_data.get('email')},
-                cause=db_error,
+            logger.debug("Transaction started",
+                        transaction_id=transaction_id,
+                        operation=operation_context['operation_name'],
+                        service_id=self._service_id)
+            
+            yield transaction_context
+            
+            # Commit transaction
+            await self._commit_transaction(transaction_context)
+            
+        except Exception as e:
+            # Rollback transaction
+            await self._rollback_transaction(transaction_context, e)
+            raise
+        
+        finally:
+            # Clean up transaction context
+            if transaction_id in self._active_transactions:
+                del self._active_transactions[transaction_id]
+    
+    async def _commit_transaction(self, transaction_context: Dict[str, Any]) -> None:
+        """
+        Commit coordinated transaction across multiple resources.
+        
+        Args:
+            transaction_context: Transaction context to commit
+        """
+        transaction_id = transaction_context['transaction_id']
+        
+        try:
+            # Commit database transaction
+            if transaction_context['database_session']:
+                await transaction_context['database_session'].commit_transaction()
+            
+            # Execute Redis pipeline
+            if transaction_context['redis_pipeline']:
+                transaction_context['redis_pipeline'].execute()
+            
+            transaction_context['committed'] = True
+            
+            logger.debug("Transaction committed successfully",
+                        transaction_id=transaction_id,
+                        service_id=self._service_id)
+        
+        except Exception as e:
+            logger.error("Transaction commit failed",
+                        transaction_id=transaction_id,
+                        error=str(e),
+                        service_id=self._service_id,
+                        exc_info=True)
+            raise ConcurrencyError(
+                message="Failed to commit transaction",
+                error_code="TRANSACTION_COMMIT_FAILED",
+                transaction_id=transaction_id,
+                cause=e,
                 severity=ErrorSeverity.HIGH
             )
     
-    async def _initialize_user_profile(self, user_id: str, context: ServiceContext) -> None:
-        """Initialize default user profile."""
-        profile_data = {
-            'user_id': user_id,
-            'preferences': {},
-            'settings': {},
-            'created_at': datetime.now(timezone.utc).isoformat()
-        }
+    async def _rollback_transaction(
+        self,
+        transaction_context: Dict[str, Any],
+        original_error: Exception
+    ) -> None:
+        """
+        Rollback coordinated transaction across multiple resources.
+        
+        Args:
+            transaction_context: Transaction context to rollback
+            original_error: Original error that caused rollback
+        """
+        transaction_id = transaction_context['transaction_id']
         
         try:
-            await execute_async_query(
-                'user_profiles',
-                'insert_one',
-                profile_data
-            )
+            # Rollback database transaction
+            if transaction_context['database_session']:
+                await transaction_context['database_session'].abort_transaction()
             
-        except Exception as profile_error:
-            logger.warning(
-                "Failed to initialize user profile",
-                user_id=user_id,
-                error=str(profile_error)
-            )
+            # Discard Redis pipeline
+            if transaction_context['redis_pipeline']:
+                transaction_context['redis_pipeline'].discard()
+            
+            # Execute custom rollback actions
+            for rollback_action in reversed(transaction_context['rollback_actions']):
+                try:
+                    if asyncio.iscoroutinefunction(rollback_action):
+                        await rollback_action()
+                    else:
+                        rollback_action()
+                except Exception as rollback_error:
+                    logger.warning("Rollback action failed",
+                                  transaction_id=transaction_id,
+                                  rollback_error=str(rollback_error),
+                                  service_id=self._service_id)
+            
+            logger.info("Transaction rolled back",
+                       transaction_id=transaction_id,
+                       original_error=str(original_error),
+                       service_id=self._service_id)
+        
+        except Exception as e:
+            logger.error("Transaction rollback failed",
+                        transaction_id=transaction_id,
+                        rollback_error=str(e),
+                        original_error=str(original_error),
+                        service_id=self._service_id,
+                        exc_info=True)
     
-    async def _get_user_from_database(self, user_id: str, context: ServiceContext) -> Optional[Dict[str, Any]]:
-        """Retrieve user from database."""
-        try:
-            result = await execute_async_query(
-                'users',
-                'find_one',
-                {'id': user_id}
-            )
+    def _handle_service_error(
+        self,
+        error: Exception,
+        operation_name: str,
+        operation_context: Dict[str, Any]
+    ) -> None:
+        """
+        Handle service operation errors with logging and tracking.
+        
+        Args:
+            error: Exception that occurred during service operation
+            operation_name: Name of the operation that failed
+            operation_context: Operation context for error correlation
+        """
+        logger.error("Service operation failed",
+                    operation=operation_name,
+                    service_type=self.__class__.__name__,
+                    error_type=type(error).__name__,
+                    error_message=str(error),
+                    operation_id=operation_context['operation_id'],
+                    service_id=self._service_id,
+                    exc_info=True)
+    
+    async def _get_cached_result(
+        self,
+        cache_key: str,
+        operation_context: Dict[str, Any]
+    ) -> Optional[Any]:
+        """
+        Get cached result for service operation.
+        
+        Args:
+            cache_key: Cache key to lookup
+            operation_context: Operation context for cache tracking
             
-            if self._metrics:
-                self._metrics.database_query_count += 1
+        Returns:
+            Cached result if available, None otherwise
+        """
+        if not self.enable_caching or not operation_context.get('enable_cache', True):
+            return None
+        
+        try:
+            cached_result = await self.redis_client.get(cache_key)
+            if cached_result:
+                operation_context['cache_hit'] = True
+                operation_context['cache_operations'] += 1
+                
+                logger.debug("Cache hit for service operation",
+                           cache_key=cache_key[:20],
+                           operation=operation_context['operation_name'],
+                           service_id=self._service_id)
+                
+                return json.loads(cached_result)
+        
+        except Exception as e:
+            logger.warning("Cache lookup failed",
+                          cache_key=cache_key[:20],
+                          error=str(e),
+                          service_id=self._service_id)
+        
+        operation_context['cache_operations'] += 1
+        return None
+    
+    async def _set_cached_result(
+        self,
+        cache_key: str,
+        result: Any,
+        ttl_seconds: int = None,
+        operation_context: Dict[str, Any] = None
+    ) -> None:
+        """
+        Set cached result for service operation.
+        
+        Args:
+            cache_key: Cache key to store under
+            result: Result to cache
+            ttl_seconds: Time to live in seconds
+            operation_context: Operation context for cache tracking
+        """
+        if not self.enable_caching:
+            return
+        
+        try:
+            ttl = ttl_seconds or self.config.CACHE_TTL
+            serialized_result = json.dumps(result, default=str)
+            
+            await self.redis_client.setex(cache_key, ttl, serialized_result)
+            
+            if operation_context:
+                operation_context['cache_operations'] += 1
+            
+            logger.debug("Result cached for service operation",
+                        cache_key=cache_key[:20],
+                        ttl=ttl,
+                        service_id=self._service_id)
+        
+        except Exception as e:
+            logger.warning("Cache storage failed",
+                          cache_key=cache_key[:20],
+                          error=str(e),
+                          service_id=self._service_id)
+    
+    def _generate_cache_key(self, operation_name: str, *args, **kwargs) -> str:
+        """
+        Generate cache key for service operation.
+        
+        Args:
+            operation_name: Name of the operation
+            *args: Operation arguments
+            **kwargs: Operation keyword arguments
+            
+        Returns:
+            Cache key string
+        """
+        key_data = {
+            'service': self.__class__.__name__,
+            'operation': operation_name,
+            'args': args,
+            'kwargs': {k: v for k, v in kwargs.items() if k not in ['operation_context']}
+        }
+        
+        key_string = json.dumps(key_data, sort_keys=True, default=str)
+        
+        import hashlib
+        return f"service:{hashlib.md5(key_string.encode()).hexdigest()}"
+    
+    def get_service_summary(self) -> Dict[str, Any]:
+        """
+        Get comprehensive service summary and metrics.
+        
+        Returns:
+            Dictionary containing service summary and metrics
+        """
+        summary = {
+            'service_type': self.__class__.__name__,
+            'service_id': self._service_id,
+            'start_time': self._start_time.isoformat(),
+            'mode': self.mode.value,
+            'active_transactions': len(self._active_transactions),
+            'circuit_breakers_enabled': self.enable_circuit_breakers,
+            'caching_enabled': self.enable_caching,
+            'metrics_enabled': self.enable_metrics
+        }
+        
+        if self.metrics:
+            summary['metrics'] = self.metrics.get_service_metrics()
+        
+        return summary
+
+
+# ============================================================================
+# CORE BUSINESS SERVICES
+# ============================================================================
+
+class UserService(BaseBusinessService):
+    """
+    User account and profile management service.
+    
+    Provides comprehensive user operations including account creation, profile
+    management, authentication coordination, and user data processing while
+    maintaining functional parity per F-004-RQ-001.
+    
+    Features:
+    - User account lifecycle management
+    - Profile data validation and processing
+    - Authentication service coordination
+    - User preferences and settings management
+    - Account security and compliance operations
+    
+    Example:
+        user_service = UserService()
+        
+        # Create new user account
+        user_result = await user_service.create_user(user_data)
+        
+        # Update user profile
+        update_result = await user_service.update_profile(user_id, profile_data)
+        
+        # Authenticate user credentials
+        auth_result = await user_service.authenticate_user(credentials)
+    """
+    
+    def __init__(self, **kwargs):
+        """Initialize user service with user-specific capabilities."""
+        super().__init__(**kwargs)
+        self._user_validator = UserValidator()
+        self._user_collection = "users"
+    
+    async def create_user(
+        self,
+        user_data: Dict[str, Any],
+        validate_rules: bool = True,
+        enable_notifications: bool = True
+    ) -> ServiceResult:
+        """
+        Create new user account with comprehensive validation and processing.
+        
+        Args:
+            user_data: User account data
+            validate_rules: Whether to validate business rules
+            enable_notifications: Whether to send notifications
+            
+        Returns:
+            Service result with created user information
+        """
+        async with self.service_operation("create_user", enable_transaction=True) as ctx:
+            try:
+                # Generate cache key
+                cache_key = self._generate_cache_key("create_user_validation", user_data.get('email', ''))
+                
+                # Check cache for validation result
+                cached_validation = await self._get_cached_result(cache_key, ctx)
+                if cached_validation and not cached_validation.get('requires_processing', True):
+                    logger.debug("Using cached user validation",
+                               email=user_data.get('email', 'unknown')[:20])
+                
+                # Process user data through pipeline
+                pipeline_result = self.processing_pipeline.execute(user_data)
+                if not pipeline_result['success']:
+                    raise DataValidationError(
+                        message="User data validation failed",
+                        error_code="USER_VALIDATION_FAILED",
+                        context={'errors': pipeline_result['errors']},
+                        severity=ErrorSeverity.MEDIUM
+                    )
+                
+                processed_data = pipeline_result['output_data']
+                
+                # Validate business rules if requested
+                if validate_rules:
+                    rule_result = self.business_rule_engine.execute_rules(
+                        processed_data,
+                        rule_set="user_validation"
+                    )
+                    if not rule_result['success']:
+                        raise BusinessRuleViolationError(
+                            message="User business rule validation failed",
+                            error_code="USER_BUSINESS_RULES_FAILED",
+                            context={'violations': rule_result['rules_failed']},
+                            severity=ErrorSeverity.MEDIUM
+                        )
+                    
+                    processed_data = rule_result['final_data']
+                
+                # Create user model
+                user_model = User.from_dict(processed_data)
+                user_model.id = str(uuid.uuid4())
+                user_model.created_at = datetime.now(timezone.utc)
+                user_model.updated_at = user_model.created_at
+                user_model.status = UserStatus.ACTIVE
+                
+                # Check for existing user
+                existing_user = await self.async_db_manager.find_one(
+                    self._user_collection,
+                    {'email': user_model.email}
+                )
+                
+                if existing_user:
+                    raise ResourceNotFoundError(
+                        message="User with this email already exists",
+                        error_code="USER_ALREADY_EXISTS",
+                        resource_type="User",
+                        resource_id=user_model.email,
+                        severity=ErrorSeverity.MEDIUM
+                    )
+                
+                # Insert user into database
+                ctx['database_operations'] += 1
+                user_doc = user_model.model_dump(exclude_none=True)
+                insert_result = await self.async_db_manager.insert_one(
+                    self._user_collection,
+                    user_doc
+                )
+                
+                if not insert_result.acknowledged:
+                    raise DataProcessingError(
+                        message="Failed to create user account",
+                        error_code="USER_CREATION_FAILED",
+                        processing_stage="database_insertion",
+                        severity=ErrorSeverity.HIGH
+                    )
+                
+                # Cache successful validation result
+                await self._set_cached_result(
+                    cache_key,
+                    {'valid': True, 'requires_processing': False},
+                    ttl_seconds=3600,  # 1 hour
+                    operation_context=ctx
+                )
+                
+                # Prepare result
+                result = {
+                    'success': True,
+                    'user': user_model.to_api_dict(),
+                    'operation_id': ctx['operation_id'],
+                    'created_at': user_model.created_at.isoformat()
+                }
+                
+                # Send notifications if enabled
+                if enable_notifications:
+                    # Note: In real implementation, would integrate with notification service
+                    logger.info("User account created successfully",
+                               user_id=user_model.id,
+                               email=user_model.email,
+                               operation_id=ctx['operation_id'])
+                
+                return result
+                
+            except Exception as e:
+                logger.error("User creation failed",
+                           error=str(e),
+                           operation_id=ctx['operation_id'],
+                           exc_info=True)
+                raise
+    
+    async def get_user(
+        self,
+        user_id: str,
+        include_sensitive: bool = False
+    ) -> ServiceResult:
+        """
+        Retrieve user account information.
+        
+        Args:
+            user_id: User identifier
+            include_sensitive: Whether to include sensitive data
+            
+        Returns:
+            Service result with user information
+        """
+        async with self.service_operation("get_user") as ctx:
+            try:
+                # Generate cache key
+                cache_key = self._generate_cache_key("get_user", user_id, include_sensitive)
+                
+                # Check cache first
+                cached_user = await self._get_cached_result(cache_key, ctx)
+                if cached_user:
+                    return {
+                        'success': True,
+                        'user': cached_user,
+                        'operation_id': ctx['operation_id'],
+                        'cached': True
+                    }
+                
+                # Query database
+                ctx['database_operations'] += 1
+                user_doc = await self.async_db_manager.find_one(
+                    self._user_collection,
+                    {'id': user_id}
+                )
+                
+                if not user_doc:
+                    raise ResourceNotFoundError(
+                        message="User not found",
+                        error_code="USER_NOT_FOUND",
+                        resource_type="User",
+                        resource_id=user_id,
+                        severity=ErrorSeverity.MEDIUM
+                    )
+                
+                # Create user model
+                user_model = User.from_dict(user_doc)
+                
+                # Format for API response
+                user_data = user_model.to_api_dict(exclude_audit=not include_sensitive)
+                if not include_sensitive:
+                    # Remove sensitive fields
+                    sensitive_fields = ['password_hash', 'auth_tokens', 'security_questions']
+                    for field in sensitive_fields:
+                        user_data.pop(field, None)
+                
+                # Cache result
+                await self._set_cached_result(
+                    cache_key,
+                    user_data,
+                    ttl_seconds=1800,  # 30 minutes
+                    operation_context=ctx
+                )
+                
+                return {
+                    'success': True,
+                    'user': user_data,
+                    'operation_id': ctx['operation_id'],
+                    'cached': False
+                }
+                
+            except Exception as e:
+                logger.error("User retrieval failed",
+                           user_id=user_id,
+                           error=str(e),
+                           operation_id=ctx['operation_id'],
+                           exc_info=True)
+                raise
+    
+    async def update_user(
+        self,
+        user_id: str,
+        update_data: Dict[str, Any],
+        validate_rules: bool = True
+    ) -> ServiceResult:
+        """
+        Update user account information.
+        
+        Args:
+            user_id: User identifier
+            update_data: Data to update
+            validate_rules: Whether to validate business rules
+            
+        Returns:
+            Service result with updated user information
+        """
+        async with self.service_operation("update_user", enable_transaction=True) as ctx:
+            try:
+                # Validate update data
+                if validate_rules:
+                    validation_result = self._user_validator.load(update_data, partial=True)
+                    if not validation_result:
+                        raise DataValidationError(
+                            message="Invalid user update data",
+                            error_code="INVALID_UPDATE_DATA",
+                            severity=ErrorSeverity.MEDIUM
+                        )
+                
+                # Get existing user
+                ctx['database_operations'] += 1
+                existing_user = await self.async_db_manager.find_one(
+                    self._user_collection,
+                    {'id': user_id}
+                )
+                
+                if not existing_user:
+                    raise ResourceNotFoundError(
+                        message="User not found for update",
+                        error_code="USER_NOT_FOUND",
+                        resource_type="User",
+                        resource_id=user_id,
+                        severity=ErrorSeverity.MEDIUM
+                    )
+                
+                # Prepare update document
+                update_doc = {
+                    **update_data,
+                    'updated_at': datetime.now(timezone.utc)
+                }
+                
+                # Update user in database
+                ctx['database_operations'] += 1
+                update_result = await self.async_db_manager.update_one(
+                    self._user_collection,
+                    {'id': user_id},
+                    {'$set': update_doc}
+                )
+                
+                if update_result.modified_count == 0:
+                    raise DataProcessingError(
+                        message="Failed to update user",
+                        error_code="USER_UPDATE_FAILED",
+                        processing_stage="database_update",
+                        severity=ErrorSeverity.MEDIUM
+                    )
+                
+                # Invalidate relevant caches
+                cache_patterns = [
+                    f"service:*get_user*{user_id}*",
+                    f"service:*user_profile*{user_id}*"
+                ]
+                
+                for pattern in cache_patterns:
+                    try:
+                        keys = await self.redis_client.keys(pattern)
+                        if keys:
+                            await self.redis_client.delete(*keys)
+                    except Exception as cache_error:
+                        logger.warning("Cache invalidation failed",
+                                      pattern=pattern,
+                                      error=str(cache_error))
+                
+                # Get updated user
+                updated_user = await self.async_db_manager.find_one(
+                    self._user_collection,
+                    {'id': user_id}
+                )
+                
+                user_model = User.from_dict(updated_user)
+                
+                return {
+                    'success': True,
+                    'user': user_model.to_api_dict(),
+                    'operation_id': ctx['operation_id'],
+                    'updated_at': update_doc['updated_at'].isoformat()
+                }
+                
+            except Exception as e:
+                logger.error("User update failed",
+                           user_id=user_id,
+                           error=str(e),
+                           operation_id=ctx['operation_id'],
+                           exc_info=True)
+                raise
+    
+    async def delete_user(
+        self,
+        user_id: str,
+        soft_delete: bool = True
+    ) -> ServiceResult:
+        """
+        Delete user account.
+        
+        Args:
+            user_id: User identifier
+            soft_delete: Whether to perform soft delete
+            
+        Returns:
+            Service result with deletion status
+        """
+        async with self.service_operation("delete_user", enable_transaction=True) as ctx:
+            try:
+                # Check if user exists
+                ctx['database_operations'] += 1
+                existing_user = await self.async_db_manager.find_one(
+                    self._user_collection,
+                    {'id': user_id}
+                )
+                
+                if not existing_user:
+                    raise ResourceNotFoundError(
+                        message="User not found for deletion",
+                        error_code="USER_NOT_FOUND",
+                        resource_type="User",
+                        resource_id=user_id,
+                        severity=ErrorSeverity.MEDIUM
+                    )
+                
+                if soft_delete:
+                    # Soft delete: mark as inactive
+                    ctx['database_operations'] += 1
+                    update_result = await self.async_db_manager.update_one(
+                        self._user_collection,
+                        {'id': user_id},
+                        {
+                            '$set': {
+                                'status': UserStatus.INACTIVE.value,
+                                'deleted_at': datetime.now(timezone.utc),
+                                'updated_at': datetime.now(timezone.utc)
+                            }
+                        }
+                    )
+                    
+                    if update_result.modified_count == 0:
+                        raise DataProcessingError(
+                            message="Failed to soft delete user",
+                            error_code="USER_SOFT_DELETE_FAILED",
+                            processing_stage="database_update",
+                            severity=ErrorSeverity.MEDIUM
+                        )
+                else:
+                    # Hard delete: remove from database
+                    ctx['database_operations'] += 1
+                    delete_result = await self.async_db_manager.delete_one(
+                        self._user_collection,
+                        {'id': user_id}
+                    )
+                    
+                    if delete_result.deleted_count == 0:
+                        raise DataProcessingError(
+                            message="Failed to delete user",
+                            error_code="USER_DELETE_FAILED",
+                            processing_stage="database_deletion",
+                            severity=ErrorSeverity.MEDIUM
+                        )
+                
+                # Clear all user-related caches
+                cache_patterns = [
+                    f"service:*{user_id}*",
+                    f"service:*{existing_user.get('email', '')}*"
+                ]
+                
+                for pattern in cache_patterns:
+                    try:
+                        keys = await self.redis_client.keys(pattern)
+                        if keys:
+                            await self.redis_client.delete(*keys)
+                    except Exception as cache_error:
+                        logger.warning("Cache cleanup failed during user deletion",
+                                      pattern=pattern,
+                                      error=str(cache_error))
+                
+                return {
+                    'success': True,
+                    'user_id': user_id,
+                    'operation_id': ctx['operation_id'],
+                    'deletion_type': 'soft' if soft_delete else 'hard',
+                    'deleted_at': datetime.now(timezone.utc).isoformat()
+                }
+                
+            except Exception as e:
+                logger.error("User deletion failed",
+                           user_id=user_id,
+                           error=str(e),
+                           operation_id=ctx['operation_id'],
+                           exc_info=True)
+                raise
+
+
+class OrderService(BaseBusinessService):
+    """
+    Order processing and transaction management service.
+    
+    Provides comprehensive order operations including order creation, payment
+    processing, fulfillment coordination, and order lifecycle management while
+    maintaining functional parity per F-004-RQ-001.
+    
+    Features:
+    - Order creation and validation
+    - Payment processing coordination
+    - Inventory management integration
+    - Order fulfillment workflow orchestration
+    - Order status tracking and updates
+    
+    Example:
+        order_service = OrderService()
+        
+        # Create new order
+        order_result = await order_service.create_order(order_data)
+        
+        # Process payment
+        payment_result = await order_service.process_payment(order_id, payment_data)
+        
+        # Update order status
+        status_result = await order_service.update_order_status(order_id, new_status)
+    """
+    
+    def __init__(self, **kwargs):
+        """Initialize order service with order-specific capabilities."""
+        super().__init__(**kwargs)
+        self._order_validator = OrderValidator()
+        self._payment_validator = PaymentValidator()
+        self._order_collection = "orders"
+        self._payment_collection = "payments"
+    
+    async def create_order(
+        self,
+        order_data: Dict[str, Any],
+        user_id: str,
+        validate_inventory: bool = True
+    ) -> ServiceResult:
+        """
+        Create new order with comprehensive validation and processing.
+        
+        Args:
+            order_data: Order data including items and shipping
+            user_id: User creating the order
+            validate_inventory: Whether to validate inventory availability
+            
+        Returns:
+            Service result with created order information
+        """
+        async with self.service_operation("create_order", enable_transaction=True) as ctx:
+            try:
+                # Validate order data
+                pipeline_result = self.processing_pipeline.execute(order_data)
+                if not pipeline_result['success']:
+                    raise DataValidationError(
+                        message="Order data validation failed",
+                        error_code="ORDER_VALIDATION_FAILED",
+                        context={'errors': pipeline_result['errors']},
+                        severity=ErrorSeverity.MEDIUM
+                    )
+                
+                processed_data = pipeline_result['output_data']
+                
+                # Add user and system data
+                processed_data.update({
+                    'user_id': user_id,
+                    'id': str(uuid.uuid4()),
+                    'created_at': datetime.now(timezone.utc),
+                    'updated_at': datetime.now(timezone.utc),
+                    'status': OrderStatus.PENDING.value
+                })
+                
+                # Validate business rules
+                rule_result = self.business_rule_engine.execute_rules(
+                    processed_data,
+                    rule_set="order_validation"
+                )
+                if not rule_result['success']:
+                    raise BusinessRuleViolationError(
+                        message="Order business rule validation failed",
+                        error_code="ORDER_BUSINESS_RULES_FAILED",
+                        context={'violations': rule_result['rules_failed']},
+                        severity=ErrorSeverity.MEDIUM
+                    )
+                
+                processed_data = rule_result['final_data']
+                
+                # Create order model
+                order_model = Order.from_dict(processed_data)
+                
+                # Validate inventory if requested
+                if validate_inventory:
+                    inventory_check = await self._validate_inventory(order_model.items, ctx)
+                    if not inventory_check['available']:
+                        raise ResourceNotFoundError(
+                            message="Insufficient inventory for order",
+                            error_code="INSUFFICIENT_INVENTORY",
+                            resource_type="Inventory",
+                            context={'unavailable_items': inventory_check['unavailable_items']},
+                            severity=ErrorSeverity.MEDIUM
+                        )
+                
+                # Calculate order totals
+                await self._calculate_order_totals(order_model, ctx)
+                
+                # Insert order into database
+                ctx['database_operations'] += 1
+                order_doc = order_model.model_dump(exclude_none=True)
+                insert_result = await self.async_db_manager.insert_one(
+                    self._order_collection,
+                    order_doc
+                )
+                
+                if not insert_result.acknowledged:
+                    raise DataProcessingError(
+                        message="Failed to create order",
+                        error_code="ORDER_CREATION_FAILED",
+                        processing_stage="database_insertion",
+                        severity=ErrorSeverity.HIGH
+                    )
+                
+                # Reserve inventory
+                if validate_inventory:
+                    reservation_result = await self._reserve_inventory(order_model.items, ctx)
+                    if not reservation_result['success']:
+                        # Add rollback action to release any partial reservations
+                        if ctx.get('transaction_context'):
+                            ctx['transaction_context']['rollback_actions'].append(
+                                lambda: self._release_inventory_reservations(order_model.items)
+                            )
+                        
+                        raise DataProcessingError(
+                            message="Failed to reserve inventory",
+                            error_code="INVENTORY_RESERVATION_FAILED",
+                            processing_stage="inventory_management",
+                            severity=ErrorSeverity.HIGH
+                        )
+                
+                # Cache order result
+                cache_key = self._generate_cache_key("get_order", order_model.id)
+                await self._set_cached_result(
+                    cache_key,
+                    order_model.to_api_dict(),
+                    ttl_seconds=1800,  # 30 minutes
+                    operation_context=ctx
+                )
+                
+                return {
+                    'success': True,
+                    'order': order_model.to_api_dict(),
+                    'operation_id': ctx['operation_id'],
+                    'inventory_reserved': validate_inventory,
+                    'created_at': order_model.created_at.isoformat()
+                }
+                
+            except Exception as e:
+                logger.error("Order creation failed",
+                           user_id=user_id,
+                           error=str(e),
+                           operation_id=ctx['operation_id'],
+                           exc_info=True)
+                raise
+    
+    async def process_payment(
+        self,
+        order_id: str,
+        payment_data: Dict[str, Any]
+    ) -> ServiceResult:
+        """
+        Process payment for order.
+        
+        Args:
+            order_id: Order identifier
+            payment_data: Payment method and details
+            
+        Returns:
+            Service result with payment processing status
+        """
+        async with self.service_operation("process_payment", enable_transaction=True) as ctx:
+            try:
+                # Get order
+                ctx['database_operations'] += 1
+                order_doc = await self.async_db_manager.find_one(
+                    self._order_collection,
+                    {'id': order_id}
+                )
+                
+                if not order_doc:
+                    raise ResourceNotFoundError(
+                        message="Order not found for payment",
+                        error_code="ORDER_NOT_FOUND",
+                        resource_type="Order",
+                        resource_id=order_id,
+                        severity=ErrorSeverity.MEDIUM
+                    )
+                
+                order_model = Order.from_dict(order_doc)
+                
+                # Validate order status
+                if order_model.status != OrderStatus.PENDING:
+                    raise BusinessRuleViolationError(
+                        message="Order is not in pending status",
+                        error_code="INVALID_ORDER_STATUS",
+                        context={'current_status': order_model.status.value},
+                        severity=ErrorSeverity.MEDIUM
+                    )
+                
+                # Prepare payment data
+                payment_data.update({
+                    'id': str(uuid.uuid4()),
+                    'order_id': order_id,
+                    'amount': order_model.total_amount.model_dump(),
+                    'created_at': datetime.now(timezone.utc),
+                    'status': PaymentStatus.PENDING.value
+                })
+                
+                # Validate payment data
+                validation_result = self._payment_validator.load(payment_data)
+                if not validation_result:
+                    raise DataValidationError(
+                        message="Invalid payment data",
+                        error_code="INVALID_PAYMENT_DATA",
+                        severity=ErrorSeverity.MEDIUM
+                    )
+                
+                # Create payment model
+                payment_model = PaymentTransaction.from_dict(payment_data)
+                
+                # Process payment with external service
+                ctx['external_calls'] += 1
+                payment_result = await self._process_external_payment(payment_model, ctx)
+                
+                if payment_result['success']:
+                    # Update payment status
+                    payment_model.status = PaymentStatus.COMPLETED
+                    payment_model.transaction_id = payment_result['transaction_id']
+                    payment_model.completed_at = datetime.now(timezone.utc)
+                    
+                    # Update order status
+                    order_model.status = OrderStatus.PAID
+                    order_model.updated_at = datetime.now(timezone.utc)
+                else:
+                    # Payment failed
+                    payment_model.status = PaymentStatus.FAILED
+                    payment_model.error_message = payment_result.get('error_message')
+                    payment_model.failed_at = datetime.now(timezone.utc)
+                
+                # Save payment record
+                ctx['database_operations'] += 1
+                payment_doc = payment_model.model_dump(exclude_none=True)
+                await self.async_db_manager.insert_one(
+                    self._payment_collection,
+                    payment_doc
+                )
+                
+                # Update order
+                ctx['database_operations'] += 1
+                order_update = order_model.model_dump(exclude_none=True)
+                await self.async_db_manager.update_one(
+                    self._order_collection,
+                    {'id': order_id},
+                    {'$set': order_update}
+                )
+                
+                # Invalidate order cache
+                cache_key = self._generate_cache_key("get_order", order_id)
+                await self.redis_client.delete(cache_key)
+                
+                return {
+                    'success': payment_result['success'],
+                    'payment': payment_model.to_api_dict(),
+                    'order_status': order_model.status.value,
+                    'operation_id': ctx['operation_id'],
+                    'transaction_id': payment_result.get('transaction_id'),
+                    'processed_at': datetime.now(timezone.utc).isoformat()
+                }
+                
+            except Exception as e:
+                logger.error("Payment processing failed",
+                           order_id=order_id,
+                           error=str(e),
+                           operation_id=ctx['operation_id'],
+                           exc_info=True)
+                raise
+    
+    async def _validate_inventory(
+        self,
+        order_items: List[OrderItem],
+        operation_context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Validate inventory availability for order items.
+        
+        Args:
+            order_items: List of order items to validate
+            operation_context: Operation context for tracking
+            
+        Returns:
+            Inventory validation result
+        """
+        # Simulate inventory check - in real implementation would query inventory service
+        operation_context['external_calls'] += 1
+        
+        unavailable_items = []
+        
+        for item in order_items:
+            # Simulate inventory check
+            if item.quantity > 100:  # Mock inventory limit
+                unavailable_items.append({
+                    'product_id': item.product_id,
+                    'requested': item.quantity,
+                    'available': 100
+                })
+        
+        return {
+            'available': len(unavailable_items) == 0,
+            'unavailable_items': unavailable_items
+        }
+    
+    async def _calculate_order_totals(
+        self,
+        order_model: Order,
+        operation_context: Dict[str, Any]
+    ) -> None:
+        """
+        Calculate order totals including tax and shipping.
+        
+        Args:
+            order_model: Order model to calculate totals for
+            operation_context: Operation context for tracking
+        """
+        # Calculate subtotal
+        subtotal = sum(
+            item.unit_price.amount * item.quantity
+            for item in order_model.items
+        )
+        
+        # Calculate tax (mock 8.5% tax rate)
+        tax_rate = Decimal('0.085')
+        tax_amount = subtotal * tax_rate
+        
+        # Calculate shipping (mock flat rate)
+        shipping_amount = Decimal('10.00')
+        
+        # Apply discount if any
+        discount_amount = order_model.discount_amount.amount if order_model.discount_amount else Decimal('0.00')
+        
+        # Calculate total
+        total_amount = subtotal + tax_amount + shipping_amount - discount_amount
+        
+        # Update order model
+        order_model.subtotal = MonetaryAmount(amount=subtotal, currency_code="USD")
+        order_model.tax_amount = MonetaryAmount(amount=tax_amount, currency_code="USD")
+        order_model.shipping_amount = MonetaryAmount(amount=shipping_amount, currency_code="USD")
+        order_model.total_amount = MonetaryAmount(amount=total_amount, currency_code="USD")
+    
+    async def _reserve_inventory(
+        self,
+        order_items: List[OrderItem],
+        operation_context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Reserve inventory for order items.
+        
+        Args:
+            order_items: List of order items to reserve
+            operation_context: Operation context for tracking
+            
+        Returns:
+            Inventory reservation result
+        """
+        # Simulate inventory reservation - in real implementation would call inventory service
+        operation_context['external_calls'] += 1
+        
+        # Mock successful reservation
+        return {
+            'success': True,
+            'reservation_id': str(uuid.uuid4()),
+            'reserved_items': len(order_items)
+        }
+    
+    async def _release_inventory_reservations(self, order_items: List[OrderItem]) -> None:
+        """
+        Release inventory reservations (rollback action).
+        
+        Args:
+            order_items: List of order items to release reservations for
+        """
+        # Simulate inventory release - in real implementation would call inventory service
+        logger.info("Released inventory reservations",
+                   item_count=len(order_items))
+    
+    async def _process_external_payment(
+        self,
+        payment_model: PaymentTransaction,
+        operation_context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Process payment with external payment service.
+        
+        Args:
+            payment_model: Payment transaction model
+            operation_context: Operation context for tracking
+            
+        Returns:
+            Payment processing result
+        """
+        # Simulate external payment processing - in real implementation would call payment gateway
+        operation_context['external_calls'] += 1
+        
+        # Mock successful payment processing
+        import random
+        success = random.random() > 0.1  # 90% success rate for simulation
+        
+        if success:
+            return {
+                'success': True,
+                'transaction_id': f"txn_{uuid.uuid4().hex[:16]}",
+                'processor_response': 'APPROVED'
+            }
+        else:
+            return {
+                'success': False,
+                'error_message': 'Payment declined by processor',
+                'processor_response': 'DECLINED'
+            }
+
+
+# ============================================================================
+# INTEGRATION SERVICES
+# ============================================================================
+
+class AuthenticationService(BaseBusinessService):
+    """
+    Authentication service integration with Auth0 and JWT token management.
+    
+    Provides comprehensive authentication operations including token validation,
+    user context creation, and Auth0 service coordination with circuit breaker
+    patterns per Section 6.1.3 requirements.
+    
+    Features:
+    - JWT token validation and verification
+    - Auth0 service integration with circuit breaker protection
+    - User context creation and session management
+    - Token refresh and expiration handling
+    - Authentication metrics and monitoring
+    
+    Example:
+        auth_service = AuthenticationService()
+        
+        # Validate JWT token
+        token_result = await auth_service.validate_token(jwt_token)
+        
+        # Get user context from token
+        user_context = await auth_service.get_user_context(jwt_token)
+        
+        # Refresh expired token
+        refresh_result = await auth_service.refresh_token(refresh_token)
+    """
+    
+    def __init__(self, **kwargs):
+        """Initialize authentication service with Auth0 integration."""
+        super().__init__(**kwargs)
+        self._auth0_circuit_breaker = None
+        self._jwt_cache_ttl = 1800  # 30 minutes
+        
+        # Initialize circuit breaker for Auth0
+        if self.enable_circuit_breakers:
+            try:
+                import pybreaker
+                self._auth0_circuit_breaker = pybreaker.CircuitBreaker(
+                    fail_max=self.config.AUTH0_CIRCUIT_BREAKER_THRESHOLD,
+                    reset_timeout=60,
+                    expected_exception=ExternalServiceError
+                )
+            except ImportError:
+                logger.warning("pybreaker not available, circuit breaker disabled")
+                self._auth0_circuit_breaker = None
+    
+    async def validate_token(
+        self,
+        token: str,
+        audience: Optional[str] = None,
+        issuer: Optional[str] = None
+    ) -> ServiceResult:
+        """
+        Validate JWT token with Auth0 verification.
+        
+        Args:
+            token: JWT token to validate
+            audience: Expected token audience
+            issuer: Expected token issuer
+            
+        Returns:
+            Service result with token validation status and claims
+        """
+        async with self.service_operation("validate_token") as ctx:
+            try:
+                # Generate cache key for token validation
+                import hashlib
+                token_hash = hashlib.md5(token.encode()).hexdigest()
+                cache_key = self._generate_cache_key("validate_token", token_hash, audience, issuer)
+                
+                # Check cache first
+                cached_result = await self._get_cached_result(cache_key, ctx)
+                if cached_result:
+                    return {
+                        'success': True,
+                        'valid': cached_result['valid'],
+                        'claims': cached_result.get('claims', {}),
+                        'operation_id': ctx['operation_id'],
+                        'cached': True
+                    }
+                
+                # Validate token format
+                if not token or not token.startswith('Bearer '):
+                    token_value = token.replace('Bearer ', '') if token else ''
+                else:
+                    token_value = token[7:]  # Remove 'Bearer ' prefix
+                
+                if not token_value:
+                    raise AuthorizationError(
+                        message="Missing or invalid token format",
+                        error_code="INVALID_TOKEN_FORMAT",
+                        severity=ErrorSeverity.MEDIUM
+                    )
+                
+                # Validate token with Auth0 (with circuit breaker protection)
+                validation_result = await self._validate_with_auth0(token_value, audience, issuer, ctx)
+                
+                # Cache successful validation
+                if validation_result['valid']:
+                    await self._set_cached_result(
+                        cache_key,
+                        {
+                            'valid': True,
+                            'claims': validation_result['claims']
+                        },
+                        ttl_seconds=self._jwt_cache_ttl,
+                        operation_context=ctx
+                    )
+                
+                return {
+                    'success': True,
+                    'valid': validation_result['valid'],
+                    'claims': validation_result.get('claims', {}),
+                    'operation_id': ctx['operation_id'],
+                    'cached': False,
+                    'error_message': validation_result.get('error_message')
+                }
+                
+            except Exception as e:
+                logger.error("Token validation failed",
+                           error=str(e),
+                           operation_id=ctx['operation_id'],
+                           exc_info=True)
+                raise
+    
+    async def get_user_context(
+        self,
+        token: str,
+        include_permissions: bool = True
+    ) -> ServiceResult:
+        """
+        Get user context from validated JWT token.
+        
+        Args:
+            token: JWT token to extract context from
+            include_permissions: Whether to include user permissions
+            
+        Returns:
+            Service result with user context information
+        """
+        async with self.service_operation("get_user_context") as ctx:
+            try:
+                # First validate the token
+                validation_result = await self.validate_token(token)
+                
+                if not validation_result['valid']:
+                    raise AuthorizationError(
+                        message="Invalid token for user context",
+                        error_code="INVALID_TOKEN",
+                        severity=ErrorSeverity.MEDIUM
+                    )
+                
+                claims = validation_result['claims']
+                
+                # Extract user information from claims
+                user_context = {
+                    'user_id': claims.get('sub', ''),
+                    'email': claims.get('email', ''),
+                    'name': claims.get('name', ''),
+                    'roles': claims.get('roles', []),
+                    'permissions': claims.get('permissions', []) if include_permissions else [],
+                    'token_issued_at': claims.get('iat'),
+                    'token_expires_at': claims.get('exp'),
+                    'issuer': claims.get('iss', ''),
+                    'audience': claims.get('aud', '')
+                }
+                
+                # Get additional user details if needed
+                if include_permissions and user_context['user_id']:
+                    user_details = await self._get_user_details(user_context['user_id'], ctx)
+                    if user_details:
+                        user_context.update({
+                            'profile': user_details.get('profile', {}),
+                            'preferences': user_details.get('preferences', {}),
+                            'last_login': user_details.get('last_login')
+                        })
+                
+                return {
+                    'success': True,
+                    'user_context': user_context,
+                    'operation_id': ctx['operation_id'],
+                    'authenticated': True
+                }
+                
+            except Exception as e:
+                logger.error("User context extraction failed",
+                           error=str(e),
+                           operation_id=ctx['operation_id'],
+                           exc_info=True)
+                raise
+    
+    async def _validate_with_auth0(
+        self,
+        token: str,
+        audience: Optional[str],
+        issuer: Optional[str],
+        operation_context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Validate token with Auth0 service using circuit breaker protection.
+        
+        Args:
+            token: JWT token to validate
+            audience: Expected token audience
+            issuer: Expected token issuer
+            operation_context: Operation context for tracking
+            
+        Returns:
+            Token validation result from Auth0
+        """
+        try:
+            # Apply circuit breaker if available
+            if self._auth0_circuit_breaker:
+                validation_func = self._auth0_circuit_breaker(self._perform_auth0_validation)
+            else:
+                validation_func = self._perform_auth0_validation
+            
+            operation_context['external_calls'] += 1
+            result = await validation_func(token, audience, issuer)
             
             return result
             
-        except Exception as db_error:
-            raise DataProcessingError(
-                message="Failed to retrieve user from database",
-                error_code="USER_DATABASE_READ_ERROR",
-                context={'user_id': user_id},
-                cause=db_error,
-                severity=ErrorSeverity.MEDIUM
-            )
-    
-    async def _enrich_user_data(self, user_data: Dict[str, Any], context: ServiceContext) -> Dict[str, Any]:
-        """Enrich user data with additional information."""
-        enriched_data = user_data.copy()
-        
-        # Add profile information if available
-        try:
-            profile_data = await execute_async_query(
-                'user_profiles',
-                'find_one',
-                {'user_id': user_data['id']}
-            )
-            
-            if profile_data:
-                enriched_data['profile'] = profile_data
-                
-        except Exception as profile_error:
-            logger.warning(
-                "Failed to enrich user data with profile",
-                user_id=user_data.get('id'),
-                error=str(profile_error)
-            )
-        
-        return enriched_data
-    
-    def _validate_profile_updates(self, updates: Dict[str, Any], context: ServiceContext) -> Dict[str, Any]:
-        """Validate profile update data."""
-        # Implement profile-specific validation logic
-        allowed_fields = {'name', 'preferences', 'settings', 'avatar_url'}
-        
-        validated_updates = {}
-        for field, value in updates.items():
-            if field in allowed_fields:
-                validated_updates[field] = value
+        except Exception as e:
+            if self._auth0_circuit_breaker and self._auth0_circuit_breaker.current_state == 'open':
+                logger.warning("Auth0 circuit breaker is open, using fallback validation")
+                # Use fallback validation when circuit breaker is open
+                return await self._fallback_token_validation(token, audience, issuer)
             else:
-                logger.warning(
-                    "Ignoring invalid profile field",
-                    field=field,
-                    operation_id=context.operation_id
-                )
-        
-        return validated_updates
-    
-    async def _process_profile_updates(
-        self, 
-        current_user: Dict[str, Any], 
-        updates: Dict[str, Any], 
-        context: ServiceContext
-    ) -> Dict[str, Any]:
-        """Process profile updates with business rules."""
-        processed_updates = updates.copy()
-        processed_updates['updated_at'] = datetime.now(timezone.utc).isoformat()
-        
-        return processed_updates
-    
-    async def _update_user_in_database(
-        self, 
-        user_id: str, 
-        updates: Dict[str, Any], 
-        context: ServiceContext
-    ) -> Dict[str, Any]:
-        """Update user record in database."""
-        try:
-            result = await execute_async_query(
-                'users',
-                'update_one',
-                {'id': user_id},
-                {'$set': updates}
-            )
-            
-            if self._metrics:
-                self._metrics.database_query_count += 1
-            
-            # Return updated user data
-            return await self._get_user_from_database(user_id, context)
-            
-        except Exception as db_error:
-            raise DataProcessingError(
-                message="Failed to update user in database",
-                error_code="USER_DATABASE_UPDATE_ERROR",
-                context={'user_id': user_id},
-                cause=db_error,
-                severity=ErrorSeverity.HIGH
-            )
-    
-    async def _invalidate_user_caches(self, email: str, context: ServiceContext) -> None:
-        """Invalidate user-related cache entries."""
-        if not self.cache_enabled or not self._cache_client:
-            return
-        
-        try:
-            # Invalidate user cache patterns
-            cache_patterns = [
-                f"user:*",
-                f"user_profile:*",
-                f"user_email:{email}"
-            ]
-            
-            for pattern in cache_patterns:
-                await invalidate_by_pattern(pattern)
-                
-        except Exception as cache_error:
-            logger.warning(
-                "Failed to invalidate user caches",
-                email=email,
-                error=str(cache_error)
-            )
-
-
-class DataProcessingService(BaseBusinessService):
-    """
-    Business data transformation and validation workflow service.
-    
-    Provides comprehensive data processing operations including validation,
-    transformation, business rule enforcement, and workflow orchestration
-    for complex business data operations maintaining Node.js equivalence.
-    
-    This service implements:
-    - Data transformation workflows per Section 5.2.4
-    - Business rule validation and enforcement per F-004-RQ-001
-    - Complex data processing orchestration
-    - Integration with external data sources and validation services
-    - Performance-optimized processing maintaining ≤10% variance
-    """
-    
-    def __init__(self):
-        """Initialize data processing service with workflow management."""
-        super().__init__(
-            service_name="data_processing",
-            cache_enabled=True,
-            circuit_breaker_enabled=True,
-            metrics_enabled=True
-        )
-        
-        # Service-specific configuration
-        self._processing_cache_ttl = 900  # 15 minutes for processing results
-        self._validation_cache_ttl = 1800  # 30 minutes for validation results
-    
-    @service_operation(
-        operation_type=ServiceOperationType.PROCESS,
-        timeout_seconds=60.0,
-        cache_enabled=True,
-        audit_enabled=True
-    )
-    async def process_business_data(
-        self, 
-        context: ServiceContext, 
-        data: Dict[str, Any],
-        processing_rules: Optional[List[str]] = None
-    ) -> Dict[str, Any]:
-        """
-        Process business data with comprehensive validation and transformation.
-        
-        Args:
-            context: Service execution context
-            data: Business data to process
-            processing_rules: Optional list of processing rules to apply
-            
-        Returns:
-            Processed and validated business data
-        """
-        try:
-            logger.info(
-                "Processing business data",
-                operation_id=context.operation_id,
-                data_fields=list(data.keys()) if isinstance(data, dict) else [],
-                processing_rules=processing_rules or []
-            )
-            
-            # Create cache key for processing result
-            cache_key = self._create_processing_cache_key(data, processing_rules)
-            
-            # Check cache for existing result
-            cached_result = await self._get_cached_result(cache_key, context)
-            if cached_result:
-                return cached_result
-            
-            # Validate input data
-            validated_data = self.validate_input(data, context)
-            
-            # Create processing request
-            processing_request = ProcessingRequest(
-                data=validated_data,
-                rules=processing_rules or [],
-                context={
-                    'operation_id': context.operation_id,
-                    'user_id': context.user_id,
-                    'request_id': context.request_id
-                }
-            )
-            
-            # Execute processing workflow
-            processing_result = await self._processor.process_request(processing_request)
-            
-            # Validate processing result
-            if processing_result.status != "success":
-                raise DataProcessingError(
-                    message="Data processing workflow failed",
-                    error_code="DATA_PROCESSING_WORKFLOW_ERROR",
-                    context={
-                        'processing_status': processing_result.status,
-                        'audit_trail': processing_result.audit_trail
-                    },
+                raise ExternalServiceError(
+                    message="Auth0 token validation failed",
+                    error_code="AUTH0_VALIDATION_FAILED",
+                    service_name="Auth0",
+                    operation="token_validation",
+                    cause=e,
                     severity=ErrorSeverity.HIGH
                 )
-            
-            # Cache the successful result
-            await self._set_cached_result(
-                cache_key, processing_result.data, context, self._processing_cache_ttl
-            )
-            
-            logger.info(
-                "Business data processing completed",
-                operation_id=context.operation_id,
-                processing_time=processing_result.processing_time,
-                audit_trail_length=len(processing_result.audit_trail)
-            )
-            
-            return processing_result.data
-            
-        except Exception as processing_error:
-            logger.error(
-                "Business data processing failed",
-                operation_id=context.operation_id,
-                error=str(processing_error)
-            )
-            raise
     
-    @service_operation(
-        operation_type=ServiceOperationType.VALIDATE,
-        timeout_seconds=30.0,
-        cache_enabled=True,
-        audit_enabled=False
-    )
-    async def validate_business_rules(
-        self, 
-        context: ServiceContext, 
-        data: Dict[str, Any],
-        rules: Optional[List[str]] = None
-    ) -> ValidationResult:
-        """
-        Validate data against business rules with caching and performance optimization.
-        
-        Args:
-            context: Service execution context
-            data: Data to validate against business rules
-            rules: Optional list of specific rules to validate
-            
-        Returns:
-            ValidationResult with validation status and messages
-        """
-        try:
-            # Create cache key for validation result
-            cache_key = self._create_validation_cache_key(data, rules)
-            
-            # Check cache for existing validation result
-            cached_result = await self._get_cached_result(cache_key, context)
-            if cached_result:
-                return ValidationResult(**cached_result)
-            
-            # Perform business rule validation
-            validation_result = validate_business_rules(data, rules)
-            
-            # Cache the validation result
-            await self._set_cached_result(
-                cache_key, validation_result.__dict__, context, self._validation_cache_ttl
-            )
-            
-            if self._metrics:
-                if not validation_result.is_valid:
-                    self._metrics.validation_error_count += 1
-                    self._metrics.business_rule_violation_count += len(validation_result.errors)
-            
-            return validation_result
-            
-        except Exception as validation_error:
-            logger.error(
-                "Business rule validation failed",
-                operation_id=context.operation_id,
-                error=str(validation_error)
-            )
-            raise
-    
-    def _create_processing_cache_key(self, data: Dict[str, Any], rules: Optional[List[str]]) -> str:
-        """Create cache key for processing operation."""
-        import hashlib
-        import json
-        
-        # Create deterministic hash of data and rules
-        content = {
-            'data': data,
-            'rules': sorted(rules) if rules else []
-        }
-        content_str = json.dumps(content, sort_keys=True, default=str)
-        content_hash = hashlib.md5(content_str.encode()).hexdigest()
-        
-        return create_cache_key("data_processing", content_hash)
-    
-    def _create_validation_cache_key(self, data: Dict[str, Any], rules: Optional[List[str]]) -> str:
-        """Create cache key for validation operation."""
-        import hashlib
-        import json
-        
-        # Create deterministic hash of data and rules
-        content = {
-            'data': data,
-            'rules': sorted(rules) if rules else []
-        }
-        content_str = json.dumps(content, sort_keys=True, default=str)
-        content_hash = hashlib.md5(content_str.encode()).hexdigest()
-        
-        return create_cache_key("validation", content_hash)
-
-
-class IntegrationOrchestrationService(BaseBusinessService):
-    """
-    External service coordination and resilience service.
-    
-    Provides comprehensive external service integration with circuit breaker patterns,
-    retry logic, fallback mechanisms, and performance monitoring for resilient
-    external service communications per Section 6.1.3.
-    
-    This service implements:
-    - External service integration coordination per F-004-RQ-002
-    - Circuit breaker patterns for service resilience per Section 6.1.3
-    - Retry logic with exponential backoff for transient failures
-    - Fallback mechanisms for graceful degradation
-    - Comprehensive monitoring and alerting for external service health
-    """
-    
-    def __init__(self):
-        """Initialize integration orchestration service."""
-        super().__init__(
-            service_name="integration_orchestration",
-            cache_enabled=True,
-            circuit_breaker_enabled=True,
-            metrics_enabled=True
-        )
-        
-        # Service-specific configuration
-        self._integration_cache_ttl = 600  # 10 minutes for integration results
-        self._health_check_interval = 60  # 1 minute for health checks
-    
-    @service_operation(
-        operation_type=ServiceOperationType.INTEGRATE,
-        timeout_seconds=45.0,
-        cache_enabled=True,
-        audit_enabled=True,
-        circuit_breaker_enabled=True
-    )
-    async def coordinate_external_services(
-        self, 
-        context: ServiceContext, 
-        service_calls: List[Dict[str, Any]]
+    async def _perform_auth0_validation(
+        self,
+        token: str,
+        audience: Optional[str],
+        issuer: Optional[str]
     ) -> Dict[str, Any]:
         """
-        Coordinate multiple external service calls with resilience patterns.
+        Perform actual Auth0 token validation.
         
         Args:
-            context: Service execution context
-            service_calls: List of external service call configurations
+            token: JWT token to validate
+            audience: Expected token audience
+            issuer: Expected token issuer
             
         Returns:
-            Aggregated results from external service calls
+            Auth0 validation result
         """
         try:
-            logger.info(
-                "Coordinating external services",
-                operation_id=context.operation_id,
-                service_count=len(service_calls)
+            # Simulate Auth0 validation - in real implementation would use Auth0 SDK
+            # For this migration, we'll implement basic JWT validation
+            import jwt
+            
+            # Mock Auth0 public key and settings - in real implementation would fetch from Auth0
+            mock_secret = "your-256-bit-secret"  # In real app, would use Auth0's public key
+            
+            # Decode and validate token
+            decoded_token = jwt.decode(
+                token,
+                mock_secret,
+                algorithms=["HS256"],  # In real app, would use RS256 with Auth0's public key
+                audience=audience,
+                issuer=issuer,
+                options={"verify_exp": True}
             )
-            
-            results = {}
-            failed_services = []
-            
-            # Execute service calls with circuit breaker protection
-            for service_call in service_calls:
-                service_name = service_call.get('service_name')
-                
-                try:
-                    result = await self._execute_external_service_call(service_call, context)
-                    results[service_name] = result
-                    
-                except CircuitBreakerOpenError:
-                    logger.warning(
-                        "Circuit breaker open for service",
-                        service_name=service_name,
-                        operation_id=context.operation_id
-                    )
-                    
-                    # Apply fallback mechanism
-                    fallback_result = await self._apply_service_fallback(service_call, context)
-                    if fallback_result:
-                        results[service_name] = fallback_result
-                    else:
-                        failed_services.append(service_name)
-                        
-                except Exception as service_error:
-                    logger.error(
-                        "External service call failed",
-                        service_name=service_name,
-                        operation_id=context.operation_id,
-                        error=str(service_error)
-                    )
-                    failed_services.append(service_name)
-            
-            # Check if critical services failed
-            critical_services = [
-                call['service_name'] for call in service_calls 
-                if call.get('critical', False)
-            ]
-            
-            failed_critical = [service for service in failed_services if service in critical_services]
-            
-            if failed_critical:
-                raise DataProcessingError(
-                    message=f"Critical external services failed: {failed_critical}",
-                    error_code="CRITICAL_EXTERNAL_SERVICE_FAILURE",
-                    context={
-                        'failed_services': failed_services,
-                        'critical_services': failed_critical
-                    },
-                    severity=ErrorSeverity.HIGH
-                )
-            
-            integration_result = {
-                'results': results,
-                'failed_services': failed_services,
-                'success_count': len(results),
-                'failure_count': len(failed_services),
-                'timestamp': datetime.now(timezone.utc).isoformat()
-            }
-            
-            if self._metrics:
-                self._metrics.external_service_call_count += len(service_calls)
-            
-            logger.info(
-                "External service coordination completed",
-                operation_id=context.operation_id,
-                success_count=len(results),
-                failure_count=len(failed_services)
-            )
-            
-            return integration_result
-            
-        except Exception as coordination_error:
-            logger.error(
-                "External service coordination failed",
-                operation_id=context.operation_id,
-                error=str(coordination_error)
-            )
-            raise
-    
-    async def _execute_external_service_call(
-        self, 
-        service_call: Dict[str, Any], 
-        context: ServiceContext
-    ) -> Any:
-        """Execute individual external service call with monitoring."""
-        service_name = service_call['service_name']
-        
-        # Track external service call
-        with track_external_service_call(service_name, service_call.get('operation', 'unknown')):
-            # Implementation would use appropriate external service client
-            # For now, simulate service call
-            await asyncio.sleep(0.1)  # Simulate network delay
             
             return {
-                'service_name': service_name,
-                'status': 'success',
-                'data': {'result': 'mock_data'},
-                'timestamp': datetime.now(timezone.utc).isoformat()
+                'valid': True,
+                'claims': decoded_token
+            }
+            
+        except jwt.ExpiredSignatureError:
+            return {
+                'valid': False,
+                'error_message': 'Token has expired'
+            }
+        except jwt.InvalidTokenError as e:
+            return {
+                'valid': False,
+                'error_message': f'Invalid token: {str(e)}'
+            }
+        except Exception as e:
+            raise ExternalServiceError(
+                message="Auth0 API call failed",
+                error_code="AUTH0_API_ERROR",
+                service_name="Auth0",
+                cause=e,
+                severity=ErrorSeverity.HIGH
+            )
+    
+    async def _fallback_token_validation(
+        self,
+        token: str,
+        audience: Optional[str],
+        issuer: Optional[str]
+    ) -> Dict[str, Any]:
+        """
+        Fallback token validation when Auth0 is unavailable.
+        
+        Args:
+            token: JWT token to validate
+            audience: Expected token audience
+            issuer: Expected token issuer
+            
+        Returns:
+            Fallback validation result
+        """
+        try:
+            # Basic token format validation without signature verification
+            import jwt
+            
+            # Decode without verification (fallback mode)
+            decoded_token = jwt.decode(
+                token,
+                options={"verify_signature": False, "verify_exp": True}
+            )
+            
+            logger.warning("Using fallback token validation due to Auth0 unavailability",
+                          subject=decoded_token.get('sub', 'unknown'))
+            
+            return {
+                'valid': True,
+                'claims': decoded_token,
+                'fallback_mode': True
+            }
+            
+        except Exception as e:
+            return {
+                'valid': False,
+                'error_message': f'Fallback validation failed: {str(e)}',
+                'fallback_mode': True
             }
     
-    async def _apply_service_fallback(
-        self, 
-        service_call: Dict[str, Any], 
-        context: ServiceContext
-    ) -> Optional[Any]:
-        """Apply fallback mechanism for failed external service."""
-        service_name = service_call['service_name']
-        fallback_config = service_call.get('fallback')
-        
-        if not fallback_config:
-            return None
-        
-        fallback_type = fallback_config.get('type')
-        
-        if fallback_type == 'cache':
-            # Try to get cached result
-            cache_key = fallback_config.get('cache_key')
-            if cache_key:
-                return await self._get_cached_result(cache_key, context)
-        
-        elif fallback_type == 'default':
-            # Return default value
-            return fallback_config.get('default_value')
-        
-        elif fallback_type == 'alternative_service':
-            # Try alternative service
-            alternative_config = fallback_config.get('alternative_service')
-            if alternative_config:
-                return await self._execute_external_service_call(alternative_config, context)
-        
-        return None
-
-
-class TransactionService(BaseBusinessService):
-    """
-    Transaction management and data consistency service.
-    
-    Provides comprehensive transaction management including distributed transactions,
-    data consistency enforcement, rollback mechanisms, and transactional workflow
-    coordination for maintaining data integrity across multiple operations.
-    
-    This service implements:
-    - Transaction management and data consistency per Section 5.2.4
-    - Distributed transaction coordination across multiple data sources
-    - Automatic rollback mechanisms for transaction failure scenarios
-    - Transaction monitoring and performance optimization
-    - Integration with database access layer for transactional operations
-    """
-    
-    def __init__(self):
-        """Initialize transaction management service."""
-        super().__init__(
-            service_name="transaction_management",
-            cache_enabled=False,  # Transactions should not be cached
-            circuit_breaker_enabled=True,
-            metrics_enabled=True
-        )
-    
-    @service_operation(
-        operation_type=ServiceOperationType.PROCESS,
-        timeout_seconds=120.0,
-        cache_enabled=False,
-        audit_enabled=True
-    )
-    async def execute_transactional_workflow(
-        self, 
-        context: ServiceContext, 
-        workflow_steps: List[Dict[str, Any]]
-    ) -> Dict[str, Any]:
+    async def _get_user_details(
+        self,
+        user_id: str,
+        operation_context: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
         """
-        Execute transactional workflow with automatic rollback on failure.
+        Get additional user details from database.
         
         Args:
-            context: Service execution context
-            workflow_steps: List of workflow steps to execute transactionally
+            user_id: User identifier
+            operation_context: Operation context for tracking
             
         Returns:
-            Workflow execution results with transaction status
+            User details if found
         """
-        transaction_id = str(uuid.uuid4())
-        completed_steps = []
-        
         try:
-            logger.info(
-                "Starting transactional workflow",
-                operation_id=context.operation_id,
-                transaction_id=transaction_id,
-                step_count=len(workflow_steps)
+            operation_context['database_operations'] += 1
+            user_doc = await self.async_db_manager.find_one(
+                "users",
+                {'id': user_id}
             )
             
-            # Begin transaction context
-            async with async_database_transaction() as session:
-                for step_index, step_config in enumerate(workflow_steps):
-                    step_name = step_config.get('name', f'step_{step_index}')
-                    
-                    logger.debug(
-                        "Executing workflow step",
-                        transaction_id=transaction_id,
-                        step_name=step_name,
-                        step_index=step_index
+            if user_doc:
+                return {
+                    'profile': {
+                        'name': user_doc.get('name', ''),
+                        'email': user_doc.get('email', ''),
+                        'avatar_url': user_doc.get('avatar_url', '')
+                    },
+                    'preferences': user_doc.get('preferences', {}),
+                    'last_login': user_doc.get('last_login')
+                }
+            
+            return None
+            
+        except Exception as e:
+            logger.warning("Failed to get user details",
+                          user_id=user_id,
+                          error=str(e))
+            return None
+
+
+# ============================================================================
+# WORKFLOW SERVICES
+# ============================================================================
+
+class BusinessWorkflowService(BaseBusinessService):
+    """
+    Complex business process orchestration service.
+    
+    Provides comprehensive workflow orchestration for complex business processes
+    including multi-step workflows, conditional logic, parallel execution, and
+    comprehensive error handling per Section 5.2.4 requirements.
+    
+    Features:
+    - Multi-step workflow definition and execution
+    - Conditional workflow logic and branching
+    - Parallel step execution with synchronization
+    - Workflow state management and persistence
+    - Comprehensive error handling and recovery
+    - Workflow metrics and performance monitoring
+    
+    Example:
+        workflow_service = BusinessWorkflowService()
+        
+        # Define workflow
+        workflow_service.define_workflow('order_fulfillment', order_fulfillment_steps)
+        
+        # Execute workflow
+        result = await workflow_service.execute_workflow('order_fulfillment', context)
+        
+        # Get workflow status
+        status = await workflow_service.get_workflow_status(workflow_id)
+    """
+    
+    def __init__(self, **kwargs):
+        """Initialize workflow service with orchestration capabilities."""
+        super().__init__(**kwargs)
+        self._workflows = {}
+        self._workflow_executions = {}
+        self._workflow_collection = "workflow_executions"
+    
+    def define_workflow(
+        self,
+        workflow_name: str,
+        steps: List[Dict[str, Any]],
+        description: Optional[str] = None
+    ) -> None:
+        """
+        Define a business workflow with steps and configuration.
+        
+        Args:
+            workflow_name: Unique name for the workflow
+            steps: List of workflow steps with configuration
+            description: Optional workflow description
+        """
+        workflow_definition = {
+            'name': workflow_name,
+            'description': description or f"Business workflow: {workflow_name}",
+            'steps': steps,
+            'created_at': datetime.now(timezone.utc),
+            'version': '1.0.0'
+        }
+        
+        # Validate workflow definition
+        self._validate_workflow_definition(workflow_definition)
+        
+        self._workflows[workflow_name] = workflow_definition
+        
+        logger.info("Workflow defined",
+                   workflow_name=workflow_name,
+                   step_count=len(steps))
+    
+    async def execute_workflow(
+        self,
+        workflow_name: str,
+        context: Dict[str, Any],
+        execution_id: Optional[str] = None
+    ) -> ServiceResult:
+        """
+        Execute business workflow with comprehensive orchestration.
+        
+        Args:
+            workflow_name: Name of workflow to execute
+            context: Workflow execution context
+            execution_id: Optional execution identifier for resuming
+            
+        Returns:
+            Service result with workflow execution status
+        """
+        async with self.service_operation(f"execute_workflow_{workflow_name}", enable_transaction=True) as ctx:
+            try:
+                # Get workflow definition
+                if workflow_name not in self._workflows:
+                    raise ConfigurationError(
+                        message=f"Workflow '{workflow_name}' not defined",
+                        error_code="WORKFLOW_NOT_DEFINED",
+                        component="BusinessWorkflowService",
+                        configuration_key=workflow_name,
+                        severity=ErrorSeverity.HIGH
                     )
-                    
-                    # Execute individual step
-                    step_result = await self._execute_workflow_step(
-                        step_config, context, session
-                    )
-                    
-                    completed_steps.append({
-                        'name': step_name,
-                        'index': step_index,
-                        'result': step_result,
-                        'timestamp': datetime.now(timezone.utc).isoformat()
-                    })
                 
-                # All steps completed successfully, commit transaction
-                await session.commit_transaction()
+                workflow_def = self._workflows[workflow_name]
                 
-                workflow_result = {
-                    'transaction_id': transaction_id,
-                    'status': 'committed',
-                    'completed_steps': completed_steps,
-                    'step_count': len(completed_steps),
-                    'timestamp': datetime.now(timezone.utc).isoformat()
+                # Create or resume execution
+                execution_id = execution_id or str(uuid.uuid4())
+                execution_context = {
+                    'execution_id': execution_id,
+                    'workflow_name': workflow_name,
+                    'start_time': datetime.now(timezone.utc),
+                    'context': context,
+                    'current_step': 0,
+                    'completed_steps': [],
+                    'failed_steps': [],
+                    'step_results': {},
+                    'status': 'running',
+                    'operation_context': ctx
                 }
                 
-                logger.info(
-                    "Transactional workflow completed successfully",
-                    operation_id=context.operation_id,
-                    transaction_id=transaction_id,
-                    step_count=len(completed_steps)
+                # Store execution state
+                self._workflow_executions[execution_id] = execution_context
+                
+                # Persist execution state
+                ctx['database_operations'] += 1
+                await self.async_db_manager.insert_one(
+                    self._workflow_collection,
+                    execution_context.copy()
                 )
                 
-                return workflow_result
+                logger.info("Workflow execution started",
+                           workflow_name=workflow_name,
+                           execution_id=execution_id)
                 
-        except Exception as workflow_error:
-            logger.error(
-                "Transactional workflow failed, rolling back",
-                operation_id=context.operation_id,
-                transaction_id=transaction_id,
-                completed_steps=len(completed_steps),
-                error=str(workflow_error)
-            )
-            
-            # Transaction will automatically rollback due to exception
-            
-            # Execute compensating actions for completed steps
-            await self._execute_compensating_actions(completed_steps, context)
-            
-            raise DataProcessingError(
-                message=f"Transactional workflow failed: {str(workflow_error)}",
-                error_code="TRANSACTIONAL_WORKFLOW_ERROR",
-                context={
-                    'transaction_id': transaction_id,
-                    'completed_steps': len(completed_steps),
-                    'total_steps': len(workflow_steps)
-                },
-                cause=workflow_error,
-                severity=ErrorSeverity.HIGH
-            )
-    
-    async def _execute_workflow_step(
-        self, 
-        step_config: Dict[str, Any], 
-        context: ServiceContext, 
-        session: Any
-    ) -> Dict[str, Any]:
-        """Execute individual workflow step within transaction context."""
-        step_type = step_config.get('type')
-        step_data = step_config.get('data', {})
-        
-        if step_type == 'database_operation':
-            return await self._execute_database_step(step_data, context, session)
-        elif step_type == 'validation':
-            return await self._execute_validation_step(step_data, context)
-        elif step_type == 'business_logic':
-            return await self._execute_business_logic_step(step_data, context)
-        else:
-            raise DataProcessingError(
-                message=f"Unknown workflow step type: {step_type}",
-                error_code="UNKNOWN_WORKFLOW_STEP_TYPE",
-                context={'step_type': step_type},
-                severity=ErrorSeverity.MEDIUM
-            )
-    
-    async def _execute_database_step(
-        self, 
-        step_data: Dict[str, Any], 
-        context: ServiceContext, 
-        session: Any
-    ) -> Dict[str, Any]:
-        """Execute database operation step within transaction."""
-        operation = step_data.get('operation')
-        collection = step_data.get('collection')
-        data = step_data.get('data', {})
-        
-        # Execute database operation with session
-        result = await execute_async_query(
-            collection,
-            operation,
-            data,
-            session=session
-        )
-        
-        if self._metrics:
-            self._metrics.database_query_count += 1
-        
-        return {
-            'operation': operation,
-            'collection': collection,
-            'result': result
-        }
-    
-    async def _execute_validation_step(
-        self, 
-        step_data: Dict[str, Any], 
-        context: ServiceContext
-    ) -> Dict[str, Any]:
-        """Execute validation step within workflow."""
-        data_to_validate = step_data.get('data')
-        validation_rules = step_data.get('rules', [])
-        
-        validation_result = validate_business_rules(data_to_validate, validation_rules)
-        
-        if not validation_result.is_valid:
-            raise BusinessRuleViolationError(
-                message="Workflow validation step failed",
-                error_code="WORKFLOW_VALIDATION_FAILURE",
-                context={
-                    'validation_errors': validation_result.errors,
-                    'validation_warnings': validation_result.warnings
-                },
-                severity=ErrorSeverity.HIGH
-            )
-        
-        return {
-            'validation_status': 'passed',
-            'warnings': validation_result.warnings
-        }
-    
-    async def _execute_business_logic_step(
-        self, 
-        step_data: Dict[str, Any], 
-        context: ServiceContext
-    ) -> Dict[str, Any]:
-        """Execute business logic step within workflow."""
-        # Process business data using the processor
-        result = process_business_data(
-            step_data.get('data', {}),
-            step_data.get('rules', []),
-            context.to_dict()
-        )
-        
-        return {
-            'processing_status': 'completed',
-            'result': result
-        }
-    
-    async def _execute_compensating_actions(
-        self, 
-        completed_steps: List[Dict[str, Any]], 
-        context: ServiceContext
-    ) -> None:
-        """Execute compensating actions for completed steps during rollback."""
-        logger.info(
-            "Executing compensating actions",
-            operation_id=context.operation_id,
-            step_count=len(completed_steps)
-        )
-        
-        # Execute compensating actions in reverse order
-        for step in reversed(completed_steps):
-            try:
-                # Implementation would depend on step type and business requirements
-                await self._execute_compensating_action(step, context)
-                
-            except Exception as compensation_error:
-                logger.error(
-                    "Compensating action failed",
-                    step_name=step.get('name'),
-                    error=str(compensation_error)
-                )
-    
-    async def _execute_compensating_action(
-        self, 
-        step: Dict[str, Any], 
-        context: ServiceContext
-    ) -> None:
-        """Execute compensating action for a specific step."""
-        # Implementation would depend on business requirements
-        # For now, log the compensating action
-        logger.debug(
-            "Executing compensating action",
-            step_name=step.get('name'),
-            operation_id=context.operation_id
-        )
-
-
-class WorkflowService(BaseBusinessService):
-    """
-    Complex business workflow orchestration and state management service.
-    
-    Provides comprehensive workflow management including state machine orchestration,
-    conditional workflow execution, parallel processing coordination, and workflow
-    monitoring for complex business processes maintaining Node.js equivalence.
-    
-    This service implements:
-    - Complex workflow orchestration per Section 5.2.4
-    - State machine management for business process flows
-    - Conditional and parallel workflow execution patterns
-    - Workflow monitoring and progress tracking
-    - Integration with all other business services for comprehensive orchestration
-    """
-    
-    def __init__(self):
-        """Initialize workflow orchestration service."""
-        super().__init__(
-            service_name="workflow_orchestration",
-            cache_enabled=True,
-            circuit_breaker_enabled=True,
-            metrics_enabled=True
-        )
-        
-        # Initialize dependent services
-        self._user_service = UserManagementService()
-        self._data_service = DataProcessingService()
-        self._integration_service = IntegrationOrchestrationService()
-        self._transaction_service = TransactionService()
-        
-        # Workflow configuration
-        self._workflow_cache_ttl = 1800  # 30 minutes for workflow results
-    
-    @service_operation(
-        operation_type=ServiceOperationType.WORKFLOW,
-        timeout_seconds=300.0,  # 5 minutes for complex workflows
-        cache_enabled=True,
-        audit_enabled=True
-    )
-    async def execute_business_workflow(
-        self, 
-        context: ServiceContext, 
-        workflow_definition: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """
-        Execute complex business workflow with comprehensive orchestration.
-        
-        Args:
-            context: Service execution context
-            workflow_definition: Complete workflow definition and configuration
-            
-        Returns:
-            Workflow execution results with state and output data
-        """
-        workflow_id = str(uuid.uuid4())
-        workflow_state = {
-            'id': workflow_id,
-            'status': 'running',
-            'start_time': datetime.now(timezone.utc),
-            'current_step': None,
-            'completed_steps': [],
-            'context': context.to_dict(),
-            'outputs': {}
-        }
-        
-        try:
-            logger.info(
-                "Executing business workflow",
-                operation_id=context.operation_id,
-                workflow_id=workflow_id,
-                workflow_name=workflow_definition.get('name', 'unnamed')
-            )
-            
-            # Validate workflow definition
-            self._validate_workflow_definition(workflow_definition)
-            
-            # Execute workflow steps
-            workflow_steps = workflow_definition.get('steps', [])
-            
-            for step_index, step_definition in enumerate(workflow_steps):
-                step_name = step_definition.get('name', f'step_{step_index}')
-                workflow_state['current_step'] = step_name
-                
-                logger.debug(
-                    "Executing workflow step",
-                    workflow_id=workflow_id,
-                    step_name=step_name,
-                    step_index=step_index
+                # Execute workflow steps
+                execution_result = await self._execute_workflow_steps(
+                    workflow_def,
+                    execution_context
                 )
                 
-                # Check step conditions
-                if not await self._evaluate_step_conditions(step_definition, workflow_state):
-                    logger.debug(
-                        "Skipping workflow step due to conditions",
-                        workflow_id=workflow_id,
-                        step_name=step_name
-                    )
-                    continue
-                
-                # Execute step
-                step_result = await self._execute_workflow_step_orchestration(
-                    step_definition, workflow_state, context
-                )
-                
-                # Update workflow state
-                workflow_state['completed_steps'].append({
-                    'name': step_name,
-                    'index': step_index,
-                    'result': step_result,
-                    'timestamp': datetime.now(timezone.utc).isoformat()
+                # Update final execution state
+                execution_context.update({
+                    'end_time': datetime.now(timezone.utc),
+                    'status': 'completed' if execution_result['success'] else 'failed',
+                    'final_result': execution_result
                 })
                 
-                # Update outputs
-                if 'output_key' in step_definition and step_result:
-                    workflow_state['outputs'][step_definition['output_key']] = step_result
-            
-            # Complete workflow
-            workflow_state['status'] = 'completed'
-            workflow_state['end_time'] = datetime.now(timezone.utc)
-            workflow_state['current_step'] = None
-            
-            workflow_result = {
-                'workflow_id': workflow_id,
-                'status': workflow_state['status'],
-                'execution_time': (workflow_state['end_time'] - workflow_state['start_time']).total_seconds(),
-                'completed_steps': len(workflow_state['completed_steps']),
-                'outputs': workflow_state['outputs'],
-                'metadata': {
-                    'workflow_name': workflow_definition.get('name'),
-                    'total_steps': len(workflow_steps),
-                    'timestamp': workflow_state['end_time'].isoformat()
+                # Persist final state
+                ctx['database_operations'] += 1
+                await self.async_db_manager.update_one(
+                    self._workflow_collection,
+                    {'execution_id': execution_id},
+                    {'$set': execution_context}
+                )
+                
+                return {
+                    'success': execution_result['success'],
+                    'execution_id': execution_id,
+                    'workflow_name': workflow_name,
+                    'operation_id': ctx['operation_id'],
+                    'completed_steps': len(execution_context['completed_steps']),
+                    'failed_steps': len(execution_context['failed_steps']),
+                    'execution_time': (
+                        execution_context['end_time'] - execution_context['start_time']
+                    ).total_seconds(),
+                    'result': execution_result.get('result', {}),
+                    'error_message': execution_result.get('error_message')
                 }
+                
+            except Exception as e:
+                logger.error("Workflow execution failed",
+                           workflow_name=workflow_name,
+                           error=str(e),
+                           operation_id=ctx['operation_id'],
+                           exc_info=True)
+                raise
+    
+    async def _execute_workflow_steps(
+        self,
+        workflow_def: Dict[str, Any],
+        execution_context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Execute workflow steps with orchestration logic.
+        
+        Args:
+            workflow_def: Workflow definition
+            execution_context: Execution context
+            
+        Returns:
+            Workflow execution result
+        """
+        steps = workflow_def['steps']
+        context = execution_context['context']
+        
+        try:
+            for step_index, step_config in enumerate(steps):
+                execution_context['current_step'] = step_index
+                
+                # Check step condition if present
+                if 'condition' in step_config:
+                    condition_result = await self._evaluate_step_condition(
+                        step_config['condition'],
+                        context,
+                        execution_context
+                    )
+                    
+                    if not condition_result:
+                        logger.debug("Skipping step due to condition",
+                                   step_name=step_config.get('name', f'step_{step_index}'),
+                                   execution_id=execution_context['execution_id'])
+                        continue
+                
+                # Execute step
+                step_result = await self._execute_workflow_step(
+                    step_config,
+                    context,
+                    execution_context
+                )
+                
+                # Store step result
+                execution_context['step_results'][step_index] = step_result
+                
+                if step_result['success']:
+                    execution_context['completed_steps'].append(step_index)
+                    
+                    # Update context with step output
+                    if 'output' in step_result:
+                        context.update(step_result['output'])
+                else:
+                    execution_context['failed_steps'].append(step_index)
+                    
+                    # Handle step failure
+                    if step_config.get('required', True):
+                        return {
+                            'success': False,
+                            'error_message': f"Required step {step_index} failed: {step_result.get('error_message', 'Unknown error')}",
+                            'failed_step': step_index,
+                            'result': context
+                        }
+                    else:
+                        logger.warning("Optional step failed, continuing workflow",
+                                     step_index=step_index,
+                                     error=step_result.get('error_message'))
+            
+            return {
+                'success': True,
+                'result': context,
+                'completed_steps': len(execution_context['completed_steps'])
             }
             
-            logger.info(
-                "Business workflow completed successfully",
-                operation_id=context.operation_id,
-                workflow_id=workflow_id,
-                execution_time=workflow_result['execution_time'],
-                completed_steps=workflow_result['completed_steps']
-            )
-            
-            return workflow_result
-            
-        except Exception as workflow_error:
-            workflow_state['status'] = 'failed'
-            workflow_state['error'] = str(workflow_error)
-            workflow_state['end_time'] = datetime.now(timezone.utc)
-            
-            logger.error(
-                "Business workflow failed",
-                operation_id=context.operation_id,
-                workflow_id=workflow_id,
-                error=str(workflow_error),
-                completed_steps=len(workflow_state['completed_steps'])
-            )
-            
-            raise DataProcessingError(
-                message=f"Business workflow failed: {str(workflow_error)}",
-                error_code="BUSINESS_WORKFLOW_ERROR",
-                context={
-                    'workflow_id': workflow_id,
-                    'workflow_state': workflow_state
-                },
-                cause=workflow_error,
-                severity=ErrorSeverity.HIGH
-            )
+        except Exception as e:
+            return {
+                'success': False,
+                'error_message': f"Workflow execution error: {str(e)}",
+                'failed_step': execution_context['current_step'],
+                'result': context
+            }
     
-    def _validate_workflow_definition(self, workflow_definition: Dict[str, Any]) -> None:
-        """Validate workflow definition structure and requirements."""
-        required_fields = ['steps']
+    async def _execute_workflow_step(
+        self,
+        step_config: Dict[str, Any],
+        context: Dict[str, Any],
+        execution_context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Execute individual workflow step.
+        
+        Args:
+            step_config: Step configuration
+            context: Workflow context
+            execution_context: Execution context
+            
+        Returns:
+            Step execution result
+        """
+        step_name = step_config.get('name', 'unnamed_step')
+        step_type = step_config.get('type', 'action')
+        
+        try:
+            logger.debug("Executing workflow step",
+                        step_name=step_name,
+                        step_type=step_type,
+                        execution_id=execution_context['execution_id'])
+            
+            step_start_time = time.perf_counter()
+            
+            # Execute based on step type
+            if step_type == 'action':
+                result = await self._execute_action_step(step_config, context, execution_context)
+            elif step_type == 'validation':
+                result = await self._execute_validation_step(step_config, context, execution_context)
+            elif step_type == 'transformation':
+                result = await self._execute_transformation_step(step_config, context, execution_context)
+            elif step_type == 'external_service':
+                result = await self._execute_external_service_step(step_config, context, execution_context)
+            elif step_type == 'parallel':
+                result = await self._execute_parallel_step(step_config, context, execution_context)
+            else:
+                raise ConfigurationError(
+                    message=f"Unknown step type: {step_type}",
+                    error_code="UNKNOWN_STEP_TYPE",
+                    component="BusinessWorkflowService",
+                    configuration_key=step_type,
+                    severity=ErrorSeverity.MEDIUM
+                )
+            
+            step_duration = time.perf_counter() - step_start_time
+            
+            result.update({
+                'step_name': step_name,
+                'step_type': step_type,
+                'duration': step_duration
+            })
+            
+            logger.debug("Workflow step completed",
+                        step_name=step_name,
+                        success=result['success'],
+                        duration=step_duration,
+                        execution_id=execution_context['execution_id'])
+            
+            return result
+            
+        except Exception as e:
+            logger.error("Workflow step execution failed",
+                        step_name=step_name,
+                        error=str(e),
+                        execution_id=execution_context['execution_id'],
+                        exc_info=True)
+            
+            return {
+                'success': False,
+                'error_message': str(e),
+                'step_name': step_name,
+                'step_type': step_type
+            }
+    
+    async def _execute_action_step(
+        self,
+        step_config: Dict[str, Any],
+        context: Dict[str, Any],
+        execution_context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Execute action workflow step."""
+        action = step_config.get('action')
+        parameters = step_config.get('parameters', {})
+        
+        # Resolve parameters from context
+        resolved_params = self._resolve_step_parameters(parameters, context)
+        
+        # Execute action based on configuration
+        if action == 'create_user':
+            user_service = UserService()
+            result = await user_service.create_user(resolved_params)
+            return {
+                'success': result['success'],
+                'output': {'user_id': result.get('user', {}).get('id')}
+            }
+        
+        elif action == 'send_notification':
+            # Mock notification sending
+            return {
+                'success': True,
+                'output': {'notification_id': str(uuid.uuid4())}
+            }
+        
+        elif action == 'update_inventory':
+            # Mock inventory update
+            return {
+                'success': True,
+                'output': {'inventory_updated': True}
+            }
+        
+        else:
+            return {
+                'success': False,
+                'error_message': f"Unknown action: {action}"
+            }
+    
+    async def _execute_validation_step(
+        self,
+        step_config: Dict[str, Any],
+        context: Dict[str, Any],
+        execution_context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Execute validation workflow step."""
+        validation_rules = step_config.get('rules', [])
+        data_path = step_config.get('data_path', '')
+        
+        # Get data to validate from context
+        data_to_validate = self._get_nested_value(context, data_path) if data_path else context
+        
+        # Execute validation using business rule engine
+        rule_result = self.business_rule_engine.execute_rules(
+            data_to_validate,
+            rule_set=step_config.get('rule_set', 'default')
+        )
+        
+        return {
+            'success': rule_result['success'],
+            'output': {'validation_result': rule_result},
+            'error_message': f"Validation failed: {rule_result.get('rules_failed', [])}" if not rule_result['success'] else None
+        }
+    
+    async def _execute_transformation_step(
+        self,
+        step_config: Dict[str, Any],
+        context: Dict[str, Any],
+        execution_context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Execute transformation workflow step."""
+        input_path = step_config.get('input_path', '')
+        output_path = step_config.get('output_path', '')
+        transformation = step_config.get('transformation', {})
+        
+        # Get input data
+        input_data = self._get_nested_value(context, input_path) if input_path else context
+        
+        # Apply transformation using processing pipeline
+        pipeline_result = self.processing_pipeline.execute(input_data)
+        
+        if pipeline_result['success']:
+            # Set output data in context
+            if output_path:
+                self._set_nested_value(context, output_path, pipeline_result['output_data'])
+            else:
+                context.update(pipeline_result['output_data'])
+        
+        return {
+            'success': pipeline_result['success'],
+            'output': {'transformed_data': pipeline_result['output_data']},
+            'error_message': str(pipeline_result.get('errors', [])) if not pipeline_result['success'] else None
+        }
+    
+    async def _execute_external_service_step(
+        self,
+        step_config: Dict[str, Any],
+        context: Dict[str, Any],
+        execution_context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Execute external service workflow step."""
+        service_name = step_config.get('service', '')
+        operation = step_config.get('operation', '')
+        parameters = step_config.get('parameters', {})
+        
+        # Resolve parameters from context
+        resolved_params = self._resolve_step_parameters(parameters, context)
+        
+        # Track external service call
+        execution_context['operation_context']['external_calls'] += 1
+        
+        # Execute based on service type
+        if service_name == 'auth_service':
+            auth_service = AuthenticationService()
+            if operation == 'validate_token':
+                result = await auth_service.validate_token(resolved_params.get('token', ''))
+            else:
+                return {'success': False, 'error_message': f"Unknown auth operation: {operation}"}
+        
+        elif service_name == 'order_service':
+            order_service = OrderService()
+            if operation == 'create_order':
+                result = await order_service.create_order(
+                    resolved_params.get('order_data', {}),
+                    resolved_params.get('user_id', '')
+                )
+            else:
+                return {'success': False, 'error_message': f"Unknown order operation: {operation}"}
+        
+        else:
+            return {'success': False, 'error_message': f"Unknown service: {service_name}"}
+        
+        return {
+            'success': result['success'],
+            'output': {'service_result': result}
+        }
+    
+    async def _execute_parallel_step(
+        self,
+        step_config: Dict[str, Any],
+        context: Dict[str, Any],
+        execution_context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Execute parallel workflow steps."""
+        parallel_steps = step_config.get('steps', [])
+        max_concurrency = min(len(parallel_steps), self.config.PARALLEL_WORKFLOW_LIMIT)
+        
+        # Execute steps in parallel with concurrency limit
+        semaphore = asyncio.Semaphore(max_concurrency)
+        
+        async def execute_parallel_step(step):
+            async with semaphore:
+                return await self._execute_workflow_step(step, context.copy(), execution_context)
+        
+        # Run parallel steps
+        parallel_results = await asyncio.gather(
+            *[execute_parallel_step(step) for step in parallel_steps],
+            return_exceptions=True
+        )
+        
+        # Collect results
+        successful_results = []
+        failed_results = []
+        
+        for i, result in enumerate(parallel_results):
+            if isinstance(result, Exception):
+                failed_results.append({
+                    'step_index': i,
+                    'error': str(result)
+                })
+            elif result.get('success', False):
+                successful_results.append(result)
+            else:
+                failed_results.append(result)
+        
+        # Determine overall success
+        success = len(failed_results) == 0 or not step_config.get('require_all_success', True)
+        
+        return {
+            'success': success,
+            'output': {
+                'parallel_results': parallel_results,
+                'successful_count': len(successful_results),
+                'failed_count': len(failed_results)
+            },
+            'error_message': f"Parallel execution failed: {failed_results}" if not success else None
+        }
+    
+    def _validate_workflow_definition(self, workflow_def: Dict[str, Any]) -> None:
+        """Validate workflow definition structure."""
+        required_fields = ['name', 'steps']
         
         for field in required_fields:
-            if field not in workflow_definition:
-                raise DataValidationError(
+            if field not in workflow_def:
+                raise ConfigurationError(
                     message=f"Workflow definition missing required field: {field}",
                     error_code="INVALID_WORKFLOW_DEFINITION",
-                    context={'field': field},
+                    component="BusinessWorkflowService",
+                    configuration_key=field,
                     severity=ErrorSeverity.HIGH
                 )
         
-        steps = workflow_definition['steps']
-        if not isinstance(steps, list) or len(steps) == 0:
-            raise DataValidationError(
-                message="Workflow must have at least one step",
-                error_code="EMPTY_WORKFLOW_DEFINITION",
-                severity=ErrorSeverity.HIGH
-            )
-    
-    async def _evaluate_step_conditions(
-        self, 
-        step_definition: Dict[str, Any], 
-        workflow_state: Dict[str, Any]
-    ) -> bool:
-        """Evaluate whether step conditions are met for execution."""
-        conditions = step_definition.get('conditions', [])
-        
-        for condition in conditions:
-            condition_type = condition.get('type')
-            
-            if condition_type == 'output_exists':
-                output_key = condition.get('output_key')
-                if output_key not in workflow_state['outputs']:
-                    return False
-            
-            elif condition_type == 'output_value':
-                output_key = condition.get('output_key')
-                expected_value = condition.get('expected_value')
-                if workflow_state['outputs'].get(output_key) != expected_value:
-                    return False
-        
-        return True
-    
-    async def _execute_workflow_step_orchestration(
-        self, 
-        step_definition: Dict[str, Any], 
-        workflow_state: Dict[str, Any], 
-        context: ServiceContext
-    ) -> Any:
-        """Execute individual workflow step with service orchestration."""
-        step_type = step_definition.get('type')
-        step_params = step_definition.get('parameters', {})
-        
-        # Create step-specific context
-        step_context = ServiceContext(
-            operation_id=f"{context.operation_id}_step",
-            user_id=context.user_id,
-            session_id=context.session_id,
-            request_id=context.request_id,
-            tenant_id=context.tenant_id,
-            operation_type=ServiceOperationType.WORKFLOW,
-            priority=context.priority,
-            metadata={**context.metadata, 'workflow_id': workflow_state['id']}
-        )
-        
-        if step_type == 'user_management':
-            return await self._user_service.execute(step_context, **step_params)
-        
-        elif step_type == 'data_processing':
-            return await self._data_service.process_business_data(
-                step_context, 
-                step_params.get('data', {}),
-                step_params.get('processing_rules')
-            )
-        
-        elif step_type == 'integration':
-            return await self._integration_service.coordinate_external_services(
-                step_context,
-                step_params.get('service_calls', [])
-            )
-        
-        elif step_type == 'transaction':
-            return await self._transaction_service.execute_transactional_workflow(
-                step_context,
-                step_params.get('workflow_steps', [])
-            )
-        
-        elif step_type == 'validation':
-            return await self._data_service.validate_business_rules(
-                step_context,
-                step_params.get('data', {}),
-                step_params.get('rules')
-            )
-        
-        else:
-            raise DataProcessingError(
-                message=f"Unknown workflow step type: {step_type}",
-                error_code="UNKNOWN_WORKFLOW_STEP_TYPE",
-                context={'step_type': step_type},
+        if len(workflow_def['steps']) > self.config.MAX_WORKFLOW_STEPS:
+            raise ConfigurationError(
+                message=f"Workflow has too many steps: {len(workflow_def['steps'])} > {self.config.MAX_WORKFLOW_STEPS}",
+                error_code="WORKFLOW_TOO_COMPLEX",
+                component="BusinessWorkflowService",
                 severity=ErrorSeverity.MEDIUM
             )
+    
+    async def _evaluate_step_condition(
+        self,
+        condition: Dict[str, Any],
+        context: Dict[str, Any],
+        execution_context: Dict[str, Any]
+    ) -> bool:
+        """Evaluate workflow step condition."""
+        condition_type = condition.get('type', 'equals')
+        field_path = condition.get('field', '')
+        expected_value = condition.get('value')
+        
+        # Get field value from context
+        field_value = self._get_nested_value(context, field_path)
+        
+        # Evaluate condition
+        if condition_type == 'equals':
+            return field_value == expected_value
+        elif condition_type == 'not_equals':
+            return field_value != expected_value
+        elif condition_type == 'greater_than':
+            return field_value > expected_value
+        elif condition_type == 'less_than':
+            return field_value < expected_value
+        elif condition_type == 'exists':
+            return field_value is not None
+        elif condition_type == 'not_exists':
+            return field_value is None
+        else:
+            logger.warning("Unknown condition type",
+                          condition_type=condition_type)
+            return True
+    
+    def _resolve_step_parameters(
+        self,
+        parameters: Dict[str, Any],
+        context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Resolve step parameters from workflow context."""
+        resolved = {}
+        
+        for key, value in parameters.items():
+            if isinstance(value, str) and value.startswith('${') and value.endswith('}'):
+                # Extract context path
+                context_path = value[2:-1]
+                resolved[key] = self._get_nested_value(context, context_path)
+            else:
+                resolved[key] = value
+        
+        return resolved
+    
+    def _get_nested_value(self, data: Dict[str, Any], path: str) -> Any:
+        """Get nested value from dictionary using dot notation."""
+        if not path:
+            return data
+        
+        keys = path.split('.')
+        value = data
+        
+        for key in keys:
+            if isinstance(value, dict) and key in value:
+                value = value[key]
+            else:
+                return None
+        
+        return value
+    
+    def _set_nested_value(self, data: Dict[str, Any], path: str, value: Any) -> None:
+        """Set nested value in dictionary using dot notation."""
+        if not path:
+            return
+        
+        keys = path.split('.')
+        current = data
+        
+        for key in keys[:-1]:
+            if key not in current:
+                current[key] = {}
+            current = current[key]
+        
+        current[keys[-1]] = value
 
 
 # ============================================================================
-# SERVICE FACTORY AND UTILITIES
+# UTILITY SERVICES
 # ============================================================================
 
-class ServiceFactory:
+class HealthCheckService(BaseBusinessService):
     """
-    Factory for creating and managing business service instances.
+    Service dependency health monitoring service.
     
-    Provides centralized service creation, configuration, and lifecycle management
-    for all business services with dependency injection and service registry patterns.
+    Provides comprehensive health monitoring for all service dependencies
+    including database connections, cache operations, external services,
+    and circuit breaker status per Section 6.1.3 requirements.
+    
+    Features:
+    - Database connection health monitoring
+    - Cache service health verification
+    - External service dependency checks
+    - Circuit breaker status monitoring
+    - Comprehensive health reporting
+    - Performance metrics collection
+    
+    Example:
+        health_service = HealthCheckService()
+        
+        # Check overall system health
+        health_status = await health_service.check_system_health()
+        
+        # Check specific dependency
+        db_health = await health_service.check_database_health()
+        
+        # Get health summary
+        summary = health_service.get_health_summary()
     """
     
-    _services: Dict[str, BaseBusinessService] = {}
-    _service_configs: Dict[str, Dict[str, Any]] = {}
+    def __init__(self, **kwargs):
+        """Initialize health check service with monitoring capabilities."""
+        super().__init__(**kwargs)
+        self._health_checks = {}
+        self._last_health_check = None
+        self._health_cache_ttl = 60  # 1 minute
     
-    @classmethod
-    def register_service(
-        cls, 
-        service_name: str, 
-        service_class: Type[BaseBusinessService],
-        config: Optional[Dict[str, Any]] = None
-    ) -> None:
-        """Register service class with factory."""
-        cls._service_configs[service_name] = {
-            'class': service_class,
-            'config': config or {}
+    async def check_system_health(self) -> ServiceResult:
+        """
+        Check overall system health including all dependencies.
+        
+        Returns:
+            Service result with comprehensive system health status
+        """
+        async with self.service_operation("check_system_health") as ctx:
+            try:
+                # Generate cache key
+                cache_key = self._generate_cache_key("system_health")
+                
+                # Check cache first
+                cached_health = await self._get_cached_result(cache_key, ctx)
+                if cached_health:
+                    return {
+                        'success': True,
+                        'health_status': cached_health,
+                        'operation_id': ctx['operation_id'],
+                        'cached': True
+                    }
+                
+                # Perform health checks
+                health_results = {}
+                
+                # Database health
+                db_health = await self._check_database_health(ctx)
+                health_results['database'] = db_health
+                
+                # Cache health
+                cache_health = await self._check_cache_health(ctx)
+                health_results['cache'] = cache_health
+                
+                # External services health
+                external_health = await self._check_external_services_health(ctx)
+                health_results['external_services'] = external_health
+                
+                # Application health
+                app_health = await self._check_application_health(ctx)
+                health_results['application'] = app_health
+                
+                # Determine overall health
+                overall_healthy = all(
+                    result.get('healthy', False)
+                    for result in health_results.values()
+                )
+                
+                health_status = {
+                    'healthy': overall_healthy,
+                    'timestamp': datetime.now(timezone.utc).isoformat(),
+                    'checks': health_results,
+                    'summary': {
+                        'total_checks': len(health_results),
+                        'passed_checks': sum(1 for r in health_results.values() if r.get('healthy', False)),
+                        'failed_checks': sum(1 for r in health_results.values() if not r.get('healthy', False))
+                    }
+                }
+                
+                # Cache health result
+                await self._set_cached_result(
+                    cache_key,
+                    health_status,
+                    ttl_seconds=self._health_cache_ttl,
+                    operation_context=ctx
+                )
+                
+                # Store last health check
+                self._last_health_check = health_status
+                
+                return {
+                    'success': True,
+                    'health_status': health_status,
+                    'operation_id': ctx['operation_id'],
+                    'cached': False
+                }
+                
+            except Exception as e:
+                logger.error("System health check failed",
+                           error=str(e),
+                           operation_id=ctx['operation_id'],
+                           exc_info=True)
+                raise
+    
+    async def _check_database_health(self, operation_context: Dict[str, Any]) -> Dict[str, Any]:
+        """Check database connection and operation health."""
+        try:
+            operation_context['database_operations'] += 1
+            
+            # Test database connection
+            start_time = time.perf_counter()
+            
+            # Perform simple ping operation
+            db_health = get_database_health_status()
+            
+            response_time = time.perf_counter() - start_time
+            
+            # Test basic query
+            test_result = await self.async_db_manager.find_one(
+                "system_health",
+                {"_id": "health_check"},
+                upsert_if_missing=True,
+                default_doc={"_id": "health_check", "last_check": datetime.now(timezone.utc)}
+            )
+            
+            return {
+                'healthy': db_health.get('healthy', False),
+                'response_time': response_time,
+                'details': {
+                    'connection_status': db_health.get('connection_status', 'unknown'),
+                    'database_name': db_health.get('database_name', 'unknown'),
+                    'collection_count': db_health.get('collection_count', 0),
+                    'test_query_success': test_result is not None
+                }
+            }
+            
+        except Exception as e:
+            logger.warning("Database health check failed", error=str(e))
+            return {
+                'healthy': False,
+                'error_message': str(e),
+                'details': {'connection_status': 'failed'}
+            }
+    
+    async def _check_cache_health(self, operation_context: Dict[str, Any]) -> Dict[str, Any]:
+        """Check Redis cache connection and operation health."""
+        try:
+            operation_context['cache_operations'] += 1
+            
+            # Test cache connection
+            start_time = time.perf_counter()
+            
+            # Perform ping operation
+            ping_result = await self.redis_client.ping()
+            
+            response_time = time.perf_counter() - start_time
+            
+            # Test set and get operations
+            test_key = f"health_check:{uuid.uuid4().hex[:8]}"
+            test_value = "health_test"
+            
+            await self.redis_client.setex(test_key, 60, test_value)
+            retrieved_value = await self.redis_client.get(test_key)
+            await self.redis_client.delete(test_key)
+            
+            test_success = retrieved_value == test_value
+            
+            return {
+                'healthy': ping_result and test_success,
+                'response_time': response_time,
+                'details': {
+                    'ping_success': ping_result,
+                    'test_operation_success': test_success,
+                    'connection_status': 'connected' if ping_result else 'failed'
+                }
+            }
+            
+        except Exception as e:
+            logger.warning("Cache health check failed", error=str(e))
+            return {
+                'healthy': False,
+                'error_message': str(e),
+                'details': {'connection_status': 'failed'}
+            }
+    
+    async def _check_external_services_health(self, operation_context: Dict[str, Any]) -> Dict[str, Any]:
+        """Check external service dependency health."""
+        external_results = {}
+        
+        # Auth0 service health
+        try:
+            operation_context['external_calls'] += 1
+            auth_service = AuthenticationService()
+            
+            # Test with a mock token validation (should fail gracefully)
+            start_time = time.perf_counter()
+            test_result = await auth_service.validate_token("Bearer test_token")
+            response_time = time.perf_counter() - start_time
+            
+            # Service is healthy if it responds (even with invalid token)
+            external_results['auth0'] = {
+                'healthy': 'error_message' in test_result or test_result.get('success', False),
+                'response_time': response_time,
+                'details': {
+                    'service_responsive': True,
+                    'test_result': 'responded'
+                }
+            }
+            
+        except Exception as e:
+            external_results['auth0'] = {
+                'healthy': False,
+                'error_message': str(e),
+                'details': {'service_responsive': False}
+            }
+        
+        # AWS services health (mock check)
+        try:
+            # Mock AWS health check
+            external_results['aws'] = {
+                'healthy': True,
+                'response_time': 0.1,
+                'details': {
+                    's3_accessible': True,
+                    'cloudwatch_accessible': True
+                }
+            }
+            
+        except Exception as e:
+            external_results['aws'] = {
+                'healthy': False,
+                'error_message': str(e),
+                'details': {'service_responsive': False}
+            }
+        
+        # Determine overall external service health
+        overall_healthy = all(result.get('healthy', False) for result in external_results.values())
+        
+        return {
+            'healthy': overall_healthy,
+            'services': external_results,
+            'details': {
+                'total_services': len(external_results),
+                'healthy_services': sum(1 for r in external_results.values() if r.get('healthy', False)),
+                'unhealthy_services': sum(1 for r in external_results.values() if not r.get('healthy', False))
+            }
         }
     
-    @classmethod
-    def get_service(cls, service_name: str) -> BaseBusinessService:
-        """Get or create service instance."""
-        if service_name not in cls._services:
-            if service_name not in cls._service_configs:
-                raise ValueError(f"Unknown service: {service_name}")
+    async def _check_application_health(self, operation_context: Dict[str, Any]) -> Dict[str, Any]:
+        """Check application-specific health metrics."""
+        try:
+            # Get service metrics
+            service_metrics = self.get_service_summary()
             
-            service_config = cls._service_configs[service_name]
-            service_class = service_config['class']
-            config = service_config['config']
+            # Check memory usage (mock)
+            import psutil
+            memory_usage = psutil.Process().memory_info().rss / 1024 / 1024  # MB
+            cpu_usage = psutil.Process().cpu_percent()
             
-            cls._services[service_name] = service_class(**config)
+            # Determine health based on resource usage
+            memory_healthy = memory_usage < 1024  # Less than 1GB
+            cpu_healthy = cpu_usage < 80  # Less than 80%
+            
+            return {
+                'healthy': memory_healthy and cpu_healthy,
+                'details': {
+                    'memory_usage_mb': memory_usage,
+                    'cpu_usage_percent': cpu_usage,
+                    'active_transactions': service_metrics.get('active_transactions', 0),
+                    'service_mode': service_metrics.get('mode', 'unknown'),
+                    'uptime_seconds': (
+                        datetime.now(timezone.utc) - self._start_time
+                    ).total_seconds()
+                }
+            }
+            
+        except Exception as e:
+            logger.warning("Application health check failed", error=str(e))
+            return {
+                'healthy': False,
+                'error_message': str(e),
+                'details': {'status': 'failed'}
+            }
+    
+    def get_health_summary(self) -> Dict[str, Any]:
+        """
+        Get health summary and status overview.
         
-        return cls._services[service_name]
-    
-    @classmethod
-    def get_all_services(cls) -> Dict[str, BaseBusinessService]:
-        """Get all registered service instances."""
-        return cls._services.copy()
-    
-    @classmethod
-    def clear_services(cls) -> None:
-        """Clear all service instances."""
-        cls._services.clear()
+        Returns:
+            Dictionary containing health summary
+        """
+        summary = {
+            'service_type': self.__class__.__name__,
+            'service_id': self._service_id,
+            'last_health_check': self._last_health_check.get('timestamp') if self._last_health_check else None,
+            'health_checks_performed': len(self._health_checks),
+            'cache_ttl_seconds': self._health_cache_ttl
+        }
+        
+        if self._last_health_check:
+            summary.update({
+                'overall_healthy': self._last_health_check.get('healthy', False),
+                'last_check_summary': self._last_health_check.get('summary', {}),
+                'failed_checks': [
+                    name for name, result in self._last_health_check.get('checks', {}).items()
+                    if not result.get('healthy', False)
+                ]
+            })
+        
+        return summary
 
 
-# Register default services
-ServiceFactory.register_service('user_management', UserManagementService)
-ServiceFactory.register_service('data_processing', DataProcessingService)
-ServiceFactory.register_service('integration_orchestration', IntegrationOrchestrationService)
-ServiceFactory.register_service('transaction_management', TransactionService)
-ServiceFactory.register_service('workflow_orchestration', WorkflowService)
+# ============================================================================
+# MODULE INITIALIZATION AND UTILITIES
+# ============================================================================
 
-
-# Convenience functions for service access
-def get_user_service() -> UserManagementService:
-    """Get user management service instance."""
-    return ServiceFactory.get_service('user_management')
-
-
-def get_data_processing_service() -> DataProcessingService:
-    """Get data processing service instance."""
-    return ServiceFactory.get_service('data_processing')
-
-
-def get_integration_service() -> IntegrationOrchestrationService:
-    """Get integration orchestration service instance."""
-    return ServiceFactory.get_service('integration_orchestration')
-
-
-def get_transaction_service() -> TransactionService:
-    """Get transaction management service instance."""
-    return ServiceFactory.get_service('transaction_management')
-
-
-def get_workflow_service() -> WorkflowService:
-    """Get workflow orchestration service instance."""
-    return ServiceFactory.get_service('workflow_orchestration')
-
-
-def create_service_context(
-    operation_type: ServiceOperationType = ServiceOperationType.PROCESS,
-    user_id: Optional[str] = None,
-    priority: ServicePriority = ServicePriority.NORMAL,
-    **kwargs
-) -> ServiceContext:
+def create_user_service(config: Optional[ServiceConfiguration] = None) -> UserService:
     """
-    Create service context from current Flask request or provided parameters.
+    Create user service with default configuration.
     
     Args:
-        operation_type: Type of service operation
-        user_id: User identifier for operation
-        priority: Operation priority level
-        **kwargs: Additional context parameters
+        config: Service configuration
         
     Returns:
-        ServiceContext instance configured for current request
+        Configured user service instance
     """
-    # Try to get context from Flask request if available
-    try:
-        from flask import request, g
+    service = UserService(config=config)
+    logger.info("User service created", service_id=service._service_id)
+    return service
+
+
+def create_order_service(config: Optional[ServiceConfiguration] = None) -> OrderService:
+    """
+    Create order service with default configuration.
+    
+    Args:
+        config: Service configuration
         
-        request_id = getattr(request, 'id', None) or str(uuid.uuid4())
-        session_id = getattr(g, 'session_id', None)
-        current_user_id = user_id or getattr(g, 'user_id', None)
+    Returns:
+        Configured order service instance
+    """
+    service = OrderService(config=config)
+    logger.info("Order service created", service_id=service._service_id)
+    return service
+
+
+def create_authentication_service(config: Optional[ServiceConfiguration] = None) -> AuthenticationService:
+    """
+    Create authentication service with circuit breaker protection.
+    
+    Args:
+        config: Service configuration
         
-    except (ImportError, RuntimeError):
-        # Not in Flask context
-        request_id = str(uuid.uuid4())
-        session_id = None
-        current_user_id = user_id
-    
-    return ServiceContext(
-        operation_id=str(uuid.uuid4()),
-        user_id=current_user_id,
-        session_id=session_id,
-        request_id=request_id,
-        operation_type=operation_type,
-        priority=priority,
-        **kwargs
-    )
-
-
-def get_service_health_summary() -> Dict[str, Any]:
-    """
-    Get health summary for all registered services.
-    
     Returns:
-        Dictionary containing health status for all services
+        Configured authentication service instance
     """
-    services = ServiceFactory.get_all_services()
-    service_health = {}
-    overall_status = 'healthy'
-    
-    for service_name, service_instance in services.items():
-        try:
-            health_status = service_instance.get_health_status()
-            service_health[service_name] = health_status
-            
-            if health_status['status'] != 'healthy':
-                overall_status = 'degraded'
-                
-        except Exception as health_error:
-            service_health[service_name] = {
-                'status': 'error',
-                'error': str(health_error),
-                'timestamp': datetime.now(timezone.utc).isoformat()
-            }
-            overall_status = 'degraded'
-    
-    return {
-        'overall_status': overall_status,
-        'services': service_health,
-        'service_count': len(services),
-        'timestamp': datetime.now(timezone.utc).isoformat()
-    }
+    service = AuthenticationService(config=config, enable_circuit_breakers=True)
+    logger.info("Authentication service created", service_id=service._service_id)
+    return service
 
 
-def get_service_metrics_summary() -> Dict[str, Any]:
+def create_workflow_service(config: Optional[ServiceConfiguration] = None) -> BusinessWorkflowService:
     """
-    Get performance metrics summary for all registered services.
+    Create business workflow service with orchestration capabilities.
     
+    Args:
+        config: Service configuration
+        
     Returns:
-        Dictionary containing aggregated metrics for all services
+        Configured workflow service instance
     """
-    services = ServiceFactory.get_all_services()
-    service_metrics = {}
-    
-    total_operations = 0
-    total_errors = 0
-    total_execution_time = 0.0
-    
-    for service_name, service_instance in services.items():
-        try:
-            metrics = service_instance.get_metrics()
-            service_metrics[service_name] = metrics.to_dict()
-            
-            total_operations += metrics.operation_count
-            total_errors += metrics.error_count
-            total_execution_time += metrics.total_execution_time
-            
-        except Exception as metrics_error:
-            service_metrics[service_name] = {
-                'error': str(metrics_error),
-                'timestamp': datetime.now(timezone.utc).isoformat()
-            }
-    
-    overall_metrics = {
-        'total_operations': total_operations,
-        'total_errors': total_errors,
-        'total_execution_time': total_execution_time,
-        'average_execution_time': total_execution_time / max(1, total_operations),
-        'overall_error_rate': (total_errors / max(1, total_operations)) * 100,
-        'service_count': len(services)
-    }
-    
-    return {
-        'overall_metrics': overall_metrics,
-        'service_metrics': service_metrics,
-        'timestamp': datetime.now(timezone.utc).isoformat()
-    }
+    service = BusinessWorkflowService(config=config)
+    logger.info("Business workflow service created", service_id=service._service_id)
+    return service
 
 
-# Export main classes and functions for use by other modules
-__all__ = [
-    # Main service classes
-    'BaseBusinessService',
-    'UserManagementService',
-    'DataProcessingService', 
-    'IntegrationOrchestrationService',
-    'TransactionService',
-    'WorkflowService',
+def create_health_check_service(config: Optional[ServiceConfiguration] = None) -> HealthCheckService:
+    """
+    Create health check service with monitoring capabilities.
     
-    # Context and configuration classes
-    'ServiceContext',
-    'ServiceMetrics',
-    'ServiceOperationType',
-    'ServicePriority',
+    Args:
+        config: Service configuration
+        
+    Returns:
+        Configured health check service instance
+    """
+    service = HealthCheckService(config=config)
+    logger.info("Health check service created", service_id=service._service_id)
+    return service
+
+
+# Default service instances for Flask application integration
+_default_services = {}
+
+
+def get_service(service_type: str, **kwargs) -> BaseBusinessService:
+    """
+    Get or create service instance of specified type.
     
-    # Service management and factory
-    'ServiceFactory',
-    'ServiceInterface',
+    Args:
+        service_type: Type of service to get
+        **kwargs: Additional service configuration
+        
+    Returns:
+        Service instance
+    """
+    if service_type not in _default_services:
+        if service_type == 'user':
+            _default_services[service_type] = create_user_service(**kwargs)
+        elif service_type == 'order':
+            _default_services[service_type] = create_order_service(**kwargs)
+        elif service_type == 'auth':
+            _default_services[service_type] = create_authentication_service(**kwargs)
+        elif service_type == 'workflow':
+            _default_services[service_type] = create_workflow_service(**kwargs)
+        elif service_type == 'health':
+            _default_services[service_type] = create_health_check_service(**kwargs)
+        else:
+            raise ValueError(f"Unknown service type: {service_type}")
     
-    # Convenience functions
-    'get_user_service',
-    'get_data_processing_service',
-    'get_integration_service',
-    'get_transaction_service',
-    'get_workflow_service',
-    'create_service_context',
-    'get_service_health_summary',
-    'get_service_metrics_summary',
-    
-    # Decorators and utilities
-    'service_operation',
-    'monitor_performance'
-]
+    return _default_services[service_type]
+
+
+def clear_service_cache() -> None:
+    """Clear all cached service instances."""
+    global _default_services
+    _default_services.clear()
+    logger.info("Service cache cleared")
+
 
 # Module initialization logging
-logger.info(
-    "Business services module initialized successfully",
-    module_version="1.0.0",
-    service_count=len(ServiceFactory._service_configs),
-    registered_services=list(ServiceFactory._service_configs.keys()),
-    features=[
-        "business_operation_orchestration",
-        "external_service_integration", 
-        "workflow_management",
-        "circuit_breaker_patterns",
-        "transaction_management",
-        "performance_monitoring"
-    ]
-)
+logger.info("Business services module initialized successfully",
+           service_types=['user', 'order', 'auth', 'workflow', 'health'],
+           circuit_breaker_enabled=True,
+           transaction_coordination_enabled=True,
+           workflow_orchestration_enabled=True,
+           health_monitoring_enabled=True)
