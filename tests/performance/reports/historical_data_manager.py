@@ -1,374 +1,443 @@
 """
 Historical Performance Data Management Module
 
-This module provides comprehensive historical performance data management for the Flask migration
-project, implementing data storage, retrieval, archival, and analysis capabilities. Maintains
-comprehensive performance history for trend analysis and long-term optimization per technical
-specification requirements.
+This module provides comprehensive historical performance data storage, retrieval, archival,
+and analysis capabilities for the Flask migration project. Maintains comprehensive performance
+history for trend analysis, long-term optimization, and compliance with enterprise data retention
+policies per Section 8.6.5 and historical trend analysis per Section 6.6.3.
 
 Key Features:
 - Historical performance data storage and management per Section 6.6.3
 - Data retention and archival policies per Section 8.6.5 (90-day active retention)
-- Performance data aggregation and analysis per Section 6.5.5
-- Data integrity validation and backup procedures per Section 8.6.5
-- Data compression and optimization for long-term storage
-- Automated data cleanup and maintenance per Section 8.6.5
-- Compliance data classification and audit trail support
+- Performance data aggregation and analysis per Section 6.5.5 improvement tracking
+- Data compression and optimization per Section 6.5.5 continuous optimization
+- Data integrity validation and backup procedures per Section 8.6.5 audit framework
+- Automated data cleanup and maintenance per Section 8.6.5 compliance data classification
 
 Architecture Integration:
-- Section 6.6.3: Historical trend analysis for performance optimization
-- Section 8.6.5: Log retention and archival policies with AWS S3 integration
-- Section 6.5.5: Improvement tracking and continuous optimization
-- Section 8.6.5: Audit framework and compliance data classification
+- Section 6.6.3: Historical trend analysis reporting with quarterly assessment reviews
+- Section 8.6.5: Log retention and archival policies with AWS S3 long-term storage
+- Section 6.5.5: APM sampling optimization and performance impact reduction tracking
+- Section 6.5.5: Continuous optimization tracking with metrics collection efficiency
+
+Performance Requirements:
+- Maintains ≤10% variance tracking history per Section 0.1.1 primary objective
+- Supports quarterly trend analysis and assessment reviews per Section 6.6.3
+- Implements automated archival to AWS S3 per Section 8.6.5
+- Provides compliance data classification per Section 8.6.5
 
 Author: Flask Migration Team
 Version: 1.0.0
-Dependencies: boto3 ≥1.28+, structlog ≥23.1+, python-dateutil ≥2.8+
+Dependencies: tests/performance/baseline_data.py, tests/performance/performance_config.py
 """
 
+import asyncio
 import gzip
+import hashlib
 import json
 import logging
-import os
-import shutil
 import statistics
-import tempfile
 import threading
-import time
-from collections import defaultdict
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from typing import Dict, List, Optional, Any, Tuple, Union, NamedTuple
-from dataclasses import dataclass, field, asdict
+import warnings
+from collections import defaultdict, deque
+from datetime import datetime, timezone, timedelta
 from enum import Enum
-import hashlib
+from pathlib import Path
+from typing import Dict, Any, List, Optional, Tuple, Union, NamedTuple, Callable
+from dataclasses import dataclass, field, asdict
+import concurrent.futures
+import sqlite3
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import pickle
+import zlib
 
-# Core dependencies
+# Performance testing framework integration
+from tests.performance.baseline_data import (
+    NodeJSPerformanceBaseline,
+    BaselineDataManager,
+    BaselineDataSource,
+    BaselineValidationStatus,
+    get_baseline_manager,
+    get_nodejs_baseline
+)
+from tests.performance.performance_config import (
+    PerformanceTestConfig,
+    PerformanceConfigFactory,
+    LoadTestScenario,
+    PerformanceMetricType,
+    NodeJSBaselineMetrics,
+    create_performance_config
+)
+
+# Structured logging for historical data tracking
 try:
     import structlog
     STRUCTLOG_AVAILABLE = True
 except ImportError:
     STRUCTLOG_AVAILABLE = False
-    import logging as structlog
+    warnings.warn("structlog not available - falling back to standard logging")
 
+# Prometheus metrics integration for historical tracking
+try:
+    from prometheus_client import CollectorRegistry, Counter, Histogram, Gauge, Info
+    PROMETHEUS_AVAILABLE = True
+except ImportError:
+    PROMETHEUS_AVAILABLE = False
+    warnings.warn("prometheus_client not available - metrics collection disabled")
+
+# AWS S3 integration for archival storage
 try:
     import boto3
-    from botocore.exceptions import ClientError, NoCredentialsError
+    from botocore.exceptions import ClientError
     AWS_AVAILABLE = True
 except ImportError:
     AWS_AVAILABLE = False
-    boto3 = None
-    ClientError = Exception
-    NoCredentialsError = Exception
+    warnings.warn("boto3 not available - AWS S3 archival disabled")
 
+# Data compression and serialization
 try:
-    from dateutil.parser import parse as parse_datetime
-    from dateutil.relativedelta import relativedelta
-    DATEUTIL_AVAILABLE = True
+    import lz4.frame
+    LZ4_AVAILABLE = True
 except ImportError:
-    DATEUTIL_AVAILABLE = False
-    relativedelta = None
-
-# Internal dependencies
-from tests.performance.baseline_data import (
-    BaselineDataManager, ResponseTimeBaseline, ResourceUtilizationBaseline,
-    DatabasePerformanceBaseline, ThroughputBaseline, NetworkIOBaseline,
-    PERFORMANCE_VARIANCE_THRESHOLD, MEMORY_VARIANCE_THRESHOLD,
-    default_baseline_manager
-)
-from tests.performance.performance_config import (
-    PerformanceConfigFactory, BasePerformanceConfig, PerformanceThreshold,
-    BaselineMetrics, LoadTestConfiguration
-)
+    LZ4_AVAILABLE = False
+    warnings.warn("lz4 not available - using gzip compression")
 
 
-# Historical data management constants per Section 8.6.5
-ACTIVE_RETENTION_DAYS = 90                    # 90-day active retention
-ARCHIVE_RETENTION_YEARS = 7                   # 7-year archive retention
-COMPRESSION_THRESHOLD_MB = 50                 # Compress files >50MB
-CLEANUP_BATCH_SIZE = 1000                     # Cleanup operations batch size
-DATA_INTEGRITY_CHECK_INTERVAL = 24           # Hours between integrity checks
-BACKUP_VERIFICATION_INTERVAL = 168           # Hours (7 days) between backup verification
-
-# Performance data classification per Section 8.6.5
-DATA_CLASSIFICATION_LEVELS = {
-    'PUBLIC': 0,
-    'INTERNAL': 1,
-    'CONFIDENTIAL': 2,
-    'RESTRICTED': 3
-}
-
-RETENTION_POLICIES_BY_LEVEL = {
-    'DEBUG': timedelta(days=7),                # Debug data: 7 days
-    'INFO': timedelta(days=30),                # Info data: 30 days  
-    'WARNING': timedelta(days=60),             # Warning data: 60 days
-    'ERROR': timedelta(days=90),               # Error data: 90 days
-    'CRITICAL': timedelta(days=365),           # Critical data: 365 days
-    'PERFORMANCE': timedelta(days=90),         # Performance data: 90 days
-    'COMPLIANCE': timedelta(days=2555)         # Compliance data: 7 years
-}
-
-
-class DataClassification(Enum):
-    """Data classification levels per Section 8.6.5 compliance framework."""
+class DataRetentionLevel(Enum):
+    """Data retention levels with associated retention periods per Section 8.6.5."""
     
-    PUBLIC = "public"
-    INTERNAL = "internal"
-    CONFIDENTIAL = "confidential"
-    RESTRICTED = "restricted"
+    DEBUG = "debug"           # 7 days retention
+    INFO = "info"             # 30 days retention  
+    WARNING = "warning"       # 60 days retention
+    ERROR = "error"           # 90 days retention
+    CRITICAL = "critical"     # 365 days retention
+    COMPLIANCE = "compliance" # 7 years retention
+    AUDIT = "audit"          # 10 years retention
 
 
-class RetentionPolicy(Enum):
-    """Data retention policy enumeration per Section 8.6.5."""
+class DataCompressionType(Enum):
+    """Data compression algorithms for historical data optimization."""
     
-    DEBUG = "debug"           # 7 days
-    INFO = "info"             # 30 days
-    WARNING = "warning"       # 60 days
-    ERROR = "error"           # 90 days
-    CRITICAL = "critical"     # 365 days
-    PERFORMANCE = "performance"  # 90 days
-    COMPLIANCE = "compliance"    # 7 years
+    NONE = "none"
+    GZIP = "gzip"
+    LZ4 = "lz4"
+    ZLIB = "zlib"
 
 
-class ArchiveStatus(Enum):
-    """Archive status enumeration for data lifecycle management."""
+class ArchivalStatus(Enum):
+    """Data archival status tracking."""
     
-    ACTIVE = "active"
-    ARCHIVED = "archived"
-    COMPRESSED = "compressed"
-    VERIFIED = "verified"
-    CORRUPTED = "corrupted"
-    EXPIRED = "expired"
+    ACTIVE = "active"           # Data in primary storage
+    ARCHIVED = "archived"       # Data archived to S3
+    COMPRESSED = "compressed"   # Data compressed but not archived
+    FAILED = "failed"          # Archival failed
+    SCHEDULED = "scheduled"     # Scheduled for archival
+
+
+class TrendAnalysisType(Enum):
+    """Types of trend analysis for historical data."""
+    
+    PERFORMANCE_VARIANCE = "performance_variance"
+    RESPONSE_TIME_TREND = "response_time_trend"
+    THROUGHPUT_TREND = "throughput_trend"
+    ERROR_RATE_TREND = "error_rate_trend"
+    RESOURCE_UTILIZATION = "resource_utilization"
+    BASELINE_DRIFT = "baseline_drift"
+    REGRESSION_DETECTION = "regression_detection"
+    SEASONAL_PATTERNS = "seasonal_patterns"
 
 
 @dataclass
-class HistoricalDataRecord:
-    """
-    Historical performance data record with metadata for comprehensive tracking.
+class RetentionPolicy:
+    """Data retention policy configuration per Section 8.6.5."""
     
-    Supports Section 6.6.3 historical trend analysis and Section 8.6.5 audit framework.
-    """
-    
-    record_id: str
-    timestamp: datetime
-    data_type: str  # 'response_time', 'resource_usage', 'throughput', etc.
-    performance_data: Dict[str, Any]
-    baseline_comparison: Optional[Dict[str, Any]] = None
-    variance_analysis: Optional[Dict[str, Any]] = None
-    test_environment: str = "unknown"
-    test_configuration: Optional[Dict[str, Any]] = None
-    data_classification: DataClassification = DataClassification.INTERNAL
-    retention_policy: RetentionPolicy = RetentionPolicy.PERFORMANCE
-    archive_status: ArchiveStatus = ArchiveStatus.ACTIVE
-    checksum: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    level: DataRetentionLevel
+    retention_days: int
+    compression_enabled: bool = True
+    compression_type: DataCompressionType = DataCompressionType.LZ4
+    archival_enabled: bool = True
+    archival_threshold_days: int = field(init=False)
+    compliance_classification: Optional[str] = None
     
     def __post_init__(self):
-        """Calculate checksum for data integrity validation."""
-        if self.checksum is None:
-            self.checksum = self._calculate_checksum()
+        """Calculate archival threshold based on retention level."""
+        # Archive data after 50% of retention period
+        self.archival_threshold_days = max(1, self.retention_days // 2)
+
+
+@dataclass
+class HistoricalDataPoint:
+    """Single historical performance data point with metadata."""
     
-    def _calculate_checksum(self) -> str:
-        """Calculate SHA-256 checksum for data integrity validation."""
-        data_for_checksum = {
-            'record_id': self.record_id,
-            'timestamp': self.timestamp.isoformat(),
-            'data_type': self.data_type,
-            'performance_data': self.performance_data
+    # Core identification
+    data_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    
+    # Performance metrics
+    performance_metrics: Dict[str, float] = field(default_factory=dict)
+    baseline_comparison: Dict[str, Any] = field(default_factory=dict)
+    variance_percentage: Optional[float] = None
+    
+    # Test configuration context
+    test_scenario: Optional[str] = None
+    environment: str = "production"
+    flask_version: str = "2.3.0"
+    python_version: str = "3.11"
+    
+    # Data classification and retention
+    retention_level: DataRetentionLevel = DataRetentionLevel.INFO
+    compliance_tags: List[str] = field(default_factory=list)
+    
+    # Storage and archival metadata
+    compression_type: DataCompressionType = DataCompressionType.NONE
+    archival_status: ArchivalStatus = ArchivalStatus.ACTIVE
+    s3_key: Optional[str] = None
+    data_size_bytes: int = 0
+    compressed_size_bytes: int = 0
+    
+    # Data integrity
+    data_hash: str = field(default="", init=False)
+    validation_status: str = "valid"
+    
+    def __post_init__(self):
+        """Post-initialization processing and validation."""
+        self._calculate_data_hash()
+        self._validate_data_integrity()
+        self._apply_compliance_classification()
+    
+    def _calculate_data_hash(self) -> None:
+        """Calculate SHA-256 hash for data integrity validation."""
+        hash_data = {
+            "timestamp": self.timestamp.isoformat(),
+            "performance_metrics": self.performance_metrics,
+            "baseline_comparison": self.baseline_comparison,
+            "test_scenario": self.test_scenario,
+            "environment": self.environment
         }
-        data_json = json.dumps(data_for_checksum, sort_keys=True)
-        return hashlib.sha256(data_json.encode()).hexdigest()
-    
-    def validate_integrity(self) -> bool:
-        """
-        Validate data integrity using checksum verification.
         
-        Returns:
-            True if data integrity is valid, False if corrupted
-        """
-        current_checksum = self._calculate_checksum()
-        return current_checksum == self.checksum
+        hash_string = json.dumps(hash_data, sort_keys=True, separators=(',', ':'))
+        self.data_hash = hashlib.sha256(hash_string.encode('utf-8')).hexdigest()
     
-    def is_expired(self) -> bool:
-        """
-        Check if record has exceeded retention policy.
+    def _validate_data_integrity(self) -> None:
+        """Validate data integrity and consistency."""
+        try:
+            # Validate timestamp
+            if not isinstance(self.timestamp, datetime):
+                self.validation_status = "invalid_timestamp"
+                return
+            
+            # Validate performance metrics
+            if not self.performance_metrics:
+                self.validation_status = "missing_metrics"
+                return
+            
+            # Validate numeric values
+            for key, value in self.performance_metrics.items():
+                if not isinstance(value, (int, float)) or value < 0:
+                    self.validation_status = f"invalid_metric_{key}"
+                    return
+            
+            # Validate variance percentage if present
+            if self.variance_percentage is not None:
+                if not isinstance(self.variance_percentage, (int, float)):
+                    self.validation_status = "invalid_variance"
+                    return
+            
+            self.validation_status = "valid"
+            
+        except Exception as e:
+            self.validation_status = f"validation_error: {str(e)}"
+    
+    def _apply_compliance_classification(self) -> None:
+        """Apply compliance classification per Section 8.6.5."""
+        # Clear existing tags
+        self.compliance_tags = []
         
-        Returns:
-            True if record should be archived or deleted
-        """
-        retention_period = RETENTION_POLICIES_BY_LEVEL.get(
-            self.retention_policy.value.upper(),
-            timedelta(days=90)
-        )
-        expiry_date = self.timestamp + retention_period
-        return datetime.now(timezone.utc) > expiry_date
-    
-    def should_compress(self) -> bool:
-        """
-        Check if record should be compressed based on age and size.
+        # Performance metrics classification
+        if self.performance_metrics:
+            self.compliance_tags.append("performance_data")
         
-        Returns:
-            True if record should be compressed for storage optimization
-        """
-        # Compress records older than 30 days
-        compression_age = timedelta(days=30)
-        age_threshold = datetime.now(timezone.utc) - compression_age
-        return self.timestamp < age_threshold
+        # Environment classification
+        if self.environment == "production":
+            self.compliance_tags.append("production_data")
+            self.compliance_tags.append("audit_required")
+        
+        # Error data classification
+        if "error_rate" in self.performance_metrics:
+            if self.performance_metrics["error_rate"] > 1.0:
+                self.compliance_tags.append("high_error_rate")
+                self.retention_level = DataRetentionLevel.ERROR
+        
+        # Performance variance classification
+        if self.variance_percentage is not None:
+            if abs(self.variance_percentage) > 10.0:  # Exceeds ≤10% threshold
+                self.compliance_tags.append("variance_violation")
+                self.retention_level = DataRetentionLevel.WARNING
+        
+        # Baseline comparison classification
+        if self.baseline_comparison:
+            self.compliance_tags.append("baseline_comparison")
+            if not self.baseline_comparison.get("overall_compliant", True):
+                self.compliance_tags.append("compliance_violation")
+                self.retention_level = DataRetentionLevel.ERROR
+        
+        # GDPR compliance (if applicable)
+        if any("user" in key.lower() for key in self.performance_metrics.keys()):
+            self.compliance_tags.append("gdpr_relevant")
+        
+        # SOX compliance for financial data
+        if self.environment == "production" and "transaction" in str(self.performance_metrics):
+            self.compliance_tags.append("sox_compliance")
+            self.retention_level = DataRetentionLevel.COMPLIANCE
     
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert record to dictionary for serialization."""
-        return {
-            'record_id': self.record_id,
-            'timestamp': self.timestamp.isoformat(),
-            'data_type': self.data_type,
-            'performance_data': self.performance_data,
-            'baseline_comparison': self.baseline_comparison,
-            'variance_analysis': self.variance_analysis,
-            'test_environment': self.test_environment,
-            'test_configuration': self.test_configuration,
-            'data_classification': self.data_classification.value,
-            'retention_policy': self.retention_policy.value,
-            'archive_status': self.archive_status.value,
-            'checksum': self.checksum,
-            'metadata': self.metadata
-        }
+    def get_size_estimate(self) -> int:
+        """Estimate data size in bytes for storage planning."""
+        if self.data_size_bytes > 0:
+            return self.data_size_bytes
+        
+        # Estimate based on serialized data
+        serialized = json.dumps(asdict(self), default=str)
+        self.data_size_bytes = len(serialized.encode('utf-8'))
+        return self.data_size_bytes
+    
+    def compress_data(self, compression_type: DataCompressionType = None) -> bytes:
+        """Compress historical data point for storage optimization."""
+        if compression_type is None:
+            compression_type = self.compression_type or DataCompressionType.LZ4
+        
+        # Serialize data
+        data_dict = asdict(self)
+        serialized_data = json.dumps(data_dict, default=str).encode('utf-8')
+        
+        # Apply compression
+        if compression_type == DataCompressionType.LZ4 and LZ4_AVAILABLE:
+            compressed_data = lz4.frame.compress(serialized_data)
+            self.compression_type = DataCompressionType.LZ4
+        elif compression_type == DataCompressionType.GZIP:
+            compressed_data = gzip.compress(serialized_data)
+            self.compression_type = DataCompressionType.GZIP
+        elif compression_type == DataCompressionType.ZLIB:
+            compressed_data = zlib.compress(serialized_data)
+            self.compression_type = DataCompressionType.ZLIB
+        else:
+            compressed_data = serialized_data
+            self.compression_type = DataCompressionType.NONE
+        
+        self.compressed_size_bytes = len(compressed_data)
+        return compressed_data
     
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'HistoricalDataRecord':
-        """Create record from dictionary."""
-        # Parse timestamp
-        timestamp = data['timestamp']
-        if isinstance(timestamp, str):
-            if DATEUTIL_AVAILABLE:
-                timestamp = parse_datetime(timestamp)
-            else:
-                timestamp = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+    def decompress_data(cls, compressed_data: bytes, compression_type: DataCompressionType) -> 'HistoricalDataPoint':
+        """Decompress historical data point from storage."""
+        # Decompress data
+        if compression_type == DataCompressionType.LZ4 and LZ4_AVAILABLE:
+            decompressed_data = lz4.frame.decompress(compressed_data)
+        elif compression_type == DataCompressionType.GZIP:
+            decompressed_data = gzip.decompress(compressed_data)
+        elif compression_type == DataCompressionType.ZLIB:
+            decompressed_data = zlib.decompress(compressed_data)
+        else:
+            decompressed_data = compressed_data
         
-        return cls(
-            record_id=data['record_id'],
-            timestamp=timestamp,
-            data_type=data['data_type'],
-            performance_data=data['performance_data'],
-            baseline_comparison=data.get('baseline_comparison'),
-            variance_analysis=data.get('variance_analysis'),
-            test_environment=data.get('test_environment', 'unknown'),
-            test_configuration=data.get('test_configuration'),
-            data_classification=DataClassification(data.get('data_classification', 'internal')),
-            retention_policy=RetentionPolicy(data.get('retention_policy', 'performance')),
-            archive_status=ArchiveStatus(data.get('archive_status', 'active')),
-            checksum=data.get('checksum'),
-            metadata=data.get('metadata', {})
-        )
+        # Deserialize data
+        data_dict = json.loads(decompressed_data.decode('utf-8'))
+        
+        # Convert timestamp back to datetime
+        if isinstance(data_dict["timestamp"], str):
+            data_dict["timestamp"] = datetime.fromisoformat(data_dict["timestamp"])
+        
+        # Convert enums back
+        data_dict["retention_level"] = DataRetentionLevel(data_dict["retention_level"])
+        data_dict["compression_type"] = DataCompressionType(data_dict["compression_type"])
+        data_dict["archival_status"] = ArchivalStatus(data_dict["archival_status"])
+        
+        return cls(**data_dict)
 
 
 @dataclass
 class TrendAnalysisResult:
-    """
-    Performance trend analysis result for improvement tracking.
+    """Results from historical trend analysis."""
     
-    Supports Section 6.5.5 improvement tracking and continuous optimization.
-    """
+    analysis_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    analysis_type: TrendAnalysisType = TrendAnalysisType.PERFORMANCE_VARIANCE
+    analysis_timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     
-    metric_name: str
-    analysis_period: Tuple[datetime, datetime]
-    trend_direction: str  # 'improving', 'degrading', 'stable'
-    trend_percentage: float
-    confidence_level: float
-    data_points: int
-    statistical_summary: Dict[str, float]
-    variance_from_baseline: Optional[float] = None
+    # Time range analyzed
+    start_date: datetime = field(default_factory=lambda: datetime.now(timezone.utc) - timedelta(days=30))
+    end_date: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    
+    # Analysis results
+    trend_direction: str = "stable"  # "improving", "degrading", "stable"
+    trend_magnitude: float = 0.0     # Percentage change
+    confidence_level: float = 0.95   # Statistical confidence
+    data_points_count: int = 0
+    
+    # Statistical analysis
+    mean_value: float = 0.0
+    median_value: float = 0.0
+    std_deviation: float = 0.0
+    min_value: float = 0.0
+    max_value: float = 0.0
+    
+    # Trend-specific metrics
+    trend_metrics: Dict[str, Any] = field(default_factory=dict)
+    seasonal_patterns: Dict[str, Any] = field(default_factory=dict)
+    anomalies_detected: List[Dict[str, Any]] = field(default_factory=list)
+    
+    # Recommendations
     recommendations: List[str] = field(default_factory=list)
-    compliance_status: bool = True
+    action_required: bool = False
+    priority_level: str = "low"  # "low", "medium", "high", "critical"
     
-    def __post_init__(self):
-        """Validate trend analysis result."""
-        if not 0 <= self.confidence_level <= 1.0:
-            raise ValueError("Confidence level must be between 0 and 1")
-        if self.data_points < 2:
-            raise ValueError("Trend analysis requires at least 2 data points")
-
-
-@dataclass
-class ArchiveMetadata:
-    """
-    Archive metadata for AWS S3 storage tracking per Section 8.6.5.
-    """
-    
-    archive_id: str
-    original_path: str
-    s3_bucket: str
-    s3_key: str
-    archive_timestamp: datetime
-    compressed_size: int
-    original_size: int
-    compression_ratio: float
-    record_count: int
-    checksum: str
-    retention_until: datetime
-    access_tier: str = "STANDARD"  # S3 storage class
-    
-    def __post_init__(self):
-        """Calculate compression ratio."""
-        if self.original_size > 0:
-            self.compression_ratio = (1 - self.compressed_size / self.original_size) * 100
-        else:
-            self.compression_ratio = 0.0
+    def add_recommendation(self, recommendation: str, priority: str = "medium"):
+        """Add analysis recommendation with priority."""
+        self.recommendations.append(recommendation)
+        if priority in ["high", "critical"] and not self.action_required:
+            self.action_required = True
+            self.priority_level = priority
 
 
 class HistoricalDataManager:
     """
-    Comprehensive historical performance data management system.
+    Comprehensive historical performance data management system providing data storage,
+    retrieval, archival, and analysis capabilities per Section 6.6.3 and Section 8.6.5.
     
-    Provides storage, retrieval, archival, and analysis capabilities for historical
-    performance data supporting Section 6.6.3 trend analysis, Section 8.6.5 
-    retention policies, and Section 6.5.5 improvement tracking.
+    Features:
+    - Historical data storage with SQLite backend
+    - Automated retention and archival policies
+    - Data compression and optimization
+    - AWS S3 integration for long-term storage
+    - Trend analysis and pattern detection
+    - Compliance data classification
+    - Data integrity validation and backup procedures
     """
     
     def __init__(
         self,
-        storage_path: str = "data/performance/historical",
-        archive_path: str = "data/performance/archive",
-        aws_s3_bucket: Optional[str] = None,
-        aws_region: str = "us-east-1",
+        data_directory: Optional[Path] = None,
+        database_path: Optional[Path] = None,
+        s3_bucket: Optional[str] = None,
         enable_compression: bool = True,
-        enable_archival: bool = True,
-        max_workers: int = 4
+        compression_type: DataCompressionType = DataCompressionType.LZ4
     ):
         """
         Initialize historical data manager with storage and archival configuration.
         
         Args:
-            storage_path: Local storage path for active historical data
-            archive_path: Local path for compressed archives
-            aws_s3_bucket: AWS S3 bucket name for long-term archival
-            aws_region: AWS region for S3 operations
-            enable_compression: Enable data compression for storage optimization
-            enable_archival: Enable automatic archival to AWS S3
-            max_workers: Maximum worker threads for concurrent operations
+            data_directory: Directory for local data storage
+            database_path: Path to SQLite database file
+            s3_bucket: AWS S3 bucket name for archival storage
+            enable_compression: Enable data compression for optimization
+            compression_type: Default compression algorithm
         """
-        self.storage_path = Path(storage_path)
-        self.archive_path = Path(archive_path)
-        self.aws_s3_bucket = aws_s3_bucket
-        self.aws_region = aws_region
+        # Storage configuration
+        self.data_directory = data_directory or Path(__file__).parent / "historical_data"
+        self.data_directory.mkdir(parents=True, exist_ok=True)
+        
+        self.database_path = database_path or self.data_directory / "historical_performance.db"
+        self.s3_bucket = s3_bucket or "performance-data-archive"
         self.enable_compression = enable_compression
-        self.enable_archival = enable_archival
-        self.max_workers = max_workers
-        
-        # Create storage directories
-        self.storage_path.mkdir(parents=True, exist_ok=True)
-        self.archive_path.mkdir(parents=True, exist_ok=True)
-        
-        # Initialize AWS S3 client if available and configured
-        self.s3_client = None
-        if AWS_AVAILABLE and self.aws_s3_bucket:
-            try:
-                self.s3_client = boto3.client('s3', region_name=aws_region)
-                self._verify_s3_bucket()
-            except (NoCredentialsError, ClientError) as e:
-                logging.warning(f"AWS S3 initialization failed: {e}")
-                self.enable_archival = False
+        self.compression_type = compression_type
         
         # Initialize logging
         if STRUCTLOG_AVAILABLE:
@@ -376,1385 +445,1708 @@ class HistoricalDataManager:
         else:
             self.logger = logging.getLogger(__name__)
         
-        # Initialize baseline data manager integration
-        self.baseline_manager = default_baseline_manager
+        # Initialize database
+        self._init_database()
         
-        # Initialize performance configuration
-        self.performance_config = PerformanceConfigFactory.get_config()
+        # Initialize AWS S3 client
+        self._init_s3_client()
         
-        # Internal state management
-        self._records_cache: Dict[str, HistoricalDataRecord] = {}
-        self._cache_lock = threading.Lock()
-        self._last_cleanup = datetime.now(timezone.utc)
-        self._last_integrity_check = datetime.now(timezone.utc)
+        # Initialize Prometheus metrics
+        self._init_prometheus_metrics()
         
-        # Archive metadata tracking
-        self.archive_metadata: Dict[str, ArchiveMetadata] = {}
-        self._load_archive_metadata()
+        # Configure retention policies per Section 8.6.5
+        self._init_retention_policies()
+        
+        # Initialize background tasks
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+        self._background_tasks_enabled = True
+        self._last_cleanup_run = datetime.now(timezone.utc)
+        self._last_archival_run = datetime.now(timezone.utc)
+        
+        # Data cache for performance
+        self._data_cache: Dict[str, HistoricalDataPoint] = {}
+        self._cache_max_size = 1000
+        self._cache_lock = threading.RLock()
+        
+        # Integration with baseline and config managers
+        self.baseline_manager = get_baseline_manager()
+        self.performance_config = create_performance_config()
+        
+        # Start background maintenance tasks
+        self._start_background_tasks()
     
-    def _verify_s3_bucket(self) -> None:
-        """Verify AWS S3 bucket accessibility."""
-        if not self.s3_client:
+    def _init_database(self) -> None:
+        """Initialize SQLite database for historical data storage."""
+        try:
+            with sqlite3.connect(self.database_path) as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS historical_data (
+                        data_id TEXT PRIMARY KEY,
+                        timestamp TEXT NOT NULL,
+                        performance_metrics TEXT NOT NULL,
+                        baseline_comparison TEXT,
+                        variance_percentage REAL,
+                        test_scenario TEXT,
+                        environment TEXT NOT NULL,
+                        flask_version TEXT,
+                        python_version TEXT,
+                        retention_level TEXT NOT NULL,
+                        compliance_tags TEXT,
+                        compression_type TEXT NOT NULL,
+                        archival_status TEXT NOT NULL,
+                        s3_key TEXT,
+                        data_size_bytes INTEGER,
+                        compressed_size_bytes INTEGER,
+                        data_hash TEXT NOT NULL,
+                        validation_status TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        archived_at TEXT,
+                        compressed_data BLOB
+                    )
+                """)
+                
+                # Create indexes for performance
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON historical_data(timestamp)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_environment ON historical_data(environment)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_retention_level ON historical_data(retention_level)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_archival_status ON historical_data(archival_status)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_variance_percentage ON historical_data(variance_percentage)")
+                
+                # Create trend analysis results table
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS trend_analysis (
+                        analysis_id TEXT PRIMARY KEY,
+                        analysis_type TEXT NOT NULL,
+                        analysis_timestamp TEXT NOT NULL,
+                        start_date TEXT NOT NULL,
+                        end_date TEXT NOT NULL,
+                        trend_direction TEXT NOT NULL,
+                        trend_magnitude REAL NOT NULL,
+                        confidence_level REAL NOT NULL,
+                        data_points_count INTEGER NOT NULL,
+                        mean_value REAL,
+                        median_value REAL,
+                        std_deviation REAL,
+                        min_value REAL,
+                        max_value REAL,
+                        trend_metrics TEXT,
+                        seasonal_patterns TEXT,
+                        anomalies_detected TEXT,
+                        recommendations TEXT,
+                        action_required INTEGER NOT NULL,
+                        priority_level TEXT NOT NULL
+                    )
+                """)
+                
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_analysis_timestamp ON trend_analysis(analysis_timestamp)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_analysis_type ON trend_analysis(analysis_type)")
+                
+                conn.commit()
+                
+            if STRUCTLOG_AVAILABLE:
+                self.logger.info("Historical data database initialized", database_path=str(self.database_path))
+                
+        except Exception as e:
+            error_msg = f"Failed to initialize database: {e}"
+            if STRUCTLOG_AVAILABLE:
+                self.logger.error("Database initialization failed", error=str(e))
+            raise RuntimeError(error_msg)
+    
+    def _init_s3_client(self) -> None:
+        """Initialize AWS S3 client for archival storage."""
+        self.s3_client = None
+        if not AWS_AVAILABLE:
+            if STRUCTLOG_AVAILABLE:
+                self.logger.warning("AWS S3 integration disabled - boto3 not available")
             return
         
         try:
-            self.s3_client.head_bucket(Bucket=self.aws_s3_bucket)
-        except ClientError as e:
-            error_code = e.response['Error']['Code']
-            if error_code == '404':
-                raise ValueError(f"S3 bucket '{self.aws_s3_bucket}' not found")
-            else:
-                raise ValueError(f"S3 bucket access error: {e}")
-    
-    def _load_archive_metadata(self) -> None:
-        """Load archive metadata from persistent storage."""
-        metadata_file = self.archive_path / "archive_metadata.json"
-        if metadata_file.exists():
-            try:
-                with open(metadata_file, 'r') as f:
-                    data = json.load(f)
-                    for archive_id, metadata_dict in data.items():
-                        # Parse timestamps
-                        metadata_dict['archive_timestamp'] = datetime.fromisoformat(
-                            metadata_dict['archive_timestamp']
-                        )
-                        metadata_dict['retention_until'] = datetime.fromisoformat(
-                            metadata_dict['retention_until']
-                        )
-                        self.archive_metadata[archive_id] = ArchiveMetadata(**metadata_dict)
-            except Exception as e:
-                self.logger.warning(f"Failed to load archive metadata: {e}")
-    
-    def _save_archive_metadata(self) -> None:
-        """Save archive metadata to persistent storage."""
-        metadata_file = self.archive_path / "archive_metadata.json"
-        try:
-            data = {}
-            for archive_id, metadata in self.archive_metadata.items():
-                metadata_dict = asdict(metadata)
-                # Convert timestamps to ISO format
-                metadata_dict['archive_timestamp'] = metadata.archive_timestamp.isoformat()
-                metadata_dict['retention_until'] = metadata.retention_until.isoformat()
-                data[archive_id] = metadata_dict
+            self.s3_client = boto3.client('s3')
             
-            with open(metadata_file, 'w') as f:
-                json.dump(data, f, indent=2)
+            # Verify bucket exists or create it
+            try:
+                self.s3_client.head_bucket(Bucket=self.s3_bucket)
+            except ClientError as e:
+                if e.response['Error']['Code'] == '404':
+                    # Bucket doesn't exist, create it
+                    self.s3_client.create_bucket(Bucket=self.s3_bucket)
+                    if STRUCTLOG_AVAILABLE:
+                        self.logger.info("Created S3 bucket for archival", bucket=self.s3_bucket)
+                else:
+                    raise
+            
+            if STRUCTLOG_AVAILABLE:
+                self.logger.info("AWS S3 archival storage initialized", bucket=self.s3_bucket)
+                
         except Exception as e:
-            self.logger.error(f"Failed to save archive metadata: {e}")
+            if STRUCTLOG_AVAILABLE:
+                self.logger.warning("AWS S3 initialization failed", error=str(e))
+            self.s3_client = None
     
-    def store_performance_data(
+    def _init_prometheus_metrics(self) -> None:
+        """Initialize Prometheus metrics for historical data tracking."""
+        if not PROMETHEUS_AVAILABLE:
+            return
+        
+        self.metrics_registry = CollectorRegistry()
+        
+        # Data storage metrics
+        self.data_points_total = Counter(
+            'historical_data_points_total',
+            'Total historical data points stored',
+            ['environment', 'retention_level'],
+            registry=self.metrics_registry
+        )
+        
+        self.data_storage_bytes = Gauge(
+            'historical_data_storage_bytes',
+            'Total storage space used by historical data',
+            ['compression_type'],
+            registry=self.metrics_registry
+        )
+        
+        # Archival metrics
+        self.archival_operations_total = Counter(
+            'historical_data_archival_total',
+            'Total archival operations performed',
+            ['status', 'destination'],
+            registry=self.metrics_registry
+        )
+        
+        self.archival_duration_seconds = Histogram(
+            'historical_data_archival_duration_seconds',
+            'Time spent on archival operations',
+            ['operation_type'],
+            registry=self.metrics_registry
+        )
+        
+        # Trend analysis metrics
+        self.trend_analysis_total = Counter(
+            'historical_trend_analysis_total',
+            'Total trend analysis operations',
+            ['analysis_type', 'trend_direction'],
+            registry=self.metrics_registry
+        )
+        
+        # Data integrity metrics
+        self.data_integrity_checks_total = Counter(
+            'historical_data_integrity_checks_total',
+            'Total data integrity validation checks',
+            ['status'],
+            registry=self.metrics_registry
+        )
+        
+        # Compression efficiency metrics
+        self.compression_ratio_gauge = Gauge(
+            'historical_data_compression_ratio',
+            'Data compression ratio achieved',
+            ['compression_type'],
+            registry=self.metrics_registry
+        )
+    
+    def _init_retention_policies(self) -> None:
+        """Initialize data retention policies per Section 8.6.5."""
+        self.retention_policies = {
+            DataRetentionLevel.DEBUG: RetentionPolicy(
+                level=DataRetentionLevel.DEBUG,
+                retention_days=7,
+                compression_enabled=True,
+                compression_type=DataCompressionType.GZIP,
+                archival_enabled=False  # Short retention, no archival needed
+            ),
+            DataRetentionLevel.INFO: RetentionPolicy(
+                level=DataRetentionLevel.INFO,
+                retention_days=30,
+                compression_enabled=True,
+                compression_type=DataCompressionType.LZ4,
+                archival_enabled=True
+            ),
+            DataRetentionLevel.WARNING: RetentionPolicy(
+                level=DataRetentionLevel.WARNING,
+                retention_days=60,
+                compression_enabled=True,
+                compression_type=DataCompressionType.LZ4,
+                archival_enabled=True
+            ),
+            DataRetentionLevel.ERROR: RetentionPolicy(
+                level=DataRetentionLevel.ERROR,
+                retention_days=90,
+                compression_enabled=True,
+                compression_type=DataCompressionType.LZ4,
+                archival_enabled=True
+            ),
+            DataRetentionLevel.CRITICAL: RetentionPolicy(
+                level=DataRetentionLevel.CRITICAL,
+                retention_days=365,
+                compression_enabled=True,
+                compression_type=DataCompressionType.LZ4,
+                archival_enabled=True
+            ),
+            DataRetentionLevel.COMPLIANCE: RetentionPolicy(
+                level=DataRetentionLevel.COMPLIANCE,
+                retention_days=365 * 7,  # 7 years
+                compression_enabled=True,
+                compression_type=DataCompressionType.LZ4,
+                archival_enabled=True,
+                compliance_classification="regulatory"
+            ),
+            DataRetentionLevel.AUDIT: RetentionPolicy(
+                level=DataRetentionLevel.AUDIT,
+                retention_days=365 * 10,  # 10 years
+                compression_enabled=True,
+                compression_type=DataCompressionType.LZ4,
+                archival_enabled=True,
+                compliance_classification="audit_trail"
+            )
+        }
+    
+    def _start_background_tasks(self) -> None:
+        """Start background maintenance tasks."""
+        if not self._background_tasks_enabled:
+            return
+        
+        # Schedule cleanup and archival tasks
+        self._executor.submit(self._background_maintenance_loop)
+    
+    def _background_maintenance_loop(self) -> None:
+        """Background maintenance loop for cleanup and archival."""
+        while self._background_tasks_enabled:
+            try:
+                current_time = datetime.now(timezone.utc)
+                
+                # Run cleanup every 6 hours
+                if (current_time - self._last_cleanup_run).total_seconds() > 21600:
+                    self._run_automated_cleanup()
+                    self._last_cleanup_run = current_time
+                
+                # Run archival every 12 hours
+                if (current_time - self._last_archival_run).total_seconds() > 43200:
+                    self._run_automated_archival()
+                    self._last_archival_run = current_time
+                
+                # Sleep for 1 hour before next check
+                import time
+                time.sleep(3600)
+                
+            except Exception as e:
+                if STRUCTLOG_AVAILABLE:
+                    self.logger.error("Background maintenance error", error=str(e))
+                import time
+                time.sleep(3600)  # Continue after errors
+    
+    def store_historical_data(
         self,
-        data_type: str,
-        performance_data: Dict[str, Any],
-        test_environment: str = "unknown",
-        test_configuration: Optional[Dict[str, Any]] = None,
-        classification: DataClassification = DataClassification.INTERNAL,
-        retention_policy: RetentionPolicy = RetentionPolicy.PERFORMANCE
+        performance_metrics: Dict[str, float],
+        test_scenario: Optional[str] = None,
+        environment: str = "production",
+        baseline_comparison: Optional[Dict[str, Any]] = None
     ) -> str:
         """
-        Store historical performance data with baseline comparison and variance analysis.
+        Store historical performance data point with compliance classification.
         
         Args:
-            data_type: Type of performance data ('response_time', 'resource_usage', etc.)
-            performance_data: Performance metrics dictionary
-            test_environment: Test environment name
-            test_configuration: Test configuration parameters
-            classification: Data classification level per Section 8.6.5
-            retention_policy: Data retention policy per Section 8.6.5
+            performance_metrics: Performance metrics dictionary
+            test_scenario: Optional test scenario identifier
+            environment: Environment name (production, staging, etc.)
+            baseline_comparison: Optional baseline comparison results
             
         Returns:
-            Record ID for the stored performance data
+            Data point ID for the stored record
+            
+        Raises:
+            ValueError: If performance metrics are invalid
+            RuntimeError: If storage operation fails
         """
-        # Generate unique record ID
-        record_id = str(uuid.uuid4())
-        timestamp = datetime.now(timezone.utc)
+        if not performance_metrics:
+            raise ValueError("Performance metrics cannot be empty")
         
-        # Perform baseline comparison and variance analysis
-        baseline_comparison = self._perform_baseline_comparison(data_type, performance_data)
-        variance_analysis = self._calculate_variance_analysis(performance_data, baseline_comparison)
+        # Calculate variance if baseline comparison available
+        variance_percentage = None
+        if baseline_comparison and "summary" in baseline_comparison:
+            summary = baseline_comparison["summary"]
+            if "compliance_percentage" in summary:
+                # Convert compliance to variance (100% compliance = 0% variance)
+                compliance_pct = summary["compliance_percentage"]
+                variance_percentage = max(0, 100 - compliance_pct)
         
-        # Create historical data record
-        record = HistoricalDataRecord(
-            record_id=record_id,
-            timestamp=timestamp,
-            data_type=data_type,
-            performance_data=performance_data,
-            baseline_comparison=baseline_comparison,
-            variance_analysis=variance_analysis,
-            test_environment=test_environment,
-            test_configuration=test_configuration,
-            data_classification=classification,
-            retention_policy=retention_policy
+        # Create historical data point
+        data_point = HistoricalDataPoint(
+            performance_metrics=performance_metrics,
+            baseline_comparison=baseline_comparison or {},
+            variance_percentage=variance_percentage,
+            test_scenario=test_scenario,
+            environment=environment,
+            flask_version=self.performance_config.get("flask_version", "2.3.0"),
+            python_version=self.performance_config.get("python_version", "3.11")
         )
         
-        # Store record to disk
-        self._persist_record(record)
+        # Apply compression if enabled
+        compressed_data = None
+        if self.enable_compression:
+            policy = self.retention_policies.get(data_point.retention_level)
+            if policy and policy.compression_enabled:
+                compressed_data = data_point.compress_data(policy.compression_type)
         
-        # Update cache
-        with self._cache_lock:
-            self._records_cache[record_id] = record
-        
-        # Log storage event
-        self.logger.info(
-            "Historical performance data stored",
-            record_id=record_id,
-            data_type=data_type,
-            environment=test_environment,
-            classification=classification.value,
-            retention_policy=retention_policy.value
-        )
-        
-        return record_id
-    
-    def _perform_baseline_comparison(
-        self,
-        data_type: str,
-        performance_data: Dict[str, Any]
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Perform baseline comparison against Node.js performance metrics.
-        
-        Args:
-            data_type: Type of performance data
-            performance_data: Current performance metrics
-            
-        Returns:
-            Baseline comparison results or None if no baseline available
-        """
+        # Store in database
         try:
-            if data_type == "response_time" and "endpoint" in performance_data:
-                baseline = self.baseline_manager.get_response_time_baseline(
-                    performance_data["endpoint"],
-                    performance_data.get("method", "GET")
+            with sqlite3.connect(self.database_path) as conn:
+                conn.execute("""
+                    INSERT INTO historical_data (
+                        data_id, timestamp, performance_metrics, baseline_comparison,
+                        variance_percentage, test_scenario, environment, flask_version,
+                        python_version, retention_level, compliance_tags, compression_type,
+                        archival_status, s3_key, data_size_bytes, compressed_size_bytes,
+                        data_hash, validation_status, created_at, compressed_data
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    data_point.data_id,
+                    data_point.timestamp.isoformat(),
+                    json.dumps(data_point.performance_metrics),
+                    json.dumps(data_point.baseline_comparison) if data_point.baseline_comparison else None,
+                    data_point.variance_percentage,
+                    data_point.test_scenario,
+                    data_point.environment,
+                    data_point.flask_version,
+                    data_point.python_version,
+                    data_point.retention_level.value,
+                    json.dumps(data_point.compliance_tags),
+                    data_point.compression_type.value,
+                    data_point.archival_status.value,
+                    data_point.s3_key,
+                    data_point.get_size_estimate(),
+                    data_point.compressed_size_bytes,
+                    data_point.data_hash,
+                    data_point.validation_status,
+                    data_point.timestamp.isoformat(),
+                    compressed_data
+                ))
+                conn.commit()
+            
+            # Update cache
+            with self._cache_lock:
+                if len(self._data_cache) >= self._cache_max_size:
+                    # Remove oldest entry
+                    oldest_key = min(self._data_cache.keys())
+                    del self._data_cache[oldest_key]
+                
+                self._data_cache[data_point.data_id] = data_point
+            
+            # Update Prometheus metrics
+            if PROMETHEUS_AVAILABLE:
+                self.data_points_total.labels(
+                    environment=data_point.environment,
+                    retention_level=data_point.retention_level.value
+                ).inc()
+                
+                self.data_storage_bytes.labels(
+                    compression_type=data_point.compression_type.value
+                ).inc(data_point.get_size_estimate())
+                
+                if compressed_data:
+                    compression_ratio = len(compressed_data) / data_point.get_size_estimate()
+                    self.compression_ratio_gauge.labels(
+                        compression_type=data_point.compression_type.value
+                    ).set(compression_ratio)
+            
+            if STRUCTLOG_AVAILABLE:
+                self.logger.info(
+                    "Stored historical performance data",
+                    data_id=data_point.data_id,
+                    environment=data_point.environment,
+                    retention_level=data_point.retention_level.value,
+                    variance_percentage=data_point.variance_percentage,
+                    compression_enabled=compressed_data is not None
                 )
-                if baseline:
-                    return {
-                        "baseline_mean_ms": baseline.mean_response_time_ms,
-                        "baseline_p95_ms": baseline.p95_response_time_ms,
-                        "baseline_sample_count": baseline.sample_count,
-                        "comparison_timestamp": datetime.now(timezone.utc).isoformat()
-                    }
             
-            elif data_type == "resource_usage":
-                avg_baseline = self.baseline_manager.get_average_resource_utilization()
-                if avg_baseline:
-                    return {
-                        "baseline_cpu_percent": avg_baseline.cpu_utilization_percent,
-                        "baseline_memory_mb": avg_baseline.memory_usage_mb,
-                        "baseline_memory_percent": avg_baseline.memory_utilization_percent,
-                        "comparison_timestamp": datetime.now(timezone.utc).isoformat()
-                    }
-            
-            elif data_type == "throughput":
-                peak_baseline = self.baseline_manager.get_peak_throughput_baseline()
-                if peak_baseline:
-                    return {
-                        "baseline_rps": peak_baseline.requests_per_second,
-                        "baseline_concurrent_users": peak_baseline.concurrent_users,
-                        "baseline_error_rate": peak_baseline.error_rate_percent,
-                        "comparison_timestamp": datetime.now(timezone.utc).isoformat()
-                    }
-            
-            return None
+            return data_point.data_id
             
         except Exception as e:
-            self.logger.warning(f"Baseline comparison failed: {e}")
-            return None
+            error_msg = f"Failed to store historical data: {e}"
+            if STRUCTLOG_AVAILABLE:
+                self.logger.error("Historical data storage failed", error=str(e))
+            raise RuntimeError(error_msg)
     
-    def _calculate_variance_analysis(
+    def retrieve_historical_data(
         self,
-        performance_data: Dict[str, Any],
-        baseline_comparison: Optional[Dict[str, Any]]
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Calculate performance variance analysis against baseline.
-        
-        Args:
-            performance_data: Current performance metrics
-            baseline_comparison: Baseline comparison data
-            
-        Returns:
-            Variance analysis results or None if no baseline available
-        """
-        if not baseline_comparison:
-            return None
-        
-        try:
-            variance_analysis = {
-                "compliance_status": True,
-                "variances": {},
-                "overall_variance": 0.0,
-                "critical_issues": [],
-                "warnings": []
-            }
-            
-            variances = []
-            
-            # Response time variance analysis
-            if "response_time_ms" in performance_data and "baseline_mean_ms" in baseline_comparison:
-                variance = self.baseline_manager.calculate_variance_percentage(
-                    baseline_comparison["baseline_mean_ms"],
-                    performance_data["response_time_ms"]
-                )
-                variances.append(abs(variance))
-                variance_analysis["variances"]["response_time"] = variance
-                
-                if abs(variance) > PERFORMANCE_VARIANCE_THRESHOLD:
-                    variance_analysis["compliance_status"] = False
-                    variance_analysis["critical_issues"].append(
-                        f"Response time variance {variance:.2f}% exceeds {PERFORMANCE_VARIANCE_THRESHOLD}% threshold"
-                    )
-                elif abs(variance) > 5.0:  # Warning threshold
-                    variance_analysis["warnings"].append(
-                        f"Response time variance {variance:.2f}% approaching threshold"
-                    )
-            
-            # CPU utilization variance analysis
-            if "cpu_utilization_percent" in performance_data and "baseline_cpu_percent" in baseline_comparison:
-                variance = self.baseline_manager.calculate_variance_percentage(
-                    baseline_comparison["baseline_cpu_percent"],
-                    performance_data["cpu_utilization_percent"]
-                )
-                variances.append(abs(variance))
-                variance_analysis["variances"]["cpu_utilization"] = variance
-                
-                if abs(variance) > PERFORMANCE_VARIANCE_THRESHOLD:
-                    variance_analysis["compliance_status"] = False
-                    variance_analysis["critical_issues"].append(
-                        f"CPU utilization variance {variance:.2f}% exceeds threshold"
-                    )
-            
-            # Memory usage variance analysis (±15% threshold per specification)
-            if "memory_usage_mb" in performance_data and "baseline_memory_mb" in baseline_comparison:
-                variance = self.baseline_manager.calculate_variance_percentage(
-                    baseline_comparison["baseline_memory_mb"],
-                    performance_data["memory_usage_mb"]
-                )
-                variances.append(abs(variance))
-                variance_analysis["variances"]["memory_usage"] = variance
-                
-                if abs(variance) > MEMORY_VARIANCE_THRESHOLD:
-                    variance_analysis["compliance_status"] = False
-                    variance_analysis["critical_issues"].append(
-                        f"Memory usage variance {variance:.2f}% exceeds {MEMORY_VARIANCE_THRESHOLD}% threshold"
-                    )
-            
-            # Throughput variance analysis
-            if "requests_per_second" in performance_data and "baseline_rps" in baseline_comparison:
-                variance = self.baseline_manager.calculate_variance_percentage(
-                    baseline_comparison["baseline_rps"],
-                    performance_data["requests_per_second"]
-                )
-                variances.append(abs(variance))
-                variance_analysis["variances"]["throughput"] = variance
-                
-                if abs(variance) > PERFORMANCE_VARIANCE_THRESHOLD:
-                    variance_analysis["compliance_status"] = False
-                    variance_analysis["critical_issues"].append(
-                        f"Throughput variance {variance:.2f}% exceeds threshold"
-                    )
-            
-            # Calculate overall variance (average of all variances)
-            if variances:
-                variance_analysis["overall_variance"] = statistics.mean(variances)
-            
-            return variance_analysis
-            
-        except Exception as e:
-            self.logger.warning(f"Variance analysis failed: {e}")
-            return None
-    
-    def _persist_record(self, record: HistoricalDataRecord) -> None:
-        """
-        Persist historical data record to disk storage.
-        
-        Args:
-            record: Historical data record to persist
-        """
-        # Organize by date and data type for efficient retrieval
-        date_str = record.timestamp.strftime("%Y/%m/%d")
-        record_dir = self.storage_path / record.data_type / date_str
-        record_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Save record as JSON file
-        record_file = record_dir / f"{record.record_id}.json"
-        
-        try:
-            with open(record_file, 'w') as f:
-                json.dump(record.to_dict(), f, indent=2)
-        except Exception as e:
-            self.logger.error(f"Failed to persist record {record.record_id}: {e}")
-            raise
-    
-    def retrieve_records(
-        self,
-        data_type: Optional[str] = None,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
         environment: Optional[str] = None,
-        limit: Optional[int] = None
-    ) -> List[HistoricalDataRecord]:
+        retention_level: Optional[DataRetentionLevel] = None,
+        limit: int = 1000,
+        include_archived: bool = False
+    ) -> List[HistoricalDataPoint]:
         """
-        Retrieve historical performance data records with filtering.
+        Retrieve historical performance data with filtering and pagination.
         
         Args:
-            data_type: Filter by data type
-            start_date: Start date for time range filtering
-            end_date: End date for time range filtering
-            environment: Filter by test environment
-            limit: Maximum number of records to return
+            start_date: Start date for data retrieval
+            end_date: End date for data retrieval
+            environment: Filter by environment
+            retention_level: Filter by retention level
+            limit: Maximum number of records to retrieve
+            include_archived: Include archived data in results
             
         Returns:
-            List of historical data records matching criteria
+            List of HistoricalDataPoint instances
         """
-        records = []
+        # Build SQL query with filters
+        query = "SELECT * FROM historical_data WHERE 1=1"
+        params = []
         
-        # Search through storage directory structure
-        for data_type_path in self.storage_path.iterdir():
-            if data_type and data_type_path.name != data_type:
-                continue
+        if start_date:
+            query += " AND timestamp >= ?"
+            params.append(start_date.isoformat())
+        
+        if end_date:
+            query += " AND timestamp <= ?"
+            params.append(end_date.isoformat())
+        
+        if environment:
+            query += " AND environment = ?"
+            params.append(environment)
+        
+        if retention_level:
+            query += " AND retention_level = ?"
+            params.append(retention_level.value)
+        
+        if not include_archived:
+            query += " AND archival_status != 'archived'"
+        
+        query += " ORDER BY timestamp DESC LIMIT ?"
+        params.append(limit)
+        
+        try:
+            with sqlite3.connect(self.database_path) as conn:
+                conn.row_factory = sqlite3.Row  # Enable column access by name
+                cursor = conn.execute(query, params)
+                rows = cursor.fetchall()
             
-            if not data_type_path.is_dir():
-                continue
-            
-            # Traverse date hierarchy
-            for year_path in data_type_path.iterdir():
-                if not year_path.is_dir():
-                    continue
+            # Convert rows to HistoricalDataPoint instances
+            data_points = []
+            for row in rows:
+                # Handle compressed data if present
+                if row['compressed_data'] and row['compression_type'] != 'none':
+                    compression_type = DataCompressionType(row['compression_type'])
+                    data_point = HistoricalDataPoint.decompress_data(
+                        row['compressed_data'], compression_type
+                    )
+                else:
+                    # Reconstruct from individual columns
+                    data_point = HistoricalDataPoint(
+                        data_id=row['data_id'],
+                        timestamp=datetime.fromisoformat(row['timestamp']),
+                        performance_metrics=json.loads(row['performance_metrics']),
+                        baseline_comparison=json.loads(row['baseline_comparison']) if row['baseline_comparison'] else {},
+                        variance_percentage=row['variance_percentage'],
+                        test_scenario=row['test_scenario'],
+                        environment=row['environment'],
+                        flask_version=row['flask_version'],
+                        python_version=row['python_version'],
+                        retention_level=DataRetentionLevel(row['retention_level']),
+                        compliance_tags=json.loads(row['compliance_tags']),
+                        compression_type=DataCompressionType(row['compression_type']),
+                        archival_status=ArchivalStatus(row['archival_status']),
+                        s3_key=row['s3_key'],
+                        data_size_bytes=row['data_size_bytes'],
+                        compressed_size_bytes=row['compressed_size_bytes'],
+                        validation_status=row['validation_status']
+                    )
+                    data_point.data_hash = row['data_hash']
                 
-                for month_path in year_path.iterdir():
-                    if not month_path.is_dir():
-                        continue
-                    
-                    for day_path in month_path.iterdir():
-                        if not day_path.is_dir():
-                            continue
-                        
-                        # Check if date is within range
-                        try:
-                            date_str = f"{year_path.name}/{month_path.name}/{day_path.name}"
-                            record_date = datetime.strptime(date_str, "%Y/%m/%d").replace(tzinfo=timezone.utc)
-                            
-                            if start_date and record_date < start_date:
-                                continue
-                            if end_date and record_date > end_date:
-                                continue
-                        except ValueError:
-                            continue
-                        
-                        # Load records from day directory
-                        for record_file in day_path.glob("*.json"):
-                            try:
-                                with open(record_file, 'r') as f:
-                                    record_data = json.load(f)
-                                    record = HistoricalDataRecord.from_dict(record_data)
-                                    
-                                    # Apply environment filter
-                                    if environment and record.test_environment != environment:
-                                        continue
-                                    
-                                    records.append(record)
-                                    
-                                    # Apply limit
-                                    if limit and len(records) >= limit:
-                                        return sorted(records, key=lambda r: r.timestamp, reverse=True)[:limit]
-                                        
-                            except Exception as e:
-                                self.logger.warning(f"Failed to load record from {record_file}: {e}")
-        
-        # Sort by timestamp (newest first) and apply limit
-        records.sort(key=lambda r: r.timestamp, reverse=True)
-        if limit:
-            records = records[:limit]
-        
-        return records
+                data_points.append(data_point)
+            
+            if STRUCTLOG_AVAILABLE:
+                self.logger.info(
+                    "Retrieved historical performance data",
+                    records_count=len(data_points),
+                    start_date=start_date.isoformat() if start_date else None,
+                    end_date=end_date.isoformat() if end_date else None,
+                    environment=environment,
+                    include_archived=include_archived
+                )
+            
+            return data_points
+            
+        except Exception as e:
+            if STRUCTLOG_AVAILABLE:
+                self.logger.error("Historical data retrieval failed", error=str(e))
+            raise RuntimeError(f"Failed to retrieve historical data: {e}")
     
-    def analyze_performance_trends(
+    def analyze_performance_trend(
         self,
+        analysis_type: TrendAnalysisType,
         metric_name: str,
-        data_type: str,
-        analysis_days: int = 30,
-        environment: Optional[str] = None
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        environment: str = "production"
     ) -> TrendAnalysisResult:
         """
-        Analyze performance trends for continuous optimization per Section 6.5.5.
+        Perform trend analysis on historical performance data.
         
         Args:
+            analysis_type: Type of trend analysis to perform
             metric_name: Name of the performance metric to analyze
-            data_type: Type of performance data to analyze
-            analysis_days: Number of days to include in trend analysis
-            environment: Optional environment filter
+            start_date: Start date for analysis (defaults to 30 days ago)
+            end_date: End date for analysis (defaults to now)
+            environment: Environment to analyze
             
         Returns:
-            Trend analysis result with recommendations
+            TrendAnalysisResult with comprehensive analysis
         """
-        # Calculate analysis period
-        end_date = datetime.now(timezone.utc)
-        start_date = end_date - timedelta(days=analysis_days)
+        # Set default date range
+        if end_date is None:
+            end_date = datetime.now(timezone.utc)
+        if start_date is None:
+            start_date = end_date - timedelta(days=30)
         
-        # Retrieve relevant records
-        records = self.retrieve_records(
-            data_type=data_type,
+        # Retrieve historical data for analysis
+        data_points = self.retrieve_historical_data(
             start_date=start_date,
             end_date=end_date,
-            environment=environment
+            environment=environment,
+            limit=10000  # Large limit for comprehensive analysis
         )
         
-        if len(records) < 2:
-            raise ValueError(f"Insufficient data points for trend analysis: {len(records)}")
-        
-        # Extract metric values and timestamps
+        # Extract metric values
         metric_values = []
         timestamps = []
         
-        for record in records:
-            if metric_name in record.performance_data:
-                metric_values.append(record.performance_data[metric_name])
-                timestamps.append(record.timestamp)
+        for data_point in data_points:
+            if metric_name in data_point.performance_metrics:
+                metric_values.append(data_point.performance_metrics[metric_name])
+                timestamps.append(data_point.timestamp)
         
         if len(metric_values) < 2:
-            raise ValueError(f"Insufficient metric data points for {metric_name}: {len(metric_values)}")
+            raise ValueError(f"Insufficient data points for trend analysis: {len(metric_values)}")
         
-        # Sort by timestamp for trend analysis
-        sorted_data = sorted(zip(timestamps, metric_values), key=lambda x: x[0])
-        timestamps, metric_values = zip(*sorted_data)
+        # Perform statistical analysis
+        mean_value = statistics.mean(metric_values)
+        median_value = statistics.median(metric_values)
+        std_deviation = statistics.stdev(metric_values) if len(metric_values) > 1 else 0.0
+        min_value = min(metric_values)
+        max_value = max(metric_values)
         
-        # Calculate statistical summary
-        statistical_summary = {
-            'count': len(metric_values),
-            'mean': statistics.mean(metric_values),
-            'median': statistics.median(metric_values),
-            'std_dev': statistics.stdev(metric_values) if len(metric_values) > 1 else 0.0,
-            'min': min(metric_values),
-            'max': max(metric_values),
-            'range': max(metric_values) - min(metric_values)
-        }
+        # Calculate trend direction and magnitude
+        trend_direction, trend_magnitude = self._calculate_trend(metric_values, timestamps)
         
-        # Calculate trend direction and percentage
-        first_value = metric_values[0]
-        last_value = metric_values[-1]
-        trend_percentage = ((last_value - first_value) / first_value) * 100 if first_value != 0 else 0.0
+        # Create analysis result
+        result = TrendAnalysisResult(
+            analysis_type=analysis_type,
+            start_date=start_date,
+            end_date=end_date,
+            trend_direction=trend_direction,
+            trend_magnitude=trend_magnitude,
+            confidence_level=0.95,  # TODO: Calculate actual confidence interval
+            data_points_count=len(metric_values),
+            mean_value=mean_value,
+            median_value=median_value,
+            std_deviation=std_deviation,
+            min_value=min_value,
+            max_value=max_value
+        )
         
-        # Determine trend direction
-        if abs(trend_percentage) < 2.0:  # Within 2% considered stable
-            trend_direction = "stable"
-        elif trend_percentage > 0:
-            # For response time, CPU, memory: positive = degrading
-            # For throughput: positive = improving
-            if metric_name in ['response_time_ms', 'cpu_utilization_percent', 'memory_usage_mb']:
-                trend_direction = "degrading"
-            else:
-                trend_direction = "improving"
-        else:
-            # For response time, CPU, memory: negative = improving
-            # For throughput: negative = degrading
-            if metric_name in ['response_time_ms', 'cpu_utilization_percent', 'memory_usage_mb']:
-                trend_direction = "improving"
-            else:
-                trend_direction = "degrading"
-        
-        # Calculate confidence level based on data consistency
-        if len(metric_values) >= 10:
-            cv = statistical_summary['std_dev'] / statistical_summary['mean'] if statistical_summary['mean'] != 0 else 0
-            confidence_level = max(0.5, 1.0 - cv)  # Higher confidence with lower coefficient of variation
-        else:
-            confidence_level = 0.6  # Lower confidence with limited data
-        
-        # Calculate variance from baseline if available
-        variance_from_baseline = None
-        latest_record = records[0]  # Records are sorted newest first
-        if latest_record.variance_analysis and metric_name in latest_record.variance_analysis.get('variances', {}):
-            variance_from_baseline = latest_record.variance_analysis['variances'][metric_name]
+        # Analyze specific trend patterns
+        if analysis_type == TrendAnalysisType.PERFORMANCE_VARIANCE:
+            self._analyze_variance_trend(result, data_points)
+        elif analysis_type == TrendAnalysisType.RESPONSE_TIME_TREND:
+            self._analyze_response_time_trend(result, metric_values, timestamps)
+        elif analysis_type == TrendAnalysisType.BASELINE_DRIFT:
+            self._analyze_baseline_drift(result, data_points, metric_name)
+        elif analysis_type == TrendAnalysisType.SEASONAL_PATTERNS:
+            self._analyze_seasonal_patterns(result, metric_values, timestamps)
+        elif analysis_type == TrendAnalysisType.REGRESSION_DETECTION:
+            self._analyze_performance_regression(result, metric_values, timestamps)
         
         # Generate recommendations
-        recommendations = self._generate_trend_recommendations(
-            metric_name, trend_direction, trend_percentage, variance_from_baseline
-        )
+        self._generate_trend_recommendations(result, analysis_type, metric_name)
         
-        # Check compliance status
-        compliance_status = True
-        if variance_from_baseline is not None:
-            threshold = MEMORY_VARIANCE_THRESHOLD if 'memory' in metric_name.lower() else PERFORMANCE_VARIANCE_THRESHOLD
-            compliance_status = abs(variance_from_baseline) <= threshold
+        # Store analysis result
+        self._store_trend_analysis(result)
         
-        return TrendAnalysisResult(
-            metric_name=metric_name,
-            analysis_period=(start_date, end_date),
-            trend_direction=trend_direction,
-            trend_percentage=trend_percentage,
-            confidence_level=confidence_level,
-            data_points=len(metric_values),
-            statistical_summary=statistical_summary,
-            variance_from_baseline=variance_from_baseline,
-            recommendations=recommendations,
-            compliance_status=compliance_status
-        )
+        # Update Prometheus metrics
+        if PROMETHEUS_AVAILABLE:
+            self.trend_analysis_total.labels(
+                analysis_type=analysis_type.value,
+                trend_direction=trend_direction
+            ).inc()
+        
+        if STRUCTLOG_AVAILABLE:
+            self.logger.info(
+                "Completed trend analysis",
+                analysis_type=analysis_type.value,
+                metric_name=metric_name,
+                trend_direction=trend_direction,
+                trend_magnitude=trend_magnitude,
+                data_points_count=len(metric_values),
+                action_required=result.action_required
+            )
+        
+        return result
     
-    def _generate_trend_recommendations(
-        self,
-        metric_name: str,
-        trend_direction: str,
-        trend_percentage: float,
-        variance_from_baseline: Optional[float]
-    ) -> List[str]:
+    def _calculate_trend(self, values: List[float], timestamps: List[datetime]) -> Tuple[str, float]:
+        """Calculate trend direction and magnitude using linear regression."""
+        if len(values) < 2:
+            return "stable", 0.0
+        
+        # Convert timestamps to numeric values (seconds since first timestamp)
+        base_time = timestamps[0]
+        x_values = [(ts - base_time).total_seconds() for ts in timestamps]
+        
+        # Calculate linear regression
+        n = len(values)
+        sum_x = sum(x_values)
+        sum_y = sum(values)
+        sum_xy = sum(x * y for x, y in zip(x_values, values))
+        sum_x2 = sum(x * x for x in x_values)
+        
+        # Calculate slope
+        denominator = n * sum_x2 - sum_x * sum_x
+        if denominator == 0:
+            return "stable", 0.0
+        
+        slope = (n * sum_xy - sum_x * sum_y) / denominator
+        
+        # Calculate magnitude as percentage change over time period
+        time_span_seconds = x_values[-1] - x_values[0]
+        if time_span_seconds == 0:
+            return "stable", 0.0
+        
+        total_change = slope * time_span_seconds
+        base_value = statistics.mean(values)
+        
+        if base_value == 0:
+            magnitude = 0.0
+        else:
+            magnitude = abs(total_change / base_value) * 100
+        
+        # Determine trend direction
+        if slope > 0.01:  # Threshold for detecting improvement/degradation
+            if metric_name in ["error_rate", "response_time"]:
+                direction = "degrading"  # Higher is worse for these metrics
+            else:
+                direction = "improving"  # Higher is better for throughput, etc.
+        elif slope < -0.01:
+            if metric_name in ["error_rate", "response_time"]:
+                direction = "improving"  # Lower is better for these metrics
+            else:
+                direction = "degrading"  # Lower is worse for throughput, etc.
+        else:
+            direction = "stable"
+        
+        return direction, magnitude
+    
+    def _analyze_variance_trend(self, result: TrendAnalysisResult, data_points: List[HistoricalDataPoint]) -> None:
+        """Analyze performance variance trend against ≤10% threshold."""
+        variance_violations = []
+        recent_violations = 0
+        
+        # Count variance violations over time
+        for data_point in data_points:
+            if data_point.variance_percentage is not None:
+                if abs(data_point.variance_percentage) > 10.0:
+                    variance_violations.append({
+                        "timestamp": data_point.timestamp.isoformat(),
+                        "variance": data_point.variance_percentage,
+                        "environment": data_point.environment
+                    })
+                    
+                    # Count recent violations (last 7 days)
+                    if data_point.timestamp > datetime.now(timezone.utc) - timedelta(days=7):
+                        recent_violations += 1
+        
+        result.trend_metrics["variance_violations_total"] = len(variance_violations)
+        result.trend_metrics["recent_violations"] = recent_violations
+        result.trend_metrics["violation_rate"] = len(variance_violations) / len(data_points) if data_points else 0
+        
+        # Set action required if recent violations exceed threshold
+        if recent_violations > 2:
+            result.action_required = True
+            result.priority_level = "high"
+            result.add_recommendation(
+                f"Performance variance violations detected: {recent_violations} in last 7 days", 
+                "high"
+            )
+        
+        result.anomalies_detected = variance_violations
+    
+    def _analyze_response_time_trend(self, result: TrendAnalysisResult, values: List[float], timestamps: List[datetime]) -> None:
+        """Analyze response time trend patterns."""
+        # Calculate percentiles
+        sorted_values = sorted(values)
+        n = len(sorted_values)
+        
+        p50 = sorted_values[n // 2]
+        p95 = sorted_values[int(n * 0.95)]
+        p99 = sorted_values[int(n * 0.99)]
+        
+        result.trend_metrics["response_time_p50"] = p50
+        result.trend_metrics["response_time_p95"] = p95
+        result.trend_metrics["response_time_p99"] = p99
+        
+        # Check against thresholds
+        if p95 > 500.0:  # Section 4.6.3 threshold
+            result.action_required = True
+            result.priority_level = "high"
+            result.add_recommendation(
+                f"95th percentile response time ({p95:.1f}ms) exceeds 500ms threshold",
+                "high"
+            )
+        
+        # Detect spikes
+        mean_val = result.mean_value
+        std_val = result.std_deviation
+        threshold = mean_val + (3 * std_val)
+        
+        spikes = []
+        for i, (value, timestamp) in enumerate(zip(values, timestamps)):
+            if value > threshold:
+                spikes.append({
+                    "timestamp": timestamp.isoformat(),
+                    "value": value,
+                    "deviation": (value - mean_val) / std_val
+                })
+        
+        result.trend_metrics["response_time_spikes"] = len(spikes)
+        if spikes:
+            result.anomalies_detected.extend(spikes[:10])  # Limit to top 10 spikes
+    
+    def _analyze_baseline_drift(self, result: TrendAnalysisResult, data_points: List[HistoricalDataPoint], metric_name: str) -> None:
+        """Analyze drift from Node.js baseline over time."""
+        baseline = get_nodejs_baseline()
+        
+        try:
+            baseline_threshold = baseline.get_performance_threshold(metric_name)
+            baseline_value = baseline_threshold.baseline_value
+        except KeyError:
+            result.add_recommendation(f"No baseline available for metric: {metric_name}", "low")
+            return
+        
+        # Calculate drift over time
+        drift_values = []
+        for data_point in data_points:
+            if metric_name in data_point.performance_metrics:
+                current_value = data_point.performance_metrics[metric_name]
+                drift = ((current_value - baseline_value) / baseline_value) * 100
+                drift_values.append(drift)
+        
+        if drift_values:
+            avg_drift = statistics.mean(drift_values)
+            max_drift = max(drift_values)
+            min_drift = min(drift_values)
+            
+            result.trend_metrics["baseline_drift_average"] = avg_drift
+            result.trend_metrics["baseline_drift_max"] = max_drift
+            result.trend_metrics["baseline_drift_min"] = min_drift
+            result.trend_metrics["baseline_value"] = baseline_value
+            
+            # Check for significant drift
+            if abs(avg_drift) > 5.0:  # 5% drift threshold
+                result.action_required = True
+                result.priority_level = "medium"
+                result.add_recommendation(
+                    f"Baseline drift detected: {avg_drift:.1f}% average drift from Node.js baseline",
+                    "medium"
+                )
+    
+    def _analyze_seasonal_patterns(self, result: TrendAnalysisResult, values: List[float], timestamps: List[datetime]) -> None:
+        """Analyze seasonal patterns in performance data."""
+        if len(values) < 24:  # Need at least 24 data points for pattern analysis
+            return
+        
+        # Group by hour of day
+        hourly_patterns = defaultdict(list)
+        for value, timestamp in zip(values, timestamps):
+            hour = timestamp.hour
+            hourly_patterns[hour].append(value)
+        
+        # Calculate average by hour
+        hourly_averages = {}
+        for hour, values_for_hour in hourly_patterns.items():
+            if values_for_hour:
+                hourly_averages[hour] = statistics.mean(values_for_hour)
+        
+        if hourly_averages:
+            peak_hour = max(hourly_averages, key=hourly_averages.get)
+            peak_value = hourly_averages[peak_hour]
+            low_hour = min(hourly_averages, key=hourly_averages.get)
+            low_value = hourly_averages[low_hour]
+            
+            result.seasonal_patterns["hourly_patterns"] = hourly_averages
+            result.seasonal_patterns["peak_hour"] = peak_hour
+            result.seasonal_patterns["peak_value"] = peak_value
+            result.seasonal_patterns["low_hour"] = low_hour
+            result.seasonal_patterns["low_value"] = low_value
+            result.seasonal_patterns["daily_variation"] = ((peak_value - low_value) / low_value) * 100
+    
+    def _analyze_performance_regression(self, result: TrendAnalysisResult, values: List[float], timestamps: List[datetime]) -> None:
+        """Analyze for performance regressions."""
+        if len(values) < 10:
+            return
+        
+        # Split data into two halves for comparison
+        mid_point = len(values) // 2
+        first_half = values[:mid_point]
+        second_half = values[mid_point:]
+        
+        first_avg = statistics.mean(first_half)
+        second_avg = statistics.mean(second_half)
+        
+        # Calculate regression percentage
+        if first_avg != 0:
+            regression_pct = ((second_avg - first_avg) / first_avg) * 100
+            
+            result.trend_metrics["regression_percentage"] = regression_pct
+            result.trend_metrics["first_period_average"] = first_avg
+            result.trend_metrics["second_period_average"] = second_avg
+            
+            # Determine if regression is significant
+            threshold = 5.0  # 5% regression threshold
+            if abs(regression_pct) > threshold:
+                if regression_pct > 0 and metric_name in ["error_rate", "response_time"]:
+                    # Performance degraded
+                    result.action_required = True
+                    result.priority_level = "high"
+                    result.add_recommendation(
+                        f"Performance regression detected: {regression_pct:.1f}% degradation",
+                        "high"
+                    )
+                elif regression_pct < 0 and metric_name in ["throughput"]:
+                    # Throughput decreased
+                    result.action_required = True
+                    result.priority_level = "medium"
+                    result.add_recommendation(
+                        f"Throughput regression detected: {abs(regression_pct):.1f}% decrease",
+                        "medium"
+                    )
+    
+    def _generate_trend_recommendations(self, result: TrendAnalysisResult, analysis_type: TrendAnalysisType, metric_name: str) -> None:
+        """Generate actionable recommendations based on trend analysis."""
+        # General recommendations based on trend direction
+        if result.trend_direction == "degrading":
+            if analysis_type == TrendAnalysisType.RESPONSE_TIME_TREND:
+                result.add_recommendation("Consider optimizing database queries and caching strategies", "medium")
+                result.add_recommendation("Review recent deployments for performance regressions", "medium")
+            elif analysis_type == TrendAnalysisType.THROUGHPUT_TREND:
+                result.add_recommendation("Investigate resource constraints and scaling requirements", "medium")
+                result.add_recommendation("Analyze bottlenecks in request processing pipeline", "medium")
+        
+        elif result.trend_direction == "improving":
+            result.add_recommendation("Document recent optimizations for knowledge sharing", "low")
+            result.add_recommendation("Consider updating baseline metrics if improvement is sustained", "low")
+        
+        # Specific recommendations based on variance
+        if result.trend_metrics.get("variance_violations_total", 0) > 0:
+            result.add_recommendation("Review ≤10% variance compliance and optimization opportunities", "high")
+        
+        # Recommendations based on statistical analysis
+        if result.std_deviation > result.mean_value * 0.5:  # High variability
+            result.add_recommendation("High performance variability detected - investigate consistency issues", "medium")
+        
+        # Seasonal pattern recommendations
+        if result.seasonal_patterns:
+            daily_variation = result.seasonal_patterns.get("daily_variation", 0)
+            if daily_variation > 20:  # >20% variation throughout the day
+                result.add_recommendation("Consider implementing time-based auto-scaling for daily patterns", "low")
+    
+    def _store_trend_analysis(self, result: TrendAnalysisResult) -> None:
+        """Store trend analysis result in database."""
+        try:
+            with sqlite3.connect(self.database_path) as conn:
+                conn.execute("""
+                    INSERT INTO trend_analysis (
+                        analysis_id, analysis_type, analysis_timestamp, start_date, end_date,
+                        trend_direction, trend_magnitude, confidence_level, data_points_count,
+                        mean_value, median_value, std_deviation, min_value, max_value,
+                        trend_metrics, seasonal_patterns, anomalies_detected, recommendations,
+                        action_required, priority_level
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    result.analysis_id,
+                    result.analysis_type.value,
+                    result.analysis_timestamp.isoformat(),
+                    result.start_date.isoformat(),
+                    result.end_date.isoformat(),
+                    result.trend_direction,
+                    result.trend_magnitude,
+                    result.confidence_level,
+                    result.data_points_count,
+                    result.mean_value,
+                    result.median_value,
+                    result.std_deviation,
+                    result.min_value,
+                    result.max_value,
+                    json.dumps(result.trend_metrics),
+                    json.dumps(result.seasonal_patterns),
+                    json.dumps(result.anomalies_detected),
+                    json.dumps(result.recommendations),
+                    1 if result.action_required else 0,
+                    result.priority_level
+                ))
+                conn.commit()
+        except Exception as e:
+            if STRUCTLOG_AVAILABLE:
+                self.logger.error("Failed to store trend analysis", error=str(e))
+    
+    def archive_historical_data(self, data_point_ids: List[str]) -> Dict[str, str]:
         """
-        Generate optimization recommendations based on trend analysis.
+        Archive historical data points to AWS S3 per Section 8.6.5.
         
         Args:
-            metric_name: Name of the performance metric
-            trend_direction: Trend direction ('improving', 'degrading', 'stable')
-            trend_percentage: Trend percentage change
-            variance_from_baseline: Variance from Node.js baseline
+            data_point_ids: List of data point IDs to archive
             
         Returns:
-            List of optimization recommendations
+            Dictionary mapping data point IDs to archival status
         """
-        recommendations = []
+        if not self.s3_client:
+            raise RuntimeError("AWS S3 client not available for archival")
         
-        # Response time recommendations
-        if metric_name == 'response_time_ms':
-            if trend_direction == 'degrading':
-                recommendations.extend([
-                    "Response time is degrading - investigate performance bottlenecks",
-                    "Consider optimizing database queries and connection pooling",
-                    "Review Flask middleware stack for performance overhead",
-                    "Analyze memory usage patterns and garbage collection impact"
-                ])
-            elif trend_direction == 'stable' and variance_from_baseline and abs(variance_from_baseline) > 5:
-                recommendations.append("Response time stable but variance exceeds 5% - monitor closely")
-            elif trend_direction == 'improving':
-                recommendations.append("Response time improving - continue current optimization strategy")
+        archival_results = {}
         
-        # CPU utilization recommendations
-        elif metric_name == 'cpu_utilization_percent':
-            if trend_direction == 'degrading':
-                recommendations.extend([
-                    "CPU utilization increasing - investigate computational bottlenecks",
-                    "Consider horizontal scaling or worker pool optimization",
-                    "Review business logic efficiency and algorithmic complexity",
-                    "Analyze concurrency patterns and thread contention"
-                ])
-            elif trend_percentage > 50:  # High CPU usage
-                recommendations.extend([
-                    "High CPU utilization detected - immediate optimization required",
-                    "Consider load balancing and horizontal scaling",
-                    "Profile CPU-intensive operations for optimization opportunities"
-                ])
-        
-        # Memory usage recommendations
-        elif metric_name == 'memory_usage_mb':
-            if trend_direction == 'degrading':
-                recommendations.extend([
-                    "Memory usage increasing - investigate memory leaks",
-                    "Review object lifecycle management and garbage collection",
-                    "Optimize data structures and caching strategies",
-                    "Consider memory profiling and heap analysis"
-                ])
-            elif variance_from_baseline and abs(variance_from_baseline) > MEMORY_VARIANCE_THRESHOLD:
-                recommendations.append("Memory usage variance exceeds ±15% threshold - immediate investigation required")
-        
-        # Throughput recommendations
-        elif metric_name == 'requests_per_second':
-            if trend_direction == 'degrading':
-                recommendations.extend([
-                    "Throughput decreasing - investigate performance degradation",
-                    "Review connection pooling and resource utilization",
-                    "Consider scaling strategies and load balancing optimization",
-                    "Analyze request processing pipeline for bottlenecks"
-                ])
-            elif trend_direction == 'improving':
-                recommendations.append("Throughput improving - continue optimization efforts")
-        
-        # Compliance and variance recommendations
-        if variance_from_baseline is not None:
-            threshold = MEMORY_VARIANCE_THRESHOLD if 'memory' in metric_name.lower() else PERFORMANCE_VARIANCE_THRESHOLD
-            if abs(variance_from_baseline) > threshold:
-                recommendations.insert(0, f"CRITICAL: {metric_name} variance {variance_from_baseline:.2f}% exceeds {threshold}% threshold")
-                recommendations.append("Consider reverting to Node.js baseline until performance issues resolved")
-            elif abs(variance_from_baseline) > 5:
-                recommendations.append("Performance variance approaching critical threshold - proactive optimization recommended")
-        
-        # General recommendations if no specific ones generated
-        if not recommendations:
-            recommendations.append(f"{metric_name} performance is {trend_direction} - continue monitoring")
-        
-        return recommendations
-    
-    def compress_historical_data(
-        self,
-        days_old: int = 30,
-        batch_size: int = 100
-    ) -> Dict[str, Any]:
-        """
-        Compress historical data for storage optimization per Section 6.5.5.
-        
-        Args:
-            days_old: Compress data older than specified days
-            batch_size: Number of records to process in each batch
-            
-        Returns:
-            Compression summary with statistics
-        """
-        compression_summary = {
-            'files_processed': 0,
-            'files_compressed': 0,
-            'original_size_mb': 0.0,
-            'compressed_size_mb': 0.0,
-            'compression_ratio': 0.0,
-            'errors': []
-        }
-        
-        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days_old)
-        
-        # Find files eligible for compression
-        files_to_compress = []
-        for data_type_path in self.storage_path.iterdir():
-            if not data_type_path.is_dir():
-                continue
-            
-            for root, dirs, files in os.walk(data_type_path):
-                root_path = Path(root)
-                for file in files:
-                    if file.endswith('.json'):
-                        file_path = root_path / file
-                        
-                        # Check file modification time
-                        try:
-                            mtime = datetime.fromtimestamp(file_path.stat().st_mtime, tz=timezone.utc)
-                            if mtime < cutoff_date:
-                                files_to_compress.append(file_path)
-                        except Exception as e:
-                            compression_summary['errors'].append(f"Error checking {file_path}: {e}")
-        
-        # Process files in batches
-        processed_files = 0
-        for i in range(0, len(files_to_compress), batch_size):
-            batch = files_to_compress[i:i + batch_size]
-            
-            for file_path in batch:
-                try:
-                    original_size = file_path.stat().st_size
-                    compression_summary['original_size_mb'] += original_size / (1024 * 1024)
-                    
-                    # Compress file
-                    compressed_path = file_path.with_suffix('.json.gz')
-                    
-                    with open(file_path, 'rb') as f_in:
-                        with gzip.open(compressed_path, 'wb') as f_out:
-                            shutil.copyfileobj(f_in, f_out)
-                    
-                    compressed_size = compressed_path.stat().st_size
-                    compression_summary['compressed_size_mb'] += compressed_size / (1024 * 1024)
-                    
-                    # Remove original file
-                    file_path.unlink()
-                    
-                    compression_summary['files_compressed'] += 1
-                    
-                except Exception as e:
-                    compression_summary['errors'].append(f"Error compressing {file_path}: {e}")
+        for data_id in data_point_ids:
+            try:
+                start_time = datetime.now()
                 
-                compression_summary['files_processed'] += 1
-            
-            processed_files += len(batch)
-            
-            # Log progress
-            if processed_files % (batch_size * 10) == 0:
-                self.logger.info(f"Compression progress: {processed_files}/{len(files_to_compress)} files processed")
-        
-        # Calculate compression ratio
-        if compression_summary['original_size_mb'] > 0:
-            compression_summary['compression_ratio'] = (
-                1 - compression_summary['compressed_size_mb'] / compression_summary['original_size_mb']
-            ) * 100
-        
-        self.logger.info(
-            "Data compression completed",
-            files_processed=compression_summary['files_processed'],
-            files_compressed=compression_summary['files_compressed'],
-            compression_ratio=f"{compression_summary['compression_ratio']:.2f}%",
-            errors=len(compression_summary['errors'])
-        )
-        
-        return compression_summary
-    
-    def archive_to_s3(
-        self,
-        retention_days: int = ACTIVE_RETENTION_DAYS,
-        storage_class: str = "STANDARD_IA"
-    ) -> Dict[str, Any]:
-        """
-        Archive historical data to AWS S3 per Section 8.6.5 archival policies.
-        
-        Args:
-            retention_days: Archive data older than specified days
-            storage_class: S3 storage class for archived data
-            
-        Returns:
-            Archive operation summary
-        """
-        if not self.enable_archival or not self.s3_client:
-            raise ValueError("S3 archival not enabled or configured")
-        
-        archive_summary = {
-            'archives_created': 0,
-            'files_archived': 0,
-            'total_size_mb': 0.0,
-            'errors': []
-        }
-        
-        cutoff_date = datetime.now(timezone.utc) - timedelta(days=retention_days)
-        
-        # Group files by data type and month for efficient archiving
-        archive_groups = defaultdict(list)
-        
-        for data_type_path in self.storage_path.iterdir():
-            if not data_type_path.is_dir():
-                continue
-            
-            for year_path in data_type_path.iterdir():
-                if not year_path.is_dir():
+                # Retrieve data point
+                with sqlite3.connect(self.database_path) as conn:
+                    conn.row_factory = sqlite3.Row
+                    cursor = conn.execute(
+                        "SELECT * FROM historical_data WHERE data_id = ?",
+                        (data_id,)
+                    )
+                    row = cursor.fetchone()
+                
+                if not row:
+                    archival_results[data_id] = "not_found"
                     continue
                 
-                for month_path in year_path.iterdir():
-                    if not month_path.is_dir():
-                        continue
-                    
-                    # Check if month is older than retention period
-                    try:
-                        month_date = datetime.strptime(f"{year_path.name}/{month_path.name}/01", "%Y/%m/%d")
-                        month_date = month_date.replace(tzinfo=timezone.utc)
-                        
-                        if month_date < cutoff_date:
-                            archive_key = f"{data_type_path.name}/{year_path.name}/{month_path.name}"
-                            archive_groups[archive_key].append(month_path)
-                    except ValueError:
-                        continue
-        
-        # Create archives for each group
-        for archive_key, paths in archive_groups.items():
-            try:
-                archive_id = str(uuid.uuid4())
-                s3_key = f"performance-archives/{archive_key}/{archive_id}.tar.gz"
+                # Generate S3 key
+                timestamp = datetime.fromisoformat(row['timestamp'])
+                s3_key = f"performance-data/{timestamp.year}/{timestamp.month:02d}/{timestamp.day:02d}/{data_id}.json.gz"
                 
-                # Create compressed archive
-                temp_archive = tempfile.NamedTemporaryFile(suffix='.tar.gz', delete=False)
-                temp_archive.close()
-                
-                total_files = 0
-                total_size = 0
-                
-                # Create tar.gz archive
-                import tarfile
-                with tarfile.open(temp_archive.name, 'w:gz') as tar:
-                    for path in paths:
-                        for file_path in path.rglob('*'):
-                            if file_path.is_file():
-                                tar.add(file_path, arcname=file_path.relative_to(self.storage_path))
-                                total_files += 1
-                                total_size += file_path.stat().st_size
+                # Prepare data for archival
+                if row['compressed_data']:
+                    # Use already compressed data
+                    compressed_data = row['compressed_data']
+                else:
+                    # Compress data for archival
+                    data_dict = {
+                        col: row[col] for col in row.keys()
+                    }
+                    data_dict.pop('compressed_data', None)  # Remove blob field
+                    json_data = json.dumps(data_dict, default=str)
+                    compressed_data = gzip.compress(json_data.encode('utf-8'))
                 
                 # Upload to S3
-                compressed_size = Path(temp_archive.name).stat().st_size
+                self.s3_client.put_object(
+                    Bucket=self.s3_bucket,
+                    Key=s3_key,
+                    Body=compressed_data,
+                    ContentType='application/gzip',
+                    Metadata={
+                        'data_id': data_id,
+                        'environment': row['environment'],
+                        'retention_level': row['retention_level'],
+                        'archived_at': datetime.now(timezone.utc).isoformat()
+                    }
+                )
                 
-                with open(temp_archive.name, 'rb') as f:
-                    self.s3_client.upload_fileobj(
-                        f,
-                        self.aws_s3_bucket,
+                # Update database record
+                with sqlite3.connect(self.database_path) as conn:
+                    conn.execute("""
+                        UPDATE historical_data 
+                        SET archival_status = ?, s3_key = ?, archived_at = ?
+                        WHERE data_id = ?
+                    """, (
+                        ArchivalStatus.ARCHIVED.value,
                         s3_key,
-                        ExtraArgs={'StorageClass': storage_class}
+                        datetime.now(timezone.utc).isoformat(),
+                        data_id
+                    ))
+                    conn.commit()
+                
+                archival_results[data_id] = "archived"
+                
+                # Update Prometheus metrics
+                if PROMETHEUS_AVAILABLE:
+                    duration = (datetime.now() - start_time).total_seconds()
+                    self.archival_duration_seconds.labels(operation_type="s3_upload").observe(duration)
+                    self.archival_operations_total.labels(status="success", destination="s3").inc()
+                
+                if STRUCTLOG_AVAILABLE:
+                    self.logger.info(
+                        "Archived historical data to S3",
+                        data_id=data_id,
+                        s3_key=s3_key,
+                        bucket=self.s3_bucket
                     )
                 
-                # Create archive metadata
-                archive_metadata = ArchiveMetadata(
-                    archive_id=archive_id,
-                    original_path=archive_key,
-                    s3_bucket=self.aws_s3_bucket,
-                    s3_key=s3_key,
-                    archive_timestamp=datetime.now(timezone.utc),
-                    compressed_size=compressed_size,
-                    original_size=total_size,
-                    compression_ratio=0.0,  # Will be calculated in __post_init__
-                    record_count=total_files,
-                    checksum=self._calculate_archive_checksum(temp_archive.name),
-                    retention_until=datetime.now(timezone.utc) + timedelta(days=365 * 7),  # 7 years
-                    access_tier=storage_class
-                )
-                
-                self.archive_metadata[archive_id] = archive_metadata
-                
-                # Remove local files after successful upload
-                for path in paths:
-                    shutil.rmtree(path)
-                
-                # Cleanup temporary file
-                Path(temp_archive.name).unlink()
-                
-                archive_summary['archives_created'] += 1
-                archive_summary['files_archived'] += total_files
-                archive_summary['total_size_mb'] += total_size / (1024 * 1024)
-                
-                self.logger.info(
-                    "Archive created and uploaded to S3",
-                    archive_id=archive_id,
-                    s3_key=s3_key,
-                    files_archived=total_files,
-                    size_mb=total_size / (1024 * 1024)
-                )
-                
             except Exception as e:
-                error_msg = f"Failed to archive {archive_key}: {e}"
-                archive_summary['errors'].append(error_msg)
-                self.logger.error(error_msg)
-        
-        # Save updated archive metadata
-        self._save_archive_metadata()
-        
-        return archive_summary
-    
-    def _calculate_archive_checksum(self, archive_path: str) -> str:
-        """Calculate SHA-256 checksum for archive file."""
-        hash_sha256 = hashlib.sha256()
-        with open(archive_path, 'rb') as f:
-            for chunk in iter(lambda: f.read(4096), b""):
-                hash_sha256.update(chunk)
-        return hash_sha256.hexdigest()
-    
-    def cleanup_expired_data(self) -> Dict[str, Any]:
-        """
-        Clean up expired historical data per Section 8.6.5 retention policies.
-        
-        Returns:
-            Cleanup operation summary
-        """
-        cleanup_summary = {
-            'records_processed': 0,
-            'records_deleted': 0,
-            'archives_expired': 0,
-            'disk_space_freed_mb': 0.0,
-            'errors': []
-        }
-        
-        current_time = datetime.now(timezone.utc)
-        
-        # Cleanup expired local records
-        for data_type_path in self.storage_path.iterdir():
-            if not data_type_path.is_dir():
-                continue
-            
-            for file_path in data_type_path.rglob('*.json*'):
-                try:
-                    cleanup_summary['records_processed'] += 1
-                    
-                    # Load record to check retention policy
-                    if file_path.suffix == '.json':
-                        with open(file_path, 'r') as f:
-                            record_data = json.load(f)
-                    elif file_path.suffix == '.gz':
-                        with gzip.open(file_path, 'rt') as f:
-                            record_data = json.load(f)
-                    else:
-                        continue
-                    
-                    record = HistoricalDataRecord.from_dict(record_data)
-                    
-                    if record.is_expired():
-                        file_size = file_path.stat().st_size
-                        file_path.unlink()
-                        cleanup_summary['records_deleted'] += 1
-                        cleanup_summary['disk_space_freed_mb'] += file_size / (1024 * 1024)
-                        
-                except Exception as e:
-                    error_msg = f"Error processing {file_path}: {e}"
-                    cleanup_summary['errors'].append(error_msg)
-        
-        # Cleanup expired S3 archives
-        expired_archives = []
-        for archive_id, metadata in self.archive_metadata.items():
-            if current_time > metadata.retention_until:
-                try:
-                    # Delete from S3
-                    if self.s3_client:
-                        self.s3_client.delete_object(
-                            Bucket=metadata.s3_bucket,
-                            Key=metadata.s3_key
-                        )
-                    
-                    expired_archives.append(archive_id)
-                    cleanup_summary['archives_expired'] += 1
-                    
-                except Exception as e:
-                    error_msg = f"Error deleting archive {archive_id}: {e}"
-                    cleanup_summary['errors'].append(error_msg)
-        
-        # Remove expired archive metadata
-        for archive_id in expired_archives:
-            del self.archive_metadata[archive_id]
-        
-        if expired_archives:
-            self._save_archive_metadata()
-        
-        # Update cleanup timestamp
-        self._last_cleanup = current_time
-        
-        self.logger.info(
-            "Data cleanup completed",
-            records_processed=cleanup_summary['records_processed'],
-            records_deleted=cleanup_summary['records_deleted'],
-            archives_expired=cleanup_summary['archives_expired'],
-            disk_space_freed_mb=cleanup_summary['disk_space_freed_mb'],
-            errors=len(cleanup_summary['errors'])
-        )
-        
-        return cleanup_summary
-    
-    def validate_data_integrity(
-        self,
-        sample_percentage: float = 10.0
-    ) -> Dict[str, Any]:
-        """
-        Validate data integrity using checksum verification per Section 8.6.5.
-        
-        Args:
-            sample_percentage: Percentage of records to validate (1-100)
-            
-        Returns:
-            Data integrity validation summary
-        """
-        validation_summary = {
-            'records_checked': 0,
-            'records_valid': 0,
-            'records_corrupted': 0,
-            'corruption_rate': 0.0,
-            'corrupted_files': [],
-            'errors': []
-        }
-        
-        if not 1 <= sample_percentage <= 100:
-            raise ValueError("Sample percentage must be between 1 and 100")
-        
-        # Collect all record files
-        all_files = []
-        for file_path in self.storage_path.rglob('*.json*'):
-            all_files.append(file_path)
-        
-        # Calculate sample size
-        sample_size = max(1, int(len(all_files) * sample_percentage / 100))
-        
-        # Randomly sample files for validation
-        import random
-        random.seed(42)  # Reproducible sampling
-        sample_files = random.sample(all_files, min(sample_size, len(all_files)))
-        
-        for file_path in sample_files:
-            try:
-                validation_summary['records_checked'] += 1
+                archival_results[data_id] = f"failed: {str(e)}"
                 
-                # Load record
-                if file_path.suffix == '.json':
-                    with open(file_path, 'r') as f:
-                        record_data = json.load(f)
-                elif file_path.suffix == '.gz':
-                    with gzip.open(file_path, 'rt') as f:
-                        record_data = json.load(f)
-                else:
+                if PROMETHEUS_AVAILABLE:
+                    self.archival_operations_total.labels(status="failed", destination="s3").inc()
+                
+                if STRUCTLOG_AVAILABLE:
+                    self.logger.error("Failed to archive historical data", data_id=data_id, error=str(e))
+        
+        return archival_results
+    
+    def _run_automated_cleanup(self) -> None:
+        """Run automated data cleanup based on retention policies."""
+        try:
+            cleanup_summary = {
+                "records_processed": 0,
+                "records_deleted": 0,
+                "records_archived": 0,
+                "storage_freed_bytes": 0
+            }
+            
+            current_time = datetime.now(timezone.utc)
+            
+            for retention_level, policy in self.retention_policies.items():
+                # Find expired records
+                cutoff_date = current_time - timedelta(days=policy.retention_days)
+                
+                with sqlite3.connect(self.database_path) as conn:
+                    # Get expired records
+                    cursor = conn.execute("""
+                        SELECT data_id, data_size_bytes, archival_status
+                        FROM historical_data 
+                        WHERE retention_level = ? AND timestamp < ?
+                    """, (retention_level.value, cutoff_date.isoformat()))
+                    
+                    expired_records = cursor.fetchall()
+                    cleanup_summary["records_processed"] += len(expired_records)
+                
+                # Process expired records
+                for data_id, size_bytes, archival_status in expired_records:
+                    if archival_status == ArchivalStatus.ACTIVE.value and policy.archival_enabled:
+                        # Archive before deletion
+                        try:
+                            result = self.archive_historical_data([data_id])
+                            if result.get(data_id) == "archived":
+                                cleanup_summary["records_archived"] += 1
+                        except Exception as e:
+                            if STRUCTLOG_AVAILABLE:
+                                self.logger.warning("Failed to archive before cleanup", data_id=data_id, error=str(e))
+                    
+                    # Delete expired record
+                    with sqlite3.connect(self.database_path) as conn:
+                        conn.execute("DELETE FROM historical_data WHERE data_id = ?", (data_id,))
+                        conn.commit()
+                    
+                    cleanup_summary["records_deleted"] += 1
+                    cleanup_summary["storage_freed_bytes"] += size_bytes or 0
+            
+            if STRUCTLOG_AVAILABLE:
+                self.logger.info("Automated cleanup completed", **cleanup_summary)
+                
+        except Exception as e:
+            if STRUCTLOG_AVAILABLE:
+                self.logger.error("Automated cleanup failed", error=str(e))
+    
+    def _run_automated_archival(self) -> None:
+        """Run automated archival for eligible records."""
+        try:
+            archival_summary = {
+                "candidates_found": 0,
+                "successfully_archived": 0,
+                "archival_failed": 0
+            }
+            
+            current_time = datetime.now(timezone.utc)
+            
+            # Find records eligible for archival
+            archival_candidates = []
+            
+            for retention_level, policy in self.retention_policies.items():
+                if not policy.archival_enabled:
                     continue
                 
-                record = HistoricalDataRecord.from_dict(record_data)
+                archival_threshold_date = current_time - timedelta(days=policy.archival_threshold_days)
                 
-                # Validate integrity
-                if record.validate_integrity():
-                    validation_summary['records_valid'] += 1
-                else:
-                    validation_summary['records_corrupted'] += 1
-                    validation_summary['corrupted_files'].append(str(file_path))
+                with sqlite3.connect(self.database_path) as conn:
+                    cursor = conn.execute("""
+                        SELECT data_id FROM historical_data 
+                        WHERE retention_level = ? AND timestamp < ? AND archival_status = ?
+                        LIMIT 100
+                    """, (
+                        retention_level.value,
+                        archival_threshold_date.isoformat(),
+                        ArchivalStatus.ACTIVE.value
+                    ))
                     
-                    self.logger.warning(
-                        "Data corruption detected",
-                        file_path=str(file_path),
-                        record_id=record.record_id
-                    )
+                    candidates = [row[0] for row in cursor.fetchall()]
+                    archival_candidates.extend(candidates)
+            
+            archival_summary["candidates_found"] = len(archival_candidates)
+            
+            # Perform archival in batches
+            batch_size = 10
+            for i in range(0, len(archival_candidates), batch_size):
+                batch = archival_candidates[i:i + batch_size]
+                results = self.archive_historical_data(batch)
                 
-            except Exception as e:
-                error_msg = f"Error validating {file_path}: {e}"
-                validation_summary['errors'].append(error_msg)
+                for data_id, status in results.items():
+                    if status == "archived":
+                        archival_summary["successfully_archived"] += 1
+                    else:
+                        archival_summary["archival_failed"] += 1
+            
+            if STRUCTLOG_AVAILABLE:
+                self.logger.info("Automated archival completed", **archival_summary)
+                
+        except Exception as e:
+            if STRUCTLOG_AVAILABLE:
+                self.logger.error("Automated archival failed", error=str(e))
+    
+    def validate_data_integrity(self, data_point_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+        """
+        Validate data integrity for specified or all historical data points.
         
-        # Calculate corruption rate
-        if validation_summary['records_checked'] > 0:
-            validation_summary['corruption_rate'] = (
-                validation_summary['records_corrupted'] / validation_summary['records_checked']
-            ) * 100
+        Args:
+            data_point_ids: Optional list of specific data point IDs to validate
+            
+        Returns:
+            Dictionary containing validation results and statistics
+        """
+        validation_results = {
+            "total_records": 0,
+            "valid_records": 0,
+            "invalid_records": 0,
+            "corrupted_records": 0,
+            "integrity_issues": [],
+            "validation_timestamp": datetime.now(timezone.utc).isoformat()
+        }
         
-        # Update last integrity check timestamp
-        self._last_integrity_check = datetime.now(timezone.utc)
-        
-        self.logger.info(
-            "Data integrity validation completed",
-            records_checked=validation_summary['records_checked'],
-            records_valid=validation_summary['records_valid'],
-            records_corrupted=validation_summary['records_corrupted'],
-            corruption_rate=f"{validation_summary['corruption_rate']:.2f}%"
-        )
-        
-        return validation_summary
+        try:
+            # Build query
+            if data_point_ids:
+                placeholders = ','.join(['?' for _ in data_point_ids])
+                query = f"SELECT * FROM historical_data WHERE data_id IN ({placeholders})"
+                params = data_point_ids
+            else:
+                query = "SELECT * FROM historical_data ORDER BY timestamp DESC LIMIT 1000"
+                params = []
+            
+            with sqlite3.connect(self.database_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute(query, params)
+                
+                for row in cursor:
+                    validation_results["total_records"] += 1
+                    data_id = row['data_id']
+                    
+                    try:
+                        # Validate data hash if available
+                        if row['data_hash']:
+                            # Reconstruct data for hash validation
+                            hash_data = {
+                                "timestamp": row['timestamp'],
+                                "performance_metrics": json.loads(row['performance_metrics']),
+                                "baseline_comparison": json.loads(row['baseline_comparison']) if row['baseline_comparison'] else {},
+                                "test_scenario": row['test_scenario'],
+                                "environment": row['environment']
+                            }
+                            
+                            expected_hash = hashlib.sha256(
+                                json.dumps(hash_data, sort_keys=True, separators=(',', ':')).encode('utf-8')
+                            ).hexdigest()
+                            
+                            if expected_hash != row['data_hash']:
+                                validation_results["corrupted_records"] += 1
+                                validation_results["integrity_issues"].append({
+                                    "data_id": data_id,
+                                    "issue": "hash_mismatch",
+                                    "expected_hash": expected_hash,
+                                    "actual_hash": row['data_hash']
+                                })
+                                continue
+                        
+                        # Validate JSON fields
+                        json.loads(row['performance_metrics'])
+                        if row['baseline_comparison']:
+                            json.loads(row['baseline_comparison'])
+                        if row['compliance_tags']:
+                            json.loads(row['compliance_tags'])
+                        
+                        # Validate timestamp format
+                        datetime.fromisoformat(row['timestamp'])
+                        
+                        # Validate enum values
+                        DataRetentionLevel(row['retention_level'])
+                        DataCompressionType(row['compression_type'])
+                        ArchivalStatus(row['archival_status'])
+                        
+                        validation_results["valid_records"] += 1
+                        
+                    except (json.JSONDecodeError, ValueError, KeyError) as e:
+                        validation_results["invalid_records"] += 1
+                        validation_results["integrity_issues"].append({
+                            "data_id": data_id,
+                            "issue": "validation_error",
+                            "error": str(e)
+                        })
+                    
+                    # Update Prometheus metrics
+                    if PROMETHEUS_AVAILABLE:
+                        status = "valid" if data_id not in [issue["data_id"] for issue in validation_results["integrity_issues"]] else "invalid"
+                        self.data_integrity_checks_total.labels(status=status).inc()
+            
+            # Calculate integrity percentage
+            if validation_results["total_records"] > 0:
+                integrity_percentage = (validation_results["valid_records"] / validation_results["total_records"]) * 100
+                validation_results["integrity_percentage"] = integrity_percentage
+            else:
+                validation_results["integrity_percentage"] = 100.0
+            
+            if STRUCTLOG_AVAILABLE:
+                self.logger.info(
+                    "Data integrity validation completed",
+                    total_records=validation_results["total_records"],
+                    valid_records=validation_results["valid_records"],
+                    integrity_percentage=validation_results["integrity_percentage"],
+                    issues_found=len(validation_results["integrity_issues"])
+                )
+            
+            return validation_results
+            
+        except Exception as e:
+            if STRUCTLOG_AVAILABLE:
+                self.logger.error("Data integrity validation failed", error=str(e))
+            raise RuntimeError(f"Data integrity validation failed: {e}")
     
     def generate_historical_report(
         self,
-        report_type: str = "comprehensive",
-        analysis_days: int = 30,
-        environment: Optional[str] = None
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        environment: str = "production"
     ) -> Dict[str, Any]:
         """
-        Generate comprehensive historical performance report.
+        Generate comprehensive historical performance report for quarterly assessments.
         
         Args:
-            report_type: Type of report ('summary', 'comprehensive', 'trend_analysis')
-            analysis_days: Number of days to include in analysis
-            environment: Optional environment filter
+            start_date: Start date for report (defaults to 90 days ago)
+            end_date: End date for report (defaults to now)
+            environment: Environment to analyze
             
         Returns:
-            Comprehensive historical performance report
+            Dictionary containing comprehensive historical analysis
         """
+        # Set default date range (quarterly report)
+        if end_date is None:
+            end_date = datetime.now(timezone.utc)
+        if start_date is None:
+            start_date = end_date - timedelta(days=90)  # Quarterly assessment
+        
         report = {
-            'report_metadata': {
-                'generated_at': datetime.now(timezone.utc).isoformat(),
-                'report_type': report_type,
-                'analysis_period_days': analysis_days,
-                'environment_filter': environment,
-                'data_sources': []
+            "report_id": str(uuid.uuid4()),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "report_period": {
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "duration_days": (end_date - start_date).days
             },
-            'data_summary': {},
-            'trend_analysis': {},
-            'compliance_status': {},
-            'recommendations': [],
-            'archive_status': {}
+            "environment": environment,
+            "summary": {},
+            "trend_analysis": {},
+            "compliance_analysis": {},
+            "recommendations": [],
+            "data_quality": {}
         }
         
-        # Get data summary
-        end_date = datetime.now(timezone.utc)
-        start_date = end_date - timedelta(days=analysis_days)
-        
-        records = self.retrieve_records(
-            start_date=start_date,
-            end_date=end_date,
-            environment=environment
-        )
-        
-        # Data summary by type
-        data_by_type = defaultdict(list)
-        for record in records:
-            data_by_type[record.data_type].append(record)
-        
-        report['data_summary'] = {
-            'total_records': len(records),
-            'records_by_type': {k: len(v) for k, v in data_by_type.items()},
-            'date_range': {
-                'start': start_date.isoformat(),
-                'end': end_date.isoformat()
-            },
-            'environments': list(set(r.test_environment for r in records))
-        }
-        
-        # Trend analysis for key metrics
-        key_metrics = [
-            ('response_time_ms', 'response_time'),
-            ('cpu_utilization_percent', 'resource_usage'),
-            ('memory_usage_mb', 'resource_usage'),
-            ('requests_per_second', 'throughput')
-        ]
-        
-        for metric_name, data_type in key_metrics:
-            try:
-                trend_result = self.analyze_performance_trends(
-                    metric_name=metric_name,
-                    data_type=data_type,
-                    analysis_days=analysis_days,
-                    environment=environment
+        try:
+            # Retrieve historical data for report period
+            data_points = self.retrieve_historical_data(
+                start_date=start_date,
+                end_date=end_date,
+                environment=environment,
+                limit=10000
+            )
+            
+            report["summary"]["total_data_points"] = len(data_points)
+            
+            if not data_points:
+                report["summary"]["status"] = "no_data"
+                return report
+            
+            # Performance trend analysis
+            key_metrics = ["api_response_time_p95", "throughput", "error_rate", "memory_usage", "cpu_utilization"]
+            
+            for metric in key_metrics:
+                try:
+                    trend_result = self.analyze_performance_trend(
+                        TrendAnalysisType.PERFORMANCE_VARIANCE,
+                        metric,
+                        start_date,
+                        end_date,
+                        environment
+                    )
+                    
+                    report["trend_analysis"][metric] = {
+                        "trend_direction": trend_result.trend_direction,
+                        "trend_magnitude": trend_result.trend_magnitude,
+                        "mean_value": trend_result.mean_value,
+                        "std_deviation": trend_result.std_deviation,
+                        "action_required": trend_result.action_required,
+                        "recommendations": trend_result.recommendations
+                    }
+                    
+                except Exception as e:
+                    report["trend_analysis"][metric] = {"error": str(e)}
+            
+            # Compliance analysis per Section 8.6.5
+            variance_violations = 0
+            compliance_violations = 0
+            
+            for data_point in data_points:
+                if data_point.variance_percentage is not None:
+                    if abs(data_point.variance_percentage) > 10.0:
+                        variance_violations += 1
+                
+                if "compliance_violation" in data_point.compliance_tags:
+                    compliance_violations += 1
+            
+            report["compliance_analysis"] = {
+                "variance_violations": variance_violations,
+                "variance_compliance_rate": ((len(data_points) - variance_violations) / len(data_points)) * 100 if data_points else 100,
+                "compliance_violations": compliance_violations,
+                "overall_compliance_rate": ((len(data_points) - compliance_violations) / len(data_points)) * 100 if data_points else 100
+            }
+            
+            # Data quality assessment
+            integrity_results = self.validate_data_integrity([dp.data_id for dp in data_points[:100]])  # Sample validation
+            
+            report["data_quality"] = {
+                "integrity_percentage": integrity_results["integrity_percentage"],
+                "validation_issues": len(integrity_results["integrity_issues"]),
+                "data_freshness": "current",  # TODO: Calculate actual freshness
+                "compression_efficiency": self._calculate_compression_efficiency(data_points)
+            }
+            
+            # Generate recommendations based on analysis
+            self._generate_report_recommendations(report)
+            
+            # Store report for future reference
+            report_file = self.data_directory / f"historical_report_{report['report_id']}.json"
+            with open(report_file, 'w') as f:
+                json.dump(report, f, indent=2, default=str)
+            
+            if STRUCTLOG_AVAILABLE:
+                self.logger.info(
+                    "Generated historical performance report",
+                    report_id=report["report_id"],
+                    data_points=len(data_points),
+                    variance_compliance_rate=report["compliance_analysis"]["variance_compliance_rate"],
+                    report_file=str(report_file)
                 )
-                
-                report['trend_analysis'][metric_name] = {
-                    'trend_direction': trend_result.trend_direction,
-                    'trend_percentage': trend_result.trend_percentage,
-                    'confidence_level': trend_result.confidence_level,
-                    'data_points': trend_result.data_points,
-                    'variance_from_baseline': trend_result.variance_from_baseline,
-                    'compliance_status': trend_result.compliance_status,
-                    'recommendations': trend_result.recommendations
-                }
-                
-            except Exception as e:
-                self.logger.warning(f"Trend analysis failed for {metric_name}: {e}")
+            
+            return report
+            
+        except Exception as e:
+            if STRUCTLOG_AVAILABLE:
+                self.logger.error("Historical report generation failed", error=str(e))
+            raise RuntimeError(f"Failed to generate historical report: {e}")
+    
+    def _calculate_compression_efficiency(self, data_points: List[HistoricalDataPoint]) -> float:
+        """Calculate compression efficiency across data points."""
+        total_original_size = 0
+        total_compressed_size = 0
         
-        # Overall compliance status
-        compliance_issues = []
-        for metric_analysis in report['trend_analysis'].values():
-            if not metric_analysis['compliance_status']:
-                compliance_issues.append(f"Non-compliant: {metric_analysis}")
+        for data_point in data_points:
+            if data_point.compressed_size_bytes > 0:
+                total_original_size += data_point.data_size_bytes or data_point.get_size_estimate()
+                total_compressed_size += data_point.compressed_size_bytes
         
-        report['compliance_status'] = {
-            'overall_compliant': len(compliance_issues) == 0,
-            'issues_count': len(compliance_issues),
-            'critical_issues': compliance_issues
-        }
+        if total_original_size == 0:
+            return 0.0
         
-        # Archive status summary
-        report['archive_status'] = {
-            'total_archives': len(self.archive_metadata),
-            'archive_size_mb': sum(m.compressed_size for m in self.archive_metadata.values()) / (1024 * 1024),
-            'compression_ratio': sum(m.compression_ratio for m in self.archive_metadata.values()) / len(self.archive_metadata) if self.archive_metadata else 0,
-            'oldest_archive': min((m.archive_timestamp for m in self.archive_metadata.values()), default=None),
-            'newest_archive': max((m.archive_timestamp for m in self.archive_metadata.values()), default=None)
-        }
-        
-        # Convert datetime objects to ISO strings for JSON serialization
-        if report['archive_status']['oldest_archive']:
-            report['archive_status']['oldest_archive'] = report['archive_status']['oldest_archive'].isoformat()
-        if report['archive_status']['newest_archive']:
-            report['archive_status']['newest_archive'] = report['archive_status']['newest_archive'].isoformat()
-        
-        # Generate recommendations based on analysis
+        efficiency = (1 - (total_compressed_size / total_original_size)) * 100
+        return max(0.0, efficiency)
+    
+    def _generate_report_recommendations(self, report: Dict[str, Any]) -> None:
+        """Generate actionable recommendations based on historical report analysis."""
         recommendations = []
         
-        # Performance recommendations
-        for metric_name, analysis in report['trend_analysis'].items():
-            if analysis['trend_direction'] == 'degrading':
-                recommendations.append(f"Performance degradation detected in {metric_name} - immediate investigation required")
-            elif analysis['variance_from_baseline'] and abs(analysis['variance_from_baseline']) > 8:
-                recommendations.append(f"{metric_name} variance approaching critical threshold - proactive optimization recommended")
+        # Variance compliance recommendations
+        variance_compliance = report["compliance_analysis"]["variance_compliance_rate"]
+        if variance_compliance < 95:
+            recommendations.append({
+                "category": "compliance",
+                "priority": "high",
+                "recommendation": f"Variance compliance rate ({variance_compliance:.1f}%) below 95% target - implement performance optimization measures"
+            })
         
-        # Data management recommendations
-        if report['data_summary']['total_records'] > 10000:
-            recommendations.append("Large volume of historical data - consider implementing automated archival")
+        # Trend-based recommendations
+        degrading_metrics = []
+        for metric, analysis in report["trend_analysis"].items():
+            if isinstance(analysis, dict) and analysis.get("trend_direction") == "degrading":
+                degrading_metrics.append(metric)
         
-        if not report['compliance_status']['overall_compliant']:
-            recommendations.append("Performance compliance issues detected - review migration strategy")
+        if degrading_metrics:
+            recommendations.append({
+                "category": "performance",
+                "priority": "medium",
+                "recommendation": f"Degrading performance trends detected in: {', '.join(degrading_metrics)} - investigate root causes"
+            })
         
-        # Archive recommendations
-        if report['archive_status']['total_archives'] == 0:
-            recommendations.append("No archives found - consider implementing data archival for storage optimization")
+        # Data quality recommendations
+        integrity_pct = report["data_quality"]["integrity_percentage"]
+        if integrity_pct < 99:
+            recommendations.append({
+                "category": "data_quality",
+                "priority": "medium",
+                "recommendation": f"Data integrity issues detected ({integrity_pct:.1f}%) - review data collection processes"
+            })
         
-        report['recommendations'] = recommendations
+        # Compression efficiency recommendations
+        compression_efficiency = report["data_quality"]["compression_efficiency"]
+        if compression_efficiency < 50:
+            recommendations.append({
+                "category": "optimization",
+                "priority": "low",
+                "recommendation": f"Low compression efficiency ({compression_efficiency:.1f}%) - consider optimizing data structure"
+            })
         
-        return report
+        report["recommendations"] = recommendations
     
-    def perform_maintenance(self) -> Dict[str, Any]:
+    def cleanup_and_optimize(self) -> Dict[str, Any]:
         """
-        Perform comprehensive maintenance operations per Section 8.6.5.
+        Perform comprehensive cleanup and optimization of historical data storage.
         
         Returns:
-            Maintenance operation summary
+            Dictionary containing cleanup and optimization results
         """
-        maintenance_summary = {
-            'started_at': datetime.now(timezone.utc).isoformat(),
-            'operations_completed': [],
-            'operations_failed': [],
-            'total_duration_seconds': 0,
-            'recommendations': []
+        optimization_results = {
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "operations_performed": [],
+            "storage_optimization": {},
+            "performance_improvements": {},
+            "errors": []
         }
         
-        start_time = time.time()
-        
         try:
-            # 1. Data integrity validation
-            self.logger.info("Starting data integrity validation")
-            integrity_result = self.validate_data_integrity(sample_percentage=5.0)
-            maintenance_summary['operations_completed'].append({
-                'operation': 'data_integrity_validation',
-                'result': integrity_result
-            })
+            # Run data cleanup
+            self._run_automated_cleanup()
+            optimization_results["operations_performed"].append("automated_cleanup")
             
-            if integrity_result['corruption_rate'] > 1.0:
-                maintenance_summary['recommendations'].append(
-                    f"High corruption rate ({integrity_result['corruption_rate']:.2f}%) detected - investigate data storage issues"
-                )
+            # Run archival
+            self._run_automated_archival()
+            optimization_results["operations_performed"].append("automated_archival")
             
-        except Exception as e:
-            maintenance_summary['operations_failed'].append({
-                'operation': 'data_integrity_validation',
-                'error': str(e)
-            })
-        
-        try:
-            # 2. Data compression
-            self.logger.info("Starting data compression")
-            compression_result = self.compress_historical_data(days_old=30)
-            maintenance_summary['operations_completed'].append({
-                'operation': 'data_compression',
-                'result': compression_result
-            })
-            
-            if compression_result['compression_ratio'] > 50:
-                maintenance_summary['recommendations'].append(
-                    f"High compression ratio ({compression_result['compression_ratio']:.2f}%) achieved - consider more frequent compression"
-                )
-            
-        except Exception as e:
-            maintenance_summary['operations_failed'].append({
-                'operation': 'data_compression',
-                'error': str(e)
-            })
-        
-        try:
-            # 3. Data archival (if enabled)
-            if self.enable_archival and self.s3_client:
-                self.logger.info("Starting data archival to S3")
-                archive_result = self.archive_to_s3(retention_days=ACTIVE_RETENTION_DAYS)
-                maintenance_summary['operations_completed'].append({
-                    'operation': 'data_archival',
-                    'result': archive_result
-                })
+            # Optimize database
+            with sqlite3.connect(self.database_path) as conn:
+                # Vacuum database to reclaim space
+                conn.execute("VACUUM")
                 
-                if archive_result['archives_created'] > 0:
-                    maintenance_summary['recommendations'].append(
-                        f"Successfully archived {archive_result['archives_created']} data sets to S3"
-                    )
+                # Reindex for performance
+                conn.execute("REINDEX")
+                
+                # Analyze for query optimization
+                conn.execute("ANALYZE")
+                
+                optimization_results["operations_performed"].append("database_optimization")
             
-        except Exception as e:
-            maintenance_summary['operations_failed'].append({
-                'operation': 'data_archival',
-                'error': str(e)
-            })
-        
-        try:
-            # 4. Cleanup expired data
-            self.logger.info("Starting cleanup of expired data")
-            cleanup_result = self.cleanup_expired_data()
-            maintenance_summary['operations_completed'].append({
-                'operation': 'data_cleanup',
-                'result': cleanup_result
-            })
+            # Validate data integrity
+            integrity_results = self.validate_data_integrity()
+            optimization_results["data_integrity"] = integrity_results
+            optimization_results["operations_performed"].append("integrity_validation")
             
-            if cleanup_result['disk_space_freed_mb'] > 100:
-                maintenance_summary['recommendations'].append(
-                    f"Freed {cleanup_result['disk_space_freed_mb']:.2f}MB of disk space - storage optimization successful"
+            # Calculate storage statistics
+            database_size = self.database_path.stat().st_size if self.database_path.exists() else 0
+            optimization_results["storage_optimization"]["database_size_bytes"] = database_size
+            
+            # Update cache efficiency
+            with self._cache_lock:
+                cache_hit_rate = len(self._data_cache) / max(1, self._cache_max_size) * 100
+                optimization_results["performance_improvements"]["cache_utilization"] = cache_hit_rate
+            
+            optimization_results["completed_at"] = datetime.now(timezone.utc).isoformat()
+            optimization_results["status"] = "success"
+            
+            if STRUCTLOG_AVAILABLE:
+                self.logger.info(
+                    "Cleanup and optimization completed",
+                    operations=len(optimization_results["operations_performed"]),
+                    database_size_mb=database_size / (1024 * 1024),
+                    integrity_percentage=integrity_results["integrity_percentage"]
                 )
             
+            return optimization_results
+            
         except Exception as e:
-            maintenance_summary['operations_failed'].append({
-                'operation': 'data_cleanup',
-                'error': str(e)
-            })
+            optimization_results["errors"].append(str(e))
+            optimization_results["status"] = "failed"
+            optimization_results["completed_at"] = datetime.now(timezone.utc).isoformat()
+            
+            if STRUCTLOG_AVAILABLE:
+                self.logger.error("Cleanup and optimization failed", error=str(e))
+            
+            return optimization_results
+    
+    def close(self) -> None:
+        """Clean shutdown of historical data manager."""
+        self._background_tasks_enabled = False
         
-        # Calculate total duration
-        end_time = time.time()
-        maintenance_summary['total_duration_seconds'] = end_time - start_time
-        maintenance_summary['completed_at'] = datetime.now(timezone.utc).isoformat()
+        if hasattr(self, '_executor'):
+            self._executor.shutdown(wait=True)
         
-        # Log maintenance summary
-        self.logger.info(
-            "Maintenance operations completed",
-            operations_completed=len(maintenance_summary['operations_completed']),
-            operations_failed=len(maintenance_summary['operations_failed']),
-            duration_seconds=maintenance_summary['total_duration_seconds']
-        )
-        
-        return maintenance_summary
+        if STRUCTLOG_AVAILABLE:
+            self.logger.info("Historical data manager shutdown completed")
 
 
-# Utility functions for external integration
+# Global historical data manager instance
+_historical_manager: Optional[HistoricalDataManager] = None
 
-def create_historical_data_manager(
-    storage_path: Optional[str] = None,
-    aws_s3_bucket: Optional[str] = None,
-    enable_archival: bool = True
-) -> HistoricalDataManager:
+
+def get_historical_data_manager() -> HistoricalDataManager:
     """
-    Create historical data manager instance with default configuration.
+    Get global historical data manager instance (singleton pattern).
+    
+    Returns:
+        HistoricalDataManager instance for historical data operations
+    """
+    global _historical_manager
+    if _historical_manager is None:
+        _historical_manager = HistoricalDataManager()
+    return _historical_manager
+
+
+def store_performance_data(
+    performance_metrics: Dict[str, float],
+    test_scenario: Optional[str] = None,
+    environment: str = "production",
+    baseline_comparison: Optional[Dict[str, Any]] = None
+) -> str:
+    """
+    Store historical performance data with automatic compliance classification.
+    
+    Convenience function for storing performance data with full historical tracking,
+    retention policy application, and compliance data classification per Section 8.6.5.
     
     Args:
-        storage_path: Optional custom storage path
-        aws_s3_bucket: Optional AWS S3 bucket for archival
-        enable_archival: Enable automatic archival capabilities
+        performance_metrics: Performance metrics dictionary
+        test_scenario: Optional test scenario identifier
+        environment: Environment name
+        baseline_comparison: Optional baseline comparison results
         
     Returns:
-        Configured historical data manager instance
+        Data point ID for the stored record
     """
-    if storage_path is None:
-        storage_path = os.getenv('PERFORMANCE_DATA_PATH', 'data/performance/historical')
-    
-    if aws_s3_bucket is None:
-        aws_s3_bucket = os.getenv('AWS_S3_PERFORMANCE_BUCKET')
-    
-    return HistoricalDataManager(
-        storage_path=storage_path,
-        aws_s3_bucket=aws_s3_bucket,
-        enable_archival=enable_archival and AWS_AVAILABLE
+    manager = get_historical_data_manager()
+    return manager.store_historical_data(
+        performance_metrics=performance_metrics,
+        test_scenario=test_scenario,
+        environment=environment,
+        baseline_comparison=baseline_comparison
     )
 
 
-def analyze_performance_regression(
-    manager: HistoricalDataManager,
+def analyze_historical_trend(
     metric_name: str,
-    data_type: str,
-    comparison_days: int = 7
-) -> Dict[str, Any]:
+    analysis_type: TrendAnalysisType = TrendAnalysisType.PERFORMANCE_VARIANCE,
+    days_back: int = 30,
+    environment: str = "production"
+) -> TrendAnalysisResult:
     """
-    Analyze performance regression for specific metric.
+    Perform trend analysis on historical performance data.
+    
+    Convenience function for comprehensive trend analysis with pattern detection,
+    baseline drift analysis, and automated recommendation generation.
     
     Args:
-        manager: Historical data manager instance
-        metric_name: Performance metric to analyze
-        data_type: Type of performance data
-        comparison_days: Number of days for regression analysis
+        metric_name: Name of the performance metric to analyze
+        analysis_type: Type of trend analysis to perform
+        days_back: Number of days to analyze (default 30)
+        environment: Environment to analyze
         
     Returns:
-        Regression analysis results
+        TrendAnalysisResult with comprehensive analysis and recommendations
     """
-    try:
-        trend_result = manager.analyze_performance_trends(
-            metric_name=metric_name,
-            data_type=data_type,
-            analysis_days=comparison_days
-        )
+    manager = get_historical_data_manager()
+    end_date = datetime.now(timezone.utc)
+    start_date = end_date - timedelta(days=days_back)
+    
+    return manager.analyze_performance_trend(
+        analysis_type=analysis_type,
+        metric_name=metric_name,
+        start_date=start_date,
+        end_date=end_date,
+        environment=environment
+    )
+
+
+def generate_quarterly_report(environment: str = "production") -> Dict[str, Any]:
+    """
+    Generate quarterly historical performance report per Section 6.6.3.
+    
+    Convenience function for comprehensive quarterly assessment reporting with
+    trend analysis, compliance evaluation, and actionable recommendations.
+    
+    Args:
+        environment: Environment to analyze
         
-        regression_analysis = {
-            'metric_name': metric_name,
-            'regression_detected': trend_result.trend_direction == 'degrading',
-            'trend_percentage': trend_result.trend_percentage,
-            'confidence_level': trend_result.confidence_level,
-            'variance_from_baseline': trend_result.variance_from_baseline,
-            'compliance_status': trend_result.compliance_status,
-            'recommendations': trend_result.recommendations,
-            'analysis_period_days': comparison_days
-        }
-        
-        # Add severity assessment
-        if regression_analysis['regression_detected']:
-            if abs(trend_result.trend_percentage) > 20:
-                regression_analysis['severity'] = 'critical'
-            elif abs(trend_result.trend_percentage) > 10:
-                regression_analysis['severity'] = 'high'
-            elif abs(trend_result.trend_percentage) > 5:
-                regression_analysis['severity'] = 'medium'
-            else:
-                regression_analysis['severity'] = 'low'
-        else:
-            regression_analysis['severity'] = 'none'
-        
-        return regression_analysis
-        
-    except Exception as e:
-        return {
-            'metric_name': metric_name,
-            'error': str(e),
-            'regression_detected': False,
-            'severity': 'unknown'
-        }
+    Returns:
+        Dictionary containing comprehensive quarterly analysis
+    """
+    manager = get_historical_data_manager()
+    end_date = datetime.now(timezone.utc)
+    start_date = end_date - timedelta(days=90)  # Quarterly assessment
+    
+    return manager.generate_historical_report(
+        start_date=start_date,
+        end_date=end_date,
+        environment=environment
+    )
+
+
+def validate_historical_integrity() -> Dict[str, Any]:
+    """
+    Validate historical data integrity across all stored records.
+    
+    Convenience function for comprehensive data integrity validation with
+    hash verification, format validation, and corruption detection.
+    
+    Returns:
+        Dictionary containing validation results and integrity statistics
+    """
+    manager = get_historical_data_manager()
+    return manager.validate_data_integrity()
+
+
+def optimize_historical_storage() -> Dict[str, Any]:
+    """
+    Perform comprehensive optimization of historical data storage.
+    
+    Convenience function for automated cleanup, archival, compression optimization,
+    and database maintenance per Section 8.6.5 archival policies.
+    
+    Returns:
+        Dictionary containing optimization results and performance improvements
+    """
+    manager = get_historical_data_manager()
+    return manager.cleanup_and_optimize()
 
 
 # Export public interface
 __all__ = [
+    # Core classes
     'HistoricalDataManager',
-    'HistoricalDataRecord',
+    'HistoricalDataPoint',
     'TrendAnalysisResult',
-    'ArchiveMetadata',
-    'DataClassification',
     'RetentionPolicy',
-    'ArchiveStatus',
-    'create_historical_data_manager',
-    'analyze_performance_regression',
-    'ACTIVE_RETENTION_DAYS',
-    'ARCHIVE_RETENTION_YEARS',
-    'DATA_CLASSIFICATION_LEVELS',
-    'RETENTION_POLICIES_BY_LEVEL'
+    
+    # Enumerations
+    'DataRetentionLevel',
+    'DataCompressionType',
+    'ArchivalStatus',
+    'TrendAnalysisType',
+    
+    # Convenience functions
+    'get_historical_data_manager',
+    'store_performance_data',
+    'analyze_historical_trend',
+    'generate_quarterly_report',
+    'validate_historical_integrity',
+    'optimize_historical_storage'
 ]
