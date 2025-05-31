@@ -1,727 +1,696 @@
 #!/bin/bash
 
-# ==============================================================================
-# Flask Application System Cleanup and Maintenance Script
-# ==============================================================================
-# 
-# Purpose: Comprehensive cleanup and maintenance script managing container image 
-#         cleanup, log rotation, cache management, and resource optimization for 
-#         Flask application operational maintenance and system hygiene.
-#
-# Components:
-# - Docker image and container cleanup procedures per Section 4.4.1
-# - Redis cache management and optimization per Section 6.2.4  
-# - Structured logging cleanup and rotation per Section 3.6.1
-# - Container resource management and optimization
-# - Prometheus metrics cleanup and maintenance
-# - System resource monitoring and cleanup
-#
-# Version: 1.0.0
-# ==============================================================================
+# System Cleanup and Maintenance Script
+# Flask Application Operational Maintenance and System Hygiene
+# Manages container image cleanup, log rotation, cache management, and resource optimization
 
 set -euo pipefail
 
-# Configuration and Constants
-readonly SCRIPT_NAME="$(basename "$0")"
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-readonly LOG_DIR="${PROJECT_ROOT}/logs"
-readonly CACHE_DIR="${PROJECT_ROOT}/cache"
-readonly METRICS_DIR="${PROJECT_ROOT}/metrics"
+# Configuration Variables
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+LOG_FILE="${LOG_FILE:-/var/log/flask-app/cleanup.log}"
+CONFIG_FILE="${PROJECT_ROOT}/src/config/cleanup.conf"
 
-# Cleanup configuration with enterprise-grade defaults
-readonly DOCKER_IMAGE_RETENTION_DAYS="${DOCKER_IMAGE_RETENTION_DAYS:-7}"
-readonly LOG_RETENTION_DAYS="${LOG_RETENTION_DAYS:-30}"
-readonly CACHE_CLEANUP_THRESHOLD="${CACHE_CLEANUP_THRESHOLD:-80}"
-readonly METRICS_RETENTION_DAYS="${METRICS_RETENTION_DAYS:-14}"
-readonly MAX_LOG_SIZE="${MAX_LOG_SIZE:-100M}"
-readonly REDIS_HOST="${REDIS_HOST:-localhost}"
-readonly REDIS_PORT="${REDIS_PORT:-6379}"
-readonly REDIS_DB="${REDIS_DB:-0}"
+# Default configuration values
+DEFAULT_DOCKER_RETENTION_DAYS=7
+DEFAULT_LOG_RETENTION_DAYS=30
+DEFAULT_CACHE_MAX_MEMORY="2GB"
+DEFAULT_PROMETHEUS_RETENTION_DAYS=15
 
-# Performance monitoring thresholds per ≤10% variance requirement
-readonly CPU_THRESHOLD="${CPU_THRESHOLD:-80}"
-readonly MEMORY_THRESHOLD="${MEMORY_THRESHOLD:-85}"
-readonly DISK_THRESHOLD="${DISK_THRESHOLD:-90}"
-
-# Color codes for enhanced readability
-readonly RED='\033[0;31m'
-readonly GREEN='\033[0;32m'
-readonly YELLOW='\033[1;33m'
-readonly BLUE='\033[0;34m'
-readonly PURPLE='\033[0;35m'
-readonly CYAN='\033[0;36m'
-readonly NC='\033[0m' # No Color
-
-# Logging functions with structured logging support per Section 3.6.1
-log_info() {
-    echo -e "${GREEN}[INFO]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $*" | tee -a "${LOG_DIR}/cleanup.log" 2>/dev/null || echo -e "${GREEN}[INFO]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $*"
+# Logging functions
+log() {
+    local level="$1"
+    shift
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $*" | tee -a "$LOG_FILE"
 }
 
-log_warning() {
-    echo -e "${YELLOW}[WARN]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $*" | tee -a "${LOG_DIR}/cleanup.log" 2>/dev/null || echo -e "${YELLOW}[WARN]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $*"
-}
+log_info() { log "INFO" "$@"; }
+log_warn() { log "WARN" "$@"; }
+log_error() { log "ERROR" "$@"; }
 
-log_error() {
-    echo -e "${RED}[ERROR]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $*" | tee -a "${LOG_DIR}/cleanup.log" 2>/dev/null || echo -e "${RED}[ERROR]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $*" >&2
-}
-
-log_success() {
-    echo -e "${CYAN}[SUCCESS]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $*" | tee -a "${LOG_DIR}/cleanup.log" 2>/dev/null || echo -e "${CYAN}[SUCCESS]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $*"
-}
-
-# Enhanced error handling with enterprise monitoring integration
-handle_error() {
-    local exit_code=$?
-    local line_number=$1
-    log_error "Script failed at line ${line_number} with exit code ${exit_code}"
+# Load configuration
+load_config() {
+    log_info "Loading cleanup configuration..."
     
-    # Emit Prometheus metrics for monitoring system integration
-    if command -v curl >/dev/null 2>&1; then
-        curl -X POST "http://localhost:9091/metrics/job/cleanup-script/instance/$(hostname)" \
-             --data-binary "cleanup_script_errors_total 1" 2>/dev/null || true
+    # Create default config if it doesn't exist
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        log_warn "Configuration file not found, creating defaults at $CONFIG_FILE"
+        mkdir -p "$(dirname "$CONFIG_FILE")"
+        cat > "$CONFIG_FILE" << EOF
+# Flask Application Cleanup Configuration
+DOCKER_RETENTION_DAYS=${DEFAULT_DOCKER_RETENTION_DAYS}
+LOG_RETENTION_DAYS=${DEFAULT_LOG_RETENTION_DAYS}
+CACHE_MAX_MEMORY=${DEFAULT_CACHE_MAX_MEMORY}
+PROMETHEUS_RETENTION_DAYS=${DEFAULT_PROMETHEUS_RETENTION_DAYS}
+ENABLE_DOCKER_CLEANUP=true
+ENABLE_LOG_CLEANUP=true
+ENABLE_CACHE_CLEANUP=true
+ENABLE_RESOURCE_OPTIMIZATION=true
+REDIS_HOST=${REDIS_HOST:-localhost}
+REDIS_PORT=${REDIS_PORT:-6379}
+REDIS_PASSWORD=${REDIS_PASSWORD:-}
+EOF
     fi
     
-    cleanup_temp_resources
-    exit $exit_code
+    # Source configuration
+    source "$CONFIG_FILE"
+    log_info "Configuration loaded successfully"
 }
 
-trap 'handle_error ${LINENO}' ERR
-
-# Pre-flight checks and initialization
-initialize_script() {
-    log_info "Initializing Flask application cleanup script"
+# Check prerequisites
+check_prerequisites() {
+    log_info "Checking prerequisites..."
     
-    # Create necessary directories
-    mkdir -p "${LOG_DIR}" "${CACHE_DIR}" "${METRICS_DIR}" 2>/dev/null || true
+    local missing_tools=()
     
-    # Validate required commands
-    local required_commands=("docker" "redis-cli" "find" "du" "df")
-    for cmd in "${required_commands[@]}"; do
-        if ! command -v "$cmd" >/dev/null 2>&1; then
-            log_warning "Command '${cmd}' not found, some cleanup functions may be skipped"
-        fi
-    done
+    # Check for required tools
+    command -v docker >/dev/null 2>&1 || missing_tools+=("docker")
+    command -v kubectl >/dev/null 2>&1 || missing_tools+=("kubectl")
+    command -v redis-cli >/dev/null 2>&1 || missing_tools+=("redis-cli")
+    command -v logrotate >/dev/null 2>&1 || missing_tools+=("logrotate")
     
-    # Check Docker daemon availability
-    if command -v docker >/dev/null 2>&1; then
-        if ! docker info >/dev/null 2>&1; then
-            log_warning "Docker daemon not accessible, container cleanup will be skipped"
-        fi
+    if [[ ${#missing_tools[@]} -gt 0 ]]; then
+        log_error "Missing required tools: ${missing_tools[*]}"
+        log_error "Please install missing tools before running cleanup"
+        exit 1
     fi
     
-    # Test Redis connectivity per Section 6.2.4 cache management requirements
-    if command -v redis-cli >/dev/null 2>&1; then
-        if ! redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" ping >/dev/null 2>&1; then
-            log_warning "Redis server not accessible at ${REDIS_HOST}:${REDIS_PORT}, cache cleanup will be skipped"
-        fi
+    # Verify Docker daemon is running
+    if ! docker info >/dev/null 2>&1; then
+        log_error "Docker daemon is not running or accessible"
+        exit 1
     fi
     
-    log_success "Script initialization completed"
+    # Verify Kubernetes context (optional, with fallback)
+    if ! kubectl cluster-info >/dev/null 2>&1; then
+        log_warn "Kubernetes cluster not accessible, skipping K8s resource cleanup"
+        export KUBERNETES_AVAILABLE=false
+    else
+        export KUBERNETES_AVAILABLE=true
+        log_info "Kubernetes cluster accessible"
+    fi
+    
+    log_info "Prerequisites check completed"
 }
 
-# Docker container and image cleanup per Section 4.4.1
-cleanup_docker_resources() {
-    log_info "Starting Docker resource cleanup"
-    
-    if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
-        log_warning "Docker not available, skipping container cleanup"
+# Docker Image Cleanup (Section 4.4.1)
+cleanup_docker_images() {
+    if [[ "${ENABLE_DOCKER_CLEANUP:-true}" != "true" ]]; then
+        log_info "Docker cleanup disabled, skipping..."
         return 0
     fi
     
-    local cleanup_count=0
+    log_info "Starting Docker image cleanup..."
+    local retention_days="${DOCKER_RETENTION_DAYS:-$DEFAULT_DOCKER_RETENTION_DAYS}"
     
-    # Remove stopped containers older than retention period
-    log_info "Removing stopped containers older than ${DOCKER_IMAGE_RETENTION_DAYS} days"
-    local stopped_containers
-    stopped_containers=$(docker ps -a -q --filter "status=exited" --filter "created<$(date -d "${DOCKER_IMAGE_RETENTION_DAYS} days ago" +%s)" 2>/dev/null || echo "")
+    # Get current application images to preserve
+    local current_images
+    current_images=$(docker images --format "table {{.Repository}}:{{.Tag}}" | grep -E "(flask-app|python.*flask)" | head -5 || true)
     
-    if [[ -n "$stopped_containers" ]]; then
-        # shellcheck disable=SC2086
-        docker rm $stopped_containers 2>/dev/null || true
-        cleanup_count=$((cleanup_count + $(echo "$stopped_containers" | wc -w)))
-        log_success "Removed ${cleanup_count} stopped containers"
-    fi
+    log_info "Preserving current application images: $current_images"
     
-    # Remove dangling images
-    log_info "Removing dangling Docker images"
-    local dangling_images
-    dangling_images=$(docker images -q --filter "dangling=true" 2>/dev/null || echo "")
-    
-    if [[ -n "$dangling_images" ]]; then
-        # shellcheck disable=SC2086
-        docker rmi $dangling_images 2>/dev/null || true
-        local dangling_count
-        dangling_count=$(echo "$dangling_images" | wc -w)
-        log_success "Removed ${dangling_count} dangling images"
-    fi
-    
-    # Remove old images based on Flask application tags
-    log_info "Removing old Flask application images older than ${DOCKER_IMAGE_RETENTION_DAYS} days"
+    # Remove old application images (older than retention period)
+    log_info "Removing Docker images older than $retention_days days..."
     local old_images
     old_images=$(docker images --format "table {{.Repository}}:{{.Tag}}\t{{.CreatedAt}}" | \
-                grep -E "(flask-app|python-app)" | \
-                awk -v days="$DOCKER_IMAGE_RETENTION_DAYS" '
-                {
-                    cmd = "date -d \"" $2 " " $3 " " $4 " " $5 "\" +%s"
-                    cmd | getline image_time
-                    close(cmd)
-                    
-                    cmd = "date -d \"" days " days ago\" +%s"
-                    cmd | getline cutoff_time
-                    close(cmd)
-                    
-                    if (image_time < cutoff_time) print $1
-                }' 2>/dev/null || echo "")
+        awk -v days="$retention_days" '
+        {
+            # Skip header
+            if (NR == 1) next
+            
+            # Parse created date
+            split($0, parts, "\t")
+            image = parts[1]
+            created = parts[2]
+            
+            # Simple date comparison (images older than X days)
+            cmd = "date -d \"" created "\" +%s"
+            cmd | getline created_epoch
+            close(cmd)
+            
+            cmd = "date -d \"" days " days ago\" +%s"
+            cmd | getline cutoff_epoch
+            close(cmd)
+            
+            if (created_epoch < cutoff_epoch && image !~ /^<none>/) {
+                print image
+            }
+        }' 2>/dev/null || true)
     
     if [[ -n "$old_images" ]]; then
         echo "$old_images" | while read -r image; do
-            if [[ -n "$image" ]]; then
-                docker rmi "$image" 2>/dev/null || true
+            if [[ -n "$image" && "$image" != "REPOSITORY:TAG" ]]; then
+                log_info "Removing old image: $image"
+                docker rmi "$image" 2>/dev/null || log_warn "Failed to remove image: $image"
             fi
         done
-        local old_count
-        old_count=$(echo "$old_images" | grep -c . || echo "0")
-        log_success "Removed ${old_count} old Flask application images"
     fi
     
-    # Clean up Docker volumes
-    log_info "Cleaning up unused Docker volumes"
-    docker volume prune -f >/dev/null 2>&1 || true
-    
-    # Clean up Docker networks
-    log_info "Cleaning up unused Docker networks"
-    docker network prune -f >/dev/null 2>&1 || true
-    
-    # System prune for comprehensive cleanup
-    log_info "Performing Docker system prune"
-    docker system prune -f --volumes >/dev/null 2>&1 || true
-    
-    # Emit metrics for monitoring
-    local total_cleanup=$((cleanup_count))
-    if command -v curl >/dev/null 2>&1; then
-        curl -X POST "http://localhost:9091/metrics/job/cleanup-script/instance/$(hostname)" \
-             --data-binary "docker_resources_cleaned_total ${total_cleanup}" 2>/dev/null || true
+    # Remove dangling images
+    log_info "Removing dangling Docker images..."
+    local dangling_images
+    dangling_images=$(docker images -f "dangling=true" -q || true)
+    if [[ -n "$dangling_images" ]]; then
+        echo "$dangling_images" | xargs docker rmi 2>/dev/null || log_warn "Some dangling images could not be removed"
+        log_info "Removed dangling images"
+    else
+        log_info "No dangling images found"
     fi
     
-    log_success "Docker resource cleanup completed - cleaned ${total_cleanup} resources"
+    # Remove unused volumes
+    log_info "Removing unused Docker volumes..."
+    docker volume prune -f >/dev/null 2>&1 || log_warn "Failed to prune volumes"
+    
+    # Remove unused networks
+    log_info "Removing unused Docker networks..."
+    docker network prune -f >/dev/null 2>&1 || log_warn "Failed to prune networks"
+    
+    # Docker system cleanup
+    log_info "Running Docker system cleanup..."
+    docker system prune -f >/dev/null 2>&1 || log_warn "Failed to run system prune"
+    
+    log_info "Docker image cleanup completed"
 }
 
-# Kubernetes resource cleanup per Section 4.4.1 
+# Kubernetes Resource Cleanup (Section 4.4.1)
 cleanup_kubernetes_resources() {
-    log_info "Starting Kubernetes resource cleanup"
-    
-    if ! command -v kubectl >/dev/null 2>&1; then
-        log_warning "kubectl not available, skipping Kubernetes cleanup"
+    if [[ "${KUBERNETES_AVAILABLE:-false}" != "true" ]]; then
+        log_info "Kubernetes not available, skipping K8s resource cleanup"
         return 0
     fi
     
-    # Check if kubectl can connect to cluster
-    if ! kubectl cluster-info >/dev/null 2>&1; then
-        log_warning "Cannot connect to Kubernetes cluster, skipping cleanup"
+    if [[ "${ENABLE_DOCKER_CLEANUP:-true}" != "true" ]]; then
+        log_info "Docker cleanup disabled, skipping K8s cleanup..."
         return 0
     fi
     
-    local cleanup_count=0
+    log_info "Starting Kubernetes resource cleanup..."
     
-    # Clean up failed pods
-    log_info "Removing failed pods"
-    local failed_pods
-    failed_pods=$(kubectl get pods --all-namespaces --field-selector=status.phase=Failed -o name 2>/dev/null || echo "")
+    # Get current namespace
+    local namespace
+    namespace=$(kubectl config view --minify -o jsonpath='{..namespace}' 2>/dev/null || echo "default")
+    log_info "Cleaning up resources in namespace: $namespace"
     
-    if [[ -n "$failed_pods" ]]; then
-        echo "$failed_pods" | while read -r pod; do
-            if [[ -n "$pod" ]]; then
-                kubectl delete "$pod" 2>/dev/null || true
-                cleanup_count=$((cleanup_count + 1))
-            fi
-        done
-        log_success "Removed ${cleanup_count} failed pods"
-    fi
-    
-    # Clean up completed jobs older than retention period
-    log_info "Cleaning up old completed jobs"
-    kubectl get jobs --all-namespaces -o json | \
-    jq -r --arg days "$DOCKER_IMAGE_RETENTION_DAYS" '.items[] | 
+    # Remove completed jobs older than retention period
+    log_info "Removing completed Kubernetes jobs..."
+    kubectl get jobs -n "$namespace" --field-selector=status.successful=1 -o json | \
+        jq -r --arg days "$DOCKER_RETENTION_DAYS" '
+        .items[] | 
         select(.status.completionTime != null) |
         select((now - (.status.completionTime | strptime("%Y-%m-%dT%H:%M:%SZ") | mktime)) > ($days | tonumber * 86400)) |
-        "\(.metadata.namespace) \(.metadata.name)"' 2>/dev/null | \
-    while read -r namespace job; do
-        if [[ -n "$namespace" && -n "$job" ]]; then
-            kubectl delete job "$job" -n "$namespace" 2>/dev/null || true
-            cleanup_count=$((cleanup_count + 1))
-        fi
-    done
-    
-    # Clean up old replica sets
-    log_info "Cleaning up old replica sets"
-    kubectl get rs --all-namespaces -o json | \
-    jq -r '.items[] | 
-        select(.spec.replicas == 0) |
-        select(.status.replicas == 0) |
-        "\(.metadata.namespace) \(.metadata.name)"' 2>/dev/null | \
-    while read -r namespace rs; do
-        if [[ -n "$namespace" && -n "$rs" ]]; then
-            kubectl delete rs "$rs" -n "$namespace" 2>/dev/null || true
-            cleanup_count=$((cleanup_count + 1))
-        fi
-    done
-    
-    log_success "Kubernetes resource cleanup completed - cleaned ${cleanup_count} resources"
-}
-
-# Redis cache management and cleanup per Section 6.2.4
-cleanup_redis_cache() {
-    log_info "Starting Redis cache cleanup and optimization"
-    
-    if ! command -v redis-cli >/dev/null 2>&1; then
-        log_warning "redis-cli not available, skipping cache cleanup"
-        return 0
-    fi
-    
-    if ! redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" ping >/dev/null 2>&1; then
-        log_warning "Redis server not accessible, skipping cache cleanup"
-        return 0
-    fi
-    
-    # Get current cache statistics
-    local memory_usage
-    memory_usage=$(redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" INFO memory | grep "used_memory_human:" | cut -d: -f2 | tr -d '\r')
-    log_info "Current Redis memory usage: ${memory_usage}"
-    
-    # Get cache hit ratio for monitoring
-    local keyspace_hits
-    local keyspace_misses
-    keyspace_hits=$(redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" INFO stats | grep "keyspace_hits:" | cut -d: -f2 | tr -d '\r')
-    keyspace_misses=$(redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" INFO stats | grep "keyspace_misses:" | cut -d: -f2 | tr -d '\r')
-    
-    if [[ -n "$keyspace_hits" && -n "$keyspace_misses" && "$((keyspace_hits + keyspace_misses))" -gt 0 ]]; then
-        local hit_ratio
-        hit_ratio=$(echo "scale=2; $keyspace_hits * 100 / ($keyspace_hits + $keyspace_misses)" | bc 2>/dev/null || echo "0")
-        log_info "Cache hit ratio: ${hit_ratio}%"
-        
-        # Emit cache metrics for Prometheus monitoring
-        if command -v curl >/dev/null 2>&1; then
-            curl -X POST "http://localhost:9091/metrics/job/cleanup-script/instance/$(hostname)" \
-                 --data-binary "redis_cache_hit_ratio ${hit_ratio}" 2>/dev/null || true
-        fi
-    fi
-    
-    # Clean up expired keys
-    log_info "Cleaning up expired Redis keys"
-    local expired_count
-    expired_count=$(redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" EVAL "
-        local expired = 0
-        local cursor = '0'
-        repeat
-            local result = redis.call('SCAN', cursor, 'COUNT', 1000)
-            cursor = result[1]
-            local keys = result[2]
-            for i = 1, #keys do
-                local ttl = redis.call('TTL', keys[i])
-                if ttl == -1 then
-                    -- Key exists but has no expiration, check if it's a session key
-                    if string.match(keys[i], '^session:') or string.match(keys[i], '^cache:') then
-                        if redis.call('HGET', keys[i], 'last_accessed') then
-                            local last_accessed = redis.call('HGET', keys[i], 'last_accessed')
-                            if last_accessed and (tonumber(last_accessed) < (os.time() - 3600)) then
-                                redis.call('DEL', keys[i])
-                                expired = expired + 1
-                            end
-                        end
-                    end
-                elseif ttl == -2 then
-                    expired = expired + 1
-                end
-            end
-        until cursor == '0'
-        return expired
-    " 0 2>/dev/null || echo "0")
-    
-    log_success "Cleaned up ${expired_count} expired cache keys"
-    
-    # Optimize Redis memory usage if above threshold
-    local memory_percentage
-    memory_percentage=$(redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" INFO memory | grep "used_memory_human:" | cut -d: -f2 | tr -d '\r' | sed 's/[^0-9.]//g' || echo "0")
-    
-    # Memory cleanup based on LRU eviction if needed
-    log_info "Performing Redis memory optimization"
-    redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" CONFIG SET maxmemory-policy allkeys-lru >/dev/null 2>&1 || true
-    
-    # Clean up Flask session keys older than 24 hours
-    log_info "Cleaning up old Flask session keys"
-    local session_cleanup_count
-    session_cleanup_count=$(redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" EVAL "
-        local cleaned = 0
-        local cursor = '0'
-        repeat
-            local result = redis.call('SCAN', cursor, 'MATCH', 'session:*', 'COUNT', 100)
-            cursor = result[1]
-            local keys = result[2]
-            for i = 1, #keys do
-                local ttl = redis.call('TTL', keys[i])
-                if ttl > 0 and ttl < 86400 then
-                    -- Keep sessions that expire within 24 hours
-                elseif ttl == -1 or ttl < 0 then
-                    -- Remove sessions without expiration or expired
-                    redis.call('DEL', keys[i])
-                    cleaned = cleaned + 1
-                end
-            end
-        until cursor == '0'
-        return cleaned
-    " 0 2>/dev/null || echo "0")
-    
-    log_success "Cleaned up ${session_cleanup_count} old session keys"
-    
-    # Get final memory usage
-    local final_memory_usage
-    final_memory_usage=$(redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" INFO memory | grep "used_memory_human:" | cut -d: -f2 | tr -d '\r')
-    log_success "Redis cleanup completed - Final memory usage: ${final_memory_usage}"
-}
-
-# Structured logging cleanup and rotation per Section 3.6.1
-cleanup_application_logs() {
-    log_info "Starting application log cleanup and rotation"
-    
-    # Ensure log directory exists
-    mkdir -p "${LOG_DIR}" 2>/dev/null || true
-    
-    local cleanup_count=0
-    
-    # Rotate large log files per enterprise log management requirements
-    log_info "Rotating large log files (>${MAX_LOG_SIZE})"
-    find "${LOG_DIR}" -name "*.log" -size "+${MAX_LOG_SIZE}" 2>/dev/null | while read -r logfile; do
-        if [[ -f "$logfile" ]]; then
-            local timestamp
-            timestamp=$(date +"%Y%m%d_%H%M%S")
-            local rotated_file="${logfile}.${timestamp}"
-            
-            # Rotate the log file
-            mv "$logfile" "$rotated_file" 2>/dev/null || continue
-            
-            # Compress rotated log file
-            gzip "$rotated_file" 2>/dev/null || true
-            
-            # Create new empty log file
-            touch "$logfile" 2>/dev/null || true
-            
-            cleanup_count=$((cleanup_count + 1))
-            log_success "Rotated log file: $(basename "$logfile")"
-        fi
-    done
-    
-    # Remove old log files based on retention policy
-    log_info "Removing log files older than ${LOG_RETENTION_DAYS} days"
-    local old_logs_count
-    old_logs_count=$(find "${LOG_DIR}" -name "*.log*" -mtime "+${LOG_RETENTION_DAYS}" -type f 2>/dev/null | wc -l || echo "0")
-    
-    if [[ "$old_logs_count" -gt 0 ]]; then
-        find "${LOG_DIR}" -name "*.log*" -mtime "+${LOG_RETENTION_DAYS}" -type f -delete 2>/dev/null || true
-        log_success "Removed ${old_logs_count} old log files"
-        cleanup_count=$((cleanup_count + old_logs_count))
-    fi
-    
-    # Clean up structlog JSON log files with size management
-    log_info "Managing structured log files (JSON format)"
-    find "${LOG_DIR}" -name "*.json" -o -name "*-json.log" 2>/dev/null | while read -r jsonlog; do
-        if [[ -f "$jsonlog" ]]; then
-            local file_size
-            file_size=$(du -m "$jsonlog" 2>/dev/null | cut -f1 || echo "0")
-            
-            # Rotate JSON logs larger than configured size
-            if [[ "$file_size" -gt 50 ]]; then
-                local timestamp
-                timestamp=$(date +"%Y%m%d_%H%M%S")
-                local rotated_json="${jsonlog}.${timestamp}"
-                
-                mv "$jsonlog" "$rotated_json" 2>/dev/null || continue
-                gzip "$rotated_json" 2>/dev/null || true
-                touch "$jsonlog" 2>/dev/null || true
-                
-                cleanup_count=$((cleanup_count + 1))
-                log_success "Rotated JSON log: $(basename "$jsonlog")"
-            fi
-        fi
-    done
-    
-    # Clean up Flask application specific logs
-    log_info "Cleaning Flask application logs"
-    local flask_logs=("gunicorn.log" "flask.log" "uwsgi.log" "celery.log" "worker.log")
-    for log_pattern in "${flask_logs[@]}"; do
-        find "${LOG_DIR}" -name "${log_pattern}*" -mtime "+${LOG_RETENTION_DAYS}" -type f -delete 2>/dev/null || true
-    done
-    
-    # Clean up APM and monitoring logs per Section 3.6.1 enterprise integration
-    log_info "Cleaning monitoring and APM logs"
-    local monitoring_patterns=("prometheus.log" "datadog.log" "newrelic.log" "apm.log" "monitoring.log")
-    for pattern in "${monitoring_patterns[@]}"; do
-        find "${LOG_DIR}" -name "${pattern}*" -mtime "+7" -type f -delete 2>/dev/null || true
-    done
-    
-    # Emit log cleanup metrics
-    if command -v curl >/dev/null 2>&1; then
-        curl -X POST "http://localhost:9091/metrics/job/cleanup-script/instance/$(hostname)" \
-             --data-binary "log_files_cleaned_total ${cleanup_count}" 2>/dev/null || true
-    fi
-    
-    log_success "Application log cleanup completed - processed ${cleanup_count} log files"
-}
-
-# Prometheus metrics cleanup and maintenance
-cleanup_prometheus_metrics() {
-    log_info "Starting Prometheus metrics cleanup"
-    
-    # Ensure metrics directory exists
-    mkdir -p "${METRICS_DIR}" 2>/dev/null || true
-    
-    local cleanup_count=0
-    
-    # Remove old metric files
-    log_info "Removing metrics files older than ${METRICS_RETENTION_DAYS} days"
-    local old_metrics_count
-    old_metrics_count=$(find "${METRICS_DIR}" -name "*.prom" -o -name "*.txt" -mtime "+${METRICS_RETENTION_DAYS}" -type f 2>/dev/null | wc -l || echo "0")
-    
-    if [[ "$old_metrics_count" -gt 0 ]]; then
-        find "${METRICS_DIR}" -name "*.prom" -o -name "*.txt" -mtime "+${METRICS_RETENTION_DAYS}" -type f -delete 2>/dev/null || true
-        log_success "Removed ${old_metrics_count} old metrics files"
-        cleanup_count=$((cleanup_count + old_metrics_count))
-    fi
-    
-    # Clean up temporary metric files
-    log_info "Cleaning temporary metrics files"
-    find "${METRICS_DIR}" -name "*.tmp" -o -name "*.temp" -type f -delete 2>/dev/null || true
-    
-    # Compress large metrics files
-    find "${METRICS_DIR}" -name "*.prom" -size "+10M" 2>/dev/null | while read -r metrics_file; do
-        if [[ -f "$metrics_file" ]]; then
-            gzip "$metrics_file" 2>/dev/null || true
-            cleanup_count=$((cleanup_count + 1))
-        fi
-    done
-    
-    log_success "Prometheus metrics cleanup completed - processed ${cleanup_count} files"
-}
-
-# System resource monitoring and optimization
-monitor_system_resources() {
-    log_info "Monitoring system resource utilization"
-    
-    # CPU usage monitoring
-    local cpu_usage
-    cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1 | cut -d'u' -f1 || echo "0")
-    log_info "Current CPU usage: ${cpu_usage}%"
-    
-    if (( $(echo "$cpu_usage > $CPU_THRESHOLD" | bc -l 2>/dev/null || echo "0") )); then
-        log_warning "High CPU usage detected: ${cpu_usage}% (threshold: ${CPU_THRESHOLD}%)"
-    fi
-    
-    # Memory usage monitoring
-    local memory_usage
-    memory_usage=$(free | grep Mem | awk '{printf "%.1f", $3/$2 * 100.0}' || echo "0")
-    log_info "Current memory usage: ${memory_usage}%"
-    
-    if (( $(echo "$memory_usage > $MEMORY_THRESHOLD" | bc -l 2>/dev/null || echo "0") )); then
-        log_warning "High memory usage detected: ${memory_usage}% (threshold: ${MEMORY_THRESHOLD}%)"
-        
-        # Trigger additional cleanup if memory usage is high
-        log_info "Triggering additional memory cleanup due to high usage"
-        sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
-    fi
-    
-    # Disk usage monitoring
-    local disk_usage
-    disk_usage=$(df / | awk 'NR==2 {print $5}' | cut -d'%' -f1 || echo "0")
-    log_info "Current disk usage: ${disk_usage}%"
-    
-    if [[ "$disk_usage" -gt "$DISK_THRESHOLD" ]]; then
-        log_warning "High disk usage detected: ${disk_usage}% (threshold: ${DISK_THRESHOLD}%)"
-        
-        # Additional disk cleanup
-        log_info "Performing additional disk cleanup"
-        
-        # Clean package manager cache
-        if command -v apt-get >/dev/null 2>&1; then
-            apt-get clean 2>/dev/null || true
-        elif command -v yum >/dev/null 2>&1; then
-            yum clean all 2>/dev/null || true
-        fi
-        
-        # Clean pip cache
-        pip cache purge 2>/dev/null || true
-        
-        # Clean temporary files
-        find /tmp -type f -atime +7 -delete 2>/dev/null || true
-    fi
-    
-    # Emit system metrics for monitoring
-    if command -v curl >/dev/null 2>&1; then
-        curl -X POST "http://localhost:9091/metrics/job/cleanup-script/instance/$(hostname)" \
-             --data-binary "system_cpu_usage_percent ${cpu_usage}" 2>/dev/null || true
-        curl -X POST "http://localhost:9091/metrics/job/cleanup-script/instance/$(hostname)" \
-             --data-binary "system_memory_usage_percent ${memory_usage}" 2>/dev/null || true
-        curl -X POST "http://localhost:9091/metrics/job/cleanup-script/instance/$(hostname)" \
-             --data-binary "system_disk_usage_percent ${disk_usage}" 2>/dev/null || true
-    fi
-    
-    log_success "System resource monitoring completed"
-}
-
-# Health check validation per enterprise requirements
-perform_health_checks() {
-    log_info "Performing post-cleanup health checks"
-    
-    local health_status=0
-    
-    # Check Flask application health endpoints
-    if command -v curl >/dev/null 2>&1; then
-        local health_endpoints=("http://localhost:8000/health" "http://localhost:8000/health/ready" "http://localhost:8000/health/live")
-        
-        for endpoint in "${health_endpoints[@]}"; do
-            if curl -f -s "$endpoint" >/dev/null 2>&1; then
-                log_success "Health check passed: $endpoint"
-            else
-                log_warning "Health check failed: $endpoint"
-                health_status=1
+        .metadata.name
+        ' 2>/dev/null | while read -r job; do
+            if [[ -n "$job" ]]; then
+                log_info "Removing completed job: $job"
+                kubectl delete job "$job" -n "$namespace" 2>/dev/null || log_warn "Failed to delete job: $job"
             fi
         done
+    
+    # Remove failed pods older than retention period
+    log_info "Removing failed pods..."
+    kubectl get pods -n "$namespace" --field-selector=status.phase=Failed -o json | \
+        jq -r --arg days "$DOCKER_RETENTION_DAYS" '
+        .items[] |
+        select(.status.startTime != null) |
+        select((now - (.status.startTime | strptime("%Y-%m-%dT%H:%M:%SZ") | mktime)) > ($days | tonumber * 86400)) |
+        .metadata.name
+        ' 2>/dev/null | while read -r pod; do
+            if [[ -n "$pod" ]]; then
+                log_info "Removing failed pod: $pod"
+                kubectl delete pod "$pod" -n "$namespace" 2>/dev/null || log_warn "Failed to delete pod: $pod"
+            fi
+        done
+    
+    # Remove old replica sets (keep last 3)
+    log_info "Cleaning up old replica sets..."
+    kubectl get rs -n "$namespace" --sort-by=.metadata.creationTimestamp -o name | head -n -3 | while read -r rs; do
+        if [[ -n "$rs" ]]; then
+            local replicas
+            replicas=$(kubectl get "$rs" -n "$namespace" -o jsonpath='{.status.replicas}' 2>/dev/null || echo "0")
+            if [[ "$replicas" == "0" ]]; then
+                log_info "Removing old replica set: $rs"
+                kubectl delete "$rs" -n "$namespace" 2>/dev/null || log_warn "Failed to delete replica set: $rs"
+            fi
+        fi
+    done
+    
+    log_info "Kubernetes resource cleanup completed"
+}
+
+# Redis Cache Management and Cleanup (Section 6.2.4)
+cleanup_redis_cache() {
+    if [[ "${ENABLE_CACHE_CLEANUP:-true}" != "true" ]]; then
+        log_info "Cache cleanup disabled, skipping..."
+        return 0
+    fi
+    
+    log_info "Starting Redis cache cleanup..."
+    
+    local redis_host="${REDIS_HOST:-localhost}"
+    local redis_port="${REDIS_PORT:-6379}"
+    local redis_password="${REDIS_PASSWORD:-}"
+    local max_memory="${CACHE_MAX_MEMORY:-$DEFAULT_CACHE_MAX_MEMORY}"
+    
+    # Build Redis CLI command
+    local redis_cmd="redis-cli -h $redis_host -p $redis_port"
+    if [[ -n "$redis_password" ]]; then
+        redis_cmd="$redis_cmd -a $redis_password"
+    fi
+    
+    # Test Redis connectivity
+    if ! $redis_cmd ping >/dev/null 2>&1; then
+        log_error "Cannot connect to Redis at $redis_host:$redis_port"
+        return 1
+    fi
+    
+    log_info "Connected to Redis successfully"
+    
+    # Get Redis info before cleanup
+    local memory_used_before
+    memory_used_before=$($redis_cmd info memory | grep used_memory_human | cut -d: -f2 | tr -d '\r')
+    local keys_before
+    keys_before=$($redis_cmd dbsize | tr -d '\r')
+    
+    log_info "Redis status before cleanup - Memory used: $memory_used_before, Keys: $keys_before"
+    
+    # Remove expired keys
+    log_info "Removing expired Redis keys..."
+    local expired_keys=0
+    
+    # Scan for keys with TTL and check expiration
+    $redis_cmd --scan --pattern "*" | while read -r key; do
+        if [[ -n "$key" ]]; then
+            local ttl
+            ttl=$($redis_cmd ttl "$key" 2>/dev/null || echo "-1")
+            if [[ "$ttl" == "0" ]]; then
+                $redis_cmd del "$key" >/dev/null 2>&1 && ((expired_keys++)) || true
+            fi
+        fi
+    done
+    
+    # Clean up Flask session cache (if using Redis for sessions)
+    log_info "Cleaning up Flask session cache..."
+    local session_keys
+    session_keys=$($redis_cmd keys "session:*" | wc -l)
+    if [[ "$session_keys" -gt 0 ]]; then
+        # Remove sessions older than 24 hours without activity
+        $redis_cmd --scan --pattern "session:*" | while read -r session_key; do
+            if [[ -n "$session_key" ]]; then
+                local last_access
+                last_access=$($redis_cmd hget "$session_key" "last_access" 2>/dev/null || echo "0")
+                local current_time
+                current_time=$(date +%s)
+                local age=$((current_time - last_access))
+                
+                # Remove sessions older than 24 hours (86400 seconds)
+                if [[ "$age" -gt 86400 ]]; then
+                    $redis_cmd del "$session_key" >/dev/null 2>&1 || true
+                    log_info "Removed expired session: $session_key"
+                fi
+            fi
+        done
+    fi
+    
+    # Clean up application response cache
+    log_info "Cleaning up application response cache..."
+    local cache_pattern="flask_cache:*"
+    local cache_keys
+    cache_keys=$($redis_cmd keys "$cache_pattern" | wc -l)
+    if [[ "$cache_keys" -gt 100 ]]; then
+        # Remove oldest cache entries if we have too many
+        $redis_cmd --scan --pattern "$cache_pattern" | head -50 | while read -r cache_key; do
+            if [[ -n "$cache_key" ]]; then
+                $redis_cmd del "$cache_key" >/dev/null 2>&1 || true
+            fi
+        done
+        log_info "Removed old cache entries to maintain performance"
+    fi
+    
+    # Optimize memory usage
+    log_info "Optimizing Redis memory usage..."
+    
+    # Run memory optimization commands
+    $redis_cmd memory purge >/dev/null 2>&1 || log_warn "Memory purge not supported in this Redis version"
+    
+    # Defragment if supported
+    if $redis_cmd memory help 2>/dev/null | grep -q "MEMORY DEFRAG"; then
+        log_info "Running Redis memory defragmentation..."
+        $redis_cmd memory defrag >/dev/null 2>&1 || log_warn "Memory defragmentation failed"
+    fi
+    
+    # Check memory usage and implement eviction if needed
+    local current_memory
+    current_memory=$($redis_cmd info memory | grep used_memory: | cut -d: -f2 | tr -d '\r')
+    
+    # Convert max_memory to bytes for comparison
+    local max_memory_bytes
+    case "${max_memory^^}" in
+        *GB) max_memory_bytes=$((${max_memory%GB} * 1024 * 1024 * 1024)) ;;
+        *MB) max_memory_bytes=$((${max_memory%MB} * 1024 * 1024)) ;;
+        *KB) max_memory_bytes=$((${max_memory%KB} * 1024)) ;;
+        *) max_memory_bytes="$max_memory" ;;
+    esac
+    
+    if [[ "$current_memory" -gt "$max_memory_bytes" ]]; then
+        log_warn "Redis memory usage ($current_memory bytes) exceeds limit ($max_memory_bytes bytes)"
+        log_info "Implementing LRU eviction for cache optimization..."
+        
+        # Set maxmemory and eviction policy temporarily
+        $redis_cmd config set maxmemory "$max_memory_bytes" >/dev/null 2>&1 || true
+        $redis_cmd config set maxmemory-policy allkeys-lru >/dev/null 2>&1 || true
+        
+        # Force eviction by attempting a small operation
+        $redis_cmd set temp_key temp_value >/dev/null 2>&1 || true
+        $redis_cmd del temp_key >/dev/null 2>&1 || true
+    fi
+    
+    # Get Redis info after cleanup
+    local memory_used_after
+    memory_used_after=$($redis_cmd info memory | grep used_memory_human | cut -d: -f2 | tr -d '\r')
+    local keys_after
+    keys_after=$($redis_cmd dbsize | tr -d '\r')
+    
+    log_info "Redis status after cleanup - Memory used: $memory_used_after, Keys: $keys_after"
+    log_info "Redis cache cleanup completed"
+}
+
+# Log Management and Rotation (Section 3.5.1)
+cleanup_logs() {
+    if [[ "${ENABLE_LOG_CLEANUP:-true}" != "true" ]]; then
+        log_info "Log cleanup disabled, skipping..."
+        return 0
+    fi
+    
+    log_info "Starting log cleanup and rotation..."
+    
+    local retention_days="${LOG_RETENTION_DAYS:-$DEFAULT_LOG_RETENTION_DAYS}"
+    local log_dirs=(
+        "/var/log/flask-app"
+        "/var/log/gunicorn"
+        "/var/log/nginx"
+        "$PROJECT_ROOT/logs"
+        "/tmp/flask-*.log"
+    )
+    
+    # Create logrotate configuration for Flask application
+    local logrotate_config="/etc/logrotate.d/flask-app"
+    if [[ ! -f "$logrotate_config" ]] && [[ -w "/etc/logrotate.d" ]]; then
+        log_info "Creating logrotate configuration..."
+        cat > "$logrotate_config" << EOF
+# Flask Application Log Rotation Configuration
+# Structured logging cleanup and rotation with enterprise integration
+
+/var/log/flask-app/*.log {
+    daily
+    rotate $retention_days
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 644 flask flask
+    postrotate
+        # Send HUP signal to gunicorn master process to reopen log files
+        if [ -f /var/run/gunicorn.pid ]; then
+            kill -HUP \$(cat /var/run/gunicorn.pid) 2>/dev/null || true
+        fi
+        
+        # Restart rsyslog if using system logging
+        systemctl reload rsyslog 2>/dev/null || true
+    endscript
+}
+
+/var/log/gunicorn/*.log {
+    daily
+    rotate $retention_days
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 644 gunicorn gunicorn
+    copytruncate
+}
+
+$PROJECT_ROOT/logs/*.log {
+    daily
+    rotate $retention_days
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 644 $(whoami) $(whoami)
+}
+EOF
+        log_info "Logrotate configuration created"
+    fi
+    
+    # Run logrotate manually if configuration exists
+    if [[ -f "$logrotate_config" ]]; then
+        log_info "Running logrotate for Flask application logs..."
+        logrotate -f "$logrotate_config" 2>/dev/null || log_warn "Logrotate execution had warnings"
+    fi
+    
+    # Manual cleanup for log directories
+    for log_dir in "${log_dirs[@]}"; do
+        if [[ -d "$log_dir" ]]; then
+            log_info "Cleaning logs in directory: $log_dir"
+            
+            # Remove logs older than retention period
+            find "$log_dir" -name "*.log" -type f -mtime "+$retention_days" -delete 2>/dev/null || true
+            find "$log_dir" -name "*.log.gz" -type f -mtime "+$retention_days" -delete 2>/dev/null || true
+            
+            # Remove empty log files
+            find "$log_dir" -name "*.log" -type f -empty -delete 2>/dev/null || true
+            
+            log_info "Cleaned logs in $log_dir"
+        elif [[ -f "$log_dir" ]]; then
+            # Handle file patterns like /tmp/flask-*.log
+            eval "ls $log_dir 2>/dev/null" | while read -r log_file; do
+                if [[ -f "$log_file" && $(stat -c %Y "$log_file") -lt $(($(date +%s) - retention_days * 86400)) ]]; then
+                    rm -f "$log_file" 2>/dev/null || true
+                    log_info "Removed old log file: $log_file"
+                fi
+            done
+        fi
+    done
+    
+    # Clean up systemd journal logs if applicable
+    if command -v journalctl >/dev/null 2>&1; then
+        log_info "Cleaning systemd journal logs..."
+        journalctl --vacuum-time="${retention_days}d" >/dev/null 2>&1 || log_warn "Failed to clean journal logs"
+    fi
+    
+    # Clean up Prometheus metrics logs if exists
+    local prometheus_retention="${PROMETHEUS_RETENTION_DAYS:-$DEFAULT_PROMETHEUS_RETENTION_DAYS}"
+    local prometheus_data_dir="/var/lib/prometheus"
+    if [[ -d "$prometheus_data_dir" ]]; then
+        log_info "Cleaning Prometheus metrics older than $prometheus_retention days..."
+        find "$prometheus_data_dir" -name "*.db" -type f -mtime "+$prometheus_retention" -delete 2>/dev/null || true
+    fi
+    
+    # Compress large log files
+    log_info "Compressing large log files..."
+    for log_dir in "${log_dirs[@]}"; do
+        if [[ -d "$log_dir" ]]; then
+            find "$log_dir" -name "*.log" -type f -size +10M -exec gzip {} \; 2>/dev/null || true
+        fi
+    done
+    
+    log_info "Log cleanup and rotation completed"
+}
+
+# Resource Optimization and System Cleanup
+optimize_system_resources() {
+    if [[ "${ENABLE_RESOURCE_OPTIMIZATION:-true}" != "true" ]]; then
+        log_info "Resource optimization disabled, skipping..."
+        return 0
+    fi
+    
+    log_info "Starting system resource optimization..."
+    
+    # Clear system caches
+    log_info "Clearing system caches..."
+    sync
+    echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || log_warn "Cannot clear system caches (requires root)"
+    
+    # Clean up temporary files
+    log_info "Cleaning up temporary files..."
+    local temp_dirs=(
+        "/tmp"
+        "/var/tmp"
+        "$PROJECT_ROOT/tmp"
+        "$PROJECT_ROOT/.pytest_cache"
+        "$PROJECT_ROOT/__pycache__"
+    )
+    
+    for temp_dir in "${temp_dirs[@]}"; do
+        if [[ -d "$temp_dir" ]]; then
+            # Remove files older than 7 days
+            find "$temp_dir" -type f -mtime +7 -delete 2>/dev/null || true
+            
+            # Remove Python cache files
+            if [[ "$temp_dir" == *"pycache"* ]] || [[ "$temp_dir" == *"pytest"* ]]; then
+                rm -rf "$temp_dir" 2>/dev/null || true
+                log_info "Removed Python cache directory: $temp_dir"
+            fi
+        fi
+    done
+    
+    # Clean up pip cache
+    if command -v pip >/dev/null 2>&1; then
+        log_info "Cleaning pip cache..."
+        pip cache purge >/dev/null 2>&1 || log_warn "Failed to clean pip cache"
+    fi
+    
+    # Clean up package manager caches
+    if command -v apt-get >/dev/null 2>&1; then
+        log_info "Cleaning apt cache..."
+        apt-get clean >/dev/null 2>&1 || log_warn "Failed to clean apt cache"
+    elif command -v yum >/dev/null 2>&1; then
+        log_info "Cleaning yum cache..."
+        yum clean all >/dev/null 2>&1 || log_warn "Failed to clean yum cache"
+    fi
+    
+    # Optimize Python bytecode
+    log_info "Optimizing Python bytecode..."
+    if [[ -d "$PROJECT_ROOT/src" ]]; then
+        python -m compileall "$PROJECT_ROOT/src" >/dev/null 2>&1 || log_warn "Failed to compile Python bytecode"
+    fi
+    
+    # Check disk usage and warn if high
+    log_info "Checking disk usage..."
+    local disk_usage
+    disk_usage=$(df / | awk 'NR==2 {print $5}' | sed 's/%//')
+    if [[ "$disk_usage" -gt 80 ]]; then
+        log_warn "Disk usage is high: ${disk_usage}%"
+        log_warn "Consider increasing cleanup frequency or expanding storage"
+    else
+        log_info "Disk usage is acceptable: ${disk_usage}%"
+    fi
+    
+    # Check memory usage
+    local memory_usage
+    memory_usage=$(free | grep Mem | awk '{printf "%.0f", $3/$2 * 100.0}')
+    log_info "Current memory usage: ${memory_usage}%"
+    
+    if [[ "$memory_usage" -gt 85 ]]; then
+        log_warn "Memory usage is high: ${memory_usage}%"
+        log_info "Running memory optimization..."
+        
+        # Force garbage collection in Python processes if possible
+        pkill -USR1 gunicorn 2>/dev/null || true
+        
+        # Restart application if memory usage is critical
+        if [[ "$memory_usage" -gt 95 ]]; then
+            log_warn "Critical memory usage detected, consider application restart"
+        fi
+    fi
+    
+    log_info "System resource optimization completed"
+}
+
+# Health check after cleanup
+post_cleanup_health_check() {
+    log_info "Running post-cleanup health check..."
+    
+    # Check if Flask application is responsive
+    local health_endpoint="${FLASK_HEALTH_ENDPOINT:-http://localhost:8000/health}"
+    if command -v curl >/dev/null 2>&1; then
+        if curl -s -f "$health_endpoint" >/dev/null 2>&1; then
+            log_info "Flask application health check passed"
+        else
+            log_warn "Flask application health check failed"
+        fi
     fi
     
     # Check Redis connectivity
-    if command -v redis-cli >/dev/null 2>&1; then
-        if redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" ping >/dev/null 2>&1; then
-            log_success "Redis health check passed"
-        else
-            log_warning "Redis health check failed"
-            health_status=1
-        fi
+    local redis_host="${REDIS_HOST:-localhost}"
+    local redis_port="${REDIS_PORT:-6379}"
+    local redis_password="${REDIS_PASSWORD:-}"
+    local redis_cmd="redis-cli -h $redis_host -p $redis_port"
+    if [[ -n "$redis_password" ]]; then
+        redis_cmd="$redis_cmd -a $redis_password"
     fi
     
-    # Check Docker daemon health
-    if command -v docker >/dev/null 2>&1; then
-        if docker info >/dev/null 2>&1; then
-            log_success "Docker health check passed"
-        else
-            log_warning "Docker health check failed"
-            health_status=1
-        fi
+    if $redis_cmd ping >/dev/null 2>&1; then
+        log_info "Redis connectivity check passed"
+    else
+        log_warn "Redis connectivity check failed"
     fi
     
-    # Check available disk space after cleanup
+    # Check Docker daemon
+    if docker info >/dev/null 2>&1; then
+        log_info "Docker daemon check passed"
+    else
+        log_warn "Docker daemon check failed"
+    fi
+    
+    # Check available disk space
     local available_space
-    available_space=$(df / | awk 'NR==2 {print $4}' || echo "0")
-    log_info "Available disk space after cleanup: $(echo "$available_space" | awk '{print $1/1024/1024 " GB"}' || echo "Unknown")"
+    available_space=$(df / | awk 'NR==2 {print $4}')
+    log_info "Available disk space: $(df -h / | awk 'NR==2 {print $4}')"
     
-    return $health_status
+    log_info "Post-cleanup health check completed"
 }
 
-# Cleanup temporary resources and files
-cleanup_temp_resources() {
-    log_info "Cleaning up temporary resources"
-    
-    # Remove script-specific temporary files
-    find /tmp -name "cleanup_script_*" -type f -delete 2>/dev/null || true
-    
-    # Clean up Python __pycache__ directories
-    find "${PROJECT_ROOT}" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
-    find "${PROJECT_ROOT}" -name "*.pyc" -type f -delete 2>/dev/null || true
-    
-    # Clean up pip temporary files
-    find /tmp -name "pip-*" -type d -mtime +1 -exec rm -rf {} + 2>/dev/null || true
-    
-    log_success "Temporary resource cleanup completed"
-}
-
-# Generate cleanup summary report
+# Generate cleanup report
 generate_cleanup_report() {
-    log_info "Generating cleanup summary report"
+    log_info "Generating cleanup report..."
     
-    local report_file="${LOG_DIR}/cleanup_report_$(date +%Y%m%d_%H%M%S).json"
+    local report_file="${PROJECT_ROOT}/logs/cleanup-report-$(date +%Y%m%d-%H%M%S).json"
+    mkdir -p "$(dirname "$report_file")"
     
-    # Create structured cleanup report in JSON format per Section 3.6.1
+    # Gather system metrics
+    local disk_usage
+    disk_usage=$(df / | awk 'NR==2 {print $5}' | sed 's/%//')
+    local memory_usage
+    memory_usage=$(free | grep Mem | awk '{printf "%.0f", $3/$2 * 100.0}')
+    local docker_images
+    docker_images=$(docker images | wc -l)
+    local docker_containers
+    docker_containers=$(docker ps -a | wc -l)
+    
+    # Redis metrics
+    local redis_keys=0
+    local redis_memory="N/A"
+    if redis-cli ping >/dev/null 2>&1; then
+        redis_keys=$(redis-cli dbsize 2>/dev/null || echo "0")
+        redis_memory=$(redis-cli info memory 2>/dev/null | grep used_memory_human | cut -d: -f2 | tr -d '\r' || echo "N/A")
+    fi
+    
     cat > "$report_file" << EOF
 {
-  "cleanup_session": {
-    "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-    "hostname": "$(hostname)",
-    "script_version": "1.0.0",
-    "duration_seconds": $(($(date +%s) - start_time)),
-    "status": "completed"
-  },
-  "system_info": {
-    "cpu_usage_percent": $(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1 | cut -d'u' -f1 || echo "0"),
-    "memory_usage_percent": $(free | grep Mem | awk '{printf "%.1f", $3/$2 * 100.0}' || echo "0"),
-    "disk_usage_percent": $(df / | awk 'NR==2 {print $5}' | cut -d'%' -f1 || echo "0"),
-    "available_disk_gb": $(df / | awk 'NR==2 {print $4/1024/1024}' || echo "0")
-  },
-  "cleanup_operations": {
-    "docker_cleanup": "$(docker info >/dev/null 2>&1 && echo "completed" || echo "skipped")",
-    "kubernetes_cleanup": "$(kubectl cluster-info >/dev/null 2>&1 && echo "completed" || echo "skipped")",
-    "redis_cleanup": "$(redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" ping >/dev/null 2>&1 && echo "completed" || echo "skipped")",
-    "log_cleanup": "completed",
-    "metrics_cleanup": "completed",
-    "temp_cleanup": "completed"
-  },
-  "performance_compliance": {
-    "cpu_threshold_exceeded": $(echo "$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1 | cut -d'u' -f1 || echo "0") > $CPU_THRESHOLD" | bc -l 2>/dev/null || echo "false"),
-    "memory_threshold_exceeded": $(echo "$(free | grep Mem | awk '{printf "%.1f", $3/$2 * 100.0}' || echo "0") > $MEMORY_THRESHOLD" | bc -l 2>/dev/null || echo "false"),
-    "disk_threshold_exceeded": $([[ "$(df / | awk 'NR==2 {print $5}' | cut -d'%' -f1 || echo "0")" -gt "$DISK_THRESHOLD" ]] && echo "true" || echo "false"),
-    "baseline_variance_compliance": "within_10_percent"
-  }
+    "cleanup_report": {
+        "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+        "script_version": "1.0.0",
+        "configuration": {
+            "docker_retention_days": ${DOCKER_RETENTION_DAYS:-$DEFAULT_DOCKER_RETENTION_DAYS},
+            "log_retention_days": ${LOG_RETENTION_DAYS:-$DEFAULT_LOG_RETENTION_DAYS},
+            "cache_max_memory": "${CACHE_MAX_MEMORY:-$DEFAULT_CACHE_MAX_MEMORY}",
+            "prometheus_retention_days": ${PROMETHEUS_RETENTION_DAYS:-$DEFAULT_PROMETHEUS_RETENTION_DAYS}
+        },
+        "system_metrics": {
+            "disk_usage_percent": $disk_usage,
+            "memory_usage_percent": $memory_usage,
+            "docker_images_count": $((docker_images - 1)),
+            "docker_containers_count": $((docker_containers - 1))
+        },
+        "redis_metrics": {
+            "keys_count": $redis_keys,
+            "memory_used": "$redis_memory"
+        },
+        "enabled_operations": {
+            "docker_cleanup": ${ENABLE_DOCKER_CLEANUP:-true},
+            "log_cleanup": ${ENABLE_LOG_CLEANUP:-true},
+            "cache_cleanup": ${ENABLE_CACHE_CLEANUP:-true},
+            "resource_optimization": ${ENABLE_RESOURCE_OPTIMIZATION:-true}
+        },
+        "cleanup_status": "completed"
+    }
 }
 EOF
     
-    log_success "Cleanup report generated: $report_file"
-    
-    # Display summary to console
-    echo
-    echo -e "${PURPLE}==================== CLEANUP SUMMARY ====================${NC}"
-    echo -e "${CYAN}Cleanup Duration:${NC} $(($(date +%s) - start_time)) seconds"
-    echo -e "${CYAN}System Status:${NC} $(df / | awk 'NR==2 {print $5}') disk usage, $(free | grep Mem | awk '{printf "%.1f%%", $3/$2 * 100.0}' || echo "N/A") memory usage"
-    echo -e "${CYAN}Operations:${NC} Docker $(docker info >/dev/null 2>&1 && echo "✓" || echo "✗"), Redis $(redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" ping >/dev/null 2>&1 && echo "✓" || echo "✗"), Logs ✓"
-    echo -e "${PURPLE}=========================================================${NC}"
-    echo
-}
-
-# Performance validation per ≤10% variance requirement from Section 0.1.1
-validate_performance_impact() {
-    log_info "Validating cleanup performance impact"
-    
-    # Measure current system performance
-    local current_cpu
-    local current_memory
-    local current_disk_io
-    
-    current_cpu=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1 | cut -d'u' -f1 || echo "0")
-    current_memory=$(free | grep Mem | awk '{printf "%.1f", $3/$2 * 100.0}' || echo "0")
-    current_disk_io=$(iostat -x 1 1 2>/dev/null | awk 'NR==4 {print $10}' || echo "0")
-    
-    # Check if performance is within acceptable variance
-    local performance_compliant=true
-    
-    if (( $(echo "$current_cpu > 90" | bc -l 2>/dev/null || echo "0") )); then
-        log_warning "High CPU usage after cleanup: ${current_cpu}%"
-        performance_compliant=false
-    fi
-    
-    if (( $(echo "$current_memory > 90" | bc -l 2>/dev/null || echo "0") )); then
-        log_warning "High memory usage after cleanup: ${current_memory}%"
-        performance_compliant=false
-    fi
-    
-    # Emit performance validation metrics
-    if command -v curl >/dev/null 2>&1; then
-        curl -X POST "http://localhost:9091/metrics/job/cleanup-script/instance/$(hostname)" \
-             --data-binary "cleanup_performance_compliant $([ "$performance_compliant" = true ] && echo "1" || echo "0")" 2>/dev/null || true
-    fi
-    
-    if [ "$performance_compliant" = true ]; then
-        log_success "Performance validation passed - system within acceptable parameters"
-    else
-        log_warning "Performance validation failed - system may need attention"
-    fi
-    
-    return $([ "$performance_compliant" = true ] && echo "0" || echo "1")
+    log_info "Cleanup report generated: $report_file"
 }
 
 # Main execution function
@@ -729,70 +698,107 @@ main() {
     local start_time
     start_time=$(date +%s)
     
-    echo -e "${BLUE}============================================================${NC}"
-    echo -e "${BLUE}  Flask Application System Cleanup & Maintenance Script  ${NC}"
-    echo -e "${BLUE}============================================================${NC}"
-    echo
+    log_info "Starting Flask application cleanup process..."
+    log_info "Script: $0"
+    log_info "Arguments: $*"
     
-    # Initialize script environment
-    initialize_script
+    # Create log directory if it doesn't exist
+    mkdir -p "$(dirname "$LOG_FILE")"
+    
+    # Parse command line arguments
+    local skip_docker=false
+    local skip_cache=false
+    local skip_logs=false
+    local skip_resources=false
+    local dry_run=false
+    
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --skip-docker)
+                skip_docker=true
+                export ENABLE_DOCKER_CLEANUP=false
+                shift
+                ;;
+            --skip-cache)
+                skip_cache=true
+                export ENABLE_CACHE_CLEANUP=false
+                shift
+                ;;
+            --skip-logs)
+                skip_logs=true
+                export ENABLE_LOG_CLEANUP=false
+                shift
+                ;;
+            --skip-resources)
+                skip_resources=true
+                export ENABLE_RESOURCE_OPTIMIZATION=false
+                shift
+                ;;
+            --dry-run)
+                dry_run=true
+                log_info "DRY RUN MODE: No actual cleanup will be performed"
+                shift
+                ;;
+            --help|-h)
+                echo "Usage: $0 [OPTIONS]"
+                echo "Flask Application Cleanup Script"
+                echo ""
+                echo "Options:"
+                echo "  --skip-docker      Skip Docker image cleanup"
+                echo "  --skip-cache       Skip Redis cache cleanup"
+                echo "  --skip-logs        Skip log rotation and cleanup"
+                echo "  --skip-resources   Skip system resource optimization"
+                echo "  --dry-run          Show what would be done without executing"
+                echo "  --help, -h         Show this help message"
+                echo ""
+                echo "Configuration:"
+                echo "  Config file: $CONFIG_FILE"
+                echo "  Log file: $LOG_FILE"
+                exit 0
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                exit 1
+                ;;
+        esac
+    done
+    
+    if [[ "$dry_run" == "true" ]]; then
+        log_info "DRY RUN: Would load configuration from $CONFIG_FILE"
+        log_info "DRY RUN: Would check prerequisites for docker, kubectl, redis-cli, logrotate"
+        log_info "DRY RUN: Would cleanup Docker images older than ${DOCKER_RETENTION_DAYS:-$DEFAULT_DOCKER_RETENTION_DAYS} days"
+        log_info "DRY RUN: Would cleanup Kubernetes resources"
+        log_info "DRY RUN: Would cleanup Redis cache and optimize memory"
+        log_info "DRY RUN: Would rotate logs older than ${LOG_RETENTION_DAYS:-$DEFAULT_LOG_RETENTION_DAYS} days"
+        log_info "DRY RUN: Would optimize system resources"
+        log_info "DRY RUN: Would run post-cleanup health check"
+        log_info "DRY RUN: Would generate cleanup report"
+        exit 0
+    fi
     
     # Execute cleanup operations
-    log_info "Starting comprehensive system cleanup"
+    load_config
+    check_prerequisites
     
-    # Docker and Kubernetes cleanup per Section 4.4.1
-    cleanup_docker_resources
+    # Execute cleanup operations based on configuration
+    cleanup_docker_images
     cleanup_kubernetes_resources
-    
-    # Cache management per Section 6.2.4
     cleanup_redis_cache
+    cleanup_logs
+    optimize_system_resources
     
-    # Log management per Section 3.6.1
-    cleanup_application_logs
-    
-    # Metrics cleanup for monitoring systems
-    cleanup_prometheus_metrics
-    
-    # System resource optimization
-    monitor_system_resources
-    cleanup_temp_resources
-    
-    # Health validation
-    if ! perform_health_checks; then
-        log_warning "Some health checks failed - review system status"
-    fi
-    
-    # Performance validation per enterprise requirements
-    validate_performance_impact
-    
-    # Generate comprehensive report
+    # Post-cleanup operations
+    post_cleanup_health_check
     generate_cleanup_report
     
-    log_success "System cleanup and maintenance completed successfully"
+    local end_time
+    end_time=$(date +%s)
+    local duration=$((end_time - start_time))
     
-    # Final metrics emission
-    if command -v curl >/dev/null 2>&1; then
-        curl -X POST "http://localhost:9091/metrics/job/cleanup-script/instance/$(hostname)" \
-             --data-binary "cleanup_script_duration_seconds $(($(date +%s) - start_time))" 2>/dev/null || true
-        curl -X POST "http://localhost:9091/metrics/job/cleanup-script/instance/$(hostname)" \
-             --data-binary "cleanup_script_success_total 1" 2>/dev/null || true
-    fi
-    
-    echo -e "${GREEN}Cleanup completed in $(($(date +%s) - start_time)) seconds${NC}"
-    echo
+    log_info "Flask application cleanup completed successfully"
+    log_info "Total execution time: ${duration} seconds"
+    log_info "Log file: $LOG_FILE"
 }
 
-# Script execution with proper error handling
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    # Ensure script is run with appropriate permissions
-    if [[ $EUID -eq 0 ]]; then
-        log_warning "Running as root - some operations may have elevated privileges"
-    fi
-    
-    # Export start time for reporting
-    start_time=$(date +%s)
-    export start_time
-    
-    # Execute main function
-    main "$@"
-fi
+# Execute main function with all arguments
+main "$@"
