@@ -1,953 +1,1109 @@
 """
 Standardized API response formatting utilities providing consistent JSON response structures,
-error formatting, and status code management for Flask applications.
+error formatting, and status code management.
 
-This module implements enterprise-grade response patterns maintaining 100% compatibility 
-with existing API contracts and response formats. It provides standardized utilities for 
-creating consistent API responses, handling errors, and ensuring proper HTTP status code 
-management throughout the Flask application.
+Implements enterprise-grade response patterns maintaining 100% compatibility with existing 
+API contracts and response formats per Section 0.1.4 API contracts and interfaces.
 
-Key Features:
-- Standardized JSON response structures preserving existing field names and data types
-- Hierarchical error response formatting maintaining existing error codes and formats
-- HTTP status code management preserving method support and API contracts
-- Business logic integration support for consistent output formatting
-- Enterprise-grade logging and monitoring integration
-- Performance-optimized response creation with caching support
-- Comprehensive type hints and validation support
-
-Response Format Standards:
-- Success responses follow standardized structure with data, metadata, and status
-- Error responses maintain hierarchical error processing patterns
-- All responses preserve ISO 8601 date formatting and timezone awareness
-- JSON serialization uses enhanced encoding supporting enterprise data types
+This module implements:
+- Standardized response formatting maintaining API contract compatibility per Section 0.1.4
+- JSON response structures preserving existing field names and data types per Section 0.1.4
+- Error response formatting maintaining existing error codes per Section 5.4.2
+- Response utilities supporting consistent business logic output per Section 5.2.4
+- HTTP status code management preserving existing API behavior per Section 2.2.5
+- Enterprise monitoring integration for response tracking per Section 5.4.1
 """
 
-import time
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Union, Tuple, Type
-from http import HTTPStatus
 import logging
 import traceback
-from flask import Flask, Response, jsonify, request, g
-from werkzeug.exceptions import HTTPException
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Union, Tuple
+from enum import Enum
+from http import HTTPStatus
+from flask import Request, jsonify, current_app
+import uuid
 
-from .json_utils import dumps, EnterpriseJSONEncoder
+# Import JSON utilities for enhanced serialization and enterprise data type support
+from .json_utils import (
+    JSONProcessor,
+    create_api_response,
+    create_error_response,
+    paginate_response,
+    filter_sensitive_json,
+    to_json_compatible
+)
 
-# Configure structured logging
+# Configure structured logging for enterprise integration
 logger = logging.getLogger(__name__)
 
 
-class APIResponse:
+class ResponseStatus(Enum):
     """
-    Standardized API response container providing consistent structure and formatting
-    for all API endpoints. Maintains 100% compatibility with existing Node.js response
-    formats while providing enhanced enterprise functionality.
+    Response status enumeration providing standardized status indicators
+    for consistent API response classification.
+    """
+    SUCCESS = "success"
+    ERROR = "error"
+    WARNING = "warning"
+    INFO = "info"
+    PARTIAL = "partial"
+
+
+class ErrorCode(Enum):
+    """
+    Standardized error codes maintaining compatibility with existing 
+    Node.js implementation patterns.
+    """
+    # Authentication and Authorization Errors
+    UNAUTHORIZED = "AUTH_001"
+    FORBIDDEN = "AUTH_002"
+    TOKEN_EXPIRED = "AUTH_003"
+    INVALID_TOKEN = "AUTH_004"
+    INSUFFICIENT_PERMISSIONS = "AUTH_005"
+    
+    # Validation Errors
+    VALIDATION_ERROR = "VAL_001"
+    INVALID_INPUT = "VAL_002"
+    MISSING_REQUIRED_FIELD = "VAL_003"
+    INVALID_FORMAT = "VAL_004"
+    DATA_CONSTRAINT_VIOLATION = "VAL_005"
+    
+    # Business Logic Errors
+    BUSINESS_RULE_VIOLATION = "BIZ_001"
+    OPERATION_NOT_ALLOWED = "BIZ_002"
+    RESOURCE_CONFLICT = "BIZ_003"
+    STATE_TRANSITION_ERROR = "BIZ_004"
+    QUOTA_EXCEEDED = "BIZ_005"
+    
+    # Database Errors
+    DATABASE_ERROR = "DB_001"
+    RECORD_NOT_FOUND = "DB_002"
+    DUPLICATE_RECORD = "DB_003"
+    TRANSACTION_FAILED = "DB_004"
+    CONNECTION_ERROR = "DB_005"
+    
+    # External Service Errors
+    EXTERNAL_SERVICE_ERROR = "EXT_001"
+    SERVICE_UNAVAILABLE = "EXT_002"
+    TIMEOUT_ERROR = "EXT_003"
+    RATE_LIMIT_EXCEEDED = "EXT_004"
+    API_VERSION_MISMATCH = "EXT_005"
+    
+    # System Errors
+    INTERNAL_SERVER_ERROR = "SYS_001"
+    CONFIGURATION_ERROR = "SYS_002"
+    RESOURCE_EXHAUSTED = "SYS_003"
+    MAINTENANCE_MODE = "SYS_004"
+    FEATURE_DISABLED = "SYS_005"
+
+
+class ResponseFormatter:
+    """
+    Enterprise-grade response formatter providing comprehensive API response 
+    standardization with enhanced features for monitoring, logging, and debugging.
+    
+    Features:
+    - Consistent response structure maintaining Node.js compatibility
+    - Comprehensive error handling with enterprise logging integration
+    - Performance monitoring integration for response tracking
+    - Sensitive data filtering for security compliance
+    - Configurable response formats for different client needs
     """
     
     def __init__(self, 
-                 data: Any = None,
-                 message: Optional[str] = None,
-                 status_code: int = 200,
-                 success: bool = True,
-                 errors: Optional[List[Dict[str, Any]]] = None,
-                 metadata: Optional[Dict[str, Any]] = None,
-                 pagination: Optional[Dict[str, Any]] = None,
-                 links: Optional[Dict[str, str]] = None):
+                 include_request_id: bool = True,
+                 include_timestamp: bool = True,
+                 include_debug_info: bool = False,
+                 sensitive_fields: Optional[List[str]] = None,
+                 default_page_size: int = 20,
+                 max_page_size: int = 1000):
         """
-        Initialize API response with standardized structure.
+        Initialize response formatter with configuration options.
         
         Args:
-            data: Response payload data
-            message: Human-readable response message
-            status_code: HTTP status code
-            success: Boolean indicating success/failure status
-            errors: List of error objects for failed responses
-            metadata: Additional response metadata
-            pagination: Pagination information for collection responses
-            links: HATEOAS links for related resources
+            include_request_id: Whether to include request ID in responses
+            include_timestamp: Whether to include timestamp in responses
+            include_debug_info: Whether to include debug information (development only)
+            sensitive_fields: List of field names to filter from responses
+            default_page_size: Default page size for paginated responses
+            max_page_size: Maximum allowed page size for pagination
         """
-        self.data = data
-        self.message = message
-        self.status_code = status_code
-        self.success = success
-        self.errors = errors or []
-        self.metadata = metadata or {}
-        self.pagination = pagination
-        self.links = links
+        self.include_request_id = include_request_id
+        self.include_timestamp = include_timestamp
+        self.include_debug_info = include_debug_info
+        self.sensitive_fields = sensitive_fields or [
+            'password', 'secret', 'token', 'key', 'auth', 'credential',
+            'private', 'confidential', 'ssn', 'credit_card', 'cvv', 'pin'
+        ]
+        self.default_page_size = default_page_size
+        self.max_page_size = max_page_size
         
-        # Add response timing for performance monitoring
-        self.timestamp = datetime.now(timezone.utc).isoformat()
-        
-        # Include request correlation ID if available
-        if hasattr(g, 'request_id'):
-            self.metadata['request_id'] = g.request_id
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """
-        Convert response to dictionary format maintaining API contract compatibility.
-        
-        Returns:
-            Dictionary representation suitable for JSON serialization
-        """
-        response_dict = {
-            'success': self.success,
-            'status': self.status_code,
-            'timestamp': self.timestamp
-        }
-        
-        # Include data for successful responses or when explicitly provided
-        if self.data is not None:
-            response_dict['data'] = self.data
-        
-        # Include message if provided
-        if self.message:
-            response_dict['message'] = self.message
-        
-        # Include errors for failed responses
-        if self.errors:
-            response_dict['errors'] = self.errors
-        
-        # Include metadata if provided
-        if self.metadata:
-            response_dict['metadata'] = self.metadata
-        
-        # Include pagination for collection responses
-        if self.pagination:
-            response_dict['pagination'] = self.pagination
-        
-        # Include HATEOAS links if provided
-        if self.links:
-            response_dict['_links'] = self.links
-        
-        return response_dict
-    
-    def to_flask_response(self) -> Response:
-        """
-        Convert to Flask Response object with proper headers and formatting.
-        
-        Returns:
-            Flask Response object ready for return from endpoint handlers
-        """
-        response_data = self.to_dict()
-        
-        # Use enterprise JSON encoder for consistent serialization
-        json_str = dumps(response_data, cls=EnterpriseJSONEncoder, ensure_ascii=False)
-        
-        response = Response(
-            response=json_str,
-            status=self.status_code,
-            mimetype='application/json'
+        # Initialize JSON processor for enhanced serialization
+        self.json_processor = JSONProcessor(
+            datetime_format='iso',
+            include_microseconds=False,
+            timezone_aware=True,
+            sort_keys=False
         )
+    
+    def success(self, 
+                data: Any = None, 
+                message: Optional[str] = None,
+                meta: Optional[Dict[str, Any]] = None,
+                status_code: int = 200,
+                request: Optional[Request] = None) -> Tuple[Dict[str, Any], int]:
+        """
+        Create standardized success response maintaining Node.js API compatibility.
         
-        # Add standard security headers
-        response.headers['X-Content-Type-Options'] = 'nosniff'
-        response.headers['X-Frame-Options'] = 'DENY'
-        response.headers['X-XSS-Protection'] = '1; mode=block'
+        Args:
+            data: Response data payload
+            message: Optional success message
+            meta: Additional metadata for the response
+            status_code: HTTP status code (default: 200)
+            request: Flask request object for context
+            
+        Returns:
+            Tuple of (response_dict, status_code)
+        """
+        try:
+            # Filter sensitive data for security compliance
+            if data is not None:
+                data = filter_sensitive_json(data, self.sensitive_fields)
+            
+            # Create base response structure
+            response = {
+                'success': True,
+                'status': ResponseStatus.SUCCESS.value
+            }
+            
+            # Add timestamp if configured
+            if self.include_timestamp:
+                response['timestamp'] = datetime.now(timezone.utc).isoformat()
+            
+            # Add request ID for tracing
+            if self.include_request_id and request:
+                response['request_id'] = self._get_request_id(request)
+            
+            # Add data payload
+            if data is not None:
+                response['data'] = to_json_compatible(data)
+            
+            # Add optional message
+            if message:
+                response['message'] = message
+            
+            # Add metadata
+            if meta:
+                response['meta'] = meta
+            
+            # Add debug information in development mode
+            if self.include_debug_info and current_app.debug:
+                response['debug'] = self._get_debug_info(request)
+            
+            # Log successful response for monitoring
+            self._log_response(response, status_code, request)
+            
+            return response, status_code
+            
+        except Exception as e:
+            logger.error(f"Error creating success response: {str(e)}")
+            # Fallback to basic response structure
+            return self._create_fallback_response(data, True, status_code)
+    
+    def error(self,
+              message: str,
+              error_code: Optional[Union[str, ErrorCode]] = None,
+              errors: Optional[List[str]] = None,
+              status_code: int = 400,
+              exception: Optional[Exception] = None,
+              request: Optional[Request] = None,
+              meta: Optional[Dict[str, Any]] = None) -> Tuple[Dict[str, Any], int]:
+        """
+        Create standardized error response with comprehensive error handling.
         
-        # Add cache headers for appropriate responses
-        if self.status_code == 200 and request.method == 'GET':
-            response.headers['Cache-Control'] = 'public, max-age=300'
+        Args:
+            message: Primary error message
+            error_code: Application-specific error code
+            errors: List of detailed error messages
+            status_code: HTTP status code (default: 400)
+            exception: Original exception for logging and debug info
+            request: Flask request object for context
+            meta: Additional metadata for the response
+            
+        Returns:
+            Tuple of (response_dict, status_code)
+        """
+        try:
+            # Create base error response structure
+            response = {
+                'success': False,
+                'status': ResponseStatus.ERROR.value,
+                'message': message
+            }
+            
+            # Add timestamp if configured
+            if self.include_timestamp:
+                response['timestamp'] = datetime.now(timezone.utc).isoformat()
+            
+            # Add request ID for tracing
+            if self.include_request_id and request:
+                response['request_id'] = self._get_request_id(request)
+            
+            # Add error code
+            if error_code:
+                if isinstance(error_code, ErrorCode):
+                    response['error_code'] = error_code.value
+                else:
+                    response['error_code'] = str(error_code)
+            
+            # Add detailed errors
+            if errors:
+                response['errors'] = errors
+            
+            # Add metadata
+            if meta:
+                response['meta'] = meta
+            
+            # Add debug information in development mode
+            if self.include_debug_info and current_app.debug and exception:
+                response['debug'] = self._get_exception_debug_info(exception, request)
+            
+            # Log error response for monitoring and alerting
+            self._log_error_response(response, status_code, exception, request)
+            
+            return response, status_code
+            
+        except Exception as e:
+            logger.error(f"Error creating error response: {str(e)}")
+            # Fallback to basic error response
+            return self._create_fallback_error_response(message, status_code)
+    
+    def validation_error(self,
+                        message: str = "Validation failed",
+                        errors: Optional[List[str]] = None,
+                        field_errors: Optional[Dict[str, List[str]]] = None,
+                        request: Optional[Request] = None) -> Tuple[Dict[str, Any], int]:
+        """
+        Create standardized validation error response.
+        
+        Args:
+            message: Primary validation error message
+            errors: List of general validation errors
+            field_errors: Dictionary mapping field names to their error lists
+            request: Flask request object for context
+            
+        Returns:
+            Tuple of (response_dict, status_code)
+        """
+        meta = {}
+        if field_errors:
+            meta['field_errors'] = field_errors
+        
+        all_errors = errors or []
+        if field_errors:
+            for field, field_error_list in field_errors.items():
+                for error in field_error_list:
+                    all_errors.append(f"{field}: {error}")
+        
+        return self.error(
+            message=message,
+            error_code=ErrorCode.VALIDATION_ERROR,
+            errors=all_errors,
+            status_code=422,  # Unprocessable Entity
+            request=request,
+            meta=meta
+        )
+    
+    def not_found(self,
+                  resource: str = "Resource",
+                  resource_id: Optional[str] = None,
+                  request: Optional[Request] = None) -> Tuple[Dict[str, Any], int]:
+        """
+        Create standardized not found error response.
+        
+        Args:
+            resource: Name of the resource that was not found
+            resource_id: ID of the resource (if applicable)
+            request: Flask request object for context
+            
+        Returns:
+            Tuple of (response_dict, status_code)
+        """
+        if resource_id:
+            message = f"{resource} with ID '{resource_id}' not found"
         else:
-            response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+            message = f"{resource} not found"
         
-        return response
-
-
-class ErrorDetail:
-    """
-    Standardized error detail container for consistent error reporting across
-    all error types and hierarchical error processing patterns.
-    """
+        return self.error(
+            message=message,
+            error_code=ErrorCode.RECORD_NOT_FOUND,
+            status_code=404,
+            request=request
+        )
     
-    def __init__(self,
-                 code: str,
-                 message: str,
-                 field: Optional[str] = None,
-                 location: Optional[str] = None,
-                 details: Optional[Dict[str, Any]] = None,
-                 error_type: str = "general"):
+    def unauthorized(self,
+                    message: str = "Authentication required",
+                    request: Optional[Request] = None) -> Tuple[Dict[str, Any], int]:
         """
-        Initialize error detail with comprehensive error information.
+        Create standardized unauthorized error response.
         
         Args:
-            code: Error code for programmatic handling
-            message: Human-readable error message
-            field: Field name for validation errors
-            location: Error location (body, query, path, header)
-            details: Additional error context
-            error_type: Error category (validation, authentication, business, database, service)
-        """
-        self.code = code
-        self.message = message
-        self.field = field
-        self.location = location
-        self.details = details or {}
-        self.error_type = error_type
-        self.timestamp = datetime.now(timezone.utc).isoformat()
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """
-        Convert error detail to dictionary format for JSON serialization.
-        
+            message: Unauthorized error message
+            request: Flask request object for context
+            
         Returns:
-            Dictionary representation maintaining error format compatibility
+            Tuple of (response_dict, status_code)
         """
-        error_dict = {
-            'code': self.code,
-            'message': self.message,
-            'type': self.error_type,
-            'timestamp': self.timestamp
+        return self.error(
+            message=message,
+            error_code=ErrorCode.UNAUTHORIZED,
+            status_code=401,
+            request=request
+        )
+    
+    def forbidden(self,
+                  message: str = "Access forbidden",
+                  request: Optional[Request] = None) -> Tuple[Dict[str, Any], int]:
+        """
+        Create standardized forbidden error response.
+        
+        Args:
+            message: Forbidden error message
+            request: Flask request object for context
+            
+        Returns:
+            Tuple of (response_dict, status_code)
+        """
+        return self.error(
+            message=message,
+            error_code=ErrorCode.FORBIDDEN,
+            status_code=403,
+            request=request
+        )
+    
+    def conflict(self,
+                 message: str = "Resource conflict",
+                 request: Optional[Request] = None) -> Tuple[Dict[str, Any], int]:
+        """
+        Create standardized conflict error response.
+        
+        Args:
+            message: Conflict error message
+            request: Flask request object for context
+            
+        Returns:
+            Tuple of (response_dict, status_code)
+        """
+        return self.error(
+            message=message,
+            error_code=ErrorCode.RESOURCE_CONFLICT,
+            status_code=409,
+            request=request
+        )
+    
+    def rate_limited(self,
+                    message: str = "Rate limit exceeded",
+                    retry_after: Optional[int] = None,
+                    request: Optional[Request] = None) -> Tuple[Dict[str, Any], int]:
+        """
+        Create standardized rate limit error response.
+        
+        Args:
+            message: Rate limit error message
+            retry_after: Number of seconds to wait before retrying
+            request: Flask request object for context
+            
+        Returns:
+            Tuple of (response_dict, status_code)
+        """
+        meta = {}
+        if retry_after:
+            meta['retry_after'] = retry_after
+        
+        return self.error(
+            message=message,
+            error_code=ErrorCode.RATE_LIMIT_EXCEEDED,
+            status_code=429,
+            request=request,
+            meta=meta
+        )
+    
+    def internal_error(self,
+                      message: str = "Internal server error",
+                      exception: Optional[Exception] = None,
+                      request: Optional[Request] = None) -> Tuple[Dict[str, Any], int]:
+        """
+        Create standardized internal server error response.
+        
+        Args:
+            message: Internal error message
+            exception: Original exception for logging
+            request: Flask request object for context
+            
+        Returns:
+            Tuple of (response_dict, status_code)
+        """
+        return self.error(
+            message=message,
+            error_code=ErrorCode.INTERNAL_SERVER_ERROR,
+            status_code=500,
+            exception=exception,
+            request=request
+        )
+    
+    def paginated(self,
+                  data: List[Any],
+                  page: int = 1,
+                  page_size: Optional[int] = None,
+                  total_count: Optional[int] = None,
+                  message: Optional[str] = None,
+                  request: Optional[Request] = None) -> Tuple[Dict[str, Any], int]:
+        """
+        Create standardized paginated response with comprehensive pagination metadata.
+        
+        Args:
+            data: List of data items for the current page
+            page: Current page number (1-based)
+            page_size: Number of items per page
+            total_count: Total number of items (calculated if not provided)
+            message: Optional success message
+            request: Flask request object for context
+            
+        Returns:
+            Tuple of (response_dict, status_code)
+        """
+        try:
+            # Validate and set page size
+            if page_size is None:
+                page_size = self.default_page_size
+            elif page_size > self.max_page_size:
+                page_size = self.max_page_size
+            elif page_size < 1:
+                page_size = 1
+            
+            # Validate page number
+            if page < 1:
+                page = 1
+            
+            # Calculate pagination metadata
+            if total_count is None:
+                total_count = len(data)
+            
+            total_pages = max(1, (total_count + page_size - 1) // page_size)
+            
+            # Ensure page doesn't exceed total pages
+            if page > total_pages:
+                page = total_pages
+            
+            # Calculate data slice for current page
+            start_index = (page - 1) * page_size
+            end_index = start_index + page_size
+            page_data = data[start_index:end_index]
+            
+            # Filter sensitive data
+            page_data = filter_sensitive_json(page_data, self.sensitive_fields)
+            
+            # Create pagination metadata
+            pagination = {
+                'page': page,
+                'page_size': page_size,
+                'total_count': total_count,
+                'total_pages': total_pages,
+                'has_next': page < total_pages,
+                'has_prev': page > 1,
+                'next_page': page + 1 if page < total_pages else None,
+                'prev_page': page - 1 if page > 1 else None,
+                'items_on_page': len(page_data)
+            }
+            
+            # Create response
+            return self.success(
+                data=page_data,
+                message=message,
+                meta={'pagination': pagination},
+                status_code=200,
+                request=request
+            )
+            
+        except Exception as e:
+            logger.error(f"Error creating paginated response: {str(e)}")
+            return self.error(
+                message="Failed to create paginated response",
+                error_code=ErrorCode.INTERNAL_SERVER_ERROR,
+                status_code=500,
+                exception=e,
+                request=request
+            )
+    
+    def partial_content(self,
+                       data: Any,
+                       warnings: Optional[List[str]] = None,
+                       message: Optional[str] = None,
+                       request: Optional[Request] = None) -> Tuple[Dict[str, Any], int]:
+        """
+        Create response for partial success scenarios with warnings.
+        
+        Args:
+            data: Response data payload
+            warnings: List of warning messages
+            message: Optional message
+            request: Flask request object for context
+            
+        Returns:
+            Tuple of (response_dict, status_code)
+        """
+        response, _ = self.success(
+            data=data,
+            message=message or "Operation completed with warnings",
+            request=request
+        )
+        
+        # Update status to partial
+        response['status'] = ResponseStatus.PARTIAL.value
+        
+        # Add warnings
+        if warnings:
+            response['warnings'] = warnings
+        
+        return response, 206  # Partial Content
+    
+    def no_content(self,
+                   message: Optional[str] = None,
+                   request: Optional[Request] = None) -> Tuple[Dict[str, Any], int]:
+        """
+        Create standardized no content response.
+        
+        Args:
+            message: Optional message
+            request: Flask request object for context
+            
+        Returns:
+            Tuple of (response_dict, status_code)
+        """
+        return self.success(
+            message=message or "Operation completed successfully",
+            status_code=204,
+            request=request
+        )
+    
+    def created(self,
+                data: Any = None,
+                resource_id: Optional[str] = None,
+                location: Optional[str] = None,
+                message: Optional[str] = None,
+                request: Optional[Request] = None) -> Tuple[Dict[str, Any], int]:
+        """
+        Create standardized resource creation response.
+        
+        Args:
+            data: Created resource data
+            resource_id: ID of the created resource
+            location: Location URL of the created resource
+            message: Optional success message
+            request: Flask request object for context
+            
+        Returns:
+            Tuple of (response_dict, status_code)
+        """
+        meta = {}
+        if resource_id:
+            meta['resource_id'] = resource_id
+        if location:
+            meta['location'] = location
+        
+        return self.success(
+            data=data,
+            message=message or "Resource created successfully",
+            meta=meta if meta else None,
+            status_code=201,
+            request=request
+        )
+    
+    def _get_request_id(self, request: Optional[Request]) -> str:
+        """
+        Get or generate request ID for tracing.
+        
+        Args:
+            request: Flask request object
+            
+        Returns:
+            Request ID string
+        """
+        if request and hasattr(request, 'id'):
+            return request.id
+        elif request and 'X-Request-ID' in request.headers:
+            return request.headers['X-Request-ID']
+        else:
+            return str(uuid.uuid4())
+    
+    def _get_debug_info(self, request: Optional[Request]) -> Dict[str, Any]:
+        """
+        Get debug information for development mode.
+        
+        Args:
+            request: Flask request object
+            
+        Returns:
+            Debug information dictionary
+        """
+        debug_info = {
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'environment': current_app.config.get('ENV', 'unknown')
         }
         
-        if self.field:
-            error_dict['field'] = self.field
+        if request:
+            debug_info.update({
+                'method': request.method,
+                'url': request.url,
+                'remote_addr': request.remote_addr,
+                'user_agent': request.headers.get('User-Agent', ''),
+                'content_type': request.content_type
+            })
         
-        if self.location:
-            error_dict['location'] = self.location
+        return debug_info
+    
+    def _get_exception_debug_info(self, 
+                                 exception: Exception, 
+                                 request: Optional[Request]) -> Dict[str, Any]:
+        """
+        Get exception debug information for development mode.
         
-        if self.details:
-            error_dict['details'] = self.details
+        Args:
+            exception: Original exception
+            request: Flask request object
+            
+        Returns:
+            Exception debug information dictionary
+        """
+        debug_info = self._get_debug_info(request)
+        debug_info.update({
+            'exception_type': type(exception).__name__,
+            'exception_message': str(exception),
+            'traceback': traceback.format_exc()
+        })
         
-        return error_dict
-
-
-# HTTP Status Code Constants for consistent usage
-class APIStatus:
-    """
-    HTTP status code constants providing consistent status code usage
-    throughout the application while maintaining API contract compatibility.
-    """
+        return debug_info
     
-    # Success codes
-    OK = 200
-    CREATED = 201
-    ACCEPTED = 202
-    NO_CONTENT = 204
-    
-    # Redirect codes
-    MOVED_PERMANENTLY = 301
-    FOUND = 302
-    NOT_MODIFIED = 304
-    
-    # Client error codes
-    BAD_REQUEST = 400
-    UNAUTHORIZED = 401
-    FORBIDDEN = 403
-    NOT_FOUND = 404
-    METHOD_NOT_ALLOWED = 405
-    NOT_ACCEPTABLE = 406
-    CONFLICT = 409
-    GONE = 410
-    UNPROCESSABLE_ENTITY = 422
-    TOO_MANY_REQUESTS = 429
-    
-    # Server error codes
-    INTERNAL_SERVER_ERROR = 500
-    NOT_IMPLEMENTED = 501
-    BAD_GATEWAY = 502
-    SERVICE_UNAVAILABLE = 503
-    GATEWAY_TIMEOUT = 504
-
-
-def create_success_response(data: Any = None,
-                          message: Optional[str] = None,
-                          status_code: int = APIStatus.OK,
-                          metadata: Optional[Dict[str, Any]] = None,
-                          pagination: Optional[Dict[str, Any]] = None,
-                          links: Optional[Dict[str, str]] = None) -> APIResponse:
-    """
-    Create standardized success response maintaining API contract compatibility.
-    
-    Args:
-        data: Response payload data
-        message: Success message
-        status_code: HTTP status code (default: 200)
-        metadata: Additional response metadata
-        pagination: Pagination information for collection responses
-        links: HATEOAS links for related resources
-    
-    Returns:
-        APIResponse object ready for conversion to Flask response
+    def _log_response(self, 
+                     response: Dict[str, Any], 
+                     status_code: int, 
+                     request: Optional[Request]) -> None:
+        """
+        Log response for monitoring and analytics.
         
-    Examples:
-        >>> response = create_success_response({'user': {'id': 1, 'name': 'John'}})
-        >>> response = create_success_response(
-        ...     data=users_list,
-        ...     pagination={'page': 1, 'total': 100, 'per_page': 10}
-        ... )
-    """
-    logger.debug(f"Creating success response with status {status_code}")
+        Args:
+            response: Response dictionary
+            status_code: HTTP status code
+            request: Flask request object
+        """
+        try:
+            log_data = {
+                'event': 'api_response',
+                'status_code': status_code,
+                'success': response.get('success', True),
+                'request_id': response.get('request_id'),
+                'timestamp': response.get('timestamp')
+            }
+            
+            if request:
+                log_data.update({
+                    'method': request.method,
+                    'path': request.path,
+                    'remote_addr': request.remote_addr
+                })
+            
+            logger.info("API response", extra=log_data)
+            
+        except Exception as e:
+            logger.error(f"Failed to log response: {str(e)}")
     
-    return APIResponse(
-        data=data,
-        message=message,
-        status_code=status_code,
-        success=True,
-        metadata=metadata,
-        pagination=pagination,
-        links=links
-    )
-
-
-def create_error_response(errors: Union[List[ErrorDetail], List[Dict[str, Any]], ErrorDetail, str],
-                         message: Optional[str] = None,
-                         status_code: int = APIStatus.BAD_REQUEST,
-                         metadata: Optional[Dict[str, Any]] = None) -> APIResponse:
-    """
-    Create standardized error response maintaining hierarchical error processing patterns
-    and existing error code compatibility.
-    
-    Args:
-        errors: Error details (single error, list of errors, or error message)
-        message: Primary error message
-        status_code: HTTP status code (default: 400)
-        metadata: Additional error context
-    
-    Returns:
-        APIResponse object with standardized error formatting
+    def _log_error_response(self, 
+                           response: Dict[str, Any], 
+                           status_code: int, 
+                           exception: Optional[Exception], 
+                           request: Optional[Request]) -> None:
+        """
+        Log error response for monitoring and alerting.
         
-    Examples:
-        >>> error = ErrorDetail('VALIDATION_ERROR', 'Invalid email format', 'email')
-        >>> response = create_error_response(error, status_code=422)
-        
-        >>> errors = [
-        ...     ErrorDetail('REQUIRED_FIELD', 'Name is required', 'name'),
-        ...     ErrorDetail('INVALID_FORMAT', 'Invalid email', 'email')
-        ... ]
-        >>> response = create_error_response(errors, 'Validation failed', 422)
-    """
-    logger.warning(f"Creating error response with status {status_code}: {message}")
-    
-    # Normalize errors to list of dictionaries
-    normalized_errors = []
-    
-    if isinstance(errors, str):
-        # Simple string error message
-        error_detail = ErrorDetail(
-            code='GENERAL_ERROR',
-            message=errors,
-            error_type='general'
-        )
-        normalized_errors.append(error_detail.to_dict())
-    elif isinstance(errors, ErrorDetail):
-        # Single ErrorDetail object
-        normalized_errors.append(errors.to_dict())
-    elif isinstance(errors, list):
-        # List of errors (mixed types supported)
-        for error in errors:
-            if isinstance(error, ErrorDetail):
-                normalized_errors.append(error.to_dict())
-            elif isinstance(error, dict):
-                normalized_errors.append(error)
+        Args:
+            response: Error response dictionary
+            status_code: HTTP status code
+            exception: Original exception
+            request: Flask request object
+        """
+        try:
+            log_data = {
+                'event': 'api_error',
+                'status_code': status_code,
+                'error_code': response.get('error_code'),
+                'message': response.get('message'),
+                'request_id': response.get('request_id'),
+                'timestamp': response.get('timestamp')
+            }
+            
+            if request:
+                log_data.update({
+                    'method': request.method,
+                    'path': request.path,
+                    'remote_addr': request.remote_addr
+                })
+            
+            if exception:
+                log_data.update({
+                    'exception_type': type(exception).__name__,
+                    'exception_message': str(exception)
+                })
+            
+            # Log as error for status codes >= 500, warning for 4xx
+            if status_code >= 500:
+                logger.error("API error response", extra=log_data)
             else:
-                # Convert other types to string
-                error_detail = ErrorDetail(
-                    code='GENERAL_ERROR',
-                    message=str(error),
-                    error_type='general'
-                )
-                normalized_errors.append(error_detail.to_dict())
+                logger.warning("API client error", extra=log_data)
+                
+        except Exception as e:
+            logger.error(f"Failed to log error response: {str(e)}")
     
-    return APIResponse(
-        data=None,
-        message=message,
-        status_code=status_code,
-        success=False,
-        errors=normalized_errors,
-        metadata=metadata
-    )
-
-
-def create_validation_error_response(validation_errors: List[Dict[str, Any]],
-                                   message: str = "Validation failed") -> APIResponse:
-    """
-    Create standardized validation error response for input validation failures.
-    Maintains compatibility with existing validation error formats.
-    
-    Args:
-        validation_errors: List of validation error details
-        message: Primary validation error message
-    
-    Returns:
-        APIResponse with validation error formatting
+    def _create_fallback_response(self, 
+                                 data: Any, 
+                                 success: bool, 
+                                 status_code: int) -> Tuple[Dict[str, Any], int]:
+        """
+        Create fallback response when primary response creation fails.
         
-    Examples:
-        >>> errors = [
-        ...     {'field': 'email', 'message': 'Invalid email format'},
-        ...     {'field': 'password', 'message': 'Password too short'}
-        ... ]
-        >>> response = create_validation_error_response(errors)
-    """
-    logger.info(f"Creating validation error response: {len(validation_errors)} errors")
+        Args:
+            data: Response data
+            success: Success indicator
+            status_code: HTTP status code
+            
+        Returns:
+            Tuple of (response_dict, status_code)
+        """
+        return {
+            'success': success,
+            'status': ResponseStatus.SUCCESS.value if success else ResponseStatus.ERROR.value,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'data': str(data) if data is not None else None
+        }, status_code
     
-    error_details = []
-    for error in validation_errors:
-        error_detail = ErrorDetail(
-            code=error.get('code', 'VALIDATION_ERROR'),
-            message=error.get('message', 'Validation failed'),
-            field=error.get('field'),
-            location=error.get('location', 'body'),
-            details=error.get('details'),
-            error_type='validation'
-        )
-        error_details.append(error_detail)
-    
-    return create_error_response(
-        errors=error_details,
-        message=message,
-        status_code=APIStatus.UNPROCESSABLE_ENTITY
-    )
+    def _create_fallback_error_response(self, 
+                                       message: str, 
+                                       status_code: int) -> Tuple[Dict[str, Any], int]:
+        """
+        Create fallback error response when primary error response creation fails.
+        
+        Args:
+            message: Error message
+            status_code: HTTP status code
+            
+        Returns:
+            Tuple of (response_dict, status_code)
+        """
+        return {
+            'success': False,
+            'status': ResponseStatus.ERROR.value,
+            'message': message,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'error_code': ErrorCode.INTERNAL_SERVER_ERROR.value
+        }, status_code
 
 
-def create_authentication_error_response(message: str = "Authentication required",
-                                       code: str = "AUTHENTICATION_REQUIRED") -> APIResponse:
-    """
-    Create standardized authentication error response for auth failures.
-    
-    Args:
-        message: Authentication error message
-        code: Error code for programmatic handling
-    
-    Returns:
-        APIResponse with authentication error formatting
-    """
-    logger.warning(f"Creating authentication error response: {message}")
-    
-    error_detail = ErrorDetail(
-        code=code,
-        message=message,
-        error_type='authentication'
-    )
-    
-    return create_error_response(
-        errors=[error_detail],
-        message=message,
-        status_code=APIStatus.UNAUTHORIZED
-    )
+# Global response formatter instance for convenient access
+_default_formatter = ResponseFormatter()
 
 
-def create_authorization_error_response(message: str = "Insufficient permissions",
-                                      code: str = "INSUFFICIENT_PERMISSIONS") -> APIResponse:
-    """
-    Create standardized authorization error response for permission failures.
-    
-    Args:
-        message: Authorization error message
-        code: Error code for programmatic handling
-    
-    Returns:
-        APIResponse with authorization error formatting
-    """
-    logger.warning(f"Creating authorization error response: {message}")
-    
-    error_detail = ErrorDetail(
-        code=code,
-        message=message,
-        error_type='authorization'
-    )
-    
-    return create_error_response(
-        errors=[error_detail],
-        message=message,
-        status_code=APIStatus.FORBIDDEN
-    )
+# Convenience functions using the default formatter
+def success_response(data: Any = None, 
+                    message: Optional[str] = None,
+                    meta: Optional[Dict[str, Any]] = None,
+                    status_code: int = 200,
+                    request: Optional[Request] = None) -> Tuple[Dict[str, Any], int]:
+    """Create success response using default formatter."""
+    return _default_formatter.success(data, message, meta, status_code, request)
 
 
-def create_business_error_response(message: str,
-                                 code: str = "BUSINESS_RULE_VIOLATION",
-                                 details: Optional[Dict[str, Any]] = None) -> APIResponse:
-    """
-    Create standardized business logic error response for business rule violations.
-    
-    Args:
-        message: Business error message
-        code: Business error code
-        details: Additional business context
-    
-    Returns:
-        APIResponse with business error formatting
-    """
-    logger.info(f"Creating business error response: {code} - {message}")
-    
-    error_detail = ErrorDetail(
-        code=code,
-        message=message,
-        details=details,
-        error_type='business'
-    )
-    
-    return create_error_response(
-        errors=[error_detail],
-        message=message,
-        status_code=APIStatus.BAD_REQUEST
-    )
+def error_response(message: str,
+                  error_code: Optional[Union[str, ErrorCode]] = None,
+                  errors: Optional[List[str]] = None,
+                  status_code: int = 400,
+                  exception: Optional[Exception] = None,
+                  request: Optional[Request] = None) -> Tuple[Dict[str, Any], int]:
+    """Create error response using default formatter."""
+    return _default_formatter.error(message, error_code, errors, status_code, exception, request)
 
 
-def create_database_error_response(message: str = "Database operation failed",
-                                 code: str = "DATABASE_ERROR",
-                                 operation: Optional[str] = None) -> APIResponse:
-    """
-    Create standardized database error response for database operation failures.
-    
-    Args:
-        message: Database error message
-        code: Database error code
-        operation: Database operation that failed
-    
-    Returns:
-        APIResponse with database error formatting
-    """
-    logger.error(f"Creating database error response: {code} - {message}")
-    
-    details = {}
-    if operation:
-        details['operation'] = operation
-    
-    error_detail = ErrorDetail(
-        code=code,
-        message=message,
-        details=details,
-        error_type='database'
-    )
-    
-    return create_error_response(
-        errors=[error_detail],
-        message=message,
-        status_code=APIStatus.INTERNAL_SERVER_ERROR
-    )
+def validation_error_response(message: str = "Validation failed",
+                             errors: Optional[List[str]] = None,
+                             field_errors: Optional[Dict[str, List[str]]] = None,
+                             request: Optional[Request] = None) -> Tuple[Dict[str, Any], int]:
+    """Create validation error response using default formatter."""
+    return _default_formatter.validation_error(message, errors, field_errors, request)
 
 
-def create_external_service_error_response(service_name: str,
-                                         message: str = "External service unavailable",
-                                         code: str = "EXTERNAL_SERVICE_ERROR",
-                                         status_code: int = APIStatus.BAD_GATEWAY) -> APIResponse:
-    """
-    Create standardized external service error response for service communication failures.
-    
-    Args:
-        service_name: Name of the external service
-        message: Service error message
-        code: Service error code
-        status_code: HTTP status code (default: 502)
-    
-    Returns:
-        APIResponse with external service error formatting
-    """
-    logger.error(f"Creating external service error response for {service_name}: {message}")
-    
-    error_detail = ErrorDetail(
-        code=code,
-        message=message,
-        details={'service': service_name},
-        error_type='external_service'
-    )
-    
-    return create_error_response(
-        errors=[error_detail],
-        message=f"{service_name}: {message}",
-        status_code=status_code
-    )
+def not_found_response(resource: str = "Resource",
+                      resource_id: Optional[str] = None,
+                      request: Optional[Request] = None) -> Tuple[Dict[str, Any], int]:
+    """Create not found error response using default formatter."""
+    return _default_formatter.not_found(resource, resource_id, request)
 
 
-def create_not_found_response(resource: str = "Resource",
-                            resource_id: Optional[str] = None) -> APIResponse:
-    """
-    Create standardized not found error response.
-    
-    Args:
-        resource: Type of resource not found
-        resource_id: ID of the resource (if applicable)
-    
-    Returns:
-        APIResponse with not found error formatting
-    """
-    if resource_id:
-        message = f"{resource} with ID '{resource_id}' not found"
-    else:
-        message = f"{resource} not found"
-    
-    logger.info(f"Creating not found response: {message}")
-    
-    error_detail = ErrorDetail(
-        code='NOT_FOUND',
-        message=message,
-        details={'resource': resource, 'resource_id': resource_id} if resource_id else {'resource': resource},
-        error_type='not_found'
-    )
-    
-    return create_error_response(
-        errors=[error_detail],
-        message=message,
-        status_code=APIStatus.NOT_FOUND
-    )
+def unauthorized_response(message: str = "Authentication required",
+                         request: Optional[Request] = None) -> Tuple[Dict[str, Any], int]:
+    """Create unauthorized error response using default formatter."""
+    return _default_formatter.unauthorized(message, request)
 
 
-def create_conflict_response(message: str,
-                           code: str = "RESOURCE_CONFLICT",
-                           details: Optional[Dict[str, Any]] = None) -> APIResponse:
-    """
-    Create standardized conflict error response for resource conflicts.
-    
-    Args:
-        message: Conflict error message
-        code: Conflict error code
-        details: Additional conflict context
-    
-    Returns:
-        APIResponse with conflict error formatting
-    """
-    logger.warning(f"Creating conflict response: {code} - {message}")
-    
-    error_detail = ErrorDetail(
-        code=code,
-        message=message,
-        details=details,
-        error_type='conflict'
-    )
-    
-    return create_error_response(
-        errors=[error_detail],
-        message=message,
-        status_code=APIStatus.CONFLICT
-    )
+def forbidden_response(message: str = "Access forbidden",
+                      request: Optional[Request] = None) -> Tuple[Dict[str, Any], int]:
+    """Create forbidden error response using default formatter."""
+    return _default_formatter.forbidden(message, request)
 
 
-def create_rate_limit_response(retry_after: Optional[int] = None) -> APIResponse:
-    """
-    Create standardized rate limit error response.
-    
-    Args:
-        retry_after: Seconds to wait before retrying
-    
-    Returns:
-        APIResponse with rate limit error formatting
-    """
-    message = "Rate limit exceeded"
-    if retry_after:
-        message += f". Retry after {retry_after} seconds"
-    
-    logger.warning(f"Creating rate limit response: {message}")
-    
-    error_detail = ErrorDetail(
-        code='RATE_LIMIT_EXCEEDED',
-        message=message,
-        details={'retry_after': retry_after} if retry_after else {},
-        error_type='rate_limit'
-    )
-    
-    metadata = {}
-    if retry_after:
-        metadata['retry_after'] = retry_after
-    
-    return create_error_response(
-        errors=[error_detail],
-        message=message,
-        status_code=APIStatus.TOO_MANY_REQUESTS,
-        metadata=metadata
-    )
+def conflict_response(message: str = "Resource conflict",
+                     request: Optional[Request] = None) -> Tuple[Dict[str, Any], int]:
+    """Create conflict error response using default formatter."""
+    return _default_formatter.conflict(message, request)
 
 
-def create_pagination_metadata(page: int,
-                             per_page: int,
-                             total: int,
-                             has_next: bool = None,
-                             has_prev: bool = None) -> Dict[str, Any]:
-    """
-    Create standardized pagination metadata for collection responses.
-    
-    Args:
-        page: Current page number
-        per_page: Items per page
-        total: Total number of items
-        has_next: Whether there is a next page
-        has_prev: Whether there is a previous page
-    
-    Returns:
-        Dictionary containing pagination metadata
-    """
-    total_pages = (total + per_page - 1) // per_page  # Ceiling division
-    
-    if has_next is None:
-        has_next = page < total_pages
-    
-    if has_prev is None:
-        has_prev = page > 1
-    
-    return {
-        'page': page,
-        'per_page': per_page,
-        'total': total,
-        'total_pages': total_pages,
-        'has_next': has_next,
-        'has_prev': has_prev,
-        'next_page': page + 1 if has_next else None,
-        'prev_page': page - 1 if has_prev else None
-    }
+def rate_limited_response(message: str = "Rate limit exceeded",
+                         retry_after: Optional[int] = None,
+                         request: Optional[Request] = None) -> Tuple[Dict[str, Any], int]:
+    """Create rate limit error response using default formatter."""
+    return _default_formatter.rate_limited(message, retry_after, request)
 
 
-def create_paginated_response(data: List[Any],
-                            page: int,
-                            per_page: int,
-                            total: int,
+def internal_error_response(message: str = "Internal server error",
+                           exception: Optional[Exception] = None,
+                           request: Optional[Request] = None) -> Tuple[Dict[str, Any], int]:
+    """Create internal server error response using default formatter."""
+    return _default_formatter.internal_error(message, exception, request)
+
+
+def paginated_response(data: List[Any],
+                      page: int = 1,
+                      page_size: Optional[int] = None,
+                      total_count: Optional[int] = None,
+                      message: Optional[str] = None,
+                      request: Optional[Request] = None) -> Tuple[Dict[str, Any], int]:
+    """Create paginated response using default formatter."""
+    return _default_formatter.paginated(data, page, page_size, total_count, message, request)
+
+
+def created_response(data: Any = None,
+                    resource_id: Optional[str] = None,
+                    location: Optional[str] = None,
+                    message: Optional[str] = None,
+                    request: Optional[Request] = None) -> Tuple[Dict[str, Any], int]:
+    """Create resource creation response using default formatter."""
+    return _default_formatter.created(data, resource_id, location, message, request)
+
+
+def no_content_response(message: Optional[str] = None,
+                       request: Optional[Request] = None) -> Tuple[Dict[str, Any], int]:
+    """Create no content response using default formatter."""
+    return _default_formatter.no_content(message, request)
+
+
+def partial_content_response(data: Any,
+                            warnings: Optional[List[str]] = None,
                             message: Optional[str] = None,
-                            metadata: Optional[Dict[str, Any]] = None) -> APIResponse:
-    """
-    Create standardized paginated collection response.
-    
-    Args:
-        data: List of items for current page
-        page: Current page number
-        per_page: Items per page
-        total: Total number of items
-        message: Optional success message
-        metadata: Additional response metadata
-    
-    Returns:
-        APIResponse with pagination support
-    """
-    pagination_meta = create_pagination_metadata(page, per_page, total)
-    
-    response_metadata = metadata or {}
-    response_metadata.update({
-        'collection_size': len(data),
-        'page_info': pagination_meta
-    })
-    
-    return create_success_response(
-        data=data,
-        message=message,
-        metadata=response_metadata,
-        pagination=pagination_meta
-    )
+                            request: Optional[Request] = None) -> Tuple[Dict[str, Any], int]:
+    """Create partial content response using default formatter."""
+    return _default_formatter.partial_content(data, warnings, message, request)
 
 
-def handle_flask_exception(error: Exception) -> APIResponse:
+# Flask-specific response utilities
+def make_json_response(response_tuple: Tuple[Dict[str, Any], int]):
     """
-    Convert Flask/Werkzeug exceptions to standardized API responses.
-    Maintains compatibility with existing error handling patterns.
+    Convert response tuple to Flask JSON response object.
     
     Args:
-        error: Exception to convert
-    
-    Returns:
-        APIResponse with appropriate error formatting
-    """
-    if isinstance(error, HTTPException):
-        # Handle HTTP exceptions (400, 404, 500, etc.)
-        error_detail = ErrorDetail(
-            code=f"HTTP_{error.code}",
-            message=error.description or HTTPStatus(error.code).phrase,
-            error_type='http'
-        )
+        response_tuple: Tuple of (response_dict, status_code)
         
-        return create_error_response(
-            errors=[error_detail],
-            message=error.description or "HTTP error occurred",
-            status_code=error.code
-        )
-    else:
-        # Handle unexpected exceptions
-        logger.error(f"Unhandled exception: {type(error).__name__}: {str(error)}")
-        logger.error(f"Exception traceback: {traceback.format_exc()}")
-        
-        error_detail = ErrorDetail(
-            code='INTERNAL_ERROR',
-            message="An unexpected error occurred",
-            details={'exception_type': type(error).__name__},
-            error_type='internal'
-        )
-        
-        return create_error_response(
-            errors=[error_detail],
-            message="Internal server error",
-            status_code=APIStatus.INTERNAL_SERVER_ERROR
-        )
-
-
-def json_response(data: Any = None,
-                 message: Optional[str] = None,
-                 status_code: int = APIStatus.OK,
-                 headers: Optional[Dict[str, str]] = None) -> Response:
-    """
-    Create Flask JSON response with standardized formatting and enhanced JSON encoding.
-    Direct alternative to Flask's jsonify with enterprise features.
-    
-    Args:
-        data: Response data
-        message: Response message
-        status_code: HTTP status code
-        headers: Additional response headers
-    
     Returns:
-        Flask Response object with JSON content
+        Flask JSON response object
     """
-    if data is None and message is None:
-        response_data = {'success': True, 'status': status_code}
-    elif isinstance(data, APIResponse):
-        response_data = data.to_dict()
-        status_code = data.status_code
-    else:
-        api_response = create_success_response(data, message, status_code)
-        response_data = api_response.to_dict()
-    
-    # Use enterprise JSON encoder
-    json_str = dumps(response_data, cls=EnterpriseJSONEncoder, ensure_ascii=False)
-    
-    response = Response(
-        response=json_str,
-        status=status_code,
-        mimetype='application/json'
-    )
-    
-    # Add security headers
-    response.headers['X-Content-Type-Options'] = 'nosniff'
-    
-    # Add custom headers if provided
-    if headers:
-        for key, value in headers.items():
-            response.headers[key] = value
-    
-    return response
+    response_dict, status_code = response_tuple
+    return jsonify(response_dict), status_code
 
 
-def register_error_handlers(app: Flask) -> None:
+def make_response_headers(response_dict: Dict[str, Any], 
+                         additional_headers: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     """
-    Register standardized error handlers with Flask application for consistent
-    error response formatting across all endpoints.
+    Create standard response headers for API responses.
     
     Args:
-        app: Flask application instance
+        response_dict: Response dictionary
+        additional_headers: Additional headers to include
+        
+    Returns:
+        Dictionary of response headers
     """
+    headers = {
+        'Content-Type': 'application/json',
+        'X-Content-Type-Options': 'nosniff',
+        'X-Frame-Options': 'DENY',
+        'X-XSS-Protection': '1; mode=block'
+    }
     
-    @app.errorhandler(400)
-    def handle_bad_request(error):
-        """Handle 400 Bad Request errors."""
-        api_response = create_error_response(
-            errors="Bad request",
-            message="The request was invalid",
-            status_code=400
-        )
-        return api_response.to_flask_response()
+    # Add request ID header if available
+    if 'request_id' in response_dict:
+        headers['X-Request-ID'] = response_dict['request_id']
     
-    @app.errorhandler(401)
-    def handle_unauthorized(error):
-        """Handle 401 Unauthorized errors."""
-        api_response = create_authentication_error_response()
-        return api_response.to_flask_response()
+    # Add pagination headers for paginated responses
+    if 'meta' in response_dict and 'pagination' in response_dict['meta']:
+        pagination = response_dict['meta']['pagination']
+        headers.update({
+            'X-Total-Count': str(pagination['total_count']),
+            'X-Page': str(pagination['page']),
+            'X-Page-Size': str(pagination['page_size']),
+            'X-Total-Pages': str(pagination['total_pages'])
+        })
+        
+        # Add Link header for pagination navigation
+        links = []
+        if pagination.get('next_page'):
+            links.append(f'<page={pagination["next_page"]}>; rel="next"')
+        if pagination.get('prev_page'):
+            links.append(f'<page={pagination["prev_page"]}>; rel="prev"')
+        if links:
+            headers['Link'] = ', '.join(links)
     
-    @app.errorhandler(403)
-    def handle_forbidden(error):
-        """Handle 403 Forbidden errors."""
-        api_response = create_authorization_error_response()
-        return api_response.to_flask_response()
+    # Add rate limiting headers if available
+    if 'meta' in response_dict and 'retry_after' in response_dict['meta']:
+        headers['Retry-After'] = str(response_dict['meta']['retry_after'])
     
-    @app.errorhandler(404)
-    def handle_not_found(error):
-        """Handle 404 Not Found errors."""
-        api_response = create_not_found_response("Resource")
-        return api_response.to_flask_response()
+    # Add additional headers
+    if additional_headers:
+        headers.update(additional_headers)
     
-    @app.errorhandler(405)
-    def handle_method_not_allowed(error):
-        """Handle 405 Method Not Allowed errors."""
-        api_response = create_error_response(
-            errors="Method not allowed",
-            message="The request method is not supported for this endpoint",
-            status_code=405
-        )
-        return api_response.to_flask_response()
-    
-    @app.errorhandler(422)
-    def handle_unprocessable_entity(error):
-        """Handle 422 Unprocessable Entity errors."""
-        api_response = create_validation_error_response(
-            [{'message': 'The request data was invalid'}]
-        )
-        return api_response.to_flask_response()
-    
-    @app.errorhandler(429)
-    def handle_rate_limit_exceeded(error):
-        """Handle 429 Too Many Requests errors."""
-        api_response = create_rate_limit_response()
-        return api_response.to_flask_response()
-    
-    @app.errorhandler(500)
-    def handle_internal_server_error(error):
-        """Handle 500 Internal Server Error."""
-        api_response = handle_flask_exception(error)
-        return api_response.to_flask_response()
-    
-    @app.errorhandler(502)
-    def handle_bad_gateway(error):
-        """Handle 502 Bad Gateway errors."""
-        api_response = create_external_service_error_response(
-            service_name="External Service",
-            message="External service unavailable",
-            status_code=502
-        )
-        return api_response.to_flask_response()
-    
-    @app.errorhandler(503)
-    def handle_service_unavailable(error):
-        """Handle 503 Service Unavailable errors."""
-        api_response = create_error_response(
-            errors="Service temporarily unavailable",
-            message="The service is temporarily unavailable",
-            status_code=503
-        )
-        return api_response.to_flask_response()
-    
-    @app.errorhandler(Exception)
-    def handle_unexpected_error(error):
-        """Handle all other unexpected exceptions."""
-        api_response = handle_flask_exception(error)
-        return api_response.to_flask_response()
+    return headers
 
 
-# Convenience aliases for backward compatibility and ease of use
-success_response = create_success_response
-error_response = create_error_response
-validation_error = create_validation_error_response
-auth_error = create_authentication_error_response
-permission_error = create_authorization_error_response
-business_error = create_business_error_response
-not_found = create_not_found_response
-conflict_error = create_conflict_response
-rate_limit_error = create_rate_limit_response
-paginated_response = create_paginated_response
+# Status code mapping utilities
+def get_status_code_from_error_code(error_code: Union[str, ErrorCode]) -> int:
+    """
+    Map error codes to appropriate HTTP status codes.
+    
+    Args:
+        error_code: Application error code
+        
+    Returns:
+        Appropriate HTTP status code
+    """
+    if isinstance(error_code, str):
+        try:
+            error_code = ErrorCode(error_code)
+        except ValueError:
+            return 400  # Bad Request as default
+    
+    status_mapping = {
+        # Authentication errors
+        ErrorCode.UNAUTHORIZED: 401,
+        ErrorCode.FORBIDDEN: 403,
+        ErrorCode.TOKEN_EXPIRED: 401,
+        ErrorCode.INVALID_TOKEN: 401,
+        ErrorCode.INSUFFICIENT_PERMISSIONS: 403,
+        
+        # Validation errors
+        ErrorCode.VALIDATION_ERROR: 422,
+        ErrorCode.INVALID_INPUT: 400,
+        ErrorCode.MISSING_REQUIRED_FIELD: 400,
+        ErrorCode.INVALID_FORMAT: 400,
+        ErrorCode.DATA_CONSTRAINT_VIOLATION: 400,
+        
+        # Business logic errors
+        ErrorCode.BUSINESS_RULE_VIOLATION: 400,
+        ErrorCode.OPERATION_NOT_ALLOWED: 403,
+        ErrorCode.RESOURCE_CONFLICT: 409,
+        ErrorCode.STATE_TRANSITION_ERROR: 400,
+        ErrorCode.QUOTA_EXCEEDED: 429,
+        
+        # Database errors
+        ErrorCode.DATABASE_ERROR: 500,
+        ErrorCode.RECORD_NOT_FOUND: 404,
+        ErrorCode.DUPLICATE_RECORD: 409,
+        ErrorCode.TRANSACTION_FAILED: 500,
+        ErrorCode.CONNECTION_ERROR: 503,
+        
+        # External service errors
+        ErrorCode.EXTERNAL_SERVICE_ERROR: 502,
+        ErrorCode.SERVICE_UNAVAILABLE: 503,
+        ErrorCode.TIMEOUT_ERROR: 504,
+        ErrorCode.RATE_LIMIT_EXCEEDED: 429,
+        ErrorCode.API_VERSION_MISMATCH: 400,
+        
+        # System errors
+        ErrorCode.INTERNAL_SERVER_ERROR: 500,
+        ErrorCode.CONFIGURATION_ERROR: 500,
+        ErrorCode.RESOURCE_EXHAUSTED: 503,
+        ErrorCode.MAINTENANCE_MODE: 503,
+        ErrorCode.FEATURE_DISABLED: 501
+    }
+    
+    return status_mapping.get(error_code, 400)
 
 
-# Export all public functions and classes
+# Response validation utilities
+def validate_response_structure(response: Dict[str, Any]) -> bool:
+    """
+    Validate response structure against expected format.
+    
+    Args:
+        response: Response dictionary to validate
+        
+    Returns:
+        True if response structure is valid
+    """
+    required_fields = ['success', 'status']
+    
+    # Check required fields
+    for field in required_fields:
+        if field not in response:
+            return False
+    
+    # Validate success field type
+    if not isinstance(response['success'], bool):
+        return False
+    
+    # Validate status field value
+    valid_statuses = [status.value for status in ResponseStatus]
+    if response['status'] not in valid_statuses:
+        return False
+    
+    # For error responses, message is required
+    if not response['success'] and 'message' not in response:
+        return False
+    
+    return True
+
+
+# Export key classes and functions
 __all__ = [
-    'APIResponse',
-    'ErrorDetail',
-    'APIStatus',
-    'create_success_response',
-    'create_error_response',
-    'create_validation_error_response',
-    'create_authentication_error_response',
-    'create_authorization_error_response',
-    'create_business_error_response',
-    'create_database_error_response',
-    'create_external_service_error_response',
-    'create_not_found_response',
-    'create_conflict_response',
-    'create_rate_limit_response',
-    'create_pagination_metadata',
-    'create_paginated_response',
-    'handle_flask_exception',
-    'json_response',
-    'register_error_handlers',
-    # Convenience aliases
+    # Main classes
+    'ResponseFormatter',
+    'ResponseStatus',
+    'ErrorCode',
+    
+    # Response creation functions
     'success_response',
     'error_response',
-    'validation_error',
-    'auth_error',
-    'permission_error',
-    'business_error',
-    'not_found',
-    'conflict_error',
-    'rate_limit_error',
+    'validation_error_response',
+    'not_found_response',
+    'unauthorized_response',
+    'forbidden_response',
+    'conflict_response',
+    'rate_limited_response',
+    'internal_error_response',
     'paginated_response',
+    'created_response',
+    'no_content_response',
+    'partial_content_response',
+    
+    # Flask utilities
+    'make_json_response',
+    'make_response_headers',
+    
+    # Utility functions
+    'get_status_code_from_error_code',
+    'validate_response_structure',
 ]
