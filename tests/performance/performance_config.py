@@ -1,989 +1,1040 @@
 """
 Performance Testing Configuration Management Module
 
-This module provides comprehensive performance testing configuration for the Flask migration
-project, implementing ≤10% variance threshold compliance, load testing parameters, baseline
-comparison settings, and CI/CD pipeline integration configuration per technical specification
-requirements.
+This module provides comprehensive performance testing configuration management for the Flask migration project,
+including load test parameters, baseline thresholds, monitoring settings, and CI/CD integration configuration.
+Centralizes all performance testing settings and environment-specific parameters to ensure compliance with the
+≤10% variance requirement from the Node.js baseline.
 
 Key Features:
 - ≤10% variance threshold configuration per Section 0.1.1 primary objective
-- Load testing parameter management (10-1000 concurrent users) per Section 4.6.3
+- Load testing parameters (10-1000 concurrent users) per Section 4.6.3
 - Performance metrics thresholds (500ms response, 100 req/sec) per Section 4.6.3
 - CI/CD pipeline integration configuration per Section 6.6.2
-- Environment-specific performance settings per Section 6.6.1
+- Environment-specific performance parameters per Section 6.6.1
 - Baseline comparison configuration per Section 0.3.2 performance monitoring
 
 Architecture Integration:
-- Section 0.1.1: Performance optimization ensuring ≤10% variance from Node.js baseline
-- Section 4.6.3: Load testing specifications with progressive scaling and performance metrics
-- Section 6.6.2: CI/CD integration with automated performance validation and regression detection
-- Section 6.6.1: Environment-specific test configuration and isolation parameters
-- Section 0.3.2: Continuous performance monitoring with baseline comparison requirements
+- Section 4.6.3: Load testing specifications with locust and apache-bench integration
+- Section 6.6.2: CI/CD pipeline performance validation and automated rollback triggers
+- Section 6.5.1: Performance metrics collection and Prometheus integration
+- Section 6.5.2: Performance monitoring patterns and SLA compliance
+
+Performance Requirements:
+- Maintains ≤10% performance variance from Node.js baseline per Section 0.1.1
+- 95th percentile response time ≤500ms per Section 4.6.3
+- Minimum 100 requests/second sustained throughput per Section 4.6.3
+- CPU ≤70%, Memory ≤80% during peak load per Section 4.6.3
 
 Author: Flask Migration Team
 Version: 1.0.0
-Dependencies: locust ≥2.x, apache-bench, pytest ≥7.4+, structlog ≥23.1+
+Dependencies: locust ≥2.x, apache-bench, prometheus-client 0.17+, psutil 5.9+
 """
 
 import os
-import time
-import statistics
-from datetime import datetime, timedelta, timezone
-from typing import Dict, Any, List, Optional, Tuple, Union, NamedTuple
+import logging
+from datetime import datetime, timedelta
+from typing import Dict, Any, List, Optional, Union, Tuple
+from pathlib import Path
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
-import secrets
-import json
-import logging
 
-# Performance testing framework dependencies
-try:
-    import locust
-    from locust import HttpUser, task, between
-    LOCUST_AVAILABLE = True
-except ImportError:
-    LOCUST_AVAILABLE = False
+# Performance testing framework imports
+import psutil
 
-try:
-    import structlog
-    STRUCTLOG_AVAILABLE = True
-except ImportError:
-    STRUCTLOG_AVAILABLE = False
-
-# Prometheus metrics integration
-try:
-    from prometheus_client import CollectorRegistry, Counter, Histogram, Gauge
-    PROMETHEUS_AVAILABLE = True
-except ImportError:
-    PROMETHEUS_AVAILABLE = False
+# Configuration imports
+from tests.test_config import TestBaseConfig
+from src.config.settings import BaseConfig
 
 
-class PerformanceTestType(Enum):
-    """Performance test type enumeration for different testing scenarios."""
+# Configure module logger
+logger = logging.getLogger(__name__)
+
+
+class LoadTestScenario(Enum):
+    """Load testing scenario types with predefined configurations."""
     
-    UNIT_PERFORMANCE = "unit_performance"
-    LOAD_TESTING = "load_testing"
-    STRESS_TESTING = "stress_testing"
+    LIGHT_LOAD = "light_load"
+    NORMAL_LOAD = "normal_load"
+    HEAVY_LOAD = "heavy_load"
+    STRESS_TEST = "stress_test"
     BASELINE_COMPARISON = "baseline_comparison"
-    ENDURANCE_TESTING = "endurance_testing"
-    SPIKE_TESTING = "spike_testing"
-    VOLUME_TESTING = "volume_testing"
-
-
-class PerformanceEnvironment(Enum):
-    """Performance testing environment enumeration."""
-    
-    DEVELOPMENT = "development"
-    TESTING = "testing"
-    STAGING = "staging"
-    PRODUCTION = "production"
-    CI_CD = "ci_cd"
-
-
-class LoadTestPhase(Enum):
-    """Load testing phase enumeration for progressive scaling."""
-    
-    WARMUP = "warmup"
-    RAMP_UP = "ramp_up"
-    STEADY_STATE = "steady_state"
-    PEAK_LOAD = "peak_load"
-    RAMP_DOWN = "ramp_down"
-    COOLDOWN = "cooldown"
+    SPIKE_TEST = "spike_test"
+    ENDURANCE_TEST = "endurance_test"
 
 
 class PerformanceMetricType(Enum):
-    """Performance metric type enumeration for measurement categories."""
+    """Performance metric types for monitoring and alerting."""
     
     RESPONSE_TIME = "response_time"
     THROUGHPUT = "throughput"
     ERROR_RATE = "error_rate"
-    MEMORY_USAGE = "memory_usage"
     CPU_UTILIZATION = "cpu_utilization"
-    DATABASE_PERFORMANCE = "database_performance"
-    CONCURRENT_USERS = "concurrent_users"
+    MEMORY_USAGE = "memory_usage"
+    GC_PAUSE_TIME = "gc_pause_time"
+    DATABASE_RESPONSE = "database_response"
+    CACHE_HIT_RATE = "cache_hit_rate"
 
 
 @dataclass
-class PerformanceThreshold:
-    """Performance threshold configuration for specific metrics."""
+class NodeJSBaselineMetrics:
+    """Node.js baseline performance metrics for comparison validation."""
     
-    metric_name: str
-    baseline_value: float
-    variance_threshold: float = 0.10  # 10% variance limit per Section 0.1.1
-    warning_threshold: float = 0.05   # 5% warning threshold
-    critical_threshold: float = 0.15  # 15% critical threshold
-    unit: str = "ms"
-    description: str = ""
+    # Response time baselines (milliseconds)
+    response_times: Dict[str, float] = field(default_factory=lambda: {
+        'api_get_users': 150.0,
+        'api_create_user': 200.0,
+        'api_update_user': 180.0,
+        'api_delete_user': 120.0,
+        'api_list_users': 100.0,
+        'api_user_search': 175.0,
+        'api_user_profile': 130.0,
+        'health_check': 50.0,
+        'auth_login': 180.0,
+        'auth_logout': 80.0,
+        'auth_token_refresh': 160.0,
+        'file_upload': 300.0,
+        'file_download': 250.0,
+        'database_query': 75.0,
+        'cache_operations': 25.0,
+        'external_api_calls': 400.0
+    })
     
-    def calculate_variance(self, current_value: float) -> float:
-        """
-        Calculate performance variance percentage from baseline.
-        
-        Args:
-            current_value: Current measured performance value
-            
-        Returns:
-            Variance percentage (positive for degradation, negative for improvement)
-        """
-        if self.baseline_value == 0:
-            return 0.0
-        return ((current_value - self.baseline_value) / self.baseline_value) * 100.0
+    # Memory usage baselines (megabytes)
+    memory_usage: Dict[str, float] = field(default_factory=lambda: {
+        'baseline_mb': 256.0,
+        'peak_mb': 512.0,
+        'average_mb': 320.0,
+        'startup_mb': 180.0,
+        'steady_state_mb': 280.0,
+        'memory_growth_rate': 2.0  # MB per hour
+    })
     
-    def is_within_threshold(self, current_value: float) -> bool:
-        """
-        Check if performance metric is within acceptable variance threshold.
-        
-        Args:
-            current_value: Current measured performance value
-            
-        Returns:
-            True if within ≤10% variance threshold, False otherwise
-        """
-        variance = abs(self.calculate_variance(current_value))
-        return variance <= (self.variance_threshold * 100.0)
+    # Throughput baselines (requests per second)
+    throughput: Dict[str, float] = field(default_factory=lambda: {
+        'requests_per_second': 1000.0,
+        'concurrent_users': 100.0,
+        'database_ops_per_second': 500.0,
+        'cache_ops_per_second': 2000.0,
+        'peak_throughput': 1500.0,
+        'sustained_throughput': 800.0
+    })
     
-    def get_threshold_status(self, current_value: float) -> str:
-        """
-        Get threshold status classification for current performance value.
-        
-        Args:
-            current_value: Current measured performance value
-            
-        Returns:
-            Status classification: 'ok', 'warning', 'critical', 'failure'
-        """
-        variance = abs(self.calculate_variance(current_value))
-        variance_decimal = variance / 100.0
-        
-        if variance_decimal <= self.warning_threshold:
-            return "ok"
-        elif variance_decimal <= self.variance_threshold:
-            return "warning"
-        elif variance_decimal <= self.critical_threshold:
-            return "critical"
-        else:
-            return "failure"
+    # Database performance baselines (milliseconds)
+    database_performance: Dict[str, float] = field(default_factory=lambda: {
+        'user_lookup': 45.0,
+        'user_create': 85.0,
+        'user_update': 70.0,
+        'user_delete': 40.0,
+        'bulk_operations': 200.0,
+        'index_queries': 25.0,
+        'aggregation_queries': 150.0,
+        'connection_setup': 30.0
+    })
+    
+    # Cache performance baselines (milliseconds)
+    cache_performance: Dict[str, float] = field(default_factory=lambda: {
+        'get_hit': 5.0,
+        'get_miss': 15.0,
+        'set': 10.0,
+        'delete': 8.0,
+        'bulk_get': 20.0,
+        'pipeline_operations': 30.0,
+        'cache_invalidation': 12.0
+    })
+    
+    # CPU and system resource baselines
+    system_resources: Dict[str, float] = field(default_factory=lambda: {
+        'cpu_utilization_average': 45.0,  # percentage
+        'cpu_utilization_peak': 70.0,
+        'memory_utilization_average': 60.0,
+        'disk_io_average': 50.0,  # operations per second
+        'network_io_average': 100.0,  # MB per second
+        'context_switches_per_second': 1000.0,
+        'thread_count_average': 50.0
+    })
 
 
 @dataclass
 class LoadTestConfiguration:
-    """Load testing configuration for progressive user scaling per Section 4.6.3."""
+    """Load test scenario configuration with scaling parameters."""
     
-    min_users: int = 10              # Minimum concurrent users
-    max_users: int = 1000            # Maximum concurrent users per Section 4.6.3
-    user_spawn_rate: float = 2.0     # Users spawned per second
-    test_duration: int = 1800        # 30-minute sustained load per Section 4.6.3
-    ramp_up_time: int = 300          # 5-minute ramp-up time
-    steady_state_time: int = 1200    # 20-minute steady state
-    ramp_down_time: int = 300        # 5-minute ramp-down time
+    scenario_name: str
+    users: int
+    spawn_rate: float
+    duration: int  # seconds
+    host: str = "http://localhost:5000"
     
-    # Request rate configuration per Section 4.6.3
-    target_request_rate: int = 100   # Minimum 100 requests/second
-    max_request_rate: int = 500      # Target 100-500 requests per second
+    # Advanced load testing parameters
+    ramp_up_time: int = field(default=60)  # seconds
+    steady_state_time: int = field(default=300)  # seconds
+    ramp_down_time: int = field(default=30)  # seconds
     
-    # Geographic distribution simulation
-    geographic_regions: List[str] = field(default_factory=lambda: [
-        "us-east-1", "us-west-2", "eu-west-1", "ap-southeast-1"
-    ])
-    
-    # Test scenario weights
-    scenario_weights: Dict[str, float] = field(default_factory=lambda: {
-        "api_read_operations": 0.60,     # 60% read operations
-        "api_write_operations": 0.25,    # 25% write operations
-        "authentication_flow": 0.10,     # 10% authentication
-        "file_upload_operations": 0.05   # 5% file operations
+    # Request distribution weights
+    endpoint_weights: Dict[str, float] = field(default_factory=lambda: {
+        'GET /api/users': 0.3,
+        'POST /api/users': 0.15,
+        'PUT /api/users/{id}': 0.1,
+        'DELETE /api/users/{id}': 0.05,
+        'GET /api/users/{id}': 0.2,
+        'GET /health': 0.1,
+        'POST /auth/login': 0.05,
+        'POST /auth/logout': 0.05
     })
     
-    def get_user_progression(self) -> List[Tuple[int, int]]:
-        """
-        Generate user progression schedule for load testing phases.
-        
-        Returns:
-            List of (time_seconds, user_count) tuples for progressive scaling
-        """
-        progression = []
-        
-        # Warmup phase
-        progression.append((0, self.min_users))
-        
-        # Ramp-up phase
-        ramp_steps = self.ramp_up_time // 60  # Steps every minute
-        user_increment = (self.max_users - self.min_users) // ramp_steps
-        
-        for step in range(1, ramp_steps + 1):
-            time_point = step * 60
-            user_count = self.min_users + (user_increment * step)
-            progression.append((time_point, min(user_count, self.max_users)))
-        
-        # Steady state phase
-        steady_start = self.ramp_up_time
-        progression.append((steady_start, self.max_users))
-        progression.append((steady_start + self.steady_state_time, self.max_users))
-        
-        # Ramp-down phase
-        ramp_down_start = steady_start + self.steady_state_time
-        ramp_down_steps = self.ramp_down_time // 60
-        user_decrement = (self.max_users - self.min_users) // ramp_down_steps
-        
-        for step in range(1, ramp_down_steps + 1):
-            time_point = ramp_down_start + (step * 60)
-            user_count = self.max_users - (user_decrement * step)
-            progression.append((time_point, max(user_count, self.min_users)))
-        
-        return progression
-    
-    def get_phase_duration(self, phase: LoadTestPhase) -> int:
-        """
-        Get duration for specific load testing phase.
-        
-        Args:
-            phase: Load testing phase
-            
-        Returns:
-            Duration in seconds for the specified phase
-        """
-        phase_durations = {
-            LoadTestPhase.WARMUP: 60,
-            LoadTestPhase.RAMP_UP: self.ramp_up_time,
-            LoadTestPhase.STEADY_STATE: self.steady_state_time,
-            LoadTestPhase.PEAK_LOAD: 300,  # 5-minute peak load
-            LoadTestPhase.RAMP_DOWN: self.ramp_down_time,
-            LoadTestPhase.COOLDOWN: 60
-        }
-        
-        return phase_durations.get(phase, 0)
+    # Performance thresholds for this scenario
+    response_time_p95: float = field(default=500.0)  # milliseconds
+    error_rate_threshold: float = field(default=0.1)  # percentage
+    throughput_threshold: float = field(default=100.0)  # requests per second
 
 
-@dataclass 
-class BaselineMetrics:
-    """Baseline performance metrics for Node.js comparison per Section 0.3.2."""
-    
-    # Response time baselines (milliseconds)
-    api_response_time_p50: float = 100.0      # 50th percentile
-    api_response_time_p95: float = 250.0      # 95th percentile ≤500ms per Section 4.6.3
-    api_response_time_p99: float = 400.0      # 99th percentile
-    database_query_time: float = 50.0         # Average database query time
-    
-    # Throughput baselines
-    requests_per_second: float = 100.0        # Minimum 100 req/sec per Section 4.6.3
-    peak_throughput: float = 500.0            # Peak throughput capacity
-    concurrent_users_capacity: int = 1000     # Maximum concurrent users
-    
-    # Resource utilization baselines
-    memory_usage_mb: float = 256.0            # Memory usage in MB
-    cpu_utilization_percent: float = 15.0     # CPU utilization percentage
-    database_connection_count: int = 50       # Database connection pool size
-    
-    # Error rate baselines
-    error_rate_percent: float = 0.1           # ≤0.1% error rate per Section 4.6.3
-    timeout_rate_percent: float = 0.05        # Timeout rate threshold
-    
-    # Calculated from Node.js implementation
-    nodejs_baseline_timestamp: datetime = field(
-        default_factory=lambda: datetime.now(timezone.utc)
-    )
-    nodejs_version: str = "18.x"
-    express_version: str = "4.x"
-    
-    def to_performance_thresholds(self) -> List[PerformanceThreshold]:
-        """
-        Convert baseline metrics to performance threshold configurations.
-        
-        Returns:
-            List of PerformanceThreshold objects for validation
-        """
-        thresholds = [
-            PerformanceThreshold(
-                metric_name="api_response_time_p95",
-                baseline_value=self.api_response_time_p95,
-                unit="ms",
-                description="95th percentile API response time"
-            ),
-            PerformanceThreshold(
-                metric_name="requests_per_second",
-                baseline_value=self.requests_per_second,
-                unit="req/s",
-                description="Sustained request throughput"
-            ),
-            PerformanceThreshold(
-                metric_name="memory_usage",
-                baseline_value=self.memory_usage_mb,
-                unit="MB",
-                description="Application memory consumption"
-            ),
-            PerformanceThreshold(
-                metric_name="cpu_utilization",
-                baseline_value=self.cpu_utilization_percent,
-                unit="%",
-                description="CPU utilization under load"
-            ),
-            PerformanceThreshold(
-                metric_name="error_rate",
-                baseline_value=self.error_rate_percent,
-                variance_threshold=0.5,  # Stricter error rate threshold
-                unit="%",
-                description="Request error rate"
-            )
-        ]
-        
-        return thresholds
-
-
-class BasePerformanceConfig:
+class PerformanceTestConfig(TestBaseConfig):
     """
-    Base performance testing configuration providing shared settings and utilities.
+    Performance testing configuration class providing comprehensive load test parameters,
+    baseline thresholds, monitoring settings, and CI/CD integration configuration.
     
-    Implements core performance testing configuration patterns with ≤10% variance
-    threshold enforcement per Section 0.1.1 and comprehensive load testing
-    parameters per Section 4.6.3.
+    Implements the ≤10% variance requirement and ensures compatibility with Node.js baseline
+    performance metrics across all testing scenarios and deployment environments.
     """
     
-    # Core Performance Requirements per Section 0.1.1
-    PERFORMANCE_VARIANCE_THRESHOLD = 0.10  # ≤10% variance requirement
-    BASELINE_COMPARISON_ENABLED = True
-    PERFORMANCE_MONITORING_ENABLED = True
+    # Performance Testing Configuration
+    PERFORMANCE_TESTING_ENABLED = True
+    PERFORMANCE_BASELINE_ENABLED = True
+    PERFORMANCE_VARIANCE_THRESHOLD = 10.0  # ≤10% variance requirement per Section 0.1.1
+    PERFORMANCE_COMPARISON_ENABLED = True
     
-    # Load Testing Configuration per Section 4.6.3
-    LOAD_TEST_MIN_USERS = 10
-    LOAD_TEST_MAX_USERS = 1000
-    LOAD_TEST_DURATION = 1800  # 30 minutes
-    TARGET_THROUGHPUT_RPS = 100  # 100 requests/second minimum
-    PEAK_THROUGHPUT_RPS = 500    # 500 requests/second target
+    # Node.js Baseline Metrics
+    NODEJS_BASELINE_METRICS = NodeJSBaselineMetrics()
+    
+    # Performance Test Environment Configuration
+    PERFORMANCE_TEST_HOST = os.getenv('PERFORMANCE_TEST_HOST', 'http://localhost:5000')
+    PERFORMANCE_TEST_DURATION = int(os.getenv('PERFORMANCE_TEST_DURATION', '300'))  # 5 minutes default
+    PERFORMANCE_TEST_USERS = int(os.getenv('PERFORMANCE_TEST_USERS', '100'))
+    PERFORMANCE_TEST_SPAWN_RATE = float(os.getenv('PERFORMANCE_TEST_SPAWN_RATE', '10.0'))
+    
+    # Load Testing Framework Configuration
+    LOCUST_CONFIG = {
+        'master_bind_host': '0.0.0.0',
+        'master_bind_port': 8089,
+        'master_web_port': 8090,
+        'worker_count': int(os.getenv('LOCUST_WORKER_COUNT', '4')),
+        'headless': os.getenv('LOCUST_HEADLESS', 'true').lower() == 'true',
+        'autostart': True,
+        'autoquit': 10,  # seconds after test completion
+        'csv_output': '/tmp/performance_results',
+        'html_output': '/tmp/performance_report.html',
+        'logfile': '/tmp/locust.log',
+        'loglevel': 'INFO'
+    }
+    
+    # Apache Bench Configuration
+    APACHE_BENCH_CONFIG = {
+        'requests_total': int(os.getenv('AB_REQUESTS_TOTAL', '10000')),
+        'concurrency': int(os.getenv('AB_CONCURRENCY', '100')),
+        'timeout': int(os.getenv('AB_TIMEOUT', '30')),
+        'keep_alive': True,
+        'post_file': None,  # For POST request testing
+        'content_type': 'application/json',
+        'output_format': 'csv',
+        'confidence_interval': 95
+    }
     
     # Performance Metrics Thresholds per Section 4.6.3
-    RESPONSE_TIME_P95_THRESHOLD = 500      # 95th percentile ≤500ms
-    ERROR_RATE_THRESHOLD = 0.1             # ≤0.1% error rate
-    RESOURCE_CPU_THRESHOLD = 70            # CPU ≤70%
-    RESOURCE_MEMORY_THRESHOLD = 80         # Memory ≤80%
-    
-    # Test Execution Configuration
-    WARMUP_ITERATIONS = 10
-    BENCHMARK_ITERATIONS = 100
-    BENCHMARK_TIMEOUT = 300  # 5 minutes
-    
-    # Monitoring and Reporting
-    METRICS_COLLECTION_INTERVAL = 1  # seconds
-    PERFORMANCE_REPORT_ENABLED = True
-    TREND_ANALYSIS_ENABLED = True
-    
-    # CI/CD Integration per Section 6.6.2
-    CI_CD_INTEGRATION_ENABLED = True
-    AUTOMATED_PERFORMANCE_GATES = True
-    PIPELINE_FAILURE_ON_REGRESSION = True
-    
-    # Environment-specific Settings per Section 6.6.1
-    ENVIRONMENT_ISOLATION_ENABLED = True
-    TEST_DATA_CLEANUP_ENABLED = True
-    PARALLEL_EXECUTION_ENABLED = True
-    
-    @classmethod
-    def get_baseline_metrics(cls) -> BaselineMetrics:
-        """
-        Get baseline performance metrics for Node.js comparison.
+    PERFORMANCE_THRESHOLDS = {
+        # Response time thresholds (milliseconds)
+        'response_time_p95': 500.0,  # 95th percentile ≤500ms
+        'response_time_p99': 800.0,  # 99th percentile ≤800ms
+        'response_time_average': 200.0,  # Average ≤200ms
+        'response_time_max': 2000.0,  # Maximum ≤2 seconds
         
-        Returns:
-            BaselineMetrics instance with Node.js performance baselines
-        """
-        return BaselineMetrics(
-            api_response_time_p95=cls.RESPONSE_TIME_P95_THRESHOLD,
-            requests_per_second=cls.TARGET_THROUGHPUT_RPS,
-            memory_usage_mb=256.0,
-            cpu_utilization_percent=15.0,
-            error_rate_percent=cls.ERROR_RATE_THRESHOLD
-        )
-    
-    @classmethod
-    def get_load_test_config(cls) -> LoadTestConfiguration:
-        """
-        Get load testing configuration for progressive scaling.
+        # Throughput thresholds (requests per second)
+        'throughput_minimum': 100.0,  # Minimum 100 req/sec sustained
+        'throughput_target': 500.0,  # Target 500 req/sec
+        'throughput_peak': 1000.0,  # Peak 1000 req/sec
         
-        Returns:
-            LoadTestConfiguration instance with load test parameters
-        """
-        return LoadTestConfiguration(
-            min_users=cls.LOAD_TEST_MIN_USERS,
-            max_users=cls.LOAD_TEST_MAX_USERS,
-            test_duration=cls.LOAD_TEST_DURATION,
-            target_request_rate=cls.TARGET_THROUGHPUT_RPS,
-            max_request_rate=cls.PEAK_THROUGHPUT_RPS
+        # Error rate thresholds (percentage)
+        'error_rate_warning': 0.1,  # 0.1% warning threshold
+        'error_rate_critical': 1.0,  # 1% critical threshold
+        'error_rate_maximum': 5.0,  # 5% maximum acceptable
+        
+        # Resource utilization thresholds (percentage)
+        'cpu_utilization_warning': 70.0,  # 70% warning per Section 4.6.3
+        'cpu_utilization_critical': 90.0,  # 90% critical
+        'memory_utilization_warning': 80.0,  # 80% warning per Section 4.6.3
+        'memory_utilization_critical': 95.0,  # 95% critical
+        
+        # Database performance thresholds (milliseconds)
+        'database_response_warning': 100.0,  # 100ms warning
+        'database_response_critical': 500.0,  # 500ms critical
+        'database_connection_timeout': 5000.0,  # 5 seconds
+        
+        # Cache performance thresholds (milliseconds)
+        'cache_response_warning': 50.0,  # 50ms warning
+        'cache_response_critical': 200.0,  # 200ms critical
+        'cache_hit_rate_minimum': 90.0,  # 90% minimum hit rate
+        
+        # GC performance thresholds (milliseconds)
+        'gc_pause_warning': 100.0,  # 100ms warning
+        'gc_pause_critical': 300.0,  # 300ms critical
+        'gc_frequency_maximum': 10.0  # Maximum 10 GC cycles per minute
+    }
+    
+    # Load Testing Scenarios per Section 4.6.3
+    LOAD_TEST_SCENARIOS = {
+        LoadTestScenario.LIGHT_LOAD: LoadTestConfiguration(
+            scenario_name="Light Load",
+            users=10,
+            spawn_rate=2.0,
+            duration=300,  # 5 minutes
+            response_time_p95=300.0,
+            error_rate_threshold=0.05,
+            throughput_threshold=50.0
+        ),
+        LoadTestScenario.NORMAL_LOAD: LoadTestConfiguration(
+            scenario_name="Normal Load",
+            users=100,
+            spawn_rate=10.0,
+            duration=600,  # 10 minutes
+            response_time_p95=500.0,
+            error_rate_threshold=0.1,
+            throughput_threshold=100.0
+        ),
+        LoadTestScenario.HEAVY_LOAD: LoadTestConfiguration(
+            scenario_name="Heavy Load",
+            users=500,
+            spawn_rate=25.0,
+            duration=1200,  # 20 minutes
+            response_time_p95=800.0,
+            error_rate_threshold=0.5,
+            throughput_threshold=300.0
+        ),
+        LoadTestScenario.STRESS_TEST: LoadTestConfiguration(
+            scenario_name="Stress Test",
+            users=1000,
+            spawn_rate=50.0,
+            duration=1800,  # 30 minutes
+            response_time_p95=1500.0,
+            error_rate_threshold=2.0,
+            throughput_threshold=500.0
+        ),
+        LoadTestScenario.BASELINE_COMPARISON: LoadTestConfiguration(
+            scenario_name="Baseline Comparison",
+            users=100,
+            spawn_rate=10.0,
+            duration=900,  # 15 minutes
+            response_time_p95=500.0,
+            error_rate_threshold=0.1,
+            throughput_threshold=100.0
+        ),
+        LoadTestScenario.SPIKE_TEST: LoadTestConfiguration(
+            scenario_name="Spike Test",
+            users=200,
+            spawn_rate=100.0,  # Rapid ramp-up
+            duration=300,  # 5 minutes
+            ramp_up_time=10,  # Very fast ramp-up
+            response_time_p95=1000.0,
+            error_rate_threshold=1.0,
+            throughput_threshold=150.0
+        ),
+        LoadTestScenario.ENDURANCE_TEST: LoadTestConfiguration(
+            scenario_name="Endurance Test",
+            users=150,
+            spawn_rate=5.0,
+            duration=7200,  # 2 hours
+            steady_state_time=6600,  # Most of the test
+            response_time_p95=600.0,
+            error_rate_threshold=0.2,
+            throughput_threshold=120.0
         )
+    }
+    
+    # Performance Monitoring Configuration
+    PERFORMANCE_MONITORING = {
+        'metrics_collection_enabled': True,
+        'metrics_collection_interval': 15,  # seconds
+        'metrics_retention_period': 86400,  # 24 hours in seconds
+        'prometheus_integration': True,
+        'prometheus_pushgateway_url': os.getenv('PROMETHEUS_PUSHGATEWAY_URL', 'http://localhost:9091'),
+        'grafana_dashboard_enabled': True,
+        'real_time_alerts': True,
+        'alert_webhook_url': os.getenv('PERFORMANCE_ALERT_WEBHOOK_URL'),
+        'alert_slack_channel': os.getenv('PERFORMANCE_ALERT_SLACK_CHANNEL', '#performance-alerts'),
+        'baseline_drift_detection': True,
+        'baseline_update_frequency': 'weekly',
+        'performance_regression_detection': True
+    }
+    
+    # CI/CD Pipeline Integration Configuration per Section 6.6.2
+    CICD_INTEGRATION = {
+        'github_actions_enabled': True,
+        'performance_gate_enabled': True,
+        'performance_gate_threshold': 10.0,  # ≤10% variance threshold
+        'automated_rollback_enabled': True,
+        'rollback_trigger_threshold': 15.0,  # >15% variance triggers rollback
+        'pipeline_timeout': 3600,  # 1 hour maximum test duration
+        'parallel_execution': True,
+        'artifact_retention': 30,  # days
+        'test_report_format': 'junit',
+        'performance_report_format': 'html',
+        'notification_enabled': True,
+        'notification_channels': ['slack', 'email'],
+        'approval_gate_enabled': True,  # Manual approval for production
+        'performance_comparison_required': True,
+        'baseline_validation_required': True
+    }
+    
+    # Environment-Specific Performance Parameters per Section 6.6.1
+    ENVIRONMENT_CONFIGS = {
+        'development': {
+            'performance_testing_enabled': True,
+            'load_test_scenario': LoadTestScenario.LIGHT_LOAD,
+            'baseline_comparison_enabled': False,
+            'ci_integration_enabled': False,
+            'resource_limits': {
+                'cpu_cores': 2,
+                'memory_gb': 4,
+                'max_users': 50
+            },
+            'test_duration_multiplier': 0.5,  # Shorter tests in dev
+            'alert_thresholds_relaxed': True
+        },
+        'testing': {
+            'performance_testing_enabled': True,
+            'load_test_scenario': LoadTestScenario.NORMAL_LOAD,
+            'baseline_comparison_enabled': True,
+            'ci_integration_enabled': True,
+            'resource_limits': {
+                'cpu_cores': 4,
+                'memory_gb': 8,
+                'max_users': 200
+            },
+            'test_duration_multiplier': 0.75,
+            'alert_thresholds_relaxed': False
+        },
+        'staging': {
+            'performance_testing_enabled': True,
+            'load_test_scenario': LoadTestScenario.HEAVY_LOAD,
+            'baseline_comparison_enabled': True,
+            'ci_integration_enabled': True,
+            'resource_limits': {
+                'cpu_cores': 8,
+                'memory_gb': 16,
+                'max_users': 500
+            },
+            'test_duration_multiplier': 1.0,
+            'alert_thresholds_relaxed': False
+        },
+        'production': {
+            'performance_testing_enabled': True,
+            'load_test_scenario': LoadTestScenario.BASELINE_COMPARISON,
+            'baseline_comparison_enabled': True,
+            'ci_integration_enabled': True,
+            'resource_limits': {
+                'cpu_cores': 16,
+                'memory_gb': 32,
+                'max_users': 1000
+            },
+            'test_duration_multiplier': 1.0,
+            'alert_thresholds_relaxed': False,
+            'production_traffic_sampling': 0.1  # 10% traffic for performance monitoring
+        }
+    }
+    
+    # Baseline Comparison Configuration per Section 0.3.2
+    BASELINE_COMPARISON = {
+        'comparison_enabled': True,
+        'variance_threshold': 10.0,  # ≤10% variance requirement
+        'variance_calculation_method': 'percentage',
+        'comparison_metrics': [
+            'response_time_average',
+            'response_time_p95',
+            'response_time_p99',
+            'throughput',
+            'error_rate',
+            'cpu_utilization',
+            'memory_usage',
+            'database_response_time'
+        ],
+        'statistical_significance': 0.95,  # 95% confidence interval
+        'sample_size_minimum': 1000,  # Minimum requests for valid comparison
+        'outlier_detection_enabled': True,
+        'outlier_threshold': 3.0,  # Standard deviations
+        'trend_analysis_enabled': True,
+        'trend_analysis_window': 7,  # days
+        'regression_detection_sensitivity': 'medium',
+        'baseline_update_criteria': {
+            'improvement_threshold': 5.0,  # Update baseline if 5% improvement
+            'stability_period': 7,  # days of stable performance
+            'validation_tests_required': 3
+        }
+    }
+    
+    # Resource Monitoring Configuration
+    RESOURCE_MONITORING = {
+        'system_metrics_enabled': True,
+        'container_metrics_enabled': True,
+        'application_metrics_enabled': True,
+        'database_metrics_enabled': True,
+        'cache_metrics_enabled': True,
+        'network_metrics_enabled': True,
+        
+        # System resource monitoring
+        'cpu_monitoring': {
+            'enabled': True,
+            'collection_interval': 15,  # seconds
+            'per_core_monitoring': True,
+            'load_average_monitoring': True,
+            'context_switch_monitoring': True
+        },
+        
+        'memory_monitoring': {
+            'enabled': True,
+            'collection_interval': 30,  # seconds
+            'heap_monitoring': True,
+            'garbage_collection_monitoring': True,
+            'memory_leak_detection': True,
+            'swap_monitoring': True
+        },
+        
+        'disk_monitoring': {
+            'enabled': True,
+            'collection_interval': 60,  # seconds
+            'io_monitoring': True,
+            'space_monitoring': True,
+            'latency_monitoring': True
+        },
+        
+        'network_monitoring': {
+            'enabled': True,
+            'collection_interval': 30,  # seconds
+            'bandwidth_monitoring': True,
+            'connection_monitoring': True,
+            'packet_loss_monitoring': True
+        }
+    }
+    
+    # Test Data Configuration
+    TEST_DATA_CONFIG = {
+        'data_generation_enabled': True,
+        'synthetic_data_size': 10000,  # Number of test records
+        'data_variety_factor': 0.8,  # 80% variety in test data
+        'realistic_data_patterns': True,
+        'data_cleanup_enabled': True,
+        'data_isolation_per_test': True,
+        'performance_data_templates': {
+            'user_profiles': 1000,
+            'transaction_records': 5000,
+            'session_data': 500,
+            'cache_entries': 2000
+        }
+    }
     
     @classmethod
-    def calculate_performance_variance(cls, current_value: float, baseline_value: float) -> float:
+    def get_environment_config(cls, environment: str = None) -> Dict[str, Any]:
         """
-        Calculate performance variance percentage from baseline.
+        Get environment-specific performance configuration.
         
         Args:
-            current_value: Current measured performance value
-            baseline_value: Baseline Node.js performance value
+            environment: Target environment name (defaults to FLASK_ENV)
             
         Returns:
-            Variance percentage (positive for degradation, negative for improvement)
+            Dict containing environment-specific performance parameters
         """
-        if baseline_value == 0:
+        if environment is None:
+            environment = os.getenv('FLASK_ENV', 'development')
+        
+        environment = environment.lower()
+        
+        if environment not in cls.ENVIRONMENT_CONFIGS:
+            logger.warning(f"Unknown environment '{environment}', using development config")
+            environment = 'development'
+        
+        env_config = cls.ENVIRONMENT_CONFIGS[environment].copy()
+        
+        # Apply environment-specific modifications
+        if env_config.get('alert_thresholds_relaxed'):
+            # Relax thresholds for development environments
+            env_config['performance_thresholds'] = cls._get_relaxed_thresholds()
+        else:
+            env_config['performance_thresholds'] = cls.PERFORMANCE_THRESHOLDS.copy()
+        
+        # Apply test duration multiplier
+        multiplier = env_config.get('test_duration_multiplier', 1.0)
+        for scenario in cls.LOAD_TEST_SCENARIOS.values():
+            env_config[f'{scenario.scenario_name.lower().replace(" ", "_")}_duration'] = int(
+                scenario.duration * multiplier
+            )
+        
+        logger.info(
+            f"Performance configuration loaded for environment: {environment}",
+            extra={
+                'environment': environment,
+                'load_test_scenario': env_config['load_test_scenario'].value,
+                'baseline_comparison_enabled': env_config['baseline_comparison_enabled'],
+                'ci_integration_enabled': env_config['ci_integration_enabled']
+            }
+        )
+        
+        return env_config
+    
+    @classmethod
+    def _get_relaxed_thresholds(cls) -> Dict[str, float]:
+        """Get relaxed performance thresholds for development environments."""
+        relaxed_thresholds = cls.PERFORMANCE_THRESHOLDS.copy()
+        
+        # Increase thresholds by 50% for development
+        multiplier = 1.5
+        
+        threshold_keys = [
+            'response_time_p95', 'response_time_p99', 'response_time_average',
+            'database_response_warning', 'database_response_critical',
+            'cache_response_warning', 'cache_response_critical',
+            'gc_pause_warning', 'gc_pause_critical'
+        ]
+        
+        for key in threshold_keys:
+            if key in relaxed_thresholds:
+                relaxed_thresholds[key] *= multiplier
+        
+        # Reduce throughput requirements for development
+        throughput_keys = ['throughput_minimum', 'throughput_target']
+        for key in throughput_keys:
+            if key in relaxed_thresholds:
+                relaxed_thresholds[key] *= 0.5
+        
+        return relaxed_thresholds
+    
+    @classmethod
+    def calculate_variance_percentage(cls, baseline: float, measured: float) -> float:
+        """
+        Calculate performance variance percentage against Node.js baseline.
+        
+        Args:
+            baseline: Node.js baseline metric value
+            measured: Flask implementation measured value
+            
+        Returns:
+            Variance percentage (positive = slower, negative = faster)
+        """
+        if baseline == 0:
             return 0.0
-        return ((current_value - baseline_value) / baseline_value) * 100.0
+        return ((measured - baseline) / baseline) * 100
     
     @classmethod
-    def is_within_variance_threshold(cls, current_value: float, baseline_value: float) -> bool:
+    def is_within_variance_threshold(cls, baseline: float, measured: float, 
+                                   threshold: float = None) -> bool:
         """
-        Check if performance metric is within ≤10% variance threshold.
+        Check if measured performance is within acceptable variance threshold.
         
         Args:
-            current_value: Current measured performance value
-            baseline_value: Baseline Node.js performance value
+            baseline: Node.js baseline metric value
+            measured: Flask implementation measured value
+            threshold: Custom variance threshold (defaults to class threshold)
             
         Returns:
-            True if within threshold, False if exceeds ≤10% variance
+            True if within variance threshold
         """
-        variance = abs(cls.calculate_performance_variance(current_value, baseline_value))
-        return variance <= (cls.PERFORMANCE_VARIANCE_THRESHOLD * 100.0)
+        if threshold is None:
+            threshold = cls.PERFORMANCE_VARIANCE_THRESHOLD
+        
+        variance = cls.calculate_variance_percentage(baseline, measured)
+        return abs(variance) <= threshold
     
     @classmethod
-    def get_performance_thresholds(cls) -> Dict[str, PerformanceThreshold]:
+    def get_performance_thresholds(cls, metric_category: str, 
+                                 environment: str = None) -> Dict[str, float]:
         """
-        Get comprehensive performance threshold configuration.
+        Get performance thresholds for specific metric category and environment.
         
+        Args:
+            metric_category: Category of metrics (response_times, memory_usage, etc.)
+            environment: Target environment (defaults to current environment)
+            
         Returns:
-            Dictionary of performance thresholds by metric name
+            Dictionary of performance thresholds with variance applied
         """
-        baseline = cls.get_baseline_metrics()
+        env_config = cls.get_environment_config(environment)
         thresholds = {}
         
-        for threshold in baseline.to_performance_thresholds():
-            thresholds[threshold.metric_name] = threshold
+        if metric_category == 'response_times':
+            baseline_metrics = cls.NODEJS_BASELINE_METRICS.response_times
+        elif metric_category == 'memory_usage':
+            baseline_metrics = cls.NODEJS_BASELINE_METRICS.memory_usage
+        elif metric_category == 'throughput':
+            baseline_metrics = cls.NODEJS_BASELINE_METRICS.throughput
+        elif metric_category == 'database_performance':
+            baseline_metrics = cls.NODEJS_BASELINE_METRICS.database_performance
+        elif metric_category == 'cache_performance':
+            baseline_metrics = cls.NODEJS_BASELINE_METRICS.cache_performance
+        elif metric_category == 'system_resources':
+            baseline_metrics = cls.NODEJS_BASELINE_METRICS.system_resources
+        else:
+            logger.warning(f"Unknown metric category: {metric_category}")
+            return {}
+        
+        variance_threshold = cls.PERFORMANCE_VARIANCE_THRESHOLD
+        
+        for metric_name, baseline_value in baseline_metrics.items():
+            # Calculate acceptable maximum (baseline + variance threshold)
+            max_threshold = baseline_value * (1 + variance_threshold / 100)
+            thresholds[f"{metric_name}_max"] = max_threshold
+            
+            # Calculate warning threshold (baseline + half variance threshold)
+            warning_threshold = baseline_value * (1 + (variance_threshold / 2) / 100)
+            thresholds[f"{metric_name}_warning"] = warning_threshold
+            
+            # Store baseline for comparison
+            thresholds[f"{metric_name}_baseline"] = baseline_value
+            
+            # Calculate acceptable minimum (for throughput metrics)
+            if metric_category in ['throughput', 'cache_performance']:
+                min_threshold = baseline_value * (1 - variance_threshold / 100)
+                thresholds[f"{metric_name}_min"] = max(0, min_threshold)
         
         return thresholds
     
     @classmethod
-    def get_environment_name(cls) -> str:
-        """Get current performance testing environment name."""
-        return os.getenv('PERFORMANCE_ENV', 'development')
-    
-    @classmethod
-    def is_ci_cd_environment(cls) -> bool:
-        """Check if running in CI/CD environment."""
-        return os.getenv('CI', 'false').lower() == 'true' or os.getenv('GITHUB_ACTIONS', 'false').lower() == 'true'
-
-
-class DevelopmentPerformanceConfig(BasePerformanceConfig):
-    """
-    Development environment performance configuration with relaxed thresholds.
-    
-    Provides developer-friendly performance testing settings with faster execution
-    and relaxed variance thresholds for local development iterations.
-    """
-    
-    # Relaxed Development Settings
-    PERFORMANCE_VARIANCE_THRESHOLD = 0.25  # 25% variance allowance for development
-    LOAD_TEST_MAX_USERS = 50               # Reduced load for development
-    LOAD_TEST_DURATION = 300               # 5-minute tests for development
-    BENCHMARK_ITERATIONS = 20              # Reduced iterations for speed
-    
-    # Development Monitoring
-    PERFORMANCE_MONITORING_ENABLED = True
-    BASELINE_COMPARISON_ENABLED = False    # Disabled for local development
-    TREND_ANALYSIS_ENABLED = False         # Disabled for development
-    
-    # Development-specific Settings
-    LOCUST_WEB_UI_ENABLED = True          # Enable Locust web UI for development
-    REAL_TIME_MONITORING = True           # Real-time performance monitoring
-    DEBUG_PERFORMANCE_LOGGING = True      # Detailed performance logging
-    
-    @classmethod
-    def get_environment_name(cls) -> str:
-        """Get development environment name."""
-        return "development"
-
-
-class TestingPerformanceConfig(BasePerformanceConfig):
-    """
-    Testing environment performance configuration for automated testing.
-    
-    Provides optimized performance testing settings for CI/CD pipeline execution
-    with automated regression detection and fast feedback cycles.
-    """
-    
-    # Testing Environment Settings
-    PERFORMANCE_VARIANCE_THRESHOLD = 0.15  # 15% variance for testing environment
-    LOAD_TEST_MAX_USERS = 100              # Moderate load for testing
-    LOAD_TEST_DURATION = 600               # 10-minute tests for CI/CD
-    BENCHMARK_ITERATIONS = 50              # Balanced iterations for CI/CD
-    
-    # CI/CD Optimizations
-    CI_CD_INTEGRATION_ENABLED = True
-    AUTOMATED_PERFORMANCE_GATES = True
-    PIPELINE_FAILURE_ON_REGRESSION = True
-    PARALLEL_EXECUTION_ENABLED = True
-    
-    # Testing-specific Settings
-    LOCUST_WEB_UI_ENABLED = False         # Disabled for automated testing
-    HEADLESS_EXECUTION = True             # Headless mode for CI/CD
-    AUTOMATED_REPORTING = True            # Automated performance reports
-    
-    # Performance Test Isolation
-    TEST_ISOLATION_ENABLED = True
-    CLEANUP_ON_COMPLETION = True
-    RESOURCE_MONITORING = True
-    
-    @classmethod
-    def get_environment_name(cls) -> str:
-        """Get testing environment name."""
-        return "testing"
-
-
-class StagingPerformanceConfig(BasePerformanceConfig):
-    """
-    Staging environment performance configuration for pre-production validation.
-    
-    Provides production-equivalent performance testing settings with comprehensive
-    baseline comparison and validation before production deployment.
-    """
-    
-    # Staging Environment Settings (strict compliance)
-    PERFORMANCE_VARIANCE_THRESHOLD = 0.10  # Full ≤10% variance enforcement
-    LOAD_TEST_MAX_USERS = 750              # Near-production load testing
-    LOAD_TEST_DURATION = 1500              # 25-minute comprehensive tests
-    BENCHMARK_ITERATIONS = 100             # Full benchmark iterations
-    
-    # Production Parity Settings
-    BASELINE_COMPARISON_ENABLED = True
-    NODEJS_BASELINE_MONITORING = True
-    COMPREHENSIVE_MONITORING = True
-    
-    # Staging-specific Settings
-    PRODUCTION_PARITY_VALIDATION = True
-    EXTERNAL_SERVICE_INTEGRATION = True
-    REALISTIC_DATA_VOLUMES = True
-    
-    @classmethod
-    def get_environment_name(cls) -> str:
-        """Get staging environment name."""
-        return "staging"
-
-
-class ProductionPerformanceConfig(BasePerformanceConfig):
-    """
-    Production environment performance configuration for live monitoring.
-    
-    Provides production performance monitoring and validation settings with
-    strict ≤10% variance enforcement and comprehensive baseline tracking.
-    """
-    
-    # Production Settings (maximum strictness)
-    PERFORMANCE_VARIANCE_THRESHOLD = 0.10  # Strict ≤10% variance enforcement
-    LOAD_TEST_MAX_USERS = 1000             # Full production load capacity
-    LOAD_TEST_DURATION = 1800              # Full 30-minute testing per Section 4.6.3
-    BENCHMARK_ITERATIONS = 100             # Complete benchmark suite
-    
-    # Production Monitoring
-    CONTINUOUS_MONITORING_ENABLED = True
-    REAL_TIME_ALERTING = True
-    PERFORMANCE_TRENDING = True
-    BASELINE_DRIFT_DETECTION = True
-    
-    # Production-specific Settings
-    HIGH_AVAILABILITY_MONITORING = True
-    DISASTER_RECOVERY_TESTING = False      # Disabled in production
-    LIVE_TRAFFIC_ANALYSIS = True
-    
-    @classmethod
-    def get_environment_name(cls) -> str:
-        """Get production environment name."""
-        return "production"
-
-
-class CICDPerformanceConfig(BasePerformanceConfig):
-    """
-    CI/CD pipeline performance configuration per Section 6.6.2.
-    
-    Provides optimized performance testing for GitHub Actions CI/CD pipeline
-    with automated performance gates and regression detection.
-    """
-    
-    # CI/CD Pipeline Settings
-    PERFORMANCE_VARIANCE_THRESHOLD = 0.10  # Strict enforcement for CI/CD
-    LOAD_TEST_MAX_USERS = 200              # Optimized for CI/CD resources
-    LOAD_TEST_DURATION = 900               # 15-minute tests for pipeline efficiency
-    BENCHMARK_ITERATIONS = 50              # Balanced for CI/CD execution time
-    
-    # Pipeline Integration Settings per Section 6.6.2
-    CI_CD_INTEGRATION_ENABLED = True
-    AUTOMATED_PERFORMANCE_GATES = True
-    PIPELINE_FAILURE_ON_REGRESSION = True
-    GITHUB_ACTIONS_INTEGRATION = True
-    
-    # CI/CD Optimization
-    PARALLEL_TEST_EXECUTION = True
-    CONTAINERIZED_TESTING = True
-    ARTIFACT_GENERATION = True
-    PERFORMANCE_REPORTING = True
-    
-    # Notification Integration per Section 6.6.2
-    SLACK_NOTIFICATIONS = os.getenv('SLACK_WEBHOOK_URL', '') != ''
-    TEAMS_NOTIFICATIONS = os.getenv('TEAMS_WEBHOOK_URL', '') != ''
-    EMAIL_NOTIFICATIONS = os.getenv('EMAIL_NOTIFICATIONS', 'false').lower() == 'true'
-    
-    # Performance Regression Detection
-    BASELINE_DRIFT_THRESHOLD = 0.05       # 5% drift detection
-    TREND_ANALYSIS_WINDOW_DAYS = 7        # 7-day trend analysis
-    REGRESSION_ALERT_THRESHOLD = 0.08     # 8% regression alert
-    
-    @classmethod
-    def get_environment_name(cls) -> str:
-        """Get CI/CD environment name."""
-        return "ci_cd"
-    
-    @classmethod
-    def get_github_actions_config(cls) -> Dict[str, Any]:
+    def get_load_test_config(cls, scenario: LoadTestScenario, 
+                           environment: str = None) -> LoadTestConfiguration:
         """
-        Get GitHub Actions specific configuration.
+        Get load test configuration for specific scenario and environment.
+        
+        Args:
+            scenario: Load test scenario type
+            environment: Target environment
+            
+        Returns:
+            LoadTestConfiguration instance for the scenario
+        """
+        if scenario not in cls.LOAD_TEST_SCENARIOS:
+            raise ValueError(f"Unknown load test scenario: {scenario}")
+        
+        base_config = cls.LOAD_TEST_SCENARIOS[scenario]
+        env_config = cls.get_environment_config(environment)
+        
+        # Apply environment-specific modifications
+        config = LoadTestConfiguration(
+            scenario_name=base_config.scenario_name,
+            users=min(base_config.users, env_config['resource_limits']['max_users']),
+            spawn_rate=base_config.spawn_rate,
+            duration=int(base_config.duration * env_config.get('test_duration_multiplier', 1.0)),
+            host=cls.PERFORMANCE_TEST_HOST,
+            ramp_up_time=base_config.ramp_up_time,
+            steady_state_time=base_config.steady_state_time,
+            ramp_down_time=base_config.ramp_down_time,
+            endpoint_weights=base_config.endpoint_weights.copy(),
+            response_time_p95=base_config.response_time_p95,
+            error_rate_threshold=base_config.error_rate_threshold,
+            throughput_threshold=base_config.throughput_threshold
+        )
+        
+        # Adjust thresholds based on environment
+        if env_config.get('alert_thresholds_relaxed'):
+            config.response_time_p95 *= 1.5
+            config.error_rate_threshold *= 2.0
+            config.throughput_threshold *= 0.7
+        
+        return config
+    
+    @classmethod
+    def get_monitoring_config(cls, environment: str = None) -> Dict[str, Any]:
+        """
+        Get monitoring configuration for specific environment.
+        
+        Args:
+            environment: Target environment
+            
+        Returns:
+            Monitoring configuration dictionary
+        """
+        env_config = cls.get_environment_config(environment)
+        monitoring_config = cls.PERFORMANCE_MONITORING.copy()
+        
+        # Environment-specific monitoring adjustments
+        if environment == 'development':
+            monitoring_config['metrics_collection_interval'] = 30  # Less frequent
+            monitoring_config['real_time_alerts'] = False
+        elif environment == 'production':
+            monitoring_config['metrics_collection_interval'] = 10  # More frequent
+            monitoring_config['real_time_alerts'] = True
+            monitoring_config['baseline_drift_detection'] = True
+        
+        return monitoring_config
+    
+    @classmethod
+    def get_system_resources(cls) -> Dict[str, float]:
+        """
+        Get current system resource utilization for comparison.
         
         Returns:
-            Configuration dictionary for GitHub Actions integration
+            Dictionary containing current system resource metrics
         """
-        return {
-            'enabled': cls.GITHUB_ACTIONS_INTEGRATION,
-            'matrix_testing': True,
-            'python_versions': ['3.8', '3.11'],
-            'performance_gates': cls.AUTOMATED_PERFORMANCE_GATES,
-            'artifact_upload': cls.ARTIFACT_GENERATION,
-            'notification_integration': {
-                'slack': cls.SLACK_NOTIFICATIONS,
-                'teams': cls.TEAMS_NOTIFICATIONS,
-                'email': cls.EMAIL_NOTIFICATIONS
+        try:
+            cpu_percent = psutil.cpu_percent(interval=1)
+            memory = psutil.virtual_memory()
+            disk = psutil.disk_usage('/')
+            
+            return {
+                'cpu_utilization': cpu_percent,
+                'memory_utilization': memory.percent,
+                'memory_available_mb': memory.available / (1024 * 1024),
+                'memory_total_mb': memory.total / (1024 * 1024),
+                'disk_utilization': (disk.used / disk.total) * 100,
+                'disk_available_gb': disk.free / (1024 * 1024 * 1024),
+                'load_average': os.getloadavg()[0] if hasattr(os, 'getloadavg') else 0.0,
+                'timestamp': datetime.utcnow().isoformat()
             }
+        except Exception as e:
+            logger.error(f"Error getting system resources: {e}")
+            return {}
+    
+    @classmethod
+    def validate_performance_requirements(cls, test_results: Dict[str, Any], 
+                                        environment: str = None) -> Dict[str, Any]:
+        """
+        Validate test results against performance requirements.
+        
+        Args:
+            test_results: Performance test results
+            environment: Target environment
+            
+        Returns:
+            Validation results with pass/fail status and details
+        """
+        validation_results = {
+            'overall_status': 'PASS',
+            'variance_within_threshold': True,
+            'threshold_violations': [],
+            'baseline_comparisons': {},
+            'recommendations': []
         }
+        
+        env_config = cls.get_environment_config(environment)
+        thresholds = env_config.get('performance_thresholds', cls.PERFORMANCE_THRESHOLDS)
+        
+        # Validate response time metrics
+        if 'response_time_p95' in test_results:
+            measured_p95 = test_results['response_time_p95']
+            threshold_p95 = thresholds['response_time_p95']
+            
+            if measured_p95 > threshold_p95:
+                validation_results['overall_status'] = 'FAIL'
+                validation_results['threshold_violations'].append({
+                    'metric': 'response_time_p95',
+                    'measured': measured_p95,
+                    'threshold': threshold_p95,
+                    'variance': ((measured_p95 - threshold_p95) / threshold_p95) * 100
+                })
+        
+        # Validate throughput metrics
+        if 'throughput' in test_results:
+            measured_throughput = test_results['throughput']
+            threshold_throughput = thresholds['throughput_minimum']
+            
+            if measured_throughput < threshold_throughput:
+                validation_results['overall_status'] = 'FAIL'
+                validation_results['threshold_violations'].append({
+                    'metric': 'throughput',
+                    'measured': measured_throughput,
+                    'threshold': threshold_throughput,
+                    'variance': ((threshold_throughput - measured_throughput) / threshold_throughput) * 100
+                })
+        
+        # Validate baseline comparisons
+        baseline_metrics = cls.NODEJS_BASELINE_METRICS.response_times
+        for endpoint, baseline_time in baseline_metrics.items():
+            if endpoint in test_results:
+                measured_time = test_results[endpoint]
+                variance = cls.calculate_variance_percentage(baseline_time, measured_time)
+                
+                validation_results['baseline_comparisons'][endpoint] = {
+                    'baseline': baseline_time,
+                    'measured': measured_time,
+                    'variance_percentage': variance,
+                    'within_threshold': abs(variance) <= cls.PERFORMANCE_VARIANCE_THRESHOLD
+                }
+                
+                if abs(variance) > cls.PERFORMANCE_VARIANCE_THRESHOLD:
+                    validation_results['overall_status'] = 'FAIL'
+                    validation_results['variance_within_threshold'] = False
+        
+        # Generate recommendations
+        if validation_results['threshold_violations']:
+            validation_results['recommendations'].append(
+                "Performance optimization required for threshold violations"
+            )
+        
+        if not validation_results['variance_within_threshold']:
+            validation_results['recommendations'].append(
+                f"Performance variance exceeds ±{cls.PERFORMANCE_VARIANCE_THRESHOLD}% threshold"
+            )
+        
+        if validation_results['overall_status'] == 'PASS':
+            validation_results['recommendations'].append(
+                "All performance requirements met successfully"
+            )
+        
+        return validation_results
 
 
 class PerformanceConfigFactory:
     """
-    Performance configuration factory for environment-specific settings.
-    
-    Provides centralized performance configuration management with environment
-    detection and validation for all performance testing scenarios.
+    Factory class for creating environment-specific performance configurations.
     """
     
-    _configs: Dict[str, type] = {
-        'development': DevelopmentPerformanceConfig,
-        'testing': TestingPerformanceConfig,
-        'staging': StagingPerformanceConfig,
-        'production': ProductionPerformanceConfig,
-        'ci_cd': CICDPerformanceConfig
-    }
+    _configs: Dict[str, PerformanceTestConfig] = {}
     
     @classmethod
-    def get_config(cls, environment: Optional[str] = None) -> BasePerformanceConfig:
+    def get_config(cls, environment: str = None) -> PerformanceTestConfig:
         """
-        Get performance configuration for specified environment.
+        Get or create performance configuration for environment.
         
         Args:
-            environment: Target environment name (defaults to PERFORMANCE_ENV)
+            environment: Target environment name
             
         Returns:
-            Performance configuration class for the specified environment
-            
-        Raises:
-            ValueError: If environment is not supported
+            PerformanceTestConfig instance
         """
         if environment is None:
-            environment = os.getenv('PERFORMANCE_ENV', 'development')
-            
-            # Auto-detect CI/CD environment
-            if os.getenv('CI', 'false').lower() == 'true' or os.getenv('GITHUB_ACTIONS', 'false').lower() == 'true':
-                environment = 'ci_cd'
+            environment = os.getenv('FLASK_ENV', 'development')
         
         environment = environment.lower()
         
         if environment not in cls._configs:
-            raise ValueError(
-                f"Unsupported performance environment: {environment}. "
-                f"Supported environments: {list(cls._configs.keys())}"
-            )
+            cls._configs[environment] = PerformanceTestConfig()
         
-        config_class = cls._configs[environment]
-        return config_class()
+        return cls._configs[environment]
     
     @classmethod
-    def get_load_test_config(cls, environment: Optional[str] = None) -> LoadTestConfiguration:
+    def create_load_test_config(cls, scenario: LoadTestScenario, 
+                              environment: str = None) -> LoadTestConfiguration:
         """
-        Get load testing configuration for specified environment.
+        Create load test configuration for specific scenario.
         
         Args:
-            environment: Target environment name
+            scenario: Load test scenario
+            environment: Target environment
             
         Returns:
-            LoadTestConfiguration instance for the environment
+            LoadTestConfiguration instance
         """
         config = cls.get_config(environment)
-        return config.get_load_test_config()
+        return config.get_load_test_config(scenario, environment)
     
     @classmethod
-    def get_baseline_metrics(cls, environment: Optional[str] = None) -> BaselineMetrics:
+    def validate_test_results(cls, test_results: Dict[str, Any], 
+                            environment: str = None) -> Dict[str, Any]:
         """
-        Get baseline metrics configuration for specified environment.
+        Validate performance test results.
         
         Args:
-            environment: Target environment name
+            test_results: Test results to validate
+            environment: Target environment
             
         Returns:
-            BaselineMetrics instance for baseline comparison
+            Validation results
         """
         config = cls.get_config(environment)
-        return config.get_baseline_metrics()
-    
-    @classmethod
-    def get_performance_thresholds(cls, environment: Optional[str] = None) -> Dict[str, PerformanceThreshold]:
-        """
-        Get performance thresholds for specified environment.
-        
-        Args:
-            environment: Target environment name
-            
-        Returns:
-            Dictionary of performance thresholds by metric name
-        """
-        config = cls.get_config(environment)
-        return config.get_performance_thresholds()
-    
-    @classmethod
-    def validate_performance_config(cls, config: BasePerformanceConfig) -> bool:
-        """
-        Validate performance configuration for completeness and correctness.
-        
-        Args:
-            config: Performance configuration instance to validate
-            
-        Returns:
-            True if configuration is valid
-            
-        Raises:
-            ValueError: If configuration validation fails
-        """
-        # Validate variance threshold
-        if config.PERFORMANCE_VARIANCE_THRESHOLD <= 0 or config.PERFORMANCE_VARIANCE_THRESHOLD > 1.0:
-            raise ValueError("Performance variance threshold must be between 0 and 1.0")
-        
-        # Validate load testing parameters
-        if config.LOAD_TEST_MIN_USERS >= config.LOAD_TEST_MAX_USERS:
-            raise ValueError("Load test minimum users must be less than maximum users")
-        
-        if config.LOAD_TEST_DURATION <= 0:
-            raise ValueError("Load test duration must be positive")
-        
-        # Validate performance thresholds
-        if config.RESPONSE_TIME_P95_THRESHOLD <= 0:
-            raise ValueError("Response time threshold must be positive")
-        
-        if config.ERROR_RATE_THRESHOLD < 0 or config.ERROR_RATE_THRESHOLD > 100:
-            raise ValueError("Error rate threshold must be between 0 and 100 percent")
-        
-        return True
-    
-    @classmethod
-    def get_available_environments(cls) -> List[str]:
-        """
-        Get list of available performance testing environments.
-        
-        Returns:
-            List of supported environment names
-        """
-        return list(cls._configs.keys())
+        return config.validate_performance_requirements(test_results, environment)
 
 
-# Performance Testing Utility Functions
-
-def create_performance_config(environment: Optional[str] = None) -> BasePerformanceConfig:
+# Convenience functions for common use cases
+def create_performance_config(environment: str = None) -> PerformanceTestConfig:
     """
-    Create performance configuration instance for specified environment with validation.
+    Create performance configuration for specific environment.
     
     Args:
-        environment: Target environment name (defaults to PERFORMANCE_ENV)
+        environment: Target environment
         
     Returns:
-        Validated performance configuration instance
-        
-    Raises:
-        ValueError: If environment is unsupported or configuration is invalid
+        PerformanceTestConfig instance
     """
-    config = PerformanceConfigFactory.get_config(environment)
-    PerformanceConfigFactory.validate_performance_config(config)
-    return config
+    return PerformanceConfigFactory.get_config(environment)
 
 
-def get_performance_baseline_comparison(
-    current_metrics: Dict[str, float],
-    environment: Optional[str] = None
-) -> Dict[str, Dict[str, Any]]:
+def get_load_test_config(scenario: LoadTestScenario, 
+                        environment: str = None) -> LoadTestConfiguration:
     """
-    Compare current performance metrics against baseline values.
+    Get load test configuration for scenario and environment.
     
     Args:
-        current_metrics: Dictionary of current performance metric values
-        environment: Target environment for baseline comparison
+        scenario: Load test scenario
+        environment: Target environment
         
     Returns:
-        Dictionary containing variance analysis and threshold compliance
+        LoadTestConfiguration instance
     """
-    config = PerformanceConfigFactory.get_config(environment)
-    thresholds = config.get_performance_thresholds()
-    baseline = config.get_baseline_metrics()
-    
-    comparison_results = {}
-    
-    for metric_name, current_value in current_metrics.items():
-        if metric_name in thresholds:
-            threshold = thresholds[metric_name]
-            variance = threshold.calculate_variance(current_value)
-            within_threshold = threshold.is_within_threshold(current_value)
-            status = threshold.get_threshold_status(current_value)
-            
-            comparison_results[metric_name] = {
-                'current_value': current_value,
-                'baseline_value': threshold.baseline_value,
-                'variance_percent': variance,
-                'within_threshold': within_threshold,
-                'status': status,
-                'threshold_config': threshold
-            }
-    
-    return comparison_results
+    return PerformanceConfigFactory.create_load_test_config(scenario, environment)
 
 
-def generate_performance_report(
-    test_results: Dict[str, Any],
-    environment: Optional[str] = None,
-    output_format: str = 'json'
-) -> Union[Dict[str, Any], str]:
+def validate_performance_results(test_results: Dict[str, Any], 
+                                environment: str = None) -> Dict[str, Any]:
     """
-    Generate comprehensive performance testing report.
+    Validate performance test results against requirements.
     
     Args:
-        test_results: Performance test execution results
-        environment: Target environment for reporting
-        output_format: Output format ('json', 'markdown', 'html')
+        test_results: Performance test results
+        environment: Target environment
         
     Returns:
-        Performance report in specified format
+        Validation results with pass/fail status
     """
-    config = PerformanceConfigFactory.get_config(environment)
-    baseline = config.get_baseline_metrics()
+    return PerformanceConfigFactory.validate_test_results(test_results, environment)
+
+
+def get_baseline_metrics(category: str = None) -> Dict[str, float]:
+    """
+    Get Node.js baseline metrics for comparison.
     
-    report_data = {
-        'report_metadata': {
-            'generated_at': datetime.now(timezone.utc).isoformat(),
-            'environment': config.get_environment_name(),
-            'performance_config': {
-                'variance_threshold': config.PERFORMANCE_VARIANCE_THRESHOLD,
-                'load_test_users': f"{config.LOAD_TEST_MIN_USERS}-{config.LOAD_TEST_MAX_USERS}",
-                'test_duration': config.LOAD_TEST_DURATION
-            }
-        },
-        'baseline_comparison': baseline.__dict__,
-        'test_results': test_results,
-        'compliance_status': {
-            'within_variance_threshold': True,  # To be calculated
-            'performance_gates_passed': True,   # To be calculated
-            'recommendation': 'Deployment approved'  # To be determined
-        }
-    }
+    Args:
+        category: Specific metric category (optional)
+        
+    Returns:
+        Baseline metrics dictionary
+    """
+    baseline = NodeJSBaselineMetrics()
     
-    if output_format.lower() == 'json':
-        return report_data
-    elif output_format.lower() == 'markdown':
-        return _generate_markdown_report(report_data)
-    elif output_format.lower() == 'html':
-        return _generate_html_report(report_data)
+    if category == 'response_times':
+        return baseline.response_times
+    elif category == 'memory_usage':
+        return baseline.memory_usage
+    elif category == 'throughput':
+        return baseline.throughput
+    elif category == 'database_performance':
+        return baseline.database_performance
+    elif category == 'cache_performance':
+        return baseline.cache_performance
+    elif category == 'system_resources':
+        return baseline.system_resources
     else:
-        raise ValueError(f"Unsupported output format: {output_format}")
+        # Return all categories
+        return {
+            'response_times': baseline.response_times,
+            'memory_usage': baseline.memory_usage,
+            'throughput': baseline.throughput,
+            'database_performance': baseline.database_performance,
+            'cache_performance': baseline.cache_performance,
+            'system_resources': baseline.system_resources
+        }
 
 
-def _generate_markdown_report(report_data: Dict[str, Any]) -> str:
-    """Generate markdown format performance report."""
-    md_report = f"""# Performance Testing Report
-
-**Generated:** {report_data['report_metadata']['generated_at']}  
-**Environment:** {report_data['report_metadata']['environment']}  
-
-## Configuration Summary
-
-- **Variance Threshold:** {report_data['report_metadata']['performance_config']['variance_threshold']*100:.1f}%
-- **Load Test Users:** {report_data['report_metadata']['performance_config']['load_test_users']}
-- **Test Duration:** {report_data['report_metadata']['performance_config']['test_duration']} seconds
-
-## Baseline Comparison
-
-| Metric | Baseline | Current | Variance | Status |
-|--------|----------|---------|----------|--------|
-| Response Time P95 | {report_data['baseline_comparison']['api_response_time_p95']:.1f}ms | TBD | TBD | TBD |
-| Throughput | {report_data['baseline_comparison']['requests_per_second']:.1f} req/s | TBD | TBD | TBD |
-| Memory Usage | {report_data['baseline_comparison']['memory_usage_mb']:.1f}MB | TBD | TBD | TBD |
-
-## Compliance Status
-
-- **Within Variance Threshold:** {report_data['compliance_status']['within_variance_threshold']}
-- **Performance Gates:** {report_data['compliance_status']['performance_gates_passed']}
-- **Recommendation:** {report_data['compliance_status']['recommendation']}
-"""
-    return md_report
-
-
-def _generate_html_report(report_data: Dict[str, Any]) -> str:
-    """Generate HTML format performance report."""
-    html_report = f"""
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Performance Testing Report</title>
-    <style>
-        body {{ font-family: Arial, sans-serif; margin: 20px; }}
-        table {{ border-collapse: collapse; width: 100%; }}
-        th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
-        th {{ background-color: #f2f2f2; }}
-        .pass {{ color: green; }}
-        .fail {{ color: red; }}
-        .warning {{ color: orange; }}
-    </style>
-</head>
-<body>
-    <h1>Performance Testing Report</h1>
-    <p><strong>Generated:</strong> {report_data['report_metadata']['generated_at']}</p>
-    <p><strong>Environment:</strong> {report_data['report_metadata']['environment']}</p>
-    
-    <h2>Configuration Summary</h2>
-    <ul>
-        <li><strong>Variance Threshold:</strong> {report_data['report_metadata']['performance_config']['variance_threshold']*100:.1f}%</li>
-        <li><strong>Load Test Users:</strong> {report_data['report_metadata']['performance_config']['load_test_users']}</li>
-        <li><strong>Test Duration:</strong> {report_data['report_metadata']['performance_config']['test_duration']} seconds</li>
-    </ul>
-    
-    <h2>Compliance Status</h2>
-    <p><strong>Recommendation:</strong> {report_data['compliance_status']['recommendation']}</p>
-</body>
-</html>
-"""
-    return html_report
-
-
-# Export configuration classes and utilities
+# Export all configuration classes and functions
 __all__ = [
-    'BasePerformanceConfig',
-    'DevelopmentPerformanceConfig',
-    'TestingPerformanceConfig', 
-    'StagingPerformanceConfig',
-    'ProductionPerformanceConfig',
-    'CICDPerformanceConfig',
-    'PerformanceConfigFactory',
-    'PerformanceThreshold',
-    'LoadTestConfiguration',
-    'BaselineMetrics',
-    'PerformanceTestType',
-    'PerformanceEnvironment',
-    'LoadTestPhase',
+    # Enums
+    'LoadTestScenario',
     'PerformanceMetricType',
+    
+    # Data classes
+    'NodeJSBaselineMetrics',
+    'LoadTestConfiguration',
+    
+    # Configuration classes
+    'PerformanceTestConfig',
+    'PerformanceConfigFactory',
+    
+    # Convenience functions
     'create_performance_config',
-    'get_performance_baseline_comparison',
-    'generate_performance_report'
+    'get_load_test_config',
+    'validate_performance_results',
+    'get_baseline_metrics'
 ]
