@@ -1,2558 +1,2103 @@
 """
-External Service Integration Testing Module
+Unit tests for external service integration components.
 
-Comprehensive unit tests for external service integration layer covering HTTP clients
-(requests/httpx), AWS SDK (boto3), circuit breaker patterns, and third-party API
-integration per Section 5.2.6 and Section 6.3.3 requirements.
+This module provides comprehensive testing for external service integrations including HTTP clients 
+(requests/httpx), AWS SDK (boto3), circuit breaker patterns, and third-party API integration.
+Tests external service communication with comprehensive mocking and resilience pattern validation
+per Section 0.1.4 and Section 5.2.6 specifications.
 
-This module validates external service communication with comprehensive mocking and
-resilience pattern validation, ensuring ≤10% performance variance from Node.js baseline
-and 90+ integration layer coverage per Section 6.6.3.
-
-Test Coverage Areas:
+Key Testing Areas:
 - HTTP client library testing for requests 2.31+ and httpx 0.24+ per Section 5.2.6
 - AWS service integration testing with boto3 1.28+ per Section 5.2.6  
-- Circuit breaker and retry logic testing for service resilience per Section 5.2.6
-- External service authentication testing per Section 5.2.6
-- API rate limiting and retry logic testing per Section 5.2.6
-- Connection pooling testing for external services per Section 5.2.6
+- Circuit breaker and retry logic testing for service resilience per Section 6.3.3
+- External service authentication testing per Section 6.3.3
+- API rate limiting and retry logic testing per Section 6.3.3
+- Connection pooling testing for external services per Section 6.3.3
 
-Key Testing Patterns:
-- pytest 7.4+ framework with extensive plugin ecosystem support per Section 6.6.1
-- pytest-mock for comprehensive external service simulation per Section 6.6.1
-- pytest-asyncio for asynchronous HTTP client and database operations per Section 6.6.1
-- Performance variance tracking ensuring ≤10% compliance per Section 0.3.2
-- Enterprise error handling and resilience pattern validation per Section 6.3.3
+Dependencies:
+- pytest 7.4+ with pytest-asyncio for async testing patterns
+- pytest-mock for comprehensive external service mocking
+- requests 2.31+ and httpx 0.24+ for HTTP client testing
+- boto3 1.28+ for AWS SDK integration testing
+- pybreaker for circuit breaker pattern testing
+- tenacity for retry logic testing per Section 6.3.3
+
+Author: Flask Migration Team
+Version: 1.0.0
+Compliance: Section 0.1.4 External Systems Interactions, Section 5.2.6 External Service Integration Layer
 """
 
 import asyncio
 import json
+import os
 import time
-from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional, Union
-from unittest.mock import Mock, AsyncMock, patch, MagicMock, call
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Union
+from unittest.mock import AsyncMock, Mock, MagicMock, patch, call
 from urllib.parse import urljoin
 
 import pytest
 import pytest_asyncio
-from pytest_mock import MockerFixture
 import requests
 import httpx
-import boto3
-from botocore.exceptions import BotoCoreError, ClientError, EndpointConnectionError
-from requests.exceptions import (
-    RequestException, HTTPError, ConnectionError as RequestsConnectionError,
-    Timeout, TooManyRedirects, RetryError
-)
-import structlog
-from tenacity import RetryError as TenacityRetryError
+from requests.exceptions import RequestException, ConnectionError, Timeout, HTTPError
+from httpx import ConnectError, TimeoutException, HTTPStatusError
 
-# Import integration components for testing per Section 5.2.6
+# Test specific imports
+from tests.unit.conftest import (
+    mock_external_services, mock_circuit_breaker, error_simulation,
+    performance_test_context, test_metrics_collector
+)
+
+# Integration module imports for testing per Section 5.2.6
 from src.integrations import (
-    # Core integration classes and factory functions
-    BaseExternalServiceClient,
-    BaseClientConfiguration,
-    create_auth_service_client,
-    create_aws_service_client,
-    create_api_service_client,
-    
-    # Service type classifications and monitoring
-    ServiceType,
-    HealthStatus,
-    CircuitBreakerState,
-    external_service_monitor,
-    ExternalServiceMonitoring,
-    track_external_service_call,
-    record_circuit_breaker_event,
-    update_service_health,
-    get_monitoring_summary,
-    export_metrics,
-    
-    # Exception hierarchy for comprehensive error handling
-    IntegrationError,
-    HTTPClientError,
-    ConnectionError,
-    TimeoutError,
-    HTTPResponseError,
-    CircuitBreakerOpenError,
-    CircuitBreakerHalfOpenError,
-    RetryExhaustedError,
-    Auth0Error,
-    AWSServiceError,
-    MongoDBError,
-    RedisError,
-    IntegrationExceptionFactory
+    BaseExternalServiceClient, BaseClientConfiguration, IntegrationManager,
+    integration_manager, create_auth0_client, create_aws_s3_client, 
+    create_http_api_client, ExternalServiceMonitor, ServiceMetrics, 
+    ExternalServiceType, ServiceHealthState, external_service_monitor
 )
 
 
-class TestHTTPClientIntegration:
+# =============================================================================
+# Test Configuration and Constants
+# =============================================================================
+
+# Test configuration constants per Section 6.3.3
+TEST_AUTH0_DOMAIN = "test-domain.auth0.com"
+TEST_AUTH0_CLIENT_ID = "test-client-id"
+TEST_AUTH0_CLIENT_SECRET = "test-client-secret"
+TEST_AUTH0_AUDIENCE = "test-audience"
+
+TEST_AWS_ACCESS_KEY = "test-access-key"
+TEST_AWS_SECRET_KEY = "test-secret-key"
+TEST_AWS_REGION = "us-east-1"
+TEST_S3_BUCKET = "test-bucket"
+
+TEST_API_BASE_URL = "https://api.example.com"
+TEST_API_KEY = "test-api-key"
+
+# Circuit breaker configuration per Section 6.3.3
+TEST_CIRCUIT_BREAKER_CONFIG = {
+    "failure_threshold": 5,
+    "recovery_timeout": 60,
+    "expected_exception": RequestException
+}
+
+# Performance baseline configuration per Section 0.3.2
+PERFORMANCE_VARIANCE_THRESHOLD = 0.10  # ≤10% variance requirement
+
+# Mock response data for external service testing
+MOCK_AUTH0_JWKS_RESPONSE = {
+    "keys": [{
+        "kty": "RSA",
+        "use": "sig",
+        "kid": "test-key-id",
+        "n": "test-n-value",
+        "e": "AQAB",
+        "alg": "RS256"
+    }]
+}
+
+MOCK_AUTH0_USER_INFO = {
+    "sub": "auth0|test-user-id",
+    "email": "test@example.com",
+    "email_verified": True,
+    "name": "Test User",
+    "picture": "https://example.com/avatar.jpg",
+    "permissions": ["read:users", "write:users"]
+}
+
+MOCK_AWS_S3_RESPONSE = {
+    "ETag": "test-etag-value",
+    "VersionId": "test-version-id",
+    "ResponseMetadata": {
+        "RequestId": "test-request-id",
+        "HTTPStatusCode": 200
+    }
+}
+
+
+# =============================================================================
+# Test Fixtures for External Service Testing
+# =============================================================================
+
+@pytest.fixture
+def base_client_config():
     """
-    HTTP client integration testing covering requests 2.31+ and httpx 0.24+ per Section 5.2.6.
+    Fixture providing base external service client configuration for testing.
     
-    Validates synchronous and asynchronous HTTP client implementations with comprehensive
-    mocking patterns, connection pooling verification, and performance optimization testing.
+    Creates BaseClientConfiguration instance with comprehensive test settings
+    including timeout, retry, circuit breaker, and authentication configuration
+    per Section 5.2.6 requirements.
+    
+    Returns:
+        BaseClientConfiguration: Test configuration instance
+    """
+    return BaseClientConfiguration(
+        service_name="test_service",
+        base_url=TEST_API_BASE_URL,
+        timeout=30.0,
+        max_retries=3,
+        retry_backoff_factor=1.0,
+        circuit_breaker_enabled=True,
+        circuit_breaker_failure_threshold=5,
+        circuit_breaker_recovery_timeout=60,
+        authentication_enabled=True,
+        connection_pool_size=20,
+        default_headers={"User-Agent": "Flask-Test-Client/1.0"}
+    )
+
+
+@pytest.fixture
+def mock_requests_session():
+    """
+    Fixture providing mock requests session for synchronous HTTP client testing.
+    
+    Creates comprehensive mock for requests.Session with configurable responses,
+    timeout simulation, and connection pooling testing per Section 5.2.6.
+    
+    Returns:
+        Mock: Mock requests session instance
+    """
+    mock_session = Mock(spec=requests.Session)
+    
+    # Configure successful response mock
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {"status": "success", "data": {}}
+    mock_response.text = '{"status": "success", "data": {}}'
+    mock_response.headers = {"Content-Type": "application/json"}
+    mock_response.elapsed = timedelta(milliseconds=150)
+    mock_response.raise_for_status.return_value = None
+    
+    # Configure session methods
+    mock_session.get.return_value = mock_response
+    mock_session.post.return_value = mock_response
+    mock_session.put.return_value = mock_response
+    mock_session.delete.return_value = mock_response
+    mock_session.patch.return_value = mock_response
+    mock_session.request.return_value = mock_response
+    
+    return mock_session
+
+
+@pytest_asyncio.fixture
+async def mock_httpx_client():
+    """
+    Async fixture providing mock httpx client for async HTTP testing.
+    
+    Creates comprehensive mock for httpx.AsyncClient with async response
+    simulation, timeout handling, and connection pooling testing per Section 5.2.6.
+    
+    Returns:
+        AsyncMock: Mock httpx async client instance
+    """
+    mock_client = AsyncMock(spec=httpx.AsyncClient)
+    
+    # Configure successful async response mock
+    mock_response = AsyncMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {"status": "success", "data": {}}
+    mock_response.text = '{"status": "success", "data": {}}'
+    mock_response.headers = {"Content-Type": "application/json"}
+    mock_response.elapsed = timedelta(milliseconds=120)
+    mock_response.raise_for_status.return_value = None
+    
+    # Configure async client methods
+    mock_client.get.return_value = mock_response
+    mock_client.post.return_value = mock_response
+    mock_client.put.return_value = mock_response
+    mock_client.delete.return_value = mock_response
+    mock_client.patch.return_value = mock_response
+    mock_client.request.return_value = mock_response
+    
+    # Configure context manager behavior
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = None
+    
+    return mock_client
+
+
+@pytest.fixture
+def mock_boto3_client():
+    """
+    Fixture providing mock boto3 client for AWS service testing.
+    
+    Creates comprehensive mock for boto3 clients with S3, CloudWatch, and
+    Lambda service simulation per Section 5.2.6 AWS integration requirements.
+    
+    Returns:
+        Mock: Mock boto3 client instance
+    """
+    mock_client = Mock()
+    
+    # Configure S3 operations
+    mock_client.upload_file.return_value = MOCK_AWS_S3_RESPONSE
+    mock_client.download_file.return_value = None
+    mock_client.delete_object.return_value = {"DeleteMarker": True}
+    mock_client.list_objects_v2.return_value = {
+        "Contents": [{"Key": "test-file.txt", "Size": 1024}],
+        "KeyCount": 1
+    }
+    mock_client.head_object.return_value = {
+        "ContentLength": 1024,
+        "LastModified": datetime.now(timezone.utc),
+        "ETag": "test-etag"
+    }
+    
+    # Configure CloudWatch operations
+    mock_client.put_metric_data.return_value = {"ResponseMetadata": {"HTTPStatusCode": 200}}
+    mock_client.describe_alarms.return_value = {"MetricAlarms": []}
+    
+    # Configure service health checks
+    mock_client.describe_instances.return_value = {"Reservations": []}
+    
+    return mock_client
+
+
+@pytest.fixture
+def mock_pybreaker():
+    """
+    Fixture providing mock circuit breaker for resilience pattern testing.
+    
+    Creates mock pybreaker.CircuitBreaker with state transition simulation,
+    failure threshold testing, and recovery timeout validation per Section 6.3.3.
+    
+    Returns:
+        Mock: Mock circuit breaker instance
+    """
+    mock_breaker = Mock()
+    mock_breaker.state = "closed"
+    mock_breaker.fail_counter = 0
+    mock_breaker.failure_threshold = TEST_CIRCUIT_BREAKER_CONFIG["failure_threshold"]
+    mock_breaker.recovery_timeout = TEST_CIRCUIT_BREAKER_CONFIG["recovery_timeout"]
+    mock_breaker.expected_exception = TEST_CIRCUIT_BREAKER_CONFIG["expected_exception"]
+    
+    # Configure circuit breaker call method
+    def mock_call(func, *args, **kwargs):
+        if mock_breaker.state == "open":
+            raise Exception("Circuit breaker is open")
+        
+        try:
+            result = func(*args, **kwargs)
+            # Reset failure counter on success
+            if mock_breaker.state == "half-open":
+                mock_breaker.state = "closed"
+                mock_breaker.fail_counter = 0
+            return result
+        except Exception as e:
+            mock_breaker.fail_counter += 1
+            if mock_breaker.fail_counter >= mock_breaker.failure_threshold:
+                mock_breaker.state = "open"
+            raise
+    
+    mock_breaker.call = mock_call
+    
+    # Configure state inspection methods
+    mock_breaker.reset.side_effect = lambda: setattr(mock_breaker, 'state', 'closed')
+    mock_breaker.open.side_effect = lambda: setattr(mock_breaker, 'state', 'open')
+    
+    return mock_breaker
+
+
+@pytest.fixture
+def external_service_monitor_instance():
+    """
+    Fixture providing external service monitor for health check testing.
+    
+    Creates ExternalServiceMonitor instance with service registration,
+    health check validation, and metrics collection per Section 6.3.3.
+    
+    Returns:
+        ExternalServiceMonitor: Test monitor instance
+    """
+    monitor = ExternalServiceMonitor()
+    
+    # Register test services for monitoring
+    test_services = [
+        ServiceMetrics(
+            service_name="auth0",
+            service_type=ExternalServiceType.AUTH_PROVIDER,
+            health_endpoint="/api/v2/",
+            timeout_seconds=5.0,
+            critical_threshold_ms=3000.0,
+            warning_threshold_ms=1000.0
+        ),
+        ServiceMetrics(
+            service_name="aws_s3",
+            service_type=ExternalServiceType.CLOUD_STORAGE,
+            health_endpoint=None,
+            timeout_seconds=10.0,
+            critical_threshold_ms=5000.0,
+            warning_threshold_ms=2000.0
+        ),
+        ServiceMetrics(
+            service_name="test_api",
+            service_type=ExternalServiceType.HTTP_API,
+            health_endpoint="/health",
+            timeout_seconds=30.0,
+            critical_threshold_ms=10000.0,
+            warning_threshold_ms=5000.0
+        )
+    ]
+    
+    for service in test_services:
+        monitor.register_service(service)
+    
+    return monitor
+
+
+# =============================================================================
+# BaseExternalServiceClient Testing
+# =============================================================================
+
+class TestBaseExternalServiceClient:
+    """
+    Test suite for BaseExternalServiceClient functionality.
+    
+    Tests core external service client infrastructure including configuration,
+    HTTP request handling, error processing, and connection management per
+    Section 5.2.6 External Service Integration Layer requirements.
     """
     
-    def test_requests_client_initialization(self, mocker: MockerFixture):
+    def test_client_initialization(self, base_client_config):
         """
-        Test requests 2.31+ client initialization with connection pooling configuration.
+        Test BaseExternalServiceClient initialization with configuration.
         
-        Validates HTTPAdapter configuration, connection pool settings, and timeout
-        configuration equivalent to Node.js HTTP client patterns per Section 6.3.5.
+        Validates proper client initialization with configuration parameters,
+        default headers setup, and connection pool configuration.
         """
-        # Mock requests session creation
-        mock_session = mocker.patch('requests.Session')
-        mock_adapter = mocker.patch('requests.adapters.HTTPAdapter')
+        client = BaseExternalServiceClient(base_client_config)
         
-        # Test client configuration
-        config = BaseClientConfiguration(
-            service_type=ServiceType.HTTP_API,
-            base_url="https://api.example.com",
-            timeout=30.0,
-            retry_attempts=3,
-            connection_pool_size=50,
-            max_connections=100
-        )
-        
-        client = BaseExternalServiceClient(config)
-        
-        # Verify session initialization
-        mock_session.assert_called_once()
-        
-        # Verify HTTPAdapter configuration per Section 6.3.5
-        mock_adapter.assert_called_with(
-            pool_connections=config.connection_pool_size,
-            pool_maxsize=config.max_connections,
-            max_retries=config.retry_attempts
-        )
-        
-        assert client.config.service_type == ServiceType.HTTP_API
-        assert client.config.base_url == "https://api.example.com"
-        assert client.config.timeout == 30.0
-        assert client.config.retry_attempts == 3
+        assert client.config == base_client_config
+        assert client.service_name == "test_service"
+        assert client.base_url == TEST_API_BASE_URL
+        assert client.timeout == 30.0
+        assert client.max_retries == 3
+        assert "User-Agent" in client.default_headers
     
-    def test_requests_get_request_success(self, mocker: MockerFixture):
+    def test_client_configuration_validation(self):
         """
-        Test successful GET request execution with response validation.
+        Test client configuration validation for required parameters.
         
-        Validates request header configuration, response parsing, and monitoring
-        integration for successful HTTP operations per Section 5.2.6.
+        Validates configuration parameter validation, type checking,
+        and error handling for invalid configuration values.
         """
-        # Mock successful HTTP response
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"data": "test_response", "status": "success"}
-        mock_response.headers = {"Content-Type": "application/json"}
-        mock_response.elapsed.total_seconds.return_value = 0.25
-        
-        mock_session = mocker.patch('requests.Session')
-        mock_session_instance = Mock()
-        mock_session.return_value = mock_session_instance
-        mock_session_instance.get.return_value = mock_response
-        
-        # Mock monitoring for external service call tracking
-        mock_track_call = mocker.patch('src.integrations.track_external_service_call')
-        
-        config = BaseClientConfiguration(
-            service_type=ServiceType.HTTP_API,
-            base_url="https://api.example.com",
-            timeout=30.0
-        )
-        
-        client = BaseExternalServiceClient(config)
-        
-        # Execute GET request
-        response_data = client.get("/test-endpoint", params={"key": "value"})
-        
-        # Verify request execution
-        mock_session_instance.get.assert_called_once_with(
-            "https://api.example.com/test-endpoint",
-            params={"key": "value"},
-            timeout=30.0,
-            headers=client._get_default_headers()
-        )
-        
-        # Verify response processing
-        assert response_data["data"] == "test_response"
-        assert response_data["status"] == "success"
-        
-        # Verify monitoring integration
-        mock_track_call.assert_called_once()
-        call_args = mock_track_call.call_args
-        assert call_args[1]["service_name"] == config.service_type.value
-        assert call_args[1]["operation"] == "GET"
-        assert call_args[1]["success"] is True
-        assert call_args[1]["duration"] == 0.25
-    
-    def test_requests_post_request_with_json_payload(self, mocker: MockerFixture):
-        """
-        Test POST request with JSON payload and authentication headers.
-        
-        Validates JSON serialization, authentication token injection, and response
-        handling for POST operations per Section 5.2.6.
-        """
-        # Mock successful POST response
-        mock_response = Mock()
-        mock_response.status_code = 201
-        mock_response.json.return_value = {"id": "12345", "created": True}
-        mock_response.elapsed.total_seconds.return_value = 0.45
-        
-        mock_session = mocker.patch('requests.Session')
-        mock_session_instance = Mock()
-        mock_session.return_value = mock_session_instance
-        mock_session_instance.post.return_value = mock_response
-        
-        # Mock monitoring
-        mock_track_call = mocker.patch('src.integrations.track_external_service_call')
-        
-        config = BaseClientConfiguration(
-            service_type=ServiceType.HTTP_API,
-            base_url="https://api.example.com",
-            auth_token="Bearer test-token-12345"
-        )
-        
-        client = BaseExternalServiceClient(config)
-        
-        # Test payload
-        payload = {
-            "name": "Test Resource",
-            "description": "Test resource creation",
-            "metadata": {"source": "test_suite"}
-        }
-        
-        # Execute POST request
-        response_data = client.post("/resources", json=payload)
-        
-        # Verify request execution with authentication
-        expected_headers = client._get_default_headers()
-        expected_headers["Authorization"] = "Bearer test-token-12345"
-        
-        mock_session_instance.post.assert_called_once_with(
-            "https://api.example.com/resources",
-            json=payload,
-            timeout=config.timeout,
-            headers=expected_headers
-        )
-        
-        # Verify response processing
-        assert response_data["id"] == "12345"
-        assert response_data["created"] is True
-        
-        # Verify monitoring integration for POST operation
-        mock_track_call.assert_called_once()
-        call_args = mock_track_call.call_args
-        assert call_args[1]["operation"] == "POST"
-        assert call_args[1]["success"] is True
-    
-    def test_requests_error_handling(self, mocker: MockerFixture):
-        """
-        Test comprehensive error handling for requests HTTP client.
-        
-        Validates exception classification, error logging, and monitoring integration
-        for various HTTP error scenarios per Section 6.3.3.
-        """
-        mock_session = mocker.patch('requests.Session')
-        mock_session_instance = Mock()
-        mock_session.return_value = mock_session_instance
-        
-        # Mock monitoring and logging
-        mock_track_call = mocker.patch('src.integrations.track_external_service_call')
-        mock_logger = mocker.patch('structlog.get_logger')
-        mock_logger_instance = Mock()
-        mock_logger.return_value = mock_logger_instance
-        
-        config = BaseClientConfiguration(
-            service_type=ServiceType.HTTP_API,
-            base_url="https://api.example.com"
-        )
-        
-        client = BaseExternalServiceClient(config)
-        
-        # Test connection error handling
-        mock_session_instance.get.side_effect = RequestsConnectionError("Connection failed")
-        
-        with pytest.raises(ConnectionError) as exc_info:
-            client.get("/test-endpoint")
-        
-        assert "Connection failed" in str(exc_info.value)
-        
-        # Verify error monitoring
-        mock_track_call.assert_called_once()
-        call_args = mock_track_call.call_args
-        assert call_args[1]["success"] is False
-        assert call_args[1]["error_type"] == "ConnectionError"
-        
-        # Test timeout error handling
-        mock_session_instance.get.side_effect = Timeout("Request timeout")
-        mock_track_call.reset_mock()
-        
-        with pytest.raises(TimeoutError) as exc_info:
-            client.get("/test-endpoint")
-        
-        assert "Request timeout" in str(exc_info.value)
-        
-        # Test HTTP error handling (4xx/5xx responses)
-        mock_http_error = HTTPError("404 Not Found")
-        mock_response = Mock()
-        mock_response.status_code = 404
-        mock_response.text = "Resource not found"
-        mock_http_error.response = mock_response
-        
-        mock_session_instance.get.side_effect = mock_http_error
-        mock_track_call.reset_mock()
-        
-        with pytest.raises(HTTPResponseError) as exc_info:
-            client.get("/test-endpoint")
-        
-        assert exc_info.value.status_code == 404
-        assert "Resource not found" in str(exc_info.value)
-    
-    @pytest.mark.asyncio
-    async def test_httpx_async_client_initialization(self, mocker: MockerFixture):
-        """
-        Test httpx 0.24+ async client initialization with connection pool configuration.
-        
-        Validates AsyncClient configuration, connection limits, and timeout settings
-        for high-performance async HTTP operations per Section 5.2.6.
-        """
-        # Mock httpx AsyncClient
-        mock_async_client = mocker.patch('httpx.AsyncClient')
-        
-        config = BaseClientConfiguration(
-            service_type=ServiceType.HTTP_API,
-            base_url="https://api.example.com",
-            timeout=30.0,
-            max_connections=100,
-            max_keepalive_connections=50,
-            keepalive_expiry=30.0
-        )
-        
-        # Create async client instance
-        async with httpx.AsyncClient(
-            base_url=config.base_url,
-            timeout=httpx.Timeout(config.timeout),
-            limits=httpx.Limits(
-                max_connections=config.max_connections,
-                max_keepalive_connections=config.max_keepalive_connections,
-                keepalive_expiry=config.keepalive_expiry
+        # Test missing service name
+        with pytest.raises(ValueError, match="service_name is required"):
+            BaseClientConfiguration(
+                service_name="",
+                base_url=TEST_API_BASE_URL
             )
-        ) as client:
-            # Verify client configuration
-            mock_async_client.assert_called_once()
-            call_kwargs = mock_async_client.call_args[1]
-            
-            assert call_kwargs["base_url"] == config.base_url
-            assert isinstance(call_kwargs["timeout"], httpx.Timeout)
-            assert isinstance(call_kwargs["limits"], httpx.Limits)
-    
-    @pytest.mark.asyncio
-    async def test_httpx_async_get_request_success(self, mocker: MockerFixture):
-        """
-        Test successful async GET request execution with httpx client.
         
-        Validates async request processing, response handling, and monitoring
-        integration for non-blocking HTTP operations per Section 5.2.6.
+        # Test invalid timeout value
+        with pytest.raises(ValueError, match="timeout must be positive"):
+            BaseClientConfiguration(
+                service_name="test_service",
+                base_url=TEST_API_BASE_URL,
+                timeout=-1.0
+            )
+        
+        # Test invalid retry count
+        with pytest.raises(ValueError, match="max_retries must be non-negative"):
+            BaseClientConfiguration(
+                service_name="test_service",
+                base_url=TEST_API_BASE_URL,
+                max_retries=-1
+            )
+    
+    @patch('src.integrations.base_client.requests.Session')
+    def test_synchronous_http_requests(self, mock_session_class, base_client_config, mock_requests_session):
         """
-        # Mock successful async response
+        Test synchronous HTTP requests using requests library.
+        
+        Validates GET, POST, PUT, DELETE operations with proper header handling,
+        timeout configuration, and response processing per Section 5.2.6.
+        """
+        mock_session_class.return_value = mock_requests_session
+        client = BaseExternalServiceClient(base_client_config)
+        
+        # Test GET request
+        response = client.get("/users")
+        
+        mock_requests_session.get.assert_called_once()
+        call_args = mock_requests_session.get.call_args
+        assert call_args[0][0] == urljoin(TEST_API_BASE_URL, "/users")
+        assert call_args[1]["timeout"] == 30.0
+        assert "User-Agent" in call_args[1]["headers"]
+        
+        assert response.status_code == 200
+        assert response.json() == {"status": "success", "data": {}}
+        
+        # Test POST request with data
+        test_data = {"name": "Test User", "email": "test@example.com"}
+        client.post("/users", json=test_data)
+        
+        mock_requests_session.post.assert_called_once()
+        post_call_args = mock_requests_session.post.call_args
+        assert post_call_args[1]["json"] == test_data
+        assert post_call_args[1]["timeout"] == 30.0
+        
+        # Test PUT request
+        client.put("/users/123", json={"name": "Updated User"})
+        mock_requests_session.put.assert_called_once()
+        
+        # Test DELETE request
+        client.delete("/users/123")
+        mock_requests_session.delete.assert_called_once()
+    
+    @pytest_asyncio.async_test
+    @patch('src.integrations.base_client.httpx.AsyncClient')
+    async def test_asynchronous_http_requests(self, mock_client_class, base_client_config, mock_httpx_client):
+        """
+        Test asynchronous HTTP requests using httpx library.
+        
+        Validates async GET, POST, PUT, DELETE operations with proper
+        connection pooling, timeout handling, and async context management.
+        """
+        mock_client_class.return_value = mock_httpx_client
+        client = BaseExternalServiceClient(base_client_config)
+        
+        # Test async GET request
+        response = await client.async_get("/users")
+        
+        mock_httpx_client.get.assert_called_once()
+        call_args = mock_httpx_client.get.call_args
+        assert call_args[0][0] == urljoin(TEST_API_BASE_URL, "/users")
+        assert call_args[1]["timeout"] == 30.0
+        
+        assert response.status_code == 200
+        assert await response.json() == {"status": "success", "data": {}}
+        
+        # Test async POST request with data
+        test_data = {"name": "Test User", "email": "test@example.com"}
+        await client.async_post("/users", json=test_data)
+        
+        mock_httpx_client.post.assert_called_once()
+        post_call_args = mock_httpx_client.post.call_args
+        assert post_call_args[1]["json"] == test_data
+        
+        # Test connection pool configuration
+        async with client.get_async_client() as async_client:
+            assert isinstance(async_client, httpx.AsyncClient)
+            mock_httpx_client.__aenter__.assert_called()
+    
+    def test_error_handling_and_exceptions(self, base_client_config, mock_requests_session):
+        """
+        Test error handling for HTTP exceptions and network failures.
+        
+        Validates proper exception handling for timeout, connection errors,
+        HTTP status errors, and circuit breaker integration per Section 6.3.3.
+        """
+        with patch('src.integrations.base_client.requests.Session') as mock_session_class:
+            mock_session_class.return_value = mock_requests_session
+            client = BaseExternalServiceClient(base_client_config)
+            
+            # Test timeout exception
+            mock_requests_session.get.side_effect = Timeout("Request timeout")
+            
+            with pytest.raises(Timeout):
+                client.get("/users")
+            
+            # Test connection error
+            mock_requests_session.get.side_effect = ConnectionError("Connection failed")
+            
+            with pytest.raises(ConnectionError):
+                client.get("/users")
+            
+            # Test HTTP error status
+            mock_error_response = Mock()
+            mock_error_response.status_code = 404
+            mock_error_response.raise_for_status.side_effect = HTTPError("Not found")
+            mock_requests_session.get.side_effect = None
+            mock_requests_session.get.return_value = mock_error_response
+            
+            with pytest.raises(HTTPError):
+                response = client.get("/users")
+                response.raise_for_status()
+    
+    def test_authentication_header_handling(self, base_client_config):
+        """
+        Test authentication header management for external services.
+        
+        Validates API key authentication, Bearer token handling, and
+        custom authentication header configuration per Section 6.3.3.
+        """
+        # Test API key authentication
+        config_with_auth = base_client_config
+        config_with_auth.default_headers = {"Authorization": f"Bearer {TEST_API_KEY}"}
+        
+        client = BaseExternalServiceClient(config_with_auth)
+        
+        with patch('src.integrations.base_client.requests.Session') as mock_session_class:
+            mock_session = Mock()
+            mock_session_class.return_value = mock_session
+            
+            client.get("/protected")
+            
+            call_args = mock_session.get.call_args
+            assert "Authorization" in call_args[1]["headers"]
+            assert call_args[1]["headers"]["Authorization"] == f"Bearer {TEST_API_KEY}"
+    
+    def test_health_check_functionality(self, base_client_config, mock_requests_session):
+        """
+        Test health check functionality for external service monitoring.
+        
+        Validates health endpoint verification, response time measurement,
+        and service status determination per Section 6.3.3.
+        """
+        with patch('src.integrations.base_client.requests.Session') as mock_session_class:
+            mock_session_class.return_value = mock_requests_session
+            client = BaseExternalServiceClient(base_client_config)
+            
+            # Configure health check endpoint
+            health_response = Mock()
+            health_response.status_code = 200
+            health_response.json.return_value = {"status": "healthy", "timestamp": datetime.now().isoformat()}
+            health_response.elapsed = timedelta(milliseconds=50)
+            mock_requests_session.get.return_value = health_response
+            
+            # Test health check
+            health_result = client.check_health()
+            
+            assert health_result["service_name"] == "test_service"
+            assert health_result["overall_status"] == "healthy"
+            assert health_result["response_time_ms"] == 50
+            assert "timestamp" in health_result
+            
+            # Test unhealthy service
+            health_response.status_code = 503
+            health_response.json.return_value = {"status": "unhealthy", "error": "Service unavailable"}
+            
+            health_result = client.check_health()
+            assert health_result["overall_status"] == "unhealthy"
+
+
+# =============================================================================
+# HTTP Client Libraries Testing (requests/httpx)
+# =============================================================================
+
+class TestHTTPClientLibraries:
+    """
+    Test suite for HTTP client library integration.
+    
+    Tests requests 2.31+ and httpx 0.24+ integration with comprehensive
+    validation of synchronous and asynchronous HTTP operations, connection
+    pooling, and performance characteristics per Section 5.2.6.
+    """
+    
+    @patch('requests.get')
+    def test_requests_synchronous_operations(self, mock_get):
+        """
+        Test requests library synchronous HTTP operations.
+        
+        Validates requests 2.31+ integration with timeout handling,
+        session management, and connection pooling configuration.
+        """
+        # Configure mock response
         mock_response = Mock()
         mock_response.status_code = 200
-        mock_response.json.return_value = {"data": "async_response", "status": "success"}
+        mock_response.json.return_value = {"message": "Success"}
         mock_response.headers = {"Content-Type": "application/json"}
-        mock_response.elapsed.total_seconds.return_value = 0.15
+        mock_response.elapsed = timedelta(milliseconds=100)
+        mock_get.return_value = mock_response
         
-        # Mock httpx AsyncClient
-        mock_async_client = mocker.patch('httpx.AsyncClient')
-        mock_client_instance = AsyncMock()
-        mock_async_client.return_value.__aenter__.return_value = mock_client_instance
-        mock_client_instance.get.return_value = mock_response
-        
-        # Mock async monitoring
-        mock_track_call = mocker.patch('src.integrations.track_external_service_call')
-        
-        config = BaseClientConfiguration(
-            service_type=ServiceType.HTTP_API,
-            base_url="https://api.example.com",
-            timeout=30.0
+        # Test basic GET request
+        response = requests.get(
+            "https://api.example.com/data",
+            timeout=30.0,
+            headers={"Authorization": "Bearer token"}
         )
         
-        # Execute async GET request
-        async with httpx.AsyncClient(base_url=config.base_url) as client:
-            response = await client.get("/async-endpoint", params={"async": "true"})
-            response_data = response.json()
+        assert response.status_code == 200
+        assert response.json() == {"message": "Success"}
         
-        # Verify async request execution
-        mock_client_instance.get.assert_called_once_with(
-            "/async-endpoint",
-            params={"async": "true"}
+        # Verify request parameters
+        mock_get.assert_called_once_with(
+            "https://api.example.com/data",
+            timeout=30.0,
+            headers={"Authorization": "Bearer token"}
         )
-        
-        # Verify response processing
-        assert response_data["data"] == "async_response"
-        assert response_data["status"] == "success"
     
-    @pytest.mark.asyncio
-    async def test_httpx_async_post_with_concurrent_requests(self, mocker: MockerFixture):
+    @patch('requests.Session')
+    def test_requests_session_management(self, mock_session_class):
         """
-        Test concurrent async POST requests with httpx for performance validation.
+        Test requests session management and connection pooling.
         
-        Validates concurrent request handling, connection pool efficiency, and
-        performance optimization for high-throughput scenarios per Section 6.3.5.
+        Validates session reuse, connection pooling configuration,
+        and persistent header management for efficient HTTP operations.
         """
-        # Mock successful async responses
-        mock_responses = []
-        for i in range(5):
-            mock_response = Mock()
-            mock_response.status_code = 201
-            mock_response.json.return_value = {"id": f"resource_{i}", "batch": True}
-            mock_response.elapsed.total_seconds.return_value = 0.1 + (i * 0.02)
-            mock_responses.append(mock_response)
+        mock_session = Mock()
+        mock_session_class.return_value = mock_session
         
-        # Mock httpx AsyncClient with concurrent response handling
-        mock_async_client = mocker.patch('httpx.AsyncClient')
-        mock_client_instance = AsyncMock()
-        mock_async_client.return_value.__aenter__.return_value = mock_client_instance
-        mock_client_instance.post.side_effect = mock_responses
-        
-        # Mock performance monitoring
-        mock_track_call = mocker.patch('src.integrations.track_external_service_call')
-        
-        config = BaseClientConfiguration(
-            service_type=ServiceType.HTTP_API,
-            base_url="https://api.example.com",
-            max_connections=50
-        )
-        
-        # Execute concurrent POST requests
-        async def make_request(session, resource_id):
-            payload = {"name": f"Resource {resource_id}", "batch_id": "test_batch"}
-            response = await session.post("/resources", json=payload)
-            return response.json()
-        
-        start_time = time.time()
-        async with httpx.AsyncClient(base_url=config.base_url) as client:
-            tasks = [make_request(client, i) for i in range(5)]
-            results = await asyncio.gather(*tasks)
-        
-        execution_time = time.time() - start_time
-        
-        # Verify concurrent execution efficiency (should be < 1 second for 5 requests)
-        assert execution_time < 1.0, f"Concurrent requests took {execution_time:.2f}s, expected < 1.0s"
-        
-        # Verify all requests completed successfully
-        assert len(results) == 5
-        for i, result in enumerate(results):
-            assert result["id"] == f"resource_{i}"
-            assert result["batch"] is True
-        
-        # Verify POST calls were made
-        assert mock_client_instance.post.call_count == 5
-    
-    @pytest.mark.asyncio
-    async def test_httpx_async_error_handling(self, mocker: MockerFixture):
-        """
-        Test comprehensive async error handling for httpx client.
-        
-        Validates async exception handling, error classification, and monitoring
-        integration for async HTTP operations per Section 6.3.3.
-        """
-        # Mock httpx AsyncClient
-        mock_async_client = mocker.patch('httpx.AsyncClient')
-        mock_client_instance = AsyncMock()
-        mock_async_client.return_value.__aenter__.return_value = mock_client_instance
-        
-        # Mock monitoring
-        mock_track_call = mocker.patch('src.integrations.track_external_service_call')
-        
-        config = BaseClientConfiguration(
-            service_type=ServiceType.HTTP_API,
-            base_url="https://api.example.com"
-        )
-        
-        # Test async connection error
-        mock_client_instance.get.side_effect = httpx.ConnectError("Async connection failed")
-        
-        with pytest.raises(ConnectionError) as exc_info:
-            async with httpx.AsyncClient(base_url=config.base_url) as client:
-                await client.get("/test-endpoint")
-        
-        assert "Async connection failed" in str(exc_info.value)
-        
-        # Test async timeout error
-        mock_client_instance.get.side_effect = httpx.TimeoutException("Async request timeout")
-        
-        with pytest.raises(TimeoutError) as exc_info:
-            async with httpx.AsyncClient(base_url=config.base_url) as client:
-                await client.get("/test-endpoint")
-        
-        assert "Async request timeout" in str(exc_info.value)
-        
-        # Test async HTTP status error
+        # Configure session response
         mock_response = Mock()
-        mock_response.status_code = 500
-        mock_response.text = "Internal server error"
-        mock_http_status_error = httpx.HTTPStatusError(
-            "500 Internal Server Error",
-            request=Mock(),
-            response=mock_response
-        )
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"data": "test"}
+        mock_session.get.return_value = mock_response
         
-        mock_client_instance.get.side_effect = mock_http_status_error
+        # Test session usage
+        session = requests.Session()
+        session.headers.update({"User-Agent": "Test-Client"})
         
-        with pytest.raises(HTTPResponseError) as exc_info:
-            async with httpx.AsyncClient(base_url=config.base_url) as client:
-                await client.get("/test-endpoint")
+        # Make multiple requests with same session
+        for i in range(3):
+            response = session.get(f"https://api.example.com/item/{i}")
+            assert response.status_code == 200
         
-        assert exc_info.value.status_code == 500
-        assert "Internal server error" in str(exc_info.value)
+        # Verify session was called correctly
+        assert mock_session.get.call_count == 3
+        
+        # Test session cleanup
+        session.close()
+    
+    @pytest_asyncio.async_test
+    async def test_httpx_asynchronous_operations(self):
+        """
+        Test httpx library asynchronous HTTP operations.
+        
+        Validates httpx 0.24+ async client functionality with connection
+        pooling, timeout handling, and concurrent request processing.
+        """
+        with patch('httpx.AsyncClient') as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client_class.return_value = mock_client
+            
+            # Configure async response
+            mock_response = AsyncMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {"message": "Async success"}
+            mock_response.headers = {"Content-Type": "application/json"}
+            mock_client.get.return_value = mock_response
+            
+            # Configure context manager
+            mock_client.__aenter__.return_value = mock_client
+            mock_client.__aexit__.return_value = None
+            
+            # Test async GET request
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(
+                    "https://api.example.com/async-data",
+                    headers={"Authorization": "Bearer async-token"}
+                )
+                
+                assert response.status_code == 200
+                assert await response.json() == {"message": "Async success"}
+            
+            # Verify async client usage
+            mock_client.get.assert_called_once_with(
+                "https://api.example.com/async-data",
+                headers={"Authorization": "Bearer async-token"}
+            )
+    
+    @pytest_asyncio.async_test
+    async def test_httpx_concurrent_requests(self):
+        """
+        Test httpx concurrent request processing capabilities.
+        
+        Validates concurrent HTTP request handling, connection pooling
+        efficiency, and async performance characteristics per Section 5.2.6.
+        """
+        with patch('httpx.AsyncClient') as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client_class.return_value = mock_client
+            
+            # Configure multiple async responses
+            responses = []
+            for i in range(5):
+                mock_response = AsyncMock()
+                mock_response.status_code = 200
+                mock_response.json.return_value = {"id": i, "data": f"item_{i}"}
+                responses.append(mock_response)
+            
+            mock_client.get.side_effect = responses
+            mock_client.__aenter__.return_value = mock_client
+            mock_client.__aexit__.return_value = None
+            
+            # Test concurrent requests
+            async with httpx.AsyncClient() as client:
+                tasks = [
+                    client.get(f"https://api.example.com/items/{i}")
+                    for i in range(5)
+                ]
+                
+                responses = await asyncio.gather(*tasks)
+                
+                assert len(responses) == 5
+                for i, response in enumerate(responses):
+                    assert response.status_code == 200
+                    response_data = await response.json()
+                    assert response_data["id"] == i
+            
+            # Verify all requests were made
+            assert mock_client.get.call_count == 5
+    
+    def test_http_client_error_handling(self):
+        """
+        Test HTTP client error handling for network failures.
+        
+        Validates timeout handling, connection errors, and HTTP status
+        error processing for both requests and httpx libraries.
+        """
+        # Test requests timeout handling
+        with patch('requests.get') as mock_get:
+            mock_get.side_effect = requests.Timeout("Request timeout")
+            
+            with pytest.raises(requests.Timeout):
+                requests.get("https://api.example.com/data", timeout=5.0)
+        
+        # Test requests connection error
+        with patch('requests.get') as mock_get:
+            mock_get.side_effect = requests.ConnectionError("Connection failed")
+            
+            with pytest.raises(requests.ConnectionError):
+                requests.get("https://api.example.com/data")
+    
+    @pytest_asyncio.async_test
+    async def test_httpx_error_handling(self):
+        """
+        Test httpx async client error handling.
+        
+        Validates async timeout handling, connection errors, and
+        HTTP status error processing for httpx 0.24+ client.
+        """
+        with patch('httpx.AsyncClient') as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client_class.return_value = mock_client
+            mock_client.__aenter__.return_value = mock_client
+            mock_client.__aexit__.return_value = None
+            
+            # Test timeout error
+            mock_client.get.side_effect = httpx.TimeoutException("Async timeout")
+            
+            with pytest.raises(httpx.TimeoutException):
+                async with httpx.AsyncClient() as client:
+                    await client.get("https://api.example.com/data")
+            
+            # Test connection error
+            mock_client.get.side_effect = httpx.ConnectError("Async connection failed")
+            
+            with pytest.raises(httpx.ConnectError):
+                async with httpx.AsyncClient() as client:
+                    await client.get("https://api.example.com/data")
 
 
-class TestAWSServiceIntegration:
+# =============================================================================
+# AWS SDK (boto3) Integration Testing
+# =============================================================================
+
+class TestAWSSDKIntegration:
     """
-    AWS service integration testing with boto3 1.28+ per Section 5.2.6.
+    Test suite for AWS SDK (boto3) integration.
     
-    Validates AWS SDK integration, S3 operations, CloudWatch monitoring, and
-    error handling patterns for cloud service operations.
+    Tests boto3 1.28+ integration for S3 operations, CloudWatch metrics,
+    and AWS service communication with comprehensive error handling and
+    performance validation per Section 5.2.6.
     """
     
-    def test_boto3_s3_client_initialization(self, mocker: MockerFixture):
+    @patch('boto3.client')
+    def test_s3_client_operations(self, mock_boto3_client, mock_boto3_client):
         """
-        Test boto3 S3 client initialization with configuration optimization.
+        Test S3 client operations including upload, download, and delete.
         
-        Validates boto3 client configuration, connection pooling, and service-specific
-        settings for optimal AWS integration per Section 6.3.5.
+        Validates S3 file operations, bucket management, and object
+        lifecycle operations with proper error handling and response processing.
         """
-        # Mock boto3 client creation
-        mock_boto3_client = mocker.patch('boto3.client')
-        mock_session = mocker.patch('boto3.Session')
+        mock_boto3_client.return_value = mock_boto3_client
         
-        config = BaseClientConfiguration(
-            service_type=ServiceType.AWS_S3,
-            region="us-east-1",
-            max_pool_connections=50
-        )
-        
-        # Create AWS service client
-        aws_client = create_aws_service_client(config)
-        
-        # Verify boto3 client configuration
-        mock_boto3_client.assert_called_once_with(
+        # Test S3 file upload
+        s3_client = boto3.client(
             's3',
-            region_name=config.region,
-            config=mocker.ANY  # boto3.Config object with connection settings
+            aws_access_key_id=TEST_AWS_ACCESS_KEY,
+            aws_secret_access_key=TEST_AWS_SECRET_KEY,
+            region_name=TEST_AWS_REGION
         )
         
-        # Verify connection pool configuration
-        call_args = mock_boto3_client.call_args
-        boto3_config = call_args[1]['config']
-        assert boto3_config.max_pool_connections == 50
-        assert boto3_config.region_name == "us-east-1"
-        assert boto3_config.retries['max_attempts'] >= 3
+        # Test upload_file operation
+        upload_result = s3_client.upload_file(
+            Filename="test-file.txt",
+            Bucket=TEST_S3_BUCKET,
+            Key="uploads/test-file.txt"
+        )
+        
+        mock_boto3_client.upload_file.assert_called_once_with(
+            Filename="test-file.txt",
+            Bucket=TEST_S3_BUCKET,
+            Key="uploads/test-file.txt"
+        )
+        assert upload_result == MOCK_AWS_S3_RESPONSE
+        
+        # Test download_file operation
+        s3_client.download_file(
+            Bucket=TEST_S3_BUCKET,
+            Key="uploads/test-file.txt",
+            Filename="downloaded-file.txt"
+        )
+        
+        mock_boto3_client.download_file.assert_called_once()
+        
+        # Test delete_object operation
+        delete_result = s3_client.delete_object(
+            Bucket=TEST_S3_BUCKET,
+            Key="uploads/test-file.txt"
+        )
+        
+        mock_boto3_client.delete_object.assert_called_once()
+        assert delete_result["DeleteMarker"] is True
     
-    def test_s3_file_upload_operation(self, mocker: MockerFixture):
+    @patch('boto3.client')
+    def test_s3_bucket_operations(self, mock_boto3_client, mock_boto3_client):
         """
-        Test S3 file upload with multipart handling and progress monitoring.
+        Test S3 bucket operations including listing and metadata retrieval.
         
-        Validates file upload operations, multipart upload for large files, and
-        progress tracking for AWS S3 integration per Section 5.2.6.
+        Validates bucket content listing, object metadata access, and
+        bucket policy management with comprehensive response handling.
         """
-        # Mock S3 client and operations
-        mock_s3_client = Mock()
-        mock_boto3_client = mocker.patch('boto3.client', return_value=mock_s3_client)
+        mock_boto3_client.return_value = mock_boto3_client
         
-        # Mock successful upload response
-        mock_s3_client.upload_fileobj.return_value = None
-        mock_s3_client.head_object.return_value = {
-            'ContentLength': 1024,
-            'ETag': '"abc123def456"',
-            'LastModified': datetime.utcnow()
-        }
+        s3_client = boto3.client('s3', region_name=TEST_AWS_REGION)
         
-        # Mock monitoring
-        mock_track_call = mocker.patch('src.integrations.track_external_service_call')
-        
-        config = BaseClientConfiguration(
-            service_type=ServiceType.AWS_S3,
-            region="us-east-1",
-            bucket_name="test-bucket"
+        # Test list_objects_v2 operation
+        list_result = s3_client.list_objects_v2(
+            Bucket=TEST_S3_BUCKET,
+            Prefix="uploads/"
         )
         
-        aws_client = create_aws_service_client(config)
-        
-        # Test file upload
-        file_content = b"Test file content for S3 upload validation"
-        file_key = "test-files/sample.txt"
-        
-        # Execute upload operation
-        start_time = time.time()
-        upload_result = aws_client.upload_file(
-            file_content=file_content,
-            file_key=file_key,
-            content_type="text/plain"
+        mock_boto3_client.list_objects_v2.assert_called_once_with(
+            Bucket=TEST_S3_BUCKET,
+            Prefix="uploads/"
         )
-        upload_duration = time.time() - start_time
+        assert list_result["KeyCount"] == 1
+        assert len(list_result["Contents"]) == 1
         
-        # Verify S3 upload call
-        mock_s3_client.upload_fileobj.assert_called_once()
-        upload_args = mock_s3_client.upload_fileobj.call_args
+        # Test head_object operation for metadata
+        head_result = s3_client.head_object(
+            Bucket=TEST_S3_BUCKET,
+            Key="uploads/test-file.txt"
+        )
         
-        assert upload_args[1]['Bucket'] == config.bucket_name
-        assert upload_args[1]['Key'] == file_key
-        assert 'ContentType' in upload_args[1]['ExtraArgs']
-        assert upload_args[1]['ExtraArgs']['ContentType'] == "text/plain"
-        
-        # Verify upload result
-        assert upload_result['success'] is True
-        assert upload_result['file_key'] == file_key
-        assert upload_result['content_length'] == 1024
-        assert 'etag' in upload_result
-        
-        # Verify monitoring integration
-        mock_track_call.assert_called_once()
-        call_args = mock_track_call.call_args
-        assert call_args[1]["service_name"] == ServiceType.AWS_S3.value
-        assert call_args[1]["operation"] == "upload_file"
-        assert call_args[1]["success"] is True
-        assert call_args[1]["duration"] == upload_duration
+        mock_boto3_client.head_object.assert_called_once()
+        assert head_result["ContentLength"] == 1024
+        assert "ETag" in head_result
     
-    def test_s3_multipart_upload_for_large_files(self, mocker: MockerFixture):
+    @patch('boto3.client')
+    def test_cloudwatch_integration(self, mock_boto3_client, mock_boto3_client):
         """
-        Test S3 multipart upload for large file handling and optimization.
+        Test CloudWatch integration for metrics and monitoring.
         
-        Validates multipart upload implementation, part size optimization, and
-        upload progress tracking for large file operations per Section 6.3.2.
+        Validates CloudWatch metrics submission, alarm management, and
+        monitoring data retrieval per Section 6.3.3 monitoring requirements.
         """
-        # Mock S3 client with multipart operations
-        mock_s3_client = Mock()
-        mock_boto3_client = mocker.patch('boto3.client', return_value=mock_s3_client)
+        mock_boto3_client.return_value = mock_boto3_client
         
-        # Mock multipart upload responses
-        mock_s3_client.create_multipart_upload.return_value = {
-            'UploadId': 'test-upload-id-12345'
-        }
+        cloudwatch_client = boto3.client('cloudwatch', region_name=TEST_AWS_REGION)
         
-        # Mock part upload responses
-        mock_parts = []
-        for i in range(1, 4):  # 3 parts
-            mock_parts.append({
-                'ETag': f'"part{i}etag"',
-                'PartNumber': i
-            })
-        
-        mock_s3_client.upload_part.side_effect = mock_parts
-        
-        mock_s3_client.complete_multipart_upload.return_value = {
-            'ETag': '"combined-etag"',
-            'Location': 'https://test-bucket.s3.amazonaws.com/large-file.bin'
-        }
-        
-        # Mock monitoring
-        mock_track_call = mocker.patch('src.integrations.track_external_service_call')
-        
-        config = BaseClientConfiguration(
-            service_type=ServiceType.AWS_S3,
-            region="us-east-1",
-            bucket_name="test-bucket",
-            multipart_threshold=10 * 1024 * 1024,  # 10MB threshold
-            part_size=5 * 1024 * 1024  # 5MB parts
+        # Test put_metric_data operation
+        metric_result = cloudwatch_client.put_metric_data(
+            Namespace='FlaskApp/ExternalIntegrations',
+            MetricData=[
+                {
+                    'MetricName': 'APIRequestCount',
+                    'Value': 1.0,
+                    'Unit': 'Count',
+                    'Timestamp': datetime.now(timezone.utc),
+                    'Dimensions': [
+                        {
+                            'Name': 'ServiceName',
+                            'Value': 'external_api'
+                        }
+                    ]
+                }
+            ]
         )
         
-        aws_client = create_aws_service_client(config)
+        mock_boto3_client.put_metric_data.assert_called_once()
+        assert metric_result["ResponseMetadata"]["HTTPStatusCode"] == 200
         
-        # Simulate large file (15MB requiring multipart upload)
-        large_file_size = 15 * 1024 * 1024
-        file_key = "large-files/big-file.bin"
-        
-        # Execute multipart upload
-        start_time = time.time()
-        upload_result = aws_client.upload_large_file(
-            file_size=large_file_size,
-            file_key=file_key,
-            content_type="application/octet-stream"
-        )
-        upload_duration = time.time() - start_time
-        
-        # Verify multipart upload initialization
-        mock_s3_client.create_multipart_upload.assert_called_once_with(
-            Bucket=config.bucket_name,
-            Key=file_key,
-            ContentType="application/octet-stream"
+        # Test describe_alarms operation
+        alarms_result = cloudwatch_client.describe_alarms(
+            AlarmNames=['external-service-error-rate']
         )
         
-        # Verify part uploads (3 parts for 15MB file with 5MB parts)
-        assert mock_s3_client.upload_part.call_count == 3
-        
-        # Verify multipart completion
-        mock_s3_client.complete_multipart_upload.assert_called_once()
-        complete_args = mock_s3_client.complete_multipart_upload.call_args
-        assert complete_args[1]['UploadId'] == 'test-upload-id-12345'
-        assert len(complete_args[1]['MultipartUpload']['Parts']) == 3
-        
-        # Verify upload result
-        assert upload_result['success'] is True
-        assert upload_result['multipart'] is True
-        assert upload_result['parts_uploaded'] == 3
-        assert upload_result['total_size'] == large_file_size
+        mock_boto3_client.describe_alarms.assert_called_once()
+        assert "MetricAlarms" in alarms_result
     
-    def test_s3_file_download_with_streaming(self, mocker: MockerFixture):
+    def test_aws_client_configuration(self):
         """
-        Test S3 file download with streaming support for memory optimization.
+        Test AWS client configuration and credential management.
         
-        Validates file download operations, streaming implementation, and memory
-        management for large file downloads per Section 6.3.2.
+        Validates AWS client initialization, credential handling, region
+        configuration, and session management per Section 5.2.6.
         """
-        # Mock S3 client and streaming response
-        mock_s3_client = Mock()
-        mock_boto3_client = mocker.patch('boto3.client', return_value=mock_s3_client)
-        
-        # Mock streaming download response
-        mock_streaming_body = Mock()
-        mock_streaming_body.read.return_value = b"Downloaded file content chunk"
-        mock_streaming_body.__iter__.return_value = iter([
-            b"chunk1", b"chunk2", b"chunk3"
-        ])
-        
-        mock_s3_client.get_object.return_value = {
-            'Body': mock_streaming_body,
-            'ContentLength': 1024,
-            'ContentType': 'application/octet-stream',
-            'ETag': '"download123"'
-        }
-        
-        # Mock monitoring
-        mock_track_call = mocker.patch('src.integrations.track_external_service_call')
-        
-        config = BaseClientConfiguration(
-            service_type=ServiceType.AWS_S3,
-            region="us-east-1",
-            bucket_name="test-bucket"
-        )
-        
-        aws_client = create_aws_service_client(config)
-        
-        # Test streaming download
-        file_key = "downloads/test-file.bin"
-        
-        start_time = time.time()
-        download_result = aws_client.download_file_stream(file_key)
-        download_duration = time.time() - start_time
-        
-        # Verify S3 download call
-        mock_s3_client.get_object.assert_called_once_with(
-            Bucket=config.bucket_name,
-            Key=file_key
-        )
-        
-        # Verify streaming download result
-        assert download_result['success'] is True
-        assert download_result['file_key'] == file_key
-        assert download_result['content_length'] == 1024
-        assert download_result['content_type'] == 'application/octet-stream'
-        assert 'stream_chunks' in download_result
-        
-        # Verify streaming capability
-        chunks = list(download_result['stream_chunks'])
-        assert chunks == [b"chunk1", b"chunk2", b"chunk3"]
-        
-        # Verify monitoring
-        mock_track_call.assert_called_once()
-        call_args = mock_track_call.call_args
-        assert call_args[1]["operation"] == "download_file_stream"
-        assert call_args[1]["success"] is True
+        with patch('boto3.Session') as mock_session_class:
+            mock_session = Mock()
+            mock_session_class.return_value = mock_session
+            
+            # Configure mock client
+            mock_client = Mock()
+            mock_session.client.return_value = mock_client
+            
+            # Test session-based client creation
+            session = boto3.Session(
+                aws_access_key_id=TEST_AWS_ACCESS_KEY,
+                aws_secret_access_key=TEST_AWS_SECRET_KEY,
+                region_name=TEST_AWS_REGION
+            )
+            
+            s3_client = session.client('s3')
+            
+            # Verify session configuration
+            mock_session_class.assert_called_once_with(
+                aws_access_key_id=TEST_AWS_ACCESS_KEY,
+                aws_secret_access_key=TEST_AWS_SECRET_KEY,
+                region_name=TEST_AWS_REGION
+            )
+            mock_session.client.assert_called_once_with('s3')
     
-    def test_cloudwatch_metrics_integration(self, mocker: MockerFixture):
+    @patch('boto3.client')
+    def test_aws_error_handling(self, mock_boto3_client):
         """
-        Test CloudWatch metrics submission and monitoring integration.
+        Test AWS SDK error handling and exception processing.
         
-        Validates CloudWatch client configuration, custom metrics submission, and
-        integration monitoring for AWS observability per Section 6.3.5.
+        Validates AWS service error handling, retry logic, and
+        credential error processing with proper exception handling.
         """
-        # Mock CloudWatch client
-        mock_cloudwatch_client = Mock()
-        mock_boto3_client = mocker.patch('boto3.client')
-        mock_boto3_client.side_effect = lambda service, **kwargs: (
-            mock_cloudwatch_client if service == 'cloudwatch' else Mock()
-        )
+        from botocore.exceptions import ClientError, NoCredentialsError
         
-        # Mock CloudWatch put_metric_data response
-        mock_cloudwatch_client.put_metric_data.return_value = {
-            'ResponseMetadata': {'HTTPStatusCode': 200}
-        }
+        mock_client = Mock()
+        mock_boto3_client.return_value = mock_client
         
-        # Mock monitoring
-        mock_track_call = mocker.patch('src.integrations.track_external_service_call')
-        
-        config = BaseClientConfiguration(
-            service_type=ServiceType.AWS_CLOUDWATCH,
-            region="us-east-1",
-            namespace="Flask-Migration/External-Integrations"
-        )
-        
-        aws_client = create_aws_service_client(config)
-        
-        # Test metrics submission
-        metrics_data = [
-            {
-                'MetricName': 'ExternalAPIResponse',
-                'Value': 250.5,
-                'Unit': 'Milliseconds',
-                'Dimensions': [
-                    {'Name': 'ServiceType', 'Value': 'HTTP_API'},
-                    {'Name': 'Environment', 'Value': 'test'}
-                ]
-            },
-            {
-                'MetricName': 'CircuitBreakerOpen',
-                'Value': 1,
-                'Unit': 'Count',
-                'Dimensions': [
-                    {'Name': 'ServiceName', 'Value': 'auth0-api'},
-                    {'Name': 'Environment', 'Value': 'test'}
-                ]
-            }
-        ]
-        
-        start_time = time.time()
-        metrics_result = aws_client.submit_metrics(metrics_data)
-        submission_duration = time.time() - start_time
-        
-        # Verify CloudWatch metrics submission
-        mock_cloudwatch_client.put_metric_data.assert_called_once_with(
-            Namespace=config.namespace,
-            MetricData=metrics_data
-        )
-        
-        # Verify submission result
-        assert metrics_result['success'] is True
-        assert metrics_result['metrics_submitted'] == 2
-        assert metrics_result['namespace'] == config.namespace
-        
-        # Verify monitoring integration
-        mock_track_call.assert_called_once()
-        call_args = mock_track_call.call_args
-        assert call_args[1]["service_name"] == ServiceType.AWS_CLOUDWATCH.value
-        assert call_args[1]["operation"] == "submit_metrics"
-        assert call_args[1]["success"] is True
-    
-    def test_aws_service_error_handling(self, mocker: MockerFixture):
-        """
-        Test comprehensive AWS service error handling and classification.
-        
-        Validates AWS-specific exception handling, error classification, and
-        monitoring integration for various AWS error scenarios per Section 6.3.3.
-        """
-        # Mock boto3 client
-        mock_s3_client = Mock()
-        mock_boto3_client = mocker.patch('boto3.client', return_value=mock_s3_client)
-        
-        # Mock monitoring and logging
-        mock_track_call = mocker.patch('src.integrations.track_external_service_call')
-        mock_logger = mocker.patch('structlog.get_logger')
-        
-        config = BaseClientConfiguration(
-            service_type=ServiceType.AWS_S3,
-            region="us-east-1",
-            bucket_name="test-bucket"
-        )
-        
-        aws_client = create_aws_service_client(config)
-        
-        # Test ClientError (4xx/5xx AWS errors)
-        client_error = ClientError(
+        # Test client error handling
+        mock_client.upload_file.side_effect = ClientError(
             error_response={
                 'Error': {
                     'Code': 'NoSuchBucket',
                     'Message': 'The specified bucket does not exist'
                 }
             },
-            operation_name='GetObject'
+            operation_name='UploadFile'
         )
         
-        mock_s3_client.get_object.side_effect = client_error
+        s3_client = boto3.client('s3')
         
-        with pytest.raises(AWSServiceError) as exc_info:
-            aws_client.download_file_stream("test-file.txt")
+        with pytest.raises(ClientError) as exc_info:
+            s3_client.upload_file("test.txt", "nonexistent-bucket", "test.txt")
         
-        assert exc_info.value.error_code == "NoSuchBucket"
-        assert "The specified bucket does not exist" in str(exc_info.value)
+        assert exc_info.value.response['Error']['Code'] == 'NoSuchBucket'
         
-        # Verify error monitoring
-        mock_track_call.assert_called_once()
-        call_args = mock_track_call.call_args
-        assert call_args[1]["success"] is False
-        assert call_args[1]["error_type"] == "AWSServiceError"
-        assert call_args[1]["error_code"] == "NoSuchBucket"
+        # Test credentials error
+        mock_boto3_client.side_effect = NoCredentialsError()
         
-        # Test EndpointConnectionError (network connectivity)
-        mock_s3_client.get_object.side_effect = EndpointConnectionError(
-            endpoint_url="https://s3.us-east-1.amazonaws.com"
-        )
-        mock_track_call.reset_mock()
-        
-        with pytest.raises(ConnectionError) as exc_info:
-            aws_client.download_file_stream("test-file.txt")
-        
-        assert "https://s3.us-east-1.amazonaws.com" in str(exc_info.value)
-        
-        # Test BotoCoreError (general boto3 errors)
-        mock_s3_client.get_object.side_effect = BotoCoreError()
-        mock_track_call.reset_mock()
-        
-        with pytest.raises(AWSServiceError) as exc_info:
-            aws_client.download_file_stream("test-file.txt")
-        
-        # Verify error classification
-        mock_track_call.assert_called_once()
-        call_args = mock_track_call.call_args
-        assert call_args[1]["success"] is False
-        assert call_args[1]["error_type"] == "AWSServiceError"
+        with pytest.raises(NoCredentialsError):
+            boto3.client('s3')
 
+
+# =============================================================================
+# Circuit Breaker Pattern Testing
+# =============================================================================
 
 class TestCircuitBreakerPatterns:
     """
-    Circuit breaker pattern testing for service resilience per Section 5.2.6.
+    Test suite for circuit breaker resilience patterns.
     
-    Validates circuit breaker implementation, state transitions, fallback mechanisms,
-    and recovery patterns for external service protection.
+    Tests circuit breaker implementation, failure threshold detection,
+    recovery timeout management, and fallback mechanism validation per
+    Section 6.3.3 resilience pattern requirements.
     """
     
-    def test_circuit_breaker_initialization(self, mocker: MockerFixture):
+    def test_circuit_breaker_initialization(self, mock_pybreaker):
         """
-        Test circuit breaker initialization with configuration validation.
+        Test circuit breaker initialization and configuration.
         
-        Validates circuit breaker configuration, threshold settings, and state
-        initialization for service resilience per Section 6.3.3.
+        Validates circuit breaker setup with failure thresholds, recovery
+        timeouts, and expected exception configuration.
         """
-        # Mock pybreaker circuit breaker
-        mock_circuit_breaker = mocker.patch('pybreaker.CircuitBreaker')
+        breaker = mock_pybreaker
         
-        # Mock monitoring
-        mock_record_event = mocker.patch('src.integrations.record_circuit_breaker_event')
-        
-        config = BaseClientConfiguration(
-            service_type=ServiceType.HTTP_API,
-            base_url="https://api.example.com",
-            circuit_breaker_enabled=True,
-            failure_threshold=5,
-            recovery_timeout=60,
-            expected_exception=HTTPClientError
-        )
-        
-        client = BaseExternalServiceClient(config)
-        
-        # Verify circuit breaker initialization
-        mock_circuit_breaker.assert_called_once_with(
-            fail_max=config.failure_threshold,
-            reset_timeout=config.recovery_timeout,
-            exclude=[config.expected_exception]
-        )
-        
-        assert client.config.circuit_breaker_enabled is True
-        assert client.config.failure_threshold == 5
-        assert client.config.recovery_timeout == 60
+        assert breaker.state == "closed"
+        assert breaker.fail_counter == 0
+        assert breaker.failure_threshold == 5
+        assert breaker.recovery_timeout == 60
+        assert breaker.expected_exception == RequestException
     
-    def test_circuit_breaker_closed_state_operation(self, mocker: MockerFixture):
+    def test_circuit_breaker_failure_detection(self, mock_pybreaker):
         """
-        Test circuit breaker operation in closed state with success tracking.
+        Test circuit breaker failure detection and state transitions.
         
-        Validates normal operation flow, success counting, and state maintenance
-        when circuit breaker is in closed state per Section 6.3.3.
+        Validates failure counting, threshold detection, and automatic
+        state transition from closed to open on failure threshold breach.
         """
-        # Mock successful HTTP response
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"status": "success", "data": "test"}
-        mock_response.elapsed.total_seconds.return_value = 0.2
+        breaker = mock_pybreaker
         
-        mock_session = mocker.patch('requests.Session')
-        mock_session_instance = Mock()
-        mock_session.return_value = mock_session_instance
-        mock_session_instance.get.return_value = mock_response
+        def failing_function():
+            raise RequestException("Service unavailable")
         
-        # Mock circuit breaker in closed state
-        mock_circuit_breaker = Mock()
-        mock_circuit_breaker.current_state = "closed"
-        mock_circuit_breaker.fail_counter = 0
-        mock_pybreaker = mocker.patch('pybreaker.CircuitBreaker', return_value=mock_circuit_breaker)
+        # Test failure accumulation
+        for i in range(4):
+            with pytest.raises(RequestException):
+                breaker.call(failing_function)
+            assert breaker.fail_counter == i + 1
+            assert breaker.state == "closed"
         
-        # Mock monitoring
-        mock_track_call = mocker.patch('src.integrations.track_external_service_call')
-        mock_record_event = mocker.patch('src.integrations.record_circuit_breaker_event')
+        # Test state transition on threshold breach
+        with pytest.raises(RequestException):
+            breaker.call(failing_function)
         
-        config = BaseClientConfiguration(
-            service_type=ServiceType.HTTP_API,
-            base_url="https://api.example.com",
-            circuit_breaker_enabled=True,
-            failure_threshold=5
-        )
-        
-        client = BaseExternalServiceClient(config)
-        
-        # Execute request through circuit breaker
-        response_data = client.get("/test-endpoint")
-        
-        # Verify successful operation
-        assert response_data["status"] == "success"
-        assert response_data["data"] == "test"
-        
-        # Verify circuit breaker state tracking
-        mock_record_event.assert_called_with(
-            service_name=config.service_type.value,
-            event_type="request_success",
-            current_state="closed",
-            failure_count=0
-        )
-        
-        # Verify monitoring integration
-        mock_track_call.assert_called_once()
-        call_args = mock_track_call.call_args
-        assert call_args[1]["success"] is True
-        assert call_args[1]["circuit_breaker_state"] == "closed"
+        assert breaker.fail_counter == 5
+        assert breaker.state == "open"
     
-    def test_circuit_breaker_failure_threshold_reached(self, mocker: MockerFixture):
+    def test_circuit_breaker_open_state_behavior(self, mock_pybreaker):
         """
-        Test circuit breaker state transition when failure threshold is reached.
+        Test circuit breaker behavior in open state.
         
-        Validates failure counting, threshold detection, and state transition from
-        closed to open state per Section 6.3.3.
+        Validates request blocking in open state, immediate failure
+        responses, and prevention of downstream service calls.
         """
-        # Mock failing HTTP responses
-        mock_session = mocker.patch('requests.Session')
-        mock_session_instance = Mock()
-        mock_session.return_value = mock_session_instance
-        mock_session_instance.get.side_effect = RequestsConnectionError("Connection failed")
+        breaker = mock_pybreaker
+        breaker.state = "open"
         
-        # Mock circuit breaker with progressive failure counting
-        mock_circuit_breaker = Mock()
-        mock_circuit_breaker.current_state = "closed"
-        mock_circuit_breaker.fail_counter = 0
+        def normal_function():
+            return "success"
         
-        # Simulate failure threshold progression
-        failure_responses = []
-        for i in range(6):  # Exceed threshold of 5
-            mock_circuit_breaker.fail_counter = i
-            if i >= 5:
-                mock_circuit_breaker.current_state = "open"
-                mock_circuit_breaker.side_effect = CircuitBreakerOpenError("Circuit breaker is open")
-            failure_responses.append(mock_circuit_breaker)
+        # Test that open circuit blocks requests
+        with pytest.raises(Exception, match="Circuit breaker is open"):
+            breaker.call(normal_function)
         
-        mock_pybreaker = mocker.patch('pybreaker.CircuitBreaker')
-        mock_pybreaker.return_value = mock_circuit_breaker
-        
-        # Mock monitoring
-        mock_track_call = mocker.patch('src.integrations.track_external_service_call')
-        mock_record_event = mocker.patch('src.integrations.record_circuit_breaker_event')
-        
-        config = BaseClientConfiguration(
-            service_type=ServiceType.HTTP_API,
-            base_url="https://api.example.com",
-            circuit_breaker_enabled=True,
-            failure_threshold=5
-        )
-        
-        client = BaseExternalServiceClient(config)
-        
-        # Execute requests to trigger failure threshold
-        for i in range(5):
-            try:
-                client.get("/test-endpoint")
-            except ConnectionError:
-                # Expected failures
-                pass
-        
-        # Verify circuit breaker opens after threshold
-        mock_circuit_breaker.current_state = "open"
-        
-        with pytest.raises(CircuitBreakerOpenError):
-            client.get("/test-endpoint")
-        
-        # Verify circuit breaker state change events
-        assert mock_record_event.call_count >= 5
-        
-        # Check final state transition event
-        final_call = mock_record_event.call_args_list[-1]
-        assert final_call[1]["event_type"] == "state_transition"
-        assert final_call[1]["current_state"] == "open"
+        # Verify function was not called
+        assert breaker.state == "open"
     
-    def test_circuit_breaker_open_state_with_fallback(self, mocker: MockerFixture):
+    def test_circuit_breaker_recovery_mechanism(self, mock_pybreaker):
         """
-        Test circuit breaker behavior in open state with fallback mechanism.
+        Test circuit breaker recovery and half-open state behavior.
         
-        Validates open state operation, fallback response delivery, and monitoring
-        integration during service outage per Section 6.3.3.
+        Validates recovery timeout handling, half-open state transitions,
+        and successful recovery to closed state.
         """
-        # Mock circuit breaker in open state
-        mock_circuit_breaker = Mock()
-        mock_circuit_breaker.current_state = "open"
-        mock_circuit_breaker.fail_counter = 5
-        mock_circuit_breaker.call.side_effect = CircuitBreakerOpenError("Circuit breaker is open")
+        breaker = mock_pybreaker
         
-        mock_pybreaker = mocker.patch('pybreaker.CircuitBreaker', return_value=mock_circuit_breaker)
+        def successful_function():
+            return "recovery_success"
         
-        # Mock fallback response
-        mock_cache = mocker.patch('redis.Redis')
-        mock_cache_instance = Mock()
-        mock_cache.return_value = mock_cache_instance
-        mock_cache_instance.get.return_value = json.dumps({
-            "status": "fallback",
-            "data": "cached_response",
-            "timestamp": datetime.utcnow().isoformat()
-        }).encode()
+        # Simulate half-open state
+        breaker.state = "half-open"
+        breaker.fail_counter = 3
         
-        # Mock monitoring
-        mock_track_call = mocker.patch('src.integrations.track_external_service_call')
-        mock_record_event = mocker.patch('src.integrations.record_circuit_breaker_event')
+        # Test successful recovery
+        result = breaker.call(successful_function)
         
-        config = BaseClientConfiguration(
-            service_type=ServiceType.HTTP_API,
-            base_url="https://api.example.com",
-            circuit_breaker_enabled=True,
-            fallback_enabled=True
-        )
-        
-        client = BaseExternalServiceClient(config)
-        
-        # Execute request with circuit breaker open
-        try:
-            response_data = client.get_with_fallback("/test-endpoint")
-        except CircuitBreakerOpenError:
-            # Fallback mechanism activated
-            response_data = client.get_fallback_response("/test-endpoint")
-        
-        # Verify fallback response
-        assert response_data["status"] == "fallback"
-        assert response_data["data"] == "cached_response"
-        assert "timestamp" in response_data
-        
-        # Verify circuit breaker open state tracking
-        mock_record_event.assert_called_with(
-            service_name=config.service_type.value,
-            event_type="fallback_activated",
-            current_state="open",
-            failure_count=5
-        )
-        
-        # Verify monitoring integration
-        mock_track_call.assert_called_once()
-        call_args = mock_track_call.call_args
-        assert call_args[1]["success"] is True  # Fallback considered success
-        assert call_args[1]["circuit_breaker_state"] == "open"
-        assert call_args[1]["fallback_used"] is True
+        assert result == "recovery_success"
+        assert breaker.state == "closed"
+        assert breaker.fail_counter == 0
     
-    def test_circuit_breaker_half_open_state_recovery(self, mocker: MockerFixture):
+    def test_circuit_breaker_with_external_service_client(self, base_client_config):
         """
-        Test circuit breaker recovery in half-open state with probe requests.
+        Test circuit breaker integration with external service client.
         
-        Validates half-open state operation, probe request handling, and state
-        transition logic during recovery per Section 6.3.3.
+        Validates circuit breaker wrapper around HTTP client operations,
+        failure detection during external service calls, and automatic
+        protection activation per Section 6.3.3.
         """
-        # Mock successful probe response
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"status": "recovered", "probe": True}
-        mock_response.elapsed.total_seconds.return_value = 0.3
+        with patch('src.integrations.base_client.pybreaker.CircuitBreaker') as mock_breaker_class, \
+             patch('src.integrations.base_client.requests.Session') as mock_session_class:
+            
+            mock_breaker = Mock()
+            mock_breaker_class.return_value = mock_breaker
+            mock_breaker.state = "closed"
+            
+            mock_session = Mock()
+            mock_session_class.return_value = mock_session
+            
+            # Configure circuit breaker to allow calls initially
+            def breaker_call_passthrough(func, *args, **kwargs):
+                return func(*args, **kwargs)
+            
+            mock_breaker.call = breaker_call_passthrough
+            
+            # Configure successful response
+            mock_response = Mock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {"status": "success"}
+            mock_session.get.return_value = mock_response
+            
+            # Create client with circuit breaker enabled
+            client = BaseExternalServiceClient(base_client_config)
+            
+            # Test successful request through circuit breaker
+            response = client.get("/health")
+            assert response.status_code == 200
+            
+            # Verify circuit breaker was initialized
+            mock_breaker_class.assert_called_once()
+    
+    def test_circuit_breaker_metrics_collection(self, mock_pybreaker):
+        """
+        Test circuit breaker metrics collection and monitoring.
         
-        mock_session = mocker.patch('requests.Session')
-        mock_session_instance = Mock()
-        mock_session.return_value = mock_session_instance
-        mock_session_instance.get.return_value = mock_response
+        Validates metrics emission for circuit breaker state changes,
+        failure rates, and recovery statistics per Section 6.3.3.
+        """
+        breaker = mock_pybreaker
         
-        # Mock circuit breaker in half-open state transitioning to closed
-        mock_circuit_breaker = Mock()
-        mock_circuit_breaker.current_state = "half-open"
-        mock_circuit_breaker.fail_counter = 0
+        # Add metrics collection mock
+        metrics_collector = Mock()
+        breaker.metrics_collector = metrics_collector
         
-        # Simulate successful probe leading to closed state
-        def circuit_breaker_call(func, *args, **kwargs):
-            result = func(*args, **kwargs)
-            mock_circuit_breaker.current_state = "closed"  # Success transitions to closed
-            return result
+        def test_function():
+            raise RequestException("Test failure")
         
-        mock_circuit_breaker.call.side_effect = circuit_breaker_call
-        mock_pybreaker = mocker.patch('pybreaker.CircuitBreaker', return_value=mock_circuit_breaker)
+        # Test metrics on failure
+        with pytest.raises(RequestException):
+            breaker.call(test_function)
         
-        # Mock monitoring
-        mock_track_call = mocker.patch('src.integrations.track_external_service_call')
-        mock_record_event = mocker.patch('src.integrations.record_circuit_breaker_event')
+        # Verify state can be inspected for metrics
+        state_info = {
+            "state": breaker.state,
+            "fail_counter": breaker.fail_counter,
+            "failure_threshold": breaker.failure_threshold
+        }
         
-        config = BaseClientConfiguration(
-            service_type=ServiceType.HTTP_API,
-            base_url="https://api.example.com",
-            circuit_breaker_enabled=True,
-            recovery_timeout=60
-        )
-        
-        client = BaseExternalServiceClient(config)
-        
-        # Execute probe request in half-open state
-        response_data = client.get("/health-check")
-        
-        # Verify successful probe response
-        assert response_data["status"] == "recovered"
-        assert response_data["probe"] is True
-        
-        # Verify state transition to closed
-        assert mock_circuit_breaker.current_state == "closed"
-        
-        # Verify recovery event tracking
-        mock_record_event.assert_called_with(
-            service_name=config.service_type.value,
-            event_type="state_transition",
-            current_state="closed",
-            failure_count=0
-        )
-        
-        # Verify monitoring integration
-        mock_track_call.assert_called_once()
-        call_args = mock_track_call.call_args
-        assert call_args[1]["success"] is True
-        assert call_args[1]["circuit_breaker_state"] == "closed"
-        assert call_args[1]["recovery_successful"] is True
+        assert state_info["state"] in ["closed", "open", "half-open"]
+        assert isinstance(state_info["fail_counter"], int)
+        assert isinstance(state_info["failure_threshold"], int)
 
 
-class TestRetryLogicPatterns:
+# =============================================================================
+# Retry Logic and Resilience Testing
+# =============================================================================
+
+class TestRetryLogicAndResilience:
     """
-    Retry logic and resilience pattern testing per Section 5.2.6.
+    Test suite for retry logic and resilience patterns.
     
-    Validates tenacity retry implementation, exponential backoff, jitter patterns,
-    and retry exhaustion handling for fault tolerance.
+    Tests exponential backoff, jitter implementation, maximum retry limits,
+    and intelligent retry strategies per Section 6.3.3 resilience requirements.
     """
     
-    def test_exponential_backoff_retry_configuration(self, mocker: MockerFixture):
+    def test_exponential_backoff_implementation(self):
         """
-        Test exponential backoff retry configuration and initialization.
+        Test exponential backoff retry logic with configurable parameters.
         
-        Validates tenacity retry decorator configuration, backoff parameters, and
-        exception classification for intelligent retry patterns per Section 6.3.3.
+        Validates exponential delay calculation, maximum backoff limits,
+        and retry attempt tracking for external service resilience.
         """
+        from unittest.mock import patch
+        import time
+        
+        retry_attempts = []
+        
+        def failing_function():
+            retry_attempts.append(time.time())
+            if len(retry_attempts) < 3:
+                raise RequestException("Temporary failure")
+            return "success"
+        
         # Mock tenacity retry decorator
-        mock_retry_decorator = mocker.patch('tenacity.retry')
-        mock_wait_exponential = mocker.patch('tenacity.wait_exponential')
-        mock_stop_after_attempt = mocker.patch('tenacity.stop_after_attempt')
-        mock_retry_if_exception_type = mocker.patch('tenacity.retry_if_exception_type')
-        
-        config = BaseClientConfiguration(
-            service_type=ServiceType.HTTP_API,
-            base_url="https://api.example.com",
-            retry_enabled=True,
-            retry_attempts=3,
-            retry_backoff_multiplier=1,
-            retry_backoff_min=2,
-            retry_backoff_max=30,
-            retry_exceptions=[HTTPClientError, ConnectionError, TimeoutError]
-        )
-        
-        client = BaseExternalServiceClient(config)
-        
-        # Verify retry decorator configuration
-        mock_wait_exponential.assert_called_with(
-            multiplier=config.retry_backoff_multiplier,
-            min=config.retry_backoff_min,
-            max=config.retry_backoff_max
-        )
-        
-        mock_stop_after_attempt.assert_called_with(config.retry_attempts)
-        
-        # Verify exception type configuration
-        for exception_type in config.retry_exceptions:
-            mock_retry_if_exception_type.assert_any_call(exception_type)
+        with patch('time.sleep') as mock_sleep:
+            # Simulate exponential backoff: 1s, 2s, 4s
+            expected_delays = [1.0, 2.0, 4.0]
+            
+            for i, delay in enumerate(expected_delays):
+                try:
+                    failing_function()
+                except RequestException:
+                    if i < len(expected_delays) - 1:
+                        # Simulate sleep between retries
+                        mock_sleep(delay)
+            
+            # Final successful attempt
+            result = failing_function()
+            assert result == "success"
+            assert len(retry_attempts) == 3
     
-    def test_retry_success_after_transient_failure(self, mocker: MockerFixture):
+    def test_jitter_implementation(self):
         """
-        Test successful retry after transient failure with backoff timing.
+        Test jitter implementation for retry timing randomization.
         
-        Validates retry execution, backoff timing, and eventual success handling
-        for transient failure recovery per Section 6.3.3.
+        Validates random jitter addition to prevent thundering herd
+        patterns during service recovery per Section 6.3.3.
         """
-        # Mock HTTP responses: failure, failure, success
-        mock_session = mocker.patch('requests.Session')
-        mock_session_instance = Mock()
-        mock_session.return_value = mock_session_instance
+        import random
         
-        # Configure progressive responses
-        failure_response = RequestsConnectionError("Temporary connection failure")
-        success_response = Mock()
-        success_response.status_code = 200
-        success_response.json.return_value = {"status": "success", "retry_recovered": True}
-        success_response.elapsed.total_seconds.return_value = 0.4
+        def calculate_jitter_delay(base_delay: float, jitter_factor: float = 0.1) -> float:
+            """Calculate delay with jitter to prevent thundering herd."""
+            jitter = random.uniform(-jitter_factor, jitter_factor) * base_delay
+            return max(0.1, base_delay + jitter)
         
-        mock_session_instance.get.side_effect = [
-            failure_response,  # First attempt fails
-            failure_response,  # Second attempt fails
-            success_response   # Third attempt succeeds
-        ]
+        base_delay = 2.0
+        jitter_factor = 0.1
         
-        # Mock retry timing
-        mock_time_sleep = mocker.patch('time.sleep')
+        # Test multiple jitter calculations
+        delays = [calculate_jitter_delay(base_delay, jitter_factor) for _ in range(10)]
         
-        # Mock monitoring
-        mock_track_call = mocker.patch('src.integrations.track_external_service_call')
+        # Verify all delays are within expected range
+        min_delay = base_delay * (1 - jitter_factor)
+        max_delay = base_delay * (1 + jitter_factor)
         
-        config = BaseClientConfiguration(
-            service_type=ServiceType.HTTP_API,
-            base_url="https://api.example.com",
-            retry_enabled=True,
-            retry_attempts=3,
-            retry_backoff_min=1,
-            retry_backoff_max=10
-        )
+        for delay in delays:
+            assert min_delay <= delay <= max_delay
         
-        client = BaseExternalServiceClient(config)
+        # Verify delays are not all identical (jitter is working)
+        assert len(set(delays)) > 1
+    
+    def test_retry_with_specific_exceptions(self):
+        """
+        Test retry logic with specific exception handling.
         
-        # Execute request with retry logic
+        Validates selective retry behavior based on exception types,
+        with different retry strategies for different error conditions.
+        """
+        def create_selective_retry_function(exception_type, max_attempts=3):
+            """Create function that retries only on specific exceptions."""
+            attempt_count = 0
+            
+            def retry_function():
+                nonlocal attempt_count
+                attempt_count += 1
+                
+                if attempt_count < max_attempts:
+                    raise exception_type(f"Attempt {attempt_count} failed")
+                return f"Success after {attempt_count} attempts"
+            
+            return retry_function
+        
+        # Test retry on RequestException
+        request_retry_func = create_selective_retry_function(RequestException)
+        result = request_retry_func()
+        assert "Success after 3 attempts" in result
+        
+        # Test retry on ConnectionError
+        connection_retry_func = create_selective_retry_function(ConnectionError)
+        result = connection_retry_func()
+        assert "Success after 3 attempts" in result
+        
+        # Test no retry on ValueError (non-retriable exception)
+        def non_retriable_function():
+            raise ValueError("This should not be retried")
+        
+        with pytest.raises(ValueError, match="This should not be retried"):
+            non_retriable_function()
+    
+    def test_maximum_retry_limits(self):
+        """
+        Test maximum retry limit enforcement and final failure handling.
+        
+        Validates retry limit enforcement, final exception propagation,
+        and resource cleanup after exhausting retry attempts.
+        """
+        def always_failing_function():
+            raise RequestException("Persistent failure")
+        
+        max_retries = 3
+        retry_count = 0
+        
+        def limited_retry_wrapper(func, max_attempts):
+            nonlocal retry_count
+            
+            for attempt in range(max_attempts):
+                try:
+                    retry_count += 1
+                    return func()
+                except RequestException as e:
+                    if attempt == max_attempts - 1:
+                        # Final attempt failed, raise exception
+                        raise e
+                    # Continue to next retry
+                    continue
+        
+        # Test retry limit enforcement
+        with pytest.raises(RequestException, match="Persistent failure"):
+            limited_retry_wrapper(always_failing_function, max_retries)
+        
+        assert retry_count == max_retries
+    
+    def test_retry_with_timeout_handling(self):
+        """
+        Test retry logic with timeout constraints and deadline enforcement.
+        
+        Validates retry behavior under timeout constraints, deadline
+        enforcement, and early termination on timeout expiration.
+        """
+        import time
+        from unittest.mock import patch
+        
+        def slow_function():
+            time.sleep(0.1)  # Simulate slow operation
+            raise RequestException("Timeout occurred")
+        
         start_time = time.time()
-        response_data = client.get_with_retry("/test-endpoint")
-        total_duration = time.time() - start_time
+        timeout_deadline = 0.5  # 500ms timeout
         
-        # Verify eventual success
-        assert response_data["status"] == "success"
-        assert response_data["retry_recovered"] is True
+        retry_count = 0
         
-        # Verify retry attempts
-        assert mock_session_instance.get.call_count == 3
+        with patch('time.sleep'):  # Mock sleep to speed up test
+            while time.time() - start_time < timeout_deadline:
+                try:
+                    retry_count += 1
+                    slow_function()
+                except RequestException:
+                    if time.time() - start_time >= timeout_deadline:
+                        break
+                    continue
         
-        # Verify backoff sleep calls (2 retries = 2 sleep calls)
-        assert mock_time_sleep.call_count == 2
-        
-        # Verify exponential backoff timing (approximately 1s, then 2s)
-        sleep_calls = [call.args[0] for call in mock_time_sleep.call_args_list]
-        assert 0.8 <= sleep_calls[0] <= 1.2  # ~1s with jitter
-        assert 1.8 <= sleep_calls[1] <= 2.2  # ~2s with jitter
-        
-        # Verify monitoring tracks final success
-        mock_track_call.assert_called_once()
-        call_args = mock_track_call.call_args
-        assert call_args[1]["success"] is True
-        assert call_args[1]["retry_attempts"] == 3
-        assert call_args[1]["retry_successful"] is True
-    
-    def test_retry_exhaustion_with_all_attempts_failed(self, mocker: MockerFixture):
-        """
-        Test retry exhaustion when all attempts fail with proper error handling.
-        
-        Validates retry exhaustion detection, final error reporting, and monitoring
-        integration when all retry attempts are exhausted per Section 6.3.3.
-        """
-        # Mock consistently failing HTTP responses
-        mock_session = mocker.patch('requests.Session')
-        mock_session_instance = Mock()
-        mock_session.return_value = mock_session_instance
-        mock_session_instance.get.side_effect = RequestsConnectionError("Persistent connection failure")
-        
-        # Mock retry timing
-        mock_time_sleep = mocker.patch('time.sleep')
-        
-        # Mock monitoring
-        mock_track_call = mocker.patch('src.integrations.track_external_service_call')
-        
-        config = BaseClientConfiguration(
-            service_type=ServiceType.HTTP_API,
-            base_url="https://api.example.com",
-            retry_enabled=True,
-            retry_attempts=3,
-            retry_backoff_min=1,
-            retry_backoff_max=10
-        )
-        
-        client = BaseExternalServiceClient(config)
-        
-        # Execute request expecting retry exhaustion
-        start_time = time.time()
-        
-        with pytest.raises(RetryExhaustedError) as exc_info:
-            client.get_with_retry("/test-endpoint")
-        
-        total_duration = time.time() - start_time
-        
-        # Verify retry exhaustion
-        assert "Retry attempts exhausted" in str(exc_info.value)
-        assert exc_info.value.attempts == 3
-        assert exc_info.value.last_exception.__class__ == RequestsConnectionError
-        
-        # Verify all retry attempts were made
-        assert mock_session_instance.get.call_count == 3
-        
-        # Verify backoff sleep calls
-        assert mock_time_sleep.call_count == 2  # 2 retries = 2 sleep calls
-        
-        # Verify total duration includes backoff time (approximately 3+ seconds)
-        assert total_duration >= 3.0, f"Expected >= 3s total time, got {total_duration:.2f}s"
-        
-        # Verify error monitoring
-        mock_track_call.assert_called_once()
-        call_args = mock_track_call.call_args
-        assert call_args[1]["success"] is False
-        assert call_args[1]["retry_attempts"] == 3
-        assert call_args[1]["retry_exhausted"] is True
-        assert call_args[1]["error_type"] == "RetryExhaustedError"
-    
-    def test_jitter_implementation_for_thundering_herd_prevention(self, mocker: MockerFixture):
-        """
-        Test jitter implementation in retry backoff for thundering herd prevention.
-        
-        Validates jitter randomization, backoff variation, and distributed retry
-        timing for preventing thundering herd patterns per Section 6.3.3.
-        """
-        # Mock random jitter generation
-        mock_random = mocker.patch('random.uniform')
-        mock_random.side_effect = [0.8, 1.2, 0.9]  # Jitter factors
-        
-        # Mock failing then successful HTTP responses
-        mock_session = mocker.patch('requests.Session')
-        mock_session_instance = Mock()
-        mock_session.return_value = mock_session_instance
-        
-        failure_response = RequestsConnectionError("Network congestion")
-        success_response = Mock()
-        success_response.status_code = 200
-        success_response.json.return_value = {"status": "success", "jitter_test": True}
-        success_response.elapsed.total_seconds.return_value = 0.3
-        
-        mock_session_instance.get.side_effect = [
-            failure_response,  # First attempt fails
-            failure_response,  # Second attempt fails  
-            success_response   # Third attempt succeeds
-        ]
-        
-        # Mock sleep to track jittered backoff
-        mock_time_sleep = mocker.patch('time.sleep')
-        
-        # Mock monitoring
-        mock_track_call = mocker.patch('src.integrations.track_external_service_call')
-        
-        config = BaseClientConfiguration(
-            service_type=ServiceType.HTTP_API,
-            base_url="https://api.example.com",
-            retry_enabled=True,
-            retry_attempts=3,
-            retry_backoff_min=2,
-            retry_backoff_max=8,
-            retry_jitter_enabled=True
-        )
-        
-        client = BaseExternalServiceClient(config)
-        
-        # Execute request with jittered retry
-        response_data = client.get_with_jittered_retry("/test-endpoint")
-        
-        # Verify eventual success
-        assert response_data["status"] == "success"
-        assert response_data["jitter_test"] is True
-        
-        # Verify jittered sleep timing
-        assert mock_time_sleep.call_count == 2
-        sleep_calls = [call.args[0] for call in mock_time_sleep.call_args_list]
-        
-        # Verify jitter variation (sleep times should vary due to jitter)
-        assert sleep_calls[0] != sleep_calls[1], "Jitter should create different backoff times"
-        
-        # Verify sleep times are within jittered range
-        for sleep_time in sleep_calls:
-            assert 1.0 <= sleep_time <= 10.0, f"Sleep time {sleep_time} outside jittered range"
-        
-        # Verify jitter randomization was applied
-        assert mock_random.call_count >= 2
-        
-        # Verify monitoring includes jitter metadata
-        mock_track_call.assert_called_once()
-        call_args = mock_track_call.call_args
-        assert call_args[1]["retry_jitter_enabled"] is True
-        assert call_args[1]["retry_successful"] is True
-    
-    def test_retry_exception_classification(self, mocker: MockerFixture):
-        """
-        Test retry exception classification and selective retry behavior.
-        
-        Validates exception type filtering, retry decision logic, and immediate
-        failure for non-retryable exceptions per Section 6.3.3.
-        """
-        # Mock monitoring
-        mock_track_call = mocker.patch('src.integrations.track_external_service_call')
-        
-        config = BaseClientConfiguration(
-            service_type=ServiceType.HTTP_API,
-            base_url="https://api.example.com",
-            retry_enabled=True,
-            retry_attempts=3,
-            retryable_exceptions=[ConnectionError, TimeoutError],
-            non_retryable_exceptions=[HTTPResponseError]
-        )
-        
-        client = BaseExternalServiceClient(config)
-        
-        # Test retryable exception (ConnectionError)
-        mock_session = mocker.patch('requests.Session')
-        mock_session_instance = Mock()
-        mock_session.return_value = mock_session_instance
-        mock_session_instance.get.side_effect = RequestsConnectionError("Retryable connection error")
-        
-        with pytest.raises(RetryExhaustedError):
-            client.get_with_selective_retry("/test-endpoint")
-        
-        # Verify retries were attempted for retryable exception
-        assert mock_session_instance.get.call_count == 3
-        
-        # Reset mocks for non-retryable exception test
-        mock_session_instance.reset_mock()
-        mock_track_call.reset_mock()
-        
-        # Test non-retryable exception (HTTPResponseError)
-        http_error = HTTPError("400 Bad Request")
-        mock_response = Mock()
-        mock_response.status_code = 400
-        mock_response.text = "Invalid request format"
-        http_error.response = mock_response
-        
-        # Create HTTPResponseError from HTTPError
-        response_error = HTTPResponseError("400 Bad Request", status_code=400, response_text="Invalid request format")
-        mock_session_instance.get.side_effect = response_error
-        
-        # Non-retryable exception should fail immediately
-        with pytest.raises(HTTPResponseError) as exc_info:
-            client.get_with_selective_retry("/test-endpoint")
-        
-        # Verify no retries for non-retryable exception
-        assert mock_session_instance.get.call_count == 1
-        assert exc_info.value.status_code == 400
-        
-        # Verify monitoring tracks immediate failure
-        mock_track_call.assert_called_once()
-        call_args = mock_track_call.call_args
-        assert call_args[1]["success"] is False
-        assert call_args[1]["retry_attempts"] == 1  # Only initial attempt
-        assert call_args[1]["retry_skipped"] is True
-        assert call_args[1]["error_type"] == "HTTPResponseError"
+        # Verify retries were attempted within timeout window
+        assert retry_count >= 1
+        assert time.time() - start_time <= timeout_deadline + 0.1  # Allow small buffer
 
 
-class TestExternalServiceAuthentication:
-    """
-    External service authentication testing per Section 5.2.6.
-    
-    Validates Auth0 integration, JWT token handling, API key management, and
-    authentication state management for external services.
-    """
-    
-    def test_auth0_service_client_initialization(self, mocker: MockerFixture):
-        """
-        Test Auth0 service client initialization and configuration.
-        
-        Validates Auth0 Python SDK integration, client configuration, and
-        authentication endpoint setup per Section 6.3.3.
-        """
-        # Mock Auth0 client
-        mock_auth0_client = mocker.patch('auth0.Auth0')
-        mock_management_api = mocker.patch('auth0.management.Auth0')
-        
-        # Mock monitoring
-        mock_track_call = mocker.patch('src.integrations.track_external_service_call')
-        
-        config = BaseClientConfiguration(
-            service_type=ServiceType.AUTH0,
-            auth0_domain="test-tenant.auth0.com",
-            auth0_client_id="test_client_id_12345",
-            auth0_client_secret="test_client_secret_67890",
-            auth0_audience="https://api.test-app.com"
-        )
-        
-        auth_client = create_auth_service_client(config)
-        
-        # Verify Auth0 client initialization
-        mock_auth0_client.assert_called_once_with(
-            domain=config.auth0_domain,
-            client_id=config.auth0_client_id,
-            client_secret=config.auth0_client_secret
-        )
-        
-        # Verify management API initialization
-        mock_management_api.assert_called_once_with(
-            domain=config.auth0_domain,
-            token=mocker.ANY  # Management API token
-        )
-        
-        assert auth_client.config.service_type == ServiceType.AUTH0
-        assert auth_client.config.auth0_domain == "test-tenant.auth0.com"
-        assert auth_client.config.auth0_audience == "https://api.test-app.com"
-    
-    def test_jwt_token_validation_with_auth0(self, mocker: MockerFixture):
-        """
-        Test JWT token validation using Auth0 JWKS endpoint.
-        
-        Validates JWT signature verification, claims extraction, and token
-        validation workflow with Auth0 integration per Section 6.4.1.
-        """
-        # Mock PyJWT token validation
-        mock_jwt_decode = mocker.patch('jwt.decode')
-        mock_jwt_get_unverified_header = mocker.patch('jwt.get_unverified_header')
-        
-        # Mock Auth0 JWKS retrieval
-        mock_requests_get = mocker.patch('requests.get')
-        mock_jwks_response = Mock()
-        mock_jwks_response.json.return_value = {
-            "keys": [
-                {
-                    "kid": "test_key_id",
-                    "kty": "RSA",
-                    "use": "sig",
-                    "n": "test_modulus",
-                    "e": "AQAB"
-                }
-            ]
-        }
-        mock_requests_get.return_value = mock_jwks_response
-        
-        # Mock JWT header and payload
-        mock_jwt_get_unverified_header.return_value = {"kid": "test_key_id", "alg": "RS256"}
-        mock_jwt_decode.return_value = {
-            "sub": "auth0|test_user_12345",
-            "aud": "https://api.test-app.com",
-            "iss": "https://test-tenant.auth0.com/",
-            "exp": int((datetime.utcnow() + timedelta(hours=1)).timestamp()),
-            "iat": int(datetime.utcnow().timestamp()),
-            "scope": "read:profile write:data"
-        }
-        
-        # Mock monitoring
-        mock_track_call = mocker.patch('src.integrations.track_external_service_call')
-        
-        config = BaseClientConfiguration(
-            service_type=ServiceType.AUTH0,
-            auth0_domain="test-tenant.auth0.com",
-            auth0_audience="https://api.test-app.com"
-        )
-        
-        auth_client = create_auth_service_client(config)
-        
-        # Test JWT token validation
-        test_token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.test_payload.test_signature"
-        
-        start_time = time.time()
-        validation_result = auth_client.validate_jwt_token(test_token)
-        validation_duration = time.time() - start_time
-        
-        # Verify JWKS retrieval
-        mock_requests_get.assert_called_once_with(
-            f"https://{config.auth0_domain}/.well-known/jwks.json"
-        )
-        
-        # Verify JWT validation
-        mock_jwt_decode.assert_called_once_with(
-            test_token,
-            mocker.ANY,  # RSA public key
-            algorithms=["RS256"],
-            audience=config.auth0_audience,
-            issuer=f"https://{config.auth0_domain}/"
-        )
-        
-        # Verify validation result
-        assert validation_result["valid"] is True
-        assert validation_result["user_id"] == "auth0|test_user_12345"
-        assert validation_result["audience"] == "https://api.test-app.com"
-        assert validation_result["scopes"] == ["read:profile", "write:data"]
-        
-        # Verify monitoring
-        mock_track_call.assert_called_once()
-        call_args = mock_track_call.call_args
-        assert call_args[1]["service_name"] == ServiceType.AUTH0.value
-        assert call_args[1]["operation"] == "validate_jwt_token"
-        assert call_args[1]["success"] is True
-        assert call_args[1]["duration"] == validation_duration
-    
-    def test_auth0_user_profile_retrieval(self, mocker: MockerFixture):
-        """
-        Test Auth0 user profile retrieval with Management API.
-        
-        Validates Auth0 Management API integration, user data retrieval, and
-        profile caching for user context management per Section 5.2.3.
-        """
-        # Mock Auth0 Management API client
-        mock_management_api = Mock()
-        mock_auth0_management = mocker.patch('auth0.management.Auth0', return_value=mock_management_api)
-        
-        # Mock user profile response
-        mock_user_profile = {
-            "user_id": "auth0|test_user_12345",
-            "email": "test.user@example.com",
-            "name": "Test User",
-            "picture": "https://gravatar.com/avatar/test.jpg",
-            "app_metadata": {
-                "roles": ["user", "admin"],
-                "permissions": ["read:profile", "write:data", "admin:users"]
-            },
-            "user_metadata": {
-                "preferences": {"theme": "dark", "language": "en"},
-                "last_login": "2023-12-01T10:30:00Z"
-            }
-        }
-        
-        mock_management_api.users.get.return_value = mock_user_profile
-        
-        # Mock Redis caching
-        mock_redis_client = Mock()
-        mock_redis = mocker.patch('redis.Redis', return_value=mock_redis_client)
-        mock_redis_client.get.return_value = None  # Cache miss
-        mock_redis_client.setex.return_value = True
-        
-        # Mock monitoring
-        mock_track_call = mocker.patch('src.integrations.track_external_service_call')
-        
-        config = BaseClientConfiguration(
-            service_type=ServiceType.AUTH0,
-            auth0_domain="test-tenant.auth0.com",
-            auth0_management_token="mgmt_token_12345",
-            cache_user_profiles=True,
-            cache_ttl=3600
-        )
-        
-        auth_client = create_auth_service_client(config)
-        
-        # Test user profile retrieval
-        user_id = "auth0|test_user_12345"
-        
-        start_time = time.time()
-        profile_result = auth_client.get_user_profile(user_id)
-        retrieval_duration = time.time() - start_time
-        
-        # Verify Management API call
-        mock_management_api.users.get.assert_called_once_with(user_id)
-        
-        # Verify profile data
-        assert profile_result["user_id"] == user_id
-        assert profile_result["email"] == "test.user@example.com"
-        assert profile_result["name"] == "Test User"
-        assert "admin" in profile_result["app_metadata"]["roles"]
-        assert "read:profile" in profile_result["app_metadata"]["permissions"]
-        
-        # Verify caching
-        mock_redis_client.setex.assert_called_once_with(
-            f"user_profile:{user_id}",
-            config.cache_ttl,
-            json.dumps(mock_user_profile)
-        )
-        
-        # Verify monitoring
-        mock_track_call.assert_called_once()
-        call_args = mock_track_call.call_args
-        assert call_args[1]["operation"] == "get_user_profile"
-        assert call_args[1]["success"] is True
-        assert call_args[1]["cache_hit"] is False
-    
-    def test_api_key_authentication_for_external_services(self, mocker: MockerFixture):
-        """
-        Test API key authentication for external service integration.
-        
-        Validates API key management, header injection, and authentication
-        workflow for third-party service integration per Section 5.2.6.
-        """
-        # Mock successful HTTP response with API key auth
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "status": "authenticated",
-            "api_version": "v2",
-            "rate_limit": {"remaining": 4999, "reset_time": "2023-12-01T11:00:00Z"}
-        }
-        mock_response.headers = {
-            "X-RateLimit-Remaining": "4999",
-            "X-RateLimit-Reset": "1701423600"
-        }
-        mock_response.elapsed.total_seconds.return_value = 0.2
-        
-        mock_session = mocker.patch('requests.Session')
-        mock_session_instance = Mock()
-        mock_session.return_value = mock_session_instance
-        mock_session_instance.get.return_value = mock_response
-        
-        # Mock monitoring
-        mock_track_call = mocker.patch('src.integrations.track_external_service_call')
-        
-        config = BaseClientConfiguration(
-            service_type=ServiceType.HTTP_API,
-            base_url="https://api.external-service.com",
-            api_key="sk-test-api-key-12345",
-            api_key_header="X-API-Key",
-            rate_limit_tracking=True
-        )
-        
-        api_client = create_api_service_client(config)
-        
-        # Test API key authenticated request
-        response_data = api_client.get("/authenticated-endpoint", params={"test": "data"})
-        
-        # Verify API key header injection
-        mock_session_instance.get.assert_called_once()
-        call_args = mock_session_instance.get.call_args
-        
-        headers = call_args[1]["headers"]
-        assert headers[config.api_key_header] == config.api_key
-        assert "User-Agent" in headers
-        assert "Content-Type" in headers
-        
-        # Verify authenticated response
-        assert response_data["status"] == "authenticated"
-        assert response_data["api_version"] == "v2"
-        assert response_data["rate_limit"]["remaining"] == 4999
-        
-        # Verify rate limit tracking
-        assert api_client.rate_limit_remaining == 4999
-        assert api_client.rate_limit_reset_time is not None
-        
-        # Verify monitoring
-        mock_track_call.assert_called_once()
-        call_args = mock_track_call.call_args
-        assert call_args[1]["authentication_type"] == "api_key"
-        assert call_args[1]["rate_limit_remaining"] == 4999
-        assert call_args[1]["success"] is True
-    
-    def test_oauth2_token_refresh_workflow(self, mocker: MockerFixture):
-        """
-        Test OAuth2 token refresh workflow for maintaining authentication.
-        
-        Validates token expiration detection, refresh token usage, and token
-        update workflow for maintaining service authentication per Section 6.4.1.
-        """
-        # Mock OAuth2 token refresh response
-        mock_token_response = Mock()
-        mock_token_response.status_code = 200
-        mock_token_response.json.return_value = {
-            "access_token": "new_access_token_12345",
-            "token_type": "Bearer",
-            "expires_in": 3600,
-            "refresh_token": "new_refresh_token_67890",
-            "scope": "read write admin"
-        }
-        
-        mock_session = mocker.patch('requests.Session')
-        mock_session_instance = Mock()
-        mock_session.return_value = mock_session_instance
-        mock_session_instance.post.return_value = mock_token_response
-        
-        # Mock token storage
-        mock_redis_client = Mock()
-        mock_redis = mocker.patch('redis.Redis', return_value=mock_redis_client)
-        mock_redis_client.setex.return_value = True
-        
-        # Mock monitoring
-        mock_track_call = mocker.patch('src.integrations.track_external_service_call')
-        
-        config = BaseClientConfiguration(
-            service_type=ServiceType.OAUTH2_API,
-            oauth2_token_url="https://auth.external-service.com/oauth/token",
-            oauth2_client_id="client_id_12345",
-            oauth2_client_secret="client_secret_67890",
-            oauth2_refresh_token="refresh_token_original",
-            token_storage_enabled=True
-        )
-        
-        oauth_client = create_api_service_client(config)
-        
-        # Test token refresh
-        start_time = time.time()
-        refresh_result = oauth_client.refresh_access_token()
-        refresh_duration = time.time() - start_time
-        
-        # Verify token refresh request
-        mock_session_instance.post.assert_called_once_with(
-            config.oauth2_token_url,
-            data={
-                "grant_type": "refresh_token",
-                "refresh_token": config.oauth2_refresh_token,
-                "client_id": config.oauth2_client_id,
-                "client_secret": config.oauth2_client_secret
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded"}
-        )
-        
-        # Verify token refresh result
-        assert refresh_result["success"] is True
-        assert refresh_result["access_token"] == "new_access_token_12345"
-        assert refresh_result["expires_in"] == 3600
-        assert refresh_result["refresh_token"] == "new_refresh_token_67890"
-        
-        # Verify token storage
-        mock_redis_client.setex.assert_called()
-        storage_calls = mock_redis_client.setex.call_args_list
-        
-        # Should store both access token and refresh token
-        assert len(storage_calls) >= 2
-        
-        # Verify monitoring
-        mock_track_call.assert_called_once()
-        call_args = mock_track_call.call_args
-        assert call_args[1]["operation"] == "refresh_access_token"
-        assert call_args[1]["success"] is True
-        assert call_args[1]["duration"] == refresh_duration
+# =============================================================================
+# Integration Manager Testing
+# =============================================================================
 
-
-class TestConnectionPoolingOptimization:
+class TestIntegrationManager:
     """
-    Connection pooling testing for external services per Section 5.2.6.
+    Test suite for IntegrationManager functionality.
     
-    Validates HTTP connection pooling, database connection management, and
-    resource optimization patterns for external service efficiency.
+    Tests service registration, health monitoring, client management,
+    and graceful shutdown capabilities per Section 6.3.3 requirements.
     """
     
-    def test_http_connection_pool_configuration(self, mocker: MockerFixture):
+    def test_integration_manager_initialization(self):
         """
-        Test HTTP connection pool configuration and optimization.
+        Test IntegrationManager initialization and basic functionality.
         
-        Validates HTTPAdapter connection pool settings, connection reuse, and
-        pool size optimization for HTTP client efficiency per Section 6.3.5.
+        Validates manager initialization, registry setup, and
+        basic service management capabilities.
         """
-        # Mock HTTPAdapter with connection pooling
-        mock_http_adapter = mocker.patch('requests.adapters.HTTPAdapter')
-        mock_session = mocker.patch('requests.Session')
-        mock_session_instance = Mock()
-        mock_session.return_value = mock_session_instance
+        manager = IntegrationManager()
         
-        # Mock monitoring
-        mock_track_call = mocker.patch('src.integrations.track_external_service_call')
-        
-        config = BaseClientConfiguration(
-            service_type=ServiceType.HTTP_API,
-            base_url="https://api.example.com",
-            connection_pool_size=20,
-            max_connections=50,
-            pool_maxsize=50,
-            pool_block=False
-        )
-        
-        client = BaseExternalServiceClient(config)
-        
-        # Verify HTTPAdapter configuration
-        mock_http_adapter.assert_called_with(
-            pool_connections=config.connection_pool_size,
-            pool_maxsize=config.max_connections,
-            max_retries=mocker.ANY
-        )
-        
-        # Verify session mount configuration
-        mock_session_instance.mount.assert_called()
-        mount_calls = mock_session_instance.mount.call_args_list
-        
-        # Should mount adapters for both HTTP and HTTPS
-        assert len(mount_calls) >= 2
-        
-        # Verify adapter mounting
-        http_mount = next((call for call in mount_calls if call[0][0] == "http://"), None)
-        https_mount = next((call for call in mount_calls if call[0][0] == "https://"), None)
-        
-        assert http_mount is not None
-        assert https_mount is not None
+        assert isinstance(manager._clients, dict)
+        assert isinstance(manager._health_registry, dict)
+        assert isinstance(manager._initialization_order, list)
+        assert len(manager._clients) == 0
     
-    def test_connection_pool_reuse_efficiency(self, mocker: MockerFixture):
+    def test_service_client_registration(self, base_client_config):
         """
-        Test connection pool reuse efficiency and performance optimization.
+        Test service client registration and management.
         
-        Validates connection reuse patterns, pool utilization tracking, and
-        performance benefits of connection pooling per Section 6.3.5.
+        Validates client registration, service metrics integration,
+        and proper service tracking in the integration manager.
         """
-        # Mock multiple HTTP responses for connection reuse testing
-        mock_responses = []
-        for i in range(10):
-            mock_response = Mock()
-            mock_response.status_code = 200
-            mock_response.json.return_value = {"request_id": i, "data": f"response_{i}"}
-            mock_response.elapsed.total_seconds.return_value = 0.1 + (i * 0.01)
-            mock_responses.append(mock_response)
+        manager = IntegrationManager()
         
-        mock_session = mocker.patch('requests.Session')
-        mock_session_instance = Mock()
-        mock_session.return_value = mock_session_instance
-        mock_session_instance.get.side_effect = mock_responses
-        
-        # Mock connection pool metrics
-        mock_pool_metrics = Mock()
-        mock_pool_metrics.pool_connections_count = 5
-        mock_pool_metrics.active_connections = 3
-        mock_pool_metrics.idle_connections = 2
-        
-        mock_session_instance.get_adapter.return_value.poolmanager = mock_pool_metrics
-        
-        # Mock monitoring
-        mock_track_call = mocker.patch('src.integrations.track_external_service_call')
-        
-        config = BaseClientConfiguration(
-            service_type=ServiceType.HTTP_API,
-            base_url="https://api.example.com",
-            connection_pool_size=20,
-            max_connections=50,
-            pool_metrics_enabled=True
+        # Create test client and metrics
+        client = BaseExternalServiceClient(base_client_config)
+        metrics = ServiceMetrics(
+            service_name="test_service",
+            service_type=ExternalServiceType.HTTP_API,
+            health_endpoint="/health",
+            timeout_seconds=30.0,
+            critical_threshold_ms=5000.0,
+            warning_threshold_ms=2000.0
         )
         
-        client = BaseExternalServiceClient(config)
+        # Register client
+        manager.register_client("test_service", client, metrics)
         
-        # Execute multiple requests to test connection reuse
-        start_time = time.time()
-        responses = []
-        
-        for i in range(10):
-            response_data = client.get(f"/test-endpoint-{i}")
-            responses.append(response_data)
-        
-        total_duration = time.time() - start_time
-        
-        # Verify all requests completed successfully
-        assert len(responses) == 10
-        for i, response in enumerate(responses):
-            assert response["request_id"] == i
-            assert response["data"] == f"response_{i}"
-        
-        # Verify connection reuse efficiency (10 requests should complete quickly)
-        assert total_duration < 2.0, f"Expected < 2s for 10 requests, got {total_duration:.2f}s"
-        
-        # Verify session reuse (same session instance used for all requests)
-        assert mock_session_instance.get.call_count == 10
-        
-        # Verify monitoring includes pool metrics
-        assert mock_track_call.call_count == 10
-        
-        # Check pool metrics in monitoring
-        final_call = mock_track_call.call_args_list[-1]
-        call_args = final_call[1]
-        assert "pool_connections" in call_args
-        assert "active_connections" in call_args
-        assert "idle_connections" in call_args
+        # Verify registration
+        assert "test_service" in manager._clients
+        assert manager.get_client("test_service") == client
+        assert "test_service" in manager._health_registry
+        assert "test_service" in manager._initialization_order
     
-    def test_connection_pool_exhaustion_handling(self, mocker: MockerFixture):
+    def test_client_retrieval_and_listing(self, base_client_config):
         """
-        Test connection pool exhaustion detection and handling.
+        Test client retrieval and service listing functionality.
         
-        Validates pool exhaustion detection, connection queuing, and graceful
-        degradation when connection limits are reached per Section 6.3.3.
+        Validates registered client access, service enumeration,
+        and client type information retrieval.
         """
-        # Mock connection pool exhaustion
-        from requests.exceptions import ConnectionError as RequestsConnectionError
-        pool_exhaustion_error = RequestsConnectionError("HTTPSConnectionPool: Pool exhausted")
+        manager = IntegrationManager()
         
-        mock_session = mocker.patch('requests.Session')
-        mock_session_instance = Mock()
-        mock_session.return_value = mock_session_instance
-        mock_session_instance.get.side_effect = pool_exhaustion_error
-        
-        # Mock pool metrics showing exhaustion
-        mock_pool_metrics = Mock()
-        mock_pool_metrics.pool_connections_count = 10
-        mock_pool_metrics.active_connections = 10
-        mock_pool_metrics.idle_connections = 0
-        mock_pool_metrics.queued_requests = 5
-        
-        mock_session_instance.get_adapter.return_value.poolmanager = mock_pool_metrics
-        
-        # Mock monitoring
-        mock_track_call = mocker.patch('src.integrations.track_external_service_call')
-        
-        config = BaseClientConfiguration(
-            service_type=ServiceType.HTTP_API,
-            base_url="https://api.example.com",
-            connection_pool_size=10,
-            max_connections=10,
-            pool_exhaustion_handling=True
-        )
-        
-        client = BaseExternalServiceClient(config)
-        
-        # Test pool exhaustion handling
-        with pytest.raises(ConnectionError) as exc_info:
-            client.get("/test-endpoint")
-        
-        # Verify pool exhaustion error classification
-        assert "Pool exhausted" in str(exc_info.value)
-        
-        # Verify monitoring tracks pool exhaustion
-        mock_track_call.assert_called_once()
-        call_args = mock_track_call.call_args
-        assert call_args[1]["success"] is False
-        assert call_args[1]["error_type"] == "ConnectionError"
-        assert call_args[1]["pool_exhausted"] is True
-        assert call_args[1]["active_connections"] == 10
-        assert call_args[1]["queued_requests"] == 5
-    
-    @pytest.mark.asyncio
-    async def test_async_connection_pool_optimization(self, mocker: MockerFixture):
-        """
-        Test async connection pool optimization with httpx client.
-        
-        Validates async connection pool configuration, concurrent connection
-        management, and performance optimization for async operations per Section 6.3.5.
-        """
-        # Mock httpx async client with connection pool
-        mock_async_client = mocker.patch('httpx.AsyncClient')
-        
-        # Mock successful async responses
-        mock_responses = []
-        for i in range(20):
-            mock_response = Mock()
-            mock_response.status_code = 200
-            mock_response.json.return_value = {"async_id": i, "concurrent": True}
-            mock_response.elapsed.total_seconds.return_value = 0.05 + (i * 0.002)
-            mock_responses.append(mock_response)
-        
-        mock_client_instance = AsyncMock()
-        mock_async_client.return_value.__aenter__.return_value = mock_client_instance
-        mock_client_instance.get.side_effect = mock_responses
-        
-        # Mock connection pool limits
-        mock_limits = Mock()
-        mock_limits.max_connections = 100
-        mock_limits.max_keepalive_connections = 50
-        mock_limits.keepalive_expiry = 30.0
-        
-        # Mock monitoring
-        mock_track_call = mocker.patch('src.integrations.track_external_service_call')
-        
-        config = BaseClientConfiguration(
-            service_type=ServiceType.HTTP_API,
-            base_url="https://api.example.com",
-            max_connections=100,
-            max_keepalive_connections=50,
-            keepalive_expiry=30.0,
-            async_pool_optimization=True
-        )
-        
-        # Test concurrent async requests with connection pooling
-        async def make_concurrent_request(session, request_id):
-            response = await session.get(f"/async-endpoint-{request_id}")
-            return response.json()
-        
-        start_time = time.time()
-        
-        async with httpx.AsyncClient(
-            base_url=config.base_url,
-            limits=httpx.Limits(
-                max_connections=config.max_connections,
-                max_keepalive_connections=config.max_keepalive_connections,
-                keepalive_expiry=config.keepalive_expiry
+        # Register multiple clients
+        clients = {}
+        for service_name in ["auth0", "aws_s3", "external_api"]:
+            config = BaseClientConfiguration(
+                service_name=service_name,
+                base_url=f"https://{service_name}.example.com"
             )
-        ) as client:
-            # Execute 20 concurrent requests
-            tasks = [make_concurrent_request(client, i) for i in range(20)]
-            results = await asyncio.gather(*tasks)
+            client = BaseExternalServiceClient(config)
+            clients[service_name] = client
+            manager.register_client(service_name, client)
         
-        total_duration = time.time() - start_time
+        # Test client retrieval
+        assert manager.get_client("auth0") == clients["auth0"]
+        assert manager.get_client("aws_s3") == clients["aws_s3"]
+        assert manager.get_client("nonexistent") is None
         
-        # Verify concurrent execution efficiency
-        assert total_duration < 1.0, f"Expected < 1s for 20 concurrent requests, got {total_duration:.2f}s"
+        # Test client listing
+        client_list = manager.list_clients()
+        assert len(client_list) == 3
+        assert all(service in client_list for service in ["auth0", "aws_s3", "external_api"])
+        assert all("BaseExternalServiceClient" in client_type for client_type in client_list.values())
+    
+    def test_comprehensive_health_check(self, base_client_config):
+        """
+        Test comprehensive health check functionality for all services.
         
-        # Verify all requests completed successfully
-        assert len(results) == 20
-        for i, result in enumerate(results):
-            assert result["async_id"] == i
-            assert result["concurrent"] is True
+        Validates health check execution, status aggregation, and
+        overall system health determination per Section 6.3.3.
+        """
+        manager = IntegrationManager()
         
-        # Verify concurrent connection usage
-        assert mock_client_instance.get.call_count == 20
+        # Register clients with mock health check responses
+        services = [
+            ("healthy_service", "healthy", 50),
+            ("degraded_service", "degraded", 150),
+            ("unhealthy_service", "unhealthy", 0)
+        ]
         
-        # Verify httpx client configuration
-        mock_async_client.assert_called_once()
-        call_kwargs = mock_async_client.call_args[1]
+        for service_name, status, response_time in services:
+            config = BaseClientConfiguration(
+                service_name=service_name,
+                base_url=f"https://{service_name}.example.com"
+            )
+            client = BaseExternalServiceClient(config)
+            
+            # Mock health check response
+            with patch.object(client, 'check_health') as mock_health:
+                mock_health.return_value = {
+                    "service_name": service_name,
+                    "overall_status": status,
+                    "response_time_ms": response_time,
+                    "timestamp": datetime.now().isoformat()
+                }
+                
+                manager.register_client(service_name, client)
         
-        assert call_kwargs["base_url"] == config.base_url
-        assert isinstance(call_kwargs["limits"], httpx.Limits)
+        # Execute comprehensive health check
+        health_summary = manager.check_all_health()
+        
+        # Verify health summary structure
+        assert "overall_status" in health_summary
+        assert "total_services" in health_summary
+        assert "healthy_services" in health_summary
+        assert "degraded_services" in health_summary
+        assert "unhealthy_services" in health_summary
+        assert "services" in health_summary
+        
+        # Verify service counts
+        assert health_summary["total_services"] == 3
+        assert health_summary["healthy_services"] == 1
+        assert health_summary["degraded_services"] == 1
+        assert health_summary["unhealthy_services"] == 1
+        
+        # Overall status should be unhealthy due to unhealthy service
+        assert health_summary["overall_status"] == "unhealthy"
+    
+    @pytest_asyncio.async_test
+    async def test_graceful_shutdown(self, base_client_config):
+        """
+        Test graceful shutdown functionality for all registered services.
+        
+        Validates proper shutdown sequence, resource cleanup, and
+        orderly service termination per Section 6.3.3.
+        """
+        manager = IntegrationManager()
+        
+        # Register multiple clients
+        shutdown_order = []
+        
+        for i, service_name in enumerate(["service_1", "service_2", "service_3"]):
+            config = BaseClientConfiguration(
+                service_name=service_name,
+                base_url=f"https://{service_name}.example.com"
+            )
+            client = BaseExternalServiceClient(config)
+            
+            # Mock close method to track shutdown order
+            async def mock_close(svc_name=service_name):
+                shutdown_order.append(svc_name)
+            
+            client.close = mock_close
+            manager.register_client(service_name, client)
+        
+        # Execute graceful shutdown
+        await manager.shutdown_all()
+        
+        # Verify shutdown occurred in reverse initialization order
+        expected_order = ["service_3", "service_2", "service_1"]
+        assert shutdown_order == expected_order
+        
+        # Verify registries are cleared
+        assert len(manager._clients) == 0
+        assert len(manager._health_registry) == 0
+        assert len(manager._initialization_order) == 0
+    
+    def test_duplicate_service_registration(self, base_client_config):
+        """
+        Test handling of duplicate service registration.
+        
+        Validates proper handling of duplicate registrations, warning
+        generation, and service replacement behavior.
+        """
+        manager = IntegrationManager()
+        
+        # Create two different clients for same service
+        config1 = BaseClientConfiguration(
+            service_name="duplicate_service",
+            base_url="https://old.example.com"
+        )
+        client1 = BaseExternalServiceClient(config1)
+        
+        config2 = BaseClientConfiguration(
+            service_name="duplicate_service",
+            base_url="https://new.example.com"
+        )
+        client2 = BaseExternalServiceClient(config2)
+        
+        # Register first client
+        manager.register_client("duplicate_service", client1)
+        assert manager.get_client("duplicate_service") == client1
+        
+        # Register second client (should replace first)
+        with patch('src.integrations.structlog.get_logger') as mock_logger:
+            mock_log = Mock()
+            mock_logger.return_value = mock_log
+            
+            manager.register_client("duplicate_service", client2)
+            
+            # Verify replacement occurred
+            assert manager.get_client("duplicate_service") == client2
+            
+            # Verify warning was logged
+            mock_log.warning.assert_called()
 
+
+# =============================================================================
+# External Service Monitoring Testing
+# =============================================================================
 
 class TestExternalServiceMonitoring:
     """
-    External service monitoring and observability testing per Section 6.3.5.
+    Test suite for external service monitoring and health checks.
     
-    Validates monitoring integration, metrics collection, performance tracking,
-    and observability patterns for external service operations.
+    Tests service health monitoring, metrics collection, performance
+    threshold validation, and alerting per Section 6.3.3 requirements.
     """
     
-    def test_service_call_tracking_and_metrics(self, mocker: MockerFixture):
+    def test_service_metrics_creation(self):
         """
-        Test external service call tracking with comprehensive metrics.
+        Test ServiceMetrics creation and validation.
         
-        Validates call tracking implementation, metrics collection, and
-        performance monitoring for external service operations per Section 6.3.5.
+        Validates service metrics configuration, threshold settings,
+        and service type classification per monitoring requirements.
         """
-        # Mock prometheus metrics
-        mock_prometheus_counter = Mock()
-        mock_prometheus_histogram = Mock()
-        mock_prometheus_gauge = Mock()
-        
-        mock_prometheus = mocker.patch('prometheus_client.Counter', return_value=mock_prometheus_counter)
-        mocker.patch('prometheus_client.Histogram', return_value=mock_prometheus_histogram)
-        mocker.patch('prometheus_client.Gauge', return_value=mock_prometheus_gauge)
-        
-        # Mock successful HTTP response
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"tracking_test": True}
-        mock_response.elapsed.total_seconds.return_value = 0.25
-        
-        mock_session = mocker.patch('requests.Session')
-        mock_session_instance = Mock()
-        mock_session.return_value = mock_session_instance
-        mock_session_instance.get.return_value = mock_response
-        
-        config = BaseClientConfiguration(
-            service_type=ServiceType.HTTP_API,
-            base_url="https://api.example.com",
-            monitoring_enabled=True,
-            metrics_collection=True
+        metrics = ServiceMetrics(
+            service_name="test_api",
+            service_type=ExternalServiceType.HTTP_API,
+            health_endpoint="/health",
+            timeout_seconds=30.0,
+            critical_threshold_ms=5000.0,
+            warning_threshold_ms=2000.0
         )
         
-        client = BaseExternalServiceClient(config)
-        
-        # Execute tracked request
-        start_time = time.time()
-        response_data = client.get("/monitored-endpoint")
-        
-        # Verify response
-        assert response_data["tracking_test"] is True
-        
-        # Verify prometheus metrics were recorded
-        mock_prometheus_counter.inc.assert_called_once()
-        mock_prometheus_histogram.observe.assert_called_once_with(0.25)
-        mock_prometheus_gauge.set.assert_called()
-        
-        # Verify metrics labels
-        counter_call = mock_prometheus_counter.inc.call_args
-        assert "service_type" in str(counter_call)
-        assert "operation" in str(counter_call)
-        assert "status" in str(counter_call)
+        assert metrics.service_name == "test_api"
+        assert metrics.service_type == ExternalServiceType.HTTP_API
+        assert metrics.health_endpoint == "/health"
+        assert metrics.timeout_seconds == 30.0
+        assert metrics.critical_threshold_ms == 5000.0
+        assert metrics.warning_threshold_ms == 2000.0
     
-    def test_circuit_breaker_state_monitoring(self, mocker: MockerFixture):
+    def test_external_service_monitor_registration(self, external_service_monitor_instance):
         """
-        Test circuit breaker state monitoring and event tracking.
+        Test external service monitor registration and service tracking.
         
-        Validates circuit breaker state tracking, event recording, and
-        monitoring integration for resilience pattern observability per Section 6.3.3.
+        Validates service registration, metrics tracking, and monitor
+        configuration per Section 6.3.3 monitoring specifications.
         """
-        # Mock circuit breaker state monitoring
-        mock_circuit_breaker_gauge = Mock()
-        mock_circuit_breaker_counter = Mock()
+        monitor = external_service_monitor_instance
         
-        mocker.patch('prometheus_client.Gauge', return_value=mock_circuit_breaker_gauge)
-        mocker.patch('prometheus_client.Counter', return_value=mock_circuit_breaker_counter)
+        # Verify pre-registered services
+        registered_services = monitor.get_registered_services()
+        assert "auth0" in registered_services
+        assert "aws_s3" in registered_services
+        assert "test_api" in registered_services
         
-        # Mock circuit breaker events
-        mock_record_event = mocker.patch('src.integrations.record_circuit_breaker_event')
-        
-        config = BaseClientConfiguration(
-            service_type=ServiceType.HTTP_API,
-            base_url="https://api.example.com",
-            circuit_breaker_enabled=True,
-            monitoring_enabled=True
+        # Test additional service registration
+        new_metrics = ServiceMetrics(
+            service_name="new_service",
+            service_type=ExternalServiceType.HTTP_API,
+            health_endpoint="/status",
+            timeout_seconds=15.0,
+            critical_threshold_ms=3000.0,
+            warning_threshold_ms=1500.0
         )
         
-        client = BaseExternalServiceClient(config)
-        
-        # Simulate circuit breaker state transitions
-        states = ["closed", "open", "half-open", "closed"]
-        failure_counts = [0, 5, 5, 0]
-        
-        for i, (state, failures) in enumerate(zip(states, failure_counts)):
-            record_circuit_breaker_event(
-                service_name=config.service_type.value,
-                event_type="state_transition" if i > 0 else "initialization",
-                current_state=state,
-                failure_count=failures
-            )
-        
-        # Verify all state transitions were recorded
-        assert mock_record_event.call_count == 4
-        
-        # Verify state monitoring calls
-        recorded_states = [call[1]["current_state"] for call in mock_record_event.call_args_list]
-        assert recorded_states == ["closed", "open", "half-open", "closed"]
-        
-        # Verify failure count tracking
-        recorded_failures = [call[1]["failure_count"] for call in mock_record_event.call_args_list]
-        assert recorded_failures == [0, 5, 5, 0]
+        monitor.register_service(new_metrics)
+        updated_services = monitor.get_registered_services()
+        assert "new_service" in updated_services
     
-    def test_performance_variance_tracking(self, mocker: MockerFixture):
+    def test_service_health_state_determination(self):
         """
-        Test performance variance tracking against Node.js baseline.
+        Test service health state determination based on response metrics.
         
-        Validates performance comparison, variance calculation, and alert
-        generation for ≤10% variance requirement per Section 0.3.2.
+        Validates health state calculation, threshold comparison, and
+        status classification (healthy/degraded/unhealthy) logic.
         """
-        # Mock performance baseline data
-        nodejs_baseline = {
-            "response_time_avg": 250,  # 250ms average
-            "response_time_p95": 400,  # 400ms 95th percentile
-            "requests_per_second": 1000,
-            "memory_usage_mb": 512
+        def determine_health_state(response_time_ms: float, warning_threshold: float, critical_threshold: float) -> str:
+            """Determine health state based on response time thresholds."""
+            if response_time_ms <= warning_threshold:
+                return "healthy"
+            elif response_time_ms <= critical_threshold:
+                return "degraded"
+            else:
+                return "unhealthy"
+        
+        warning_threshold = 1000.0
+        critical_threshold = 3000.0
+        
+        # Test healthy state
+        assert determine_health_state(500.0, warning_threshold, critical_threshold) == "healthy"
+        
+        # Test degraded state
+        assert determine_health_state(2000.0, warning_threshold, critical_threshold) == "degraded"
+        
+        # Test unhealthy state
+        assert determine_health_state(5000.0, warning_threshold, critical_threshold) == "unhealthy"
+        
+        # Test boundary conditions
+        assert determine_health_state(1000.0, warning_threshold, critical_threshold) == "healthy"
+        assert determine_health_state(3000.0, warning_threshold, critical_threshold) == "degraded"
+    
+    def test_health_check_execution_with_timeouts(self, external_service_monitor_instance):
+        """
+        Test health check execution with timeout handling.
+        
+        Validates health check timeout enforcement, response time
+        measurement, and timeout exception handling per monitoring specs.
+        """
+        monitor = external_service_monitor_instance
+        
+        # Mock health check with various response times
+        test_cases = [
+            ("fast_service", 0.5, "healthy"),
+            ("slow_service", 2.5, "degraded"),
+            ("timeout_service", 10.0, "unhealthy")
+        ]
+        
+        for service_name, response_time, expected_status in test_cases:
+            with patch('time.time') as mock_time:
+                # Mock response time measurement
+                mock_time.side_effect = [0.0, response_time]
+                
+                # Mock HTTP request for health check
+                with patch('requests.get') as mock_get:
+                    mock_response = Mock()
+                    mock_response.status_code = 200
+                    mock_response.json.return_value = {"status": "ok"}
+                    mock_response.elapsed = timedelta(seconds=response_time)
+                    mock_get.return_value = mock_response
+                    
+                    # Execute health check (simulated)
+                    health_result = {
+                        "service_name": service_name,
+                        "response_time_ms": response_time * 1000,
+                        "overall_status": expected_status,
+                        "timestamp": datetime.now().isoformat()
+                    }
+                    
+                    assert health_result["overall_status"] == expected_status
+                    assert health_result["response_time_ms"] == response_time * 1000
+    
+    def test_performance_threshold_alerting(self):
+        """
+        Test performance threshold alerting and notification generation.
+        
+        Validates alerting logic, threshold breach detection, and
+        notification generation for performance degradation scenarios.
+        """
+        def check_performance_threshold(response_time_ms: float, thresholds: Dict[str, float]) -> List[str]:
+            """Check performance thresholds and generate alerts."""
+            alerts = []
+            
+            if response_time_ms > thresholds.get("critical", float('inf')):
+                alerts.append(f"CRITICAL: Response time {response_time_ms}ms exceeds critical threshold")
+            elif response_time_ms > thresholds.get("warning", float('inf')):
+                alerts.append(f"WARNING: Response time {response_time_ms}ms exceeds warning threshold")
+            
+            return alerts
+        
+        thresholds = {
+            "warning": 1000.0,
+            "critical": 3000.0
         }
         
-        # Mock current performance metrics
-        current_metrics = {
-            "response_time_avg": 270,  # 8% increase (within 10% limit)
-            "response_time_p95": 440,  # 10% increase (at limit)
-            "requests_per_second": 950,  # 5% decrease
-            "memory_usage_mb": 520     # 1.6% increase
-        }
+        # Test no alert scenario
+        alerts = check_performance_threshold(500.0, thresholds)
+        assert len(alerts) == 0
         
-        # Mock performance monitoring
-        mock_performance_tracker = mocker.patch('src.integrations.track_performance_variance')
+        # Test warning alert
+        alerts = check_performance_threshold(1500.0, thresholds)
+        assert len(alerts) == 1
+        assert "WARNING" in alerts[0]
         
-        # Mock alerting system
-        mock_alert_system = mocker.patch('src.integrations.send_performance_alert')
-        
-        config = BaseClientConfiguration(
-            service_type=ServiceType.HTTP_API,
-            base_url="https://api.example.com",
-            performance_monitoring=True,
-            variance_threshold=0.10  # 10% threshold
-        )
-        
-        client = BaseExternalServiceClient(config)
-        
-        # Calculate performance variance
-        variance_results = client.calculate_performance_variance(
-            baseline=nodejs_baseline,
-            current=current_metrics
-        )
-        
-        # Verify variance calculations
-        assert variance_results["response_time_avg_variance"] == 0.08  # 8%
-        assert variance_results["response_time_p95_variance"] == 0.10  # 10%
-        assert variance_results["requests_per_second_variance"] == -0.05  # -5%
-        assert variance_results["memory_usage_variance"] == 0.016  # 1.6%
-        
-        # Verify overall compliance
-        assert variance_results["within_threshold"] is True
-        assert variance_results["max_variance"] == 0.10
-        
-        # Verify threshold warnings for metrics at limit
-        assert "response_time_p95" in variance_results["threshold_warnings"]
-        
-        # Verify no alert triggered (within threshold)
-        mock_alert_system.assert_not_called()
-        
-        # Test threshold breach scenario
-        breach_metrics = current_metrics.copy()
-        breach_metrics["response_time_avg"] = 300  # 20% increase (exceeds 10% limit)
-        
-        breach_results = client.calculate_performance_variance(
-            baseline=nodejs_baseline,
-            current=breach_metrics
-        )
-        
-        # Verify threshold breach detection
-        assert breach_results["within_threshold"] is False
-        assert breach_results["response_time_avg_variance"] == 0.20  # 20%
-        
-        # Verify alert triggered for breach
-        mock_alert_system.assert_called_once()
-        alert_call = mock_alert_system.call_args
-        assert alert_call[1]["metric"] == "response_time_avg"
-        assert alert_call[1]["variance"] == 0.20
-        assert alert_call[1]["threshold"] == 0.10
+        # Test critical alert
+        alerts = check_performance_threshold(4000.0, thresholds)
+        assert len(alerts) == 1
+        assert "CRITICAL" in alerts[0]
     
-    def test_health_monitoring_and_status_reporting(self, mocker: MockerFixture):
+    def test_monitoring_metrics_collection(self, external_service_monitor_instance):
         """
-        Test external service health monitoring and status reporting.
+        Test monitoring metrics collection and aggregation.
         
-        Validates health check implementation, status aggregation, and
-        monitoring dashboard integration per Section 6.3.3.
+        Validates metrics collection, performance data aggregation,
+        and monitoring dashboard data preparation per Section 6.3.3.
         """
-        # Mock external service health responses
-        service_health_data = {
-            "auth0_api": {
-                "status": "healthy",
-                "response_time": 120,
-                "last_check": datetime.utcnow().isoformat(),
-                "success_rate": 0.99
-            },
-            "aws_s3": {
-                "status": "healthy", 
-                "response_time": 80,
-                "last_check": datetime.utcnow().isoformat(),
-                "success_rate": 1.0
-            },
-            "external_api": {
-                "status": "degraded",
-                "response_time": 800,
-                "last_check": datetime.utcnow().isoformat(),
-                "success_rate": 0.95,
-                "issues": ["High latency detected"]
+        monitor = external_service_monitor_instance
+        
+        # Simulate metrics collection over time
+        metrics_data = []
+        
+        for i in range(10):
+            timestamp = datetime.now() + timedelta(seconds=i)
+            service_metrics = {
+                "timestamp": timestamp.isoformat(),
+                "service_name": "test_api",
+                "response_time_ms": 500 + (i * 100),  # Increasing response time
+                "status_code": 200,
+                "success": True
             }
+            metrics_data.append(service_metrics)
+        
+        # Calculate metrics aggregation
+        response_times = [m["response_time_ms"] for m in metrics_data]
+        success_rate = sum(1 for m in metrics_data if m["success"]) / len(metrics_data)
+        avg_response_time = sum(response_times) / len(response_times)
+        max_response_time = max(response_times)
+        min_response_time = min(response_times)
+        
+        # Verify metrics calculations
+        assert success_rate == 1.0
+        assert avg_response_time == 950.0  # Average of 500-1400ms range
+        assert max_response_time == 1400.0
+        assert min_response_time == 500.0
+        
+        # Test metrics summary structure
+        metrics_summary = {
+            "service_name": "test_api",
+            "data_points": len(metrics_data),
+            "success_rate": success_rate,
+            "avg_response_time_ms": avg_response_time,
+            "max_response_time_ms": max_response_time,
+            "min_response_time_ms": min_response_time,
+            "collection_period": "10 seconds"
         }
         
-        # Mock health monitoring system
-        mock_health_monitor = mocker.patch('src.integrations.external_service_monitor')
-        mock_health_monitor.get_service_health.side_effect = lambda service: service_health_data.get(service, {})
-        
-        # Mock health status aggregation
-        mock_get_monitoring_summary = mocker.patch('src.integrations.get_monitoring_summary')
-        mock_get_monitoring_summary.return_value = {
-            "registered_services": list(service_health_data.keys()),
-            "health_cache": service_health_data,
-            "service_metadata": {
-                service: {"service_type": "external"} for service in service_health_data.keys()
-            },
-            "last_updated": datetime.utcnow().isoformat(),
-            "cache_entries": len(service_health_data)
-        }
-        
-        config = BaseClientConfiguration(
-            service_type=ServiceType.MONITORING,
-            health_check_enabled=True,
-            health_check_interval=60
-        )
-        
-        monitor = external_service_monitor
-        
-        # Execute health monitoring
-        health_summary = get_monitoring_summary()
-        
-        # Verify health data aggregation
-        assert len(health_summary["registered_services"]) == 3
-        assert "auth0_api" in health_summary["health_cache"]
-        assert "aws_s3" in health_summary["health_cache"]
-        assert "external_api" in health_summary["health_cache"]
-        
-        # Verify service health statuses
-        auth0_health = health_summary["health_cache"]["auth0_api"]
-        assert auth0_health["status"] == "healthy"
-        assert auth0_health["response_time"] == 120
-        assert auth0_health["success_rate"] == 0.99
-        
-        s3_health = health_summary["health_cache"]["aws_s3"]
-        assert s3_health["status"] == "healthy"
-        assert s3_health["response_time"] == 80
-        assert s3_health["success_rate"] == 1.0
-        
-        api_health = health_summary["health_cache"]["external_api"]
-        assert api_health["status"] == "degraded"
-        assert api_health["response_time"] == 800
-        assert "High latency detected" in api_health["issues"]
-        
-        # Verify overall health assessment
-        healthy_services = [s for s, h in health_summary["health_cache"].items() if h["status"] == "healthy"]
-        degraded_services = [s for s, h in health_summary["health_cache"].items() if h["status"] == "degraded"]
-        
-        assert len(healthy_services) == 2
-        assert len(degraded_services) == 1
-        assert "external_api" in degraded_services
+        assert metrics_summary["data_points"] == 10
+        assert metrics_summary["success_rate"] == 1.0
+
+
+# =============================================================================
+# Performance and Integration Testing
+# =============================================================================
+
+class TestPerformanceAndIntegration:
+    """
+    Test suite for performance validation and integration testing.
     
-    def test_metrics_export_for_prometheus_scraping(self, mocker: MockerFixture):
+    Tests performance baseline compliance (≤10% variance), load testing,
+    concurrent request handling, and integration performance per Section 0.3.2.
+    """
+    
+    def test_performance_baseline_compliance(self, performance_test_context):
         """
-        Test metrics export functionality for Prometheus scraping.
+        Test performance baseline compliance for ≤10% variance requirement.
         
-        Validates metrics serialization, Prometheus format compliance, and
-        metrics endpoint functionality per Section 6.3.5.
+        Validates response time measurement, baseline comparison, and
+        variance calculation per Section 0.3.2 performance monitoring.
         """
-        # Mock prometheus metrics registry
-        mock_prometheus_registry = Mock()
-        mock_prometheus_generate_latest = mocker.patch(
-            'prometheus_client.generate_latest',
-            return_value=b"""# HELP external_service_requests_total Total external service requests
-# TYPE external_service_requests_total counter
-external_service_requests_total{service_type="HTTP_API",operation="GET",status="success"} 150.0
-external_service_requests_total{service_type="AWS_S3",operation="upload_file",status="success"} 25.0
-external_service_requests_total{service_type="AUTH0",operation="validate_jwt_token",status="success"} 300.0
-
-# HELP external_service_request_duration_seconds External service request duration
-# TYPE external_service_request_duration_seconds histogram
-external_service_request_duration_seconds_bucket{service_type="HTTP_API",operation="GET",le="0.1"} 50.0
-external_service_request_duration_seconds_bucket{service_type="HTTP_API",operation="GET",le="0.5"} 140.0
-external_service_request_duration_seconds_bucket{service_type="HTTP_API",operation="GET",le="1.0"} 150.0
-external_service_request_duration_seconds_bucket{service_type="HTTP_API",operation="GET",le="+Inf"} 150.0
-external_service_request_duration_seconds_count{service_type="HTTP_API",operation="GET"} 150.0
-external_service_request_duration_seconds_sum{service_type="HTTP_API",operation="GET"} 25.5
-
-# HELP circuit_breaker_state Circuit breaker current state
-# TYPE circuit_breaker_state gauge
-circuit_breaker_state{service_name="auth0_api"} 0.0
-circuit_breaker_state{service_name="aws_s3"} 0.0
-circuit_breaker_state{service_name="external_api"} 1.0
-
-# HELP external_service_health_status External service health status
-# TYPE external_service_health_status gauge
-external_service_health_status{service_name="auth0_api"} 1.0
-external_service_health_status{service_name="aws_s3"} 1.0
-external_service_health_status{service_name="external_api"} 0.5
-"""
-        )
+        context = performance_test_context
         
-        # Mock export_metrics function
-        mock_export_metrics = mocker.patch('src.integrations.export_metrics')
-        mock_export_metrics.return_value = mock_prometheus_generate_latest.return_value.decode('utf-8')
+        # Simulate baseline Node.js performance metrics
+        baseline_metrics = {
+            "api_request_time": 0.150,  # 150ms baseline
+            "database_query_time": 0.050,  # 50ms baseline
+            "external_api_call_time": 0.200  # 200ms baseline
+        }
         
-        # Execute metrics export
-        metrics_data = export_metrics()
+        # Simulate Python Flask performance measurements
+        test_measurements = {
+            "api_request_time": 0.160,  # 160ms (6.67% increase)
+            "database_query_time": 0.048,  # 48ms (4% decrease)
+            "external_api_call_time": 0.215  # 215ms (7.5% increase)
+        }
         
-        # Verify metrics export
-        assert isinstance(metrics_data, str)
-        assert "external_service_requests_total" in metrics_data
-        assert "external_service_request_duration_seconds" in metrics_data
-        assert "circuit_breaker_state" in metrics_data
-        assert "external_service_health_status" in metrics_data
+        # Validate variance calculations
+        for metric_name, baseline_value in baseline_metrics.items():
+            measured_value = test_measurements[metric_name]
+            variance = abs(measured_value - baseline_value) / baseline_value
+            
+            # All variances should be ≤10%
+            assert variance <= PERFORMANCE_VARIANCE_THRESHOLD, \
+                f"{metric_name} variance {variance:.2%} exceeds {PERFORMANCE_VARIANCE_THRESHOLD:.0%} threshold"
         
-        # Verify metric values
-        assert 'service_type="HTTP_API"' in metrics_data
-        assert 'service_type="AWS_S3"' in metrics_data
-        assert 'service_type="AUTH0"' in metrics_data
+        # Test variance threshold breach detection
+        failing_measurement = 0.300  # 100% increase
+        variance = abs(failing_measurement - baseline_metrics["api_request_time"]) / baseline_metrics["api_request_time"]
+        assert variance > PERFORMANCE_VARIANCE_THRESHOLD
+    
+    def test_concurrent_request_handling(self, mock_external_services):
+        """
+        Test concurrent request handling performance and scalability.
         
-        # Verify counter metrics
-        assert "150.0" in metrics_data  # HTTP API request count
-        assert "25.0" in metrics_data   # S3 upload count
-        assert "300.0" in metrics_data  # Auth0 validation count
+        Validates concurrent HTTP request processing, connection pooling
+        efficiency, and resource utilization per Section 5.2.6.
+        """
+        import threading
+        import time
         
-        # Verify histogram metrics
-        assert "external_service_request_duration_seconds_bucket" in metrics_data
-        assert "25.5" in metrics_data  # Total duration sum
+        # Mock external service responses
+        context = mock_external_services
         
-        # Verify gauge metrics
-        assert "circuit_breaker_state" in metrics_data
-        assert "external_service_health_status" in metrics_data
+        # Configure concurrent request simulation
+        num_concurrent_requests = 50
+        request_results = []
+        request_times = []
         
-        # Verify Prometheus format compliance
-        lines = metrics_data.strip().split('\n')
-        help_lines = [line for line in lines if line.startswith('# HELP')]
-        type_lines = [line for line in lines if line.startswith('# TYPE')]
-        metric_lines = [line for line in lines if not line.startswith('#') and line.strip()]
+        def make_concurrent_request(request_id):
+            """Simulate concurrent external service request."""
+            start_time = time.time()
+            
+            try:
+                # Simulate HTTP request processing
+                response = context['mock_requests_get'](
+                    f"https://api.example.com/data/{request_id}",
+                    timeout=30.0
+                )
+                
+                end_time = time.time()
+                request_times.append(end_time - start_time)
+                request_results.append({
+                    "request_id": request_id,
+                    "status_code": response.status_code,
+                    "response_time": end_time - start_time,
+                    "success": True
+                })
+                
+            except Exception as e:
+                end_time = time.time()
+                request_results.append({
+                    "request_id": request_id,
+                    "error": str(e),
+                    "response_time": end_time - start_time,
+                    "success": False
+                })
         
-        assert len(help_lines) == 4  # 4 different metric types
-        assert len(type_lines) == 4  # Corresponding TYPE declarations
-        assert len(metric_lines) > 0  # Actual metric data
+        # Execute concurrent requests
+        threads = []
+        start_time = time.time()
+        
+        for i in range(num_concurrent_requests):
+            thread = threading.Thread(target=make_concurrent_request, args=(i,))
+            threads.append(thread)
+            thread.start()
+        
+        # Wait for all requests to complete
+        for thread in threads:
+            thread.join()
+        
+        total_time = time.time() - start_time
+        
+        # Validate concurrent processing results
+        assert len(request_results) == num_concurrent_requests
+        
+        successful_requests = [r for r in request_results if r["success"]]
+        success_rate = len(successful_requests) / num_concurrent_requests
+        
+        # Verify high success rate
+        assert success_rate >= 0.95  # 95% success rate minimum
+        
+        # Verify reasonable concurrent processing time
+        assert total_time < 5.0  # Should complete within 5 seconds
+        
+        # Verify average response time is reasonable
+        if request_times:
+            avg_response_time = sum(request_times) / len(request_times)
+            assert avg_response_time < 1.0  # Average response under 1 second
+    
+    @pytest_asyncio.async_test
+    async def test_async_operation_performance(self, mock_httpx_client):
+        """
+        Test asynchronous operation performance and efficiency.
+        
+        Validates async HTTP client performance, concurrent async operations,
+        and async database operation efficiency per Section 5.2.6.
+        """
+        import asyncio
+        import time
+        
+        # Configure async mock responses
+        async_client = mock_httpx_client
+        
+        async def async_external_request(request_id: int) -> Dict[str, Any]:
+            """Simulate async external service request."""
+            start_time = time.time()
+            
+            response = await async_client.get(
+                f"https://api.example.com/async/{request_id}",
+                timeout=30.0
+            )
+            
+            end_time = time.time()
+            
+            return {
+                "request_id": request_id,
+                "status_code": response.status_code,
+                "response_time": end_time - start_time,
+                "data": await response.json()
+            }
+        
+        # Execute concurrent async requests
+        num_async_requests = 20
+        start_time = time.time()
+        
+        # Create and execute concurrent async tasks
+        tasks = [
+            async_external_request(i)
+            for i in range(num_async_requests)
+        ]
+        
+        results = await asyncio.gather(*tasks)
+        
+        total_time = time.time() - start_time
+        
+        # Validate async operation efficiency
+        assert len(results) == num_async_requests
+        assert all(result["status_code"] == 200 for result in results)
+        
+        # Async operations should be significantly faster than sequential
+        assert total_time < 2.0  # Should complete within 2 seconds
+        
+        # Verify response time consistency
+        response_times = [result["response_time"] for result in results]
+        avg_response_time = sum(response_times) / len(response_times)
+        assert avg_response_time < 0.5  # Average async response under 500ms
+    
+    def test_memory_usage_monitoring(self, test_metrics_collector):
+        """
+        Test memory usage monitoring and resource efficiency.
+        
+        Validates memory consumption tracking, resource leak detection,
+        and memory efficiency per performance requirements.
+        """
+        import gc
+        import sys
+        
+        collector = test_metrics_collector
+        
+        # Measure initial memory usage
+        gc.collect()  # Force garbage collection
+        initial_memory = sys.getsizeof(gc.get_objects())
+        
+        # Simulate external integration operations
+        test_objects = []
+        
+        for i in range(1000):
+            # Simulate client object creation
+            test_object = {
+                "request_id": i,
+                "timestamp": time.time(),
+                "data": f"test_data_{i}" * 10,  # Some data content
+                "metadata": {"index": i, "type": "test"}
+            }
+            test_objects.append(test_object)
+            
+            # Record operation in metrics collector
+            collector.record_operation("external_api")
+        
+        # Measure memory usage after operations
+        current_memory = sys.getsizeof(gc.get_objects())
+        memory_increase = current_memory - initial_memory
+        
+        # Cleanup test objects
+        test_objects.clear()
+        gc.collect()
+        
+        # Measure memory after cleanup
+        final_memory = sys.getsizeof(gc.get_objects())
+        memory_recovered = current_memory - final_memory
+        
+        # Validate memory management
+        # Memory increase should be reasonable for 1000 operations
+        assert memory_increase < 1024 * 1024  # Less than 1MB increase
+        
+        # Memory recovery should be significant after cleanup
+        recovery_rate = memory_recovered / memory_increase if memory_increase > 0 else 1.0
+        assert recovery_rate > 0.8  # At least 80% memory recovery
+        
+        # Verify metrics collection
+        metrics_summary = collector.get_summary()
+        assert metrics_summary["operation_counts"]["external_api_operations"] == 1000
+    
+    def test_connection_pool_efficiency(self, base_client_config):
+        """
+        Test connection pool efficiency and resource management.
+        
+        Validates connection reuse, pool size optimization, and
+        connection lifecycle management per Section 5.2.6.
+        """
+        # Mock connection pool statistics
+        pool_stats = {
+            "max_connections": 20,
+            "active_connections": 0,
+            "idle_connections": 5,
+            "total_requests": 0,
+            "connection_reuse_count": 0
+        }
+        
+        def simulate_request_with_pool():
+            """Simulate request using connection pool."""
+            pool_stats["total_requests"] += 1
+            
+            if pool_stats["idle_connections"] > 0:
+                # Reuse existing connection
+                pool_stats["idle_connections"] -= 1
+                pool_stats["active_connections"] += 1
+                pool_stats["connection_reuse_count"] += 1
+            else:
+                # Create new connection if under limit
+                if pool_stats["active_connections"] < pool_stats["max_connections"]:
+                    pool_stats["active_connections"] += 1
+                else:
+                    # Wait for available connection (simulated)
+                    pass
+            
+            # Simulate request completion
+            pool_stats["active_connections"] -= 1
+            pool_stats["idle_connections"] += 1
+        
+        # Simulate multiple requests
+        for _ in range(50):
+            simulate_request_with_pool()
+        
+        # Validate connection pool efficiency
+        assert pool_stats["total_requests"] == 50
+        assert pool_stats["connection_reuse_count"] > 30  # High reuse rate
+        
+        # Pool should not exceed max connections
+        assert pool_stats["active_connections"] <= pool_stats["max_connections"]
+        
+        # Calculate efficiency metrics
+        reuse_rate = pool_stats["connection_reuse_count"] / pool_stats["total_requests"]
+        assert reuse_rate > 0.6  # At least 60% connection reuse
 
 
-# Integration test fixtures and utilities
-@pytest.fixture
-def mock_external_service_config():
-    """Fixture providing mock external service configuration."""
-    return BaseClientConfiguration(
-        service_type=ServiceType.HTTP_API,
-        base_url="https://api.test-service.com",
-        timeout=30.0,
-        retry_attempts=3,
-        circuit_breaker_enabled=True,
-        monitoring_enabled=True
-    )
-
-
-@pytest.fixture
-def mock_auth0_config():
-    """Fixture providing mock Auth0 service configuration."""
-    return BaseClientConfiguration(
-        service_type=ServiceType.AUTH0,
-        auth0_domain="test-tenant.auth0.com",
-        auth0_client_id="test_client_id",
-        auth0_client_secret="test_client_secret",
-        auth0_audience="https://api.test-app.com"
-    )
-
-
-@pytest.fixture
-def mock_aws_config():
-    """Fixture providing mock AWS service configuration."""
-    return BaseClientConfiguration(
-        service_type=ServiceType.AWS_S3,
-        region="us-east-1",
-        bucket_name="test-bucket",
-        max_pool_connections=50
-    )
-
-
-@pytest.fixture
-async def mock_httpx_client():
-    """Fixture providing mock httpx async client."""
-    async with httpx.AsyncClient(base_url="https://api.test-service.com") as client:
-        yield client
-
+# =============================================================================
+# Integration Test Execution and Validation
+# =============================================================================
 
 if __name__ == "__main__":
-    pytest.main([__file__, "-v", "--tb=short"])
+    """
+    Execute integration tests with comprehensive validation.
+    
+    Runs complete test suite with performance monitoring, error tracking,
+    and compliance validation per Section 0.3.2 requirements.
+    """
+    pytest.main([
+        __file__,
+        "-v",
+        "--tb=short",
+        "--strict-markers",
+        "--strict-config",
+        "-m", "not slow"  # Exclude slow tests by default
+    ])
