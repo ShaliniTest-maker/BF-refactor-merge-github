@@ -1,0 +1,405 @@
+{
+  "memory_cpu_baselines": {
+    "metadata": {
+      "version": "1.0.0",
+      "created_date": "2024-12-19",
+      "description": "System resource utilization baselines for Node.js to Flask migration performance comparison",
+      "variance_threshold": 10.0,
+      "baseline_source": "Node.js production metrics",
+      "measurement_period": "30_days",
+      "monitoring_requirements": {
+        "cpu_utilization_limits": {
+          "warning_threshold": 70.0,
+          "critical_threshold": 90.0,
+          "sustained_duration_minutes": 5
+        },
+        "memory_usage_limits": {
+          "warning_threshold": 80.0,
+          "critical_threshold": 95.0,
+          "heap_threshold": 85.0
+        },
+        "gc_pause_limits": {
+          "target_average_ms": 5.0,
+          "warning_threshold_ms": 100.0,
+          "critical_threshold_ms": 300.0
+        }
+      }
+    },
+    
+    "cpu_utilization_baselines": {
+      "idle_state": {
+        "average_cpu_percent": 8.5,
+        "p50_cpu_percent": 6.2,
+        "p90_cpu_percent": 12.1,
+        "p95_cpu_percent": 15.8,
+        "p99_cpu_percent": 22.3,
+        "measurement_interval_seconds": 15,
+        "sample_count": 2880
+      },
+      "light_load": {
+        "concurrent_users": 50,
+        "average_cpu_percent": 24.7,
+        "p50_cpu_percent": 22.1,
+        "p90_cpu_percent": 35.4,
+        "p95_cpu_percent": 42.8,
+        "p99_cpu_percent": 58.2,
+        "requests_per_second": 45,
+        "measurement_duration_minutes": 15
+      },
+      "moderate_load": {
+        "concurrent_users": 200,
+        "average_cpu_percent": 45.3,
+        "p50_cpu_percent": 43.7,
+        "p90_cpu_percent": 62.1,
+        "p95_cpu_percent": 68.9,
+        "p99_cpu_percent": 75.4,
+        "requests_per_second": 150,
+        "measurement_duration_minutes": 30
+      },
+      "heavy_load": {
+        "concurrent_users": 500,
+        "average_cpu_percent": 62.8,
+        "p50_cpu_percent": 61.2,
+        "p90_cpu_percent": 74.6,
+        "p95_cpu_percent": 79.3,
+        "p99_cpu_percent": 85.7,
+        "requests_per_second": 285,
+        "measurement_duration_minutes": 30
+      },
+      "peak_load": {
+        "concurrent_users": 1000,
+        "average_cpu_percent": 68.4,
+        "p50_cpu_percent": 67.1,
+        "p90_cpu_percent": 78.9,
+        "p95_cpu_percent": 82.3,
+        "p99_cpu_percent": 88.1,
+        "requests_per_second": 420,
+        "measurement_duration_minutes": 30
+      },
+      "per_endpoint_cpu_usage": {
+        "GET_api_health": {
+          "average_cpu_ms": 2.1,
+          "p95_cpu_ms": 4.8,
+          "requests_sampled": 50000
+        },
+        "POST_api_auth_login": {
+          "average_cpu_ms": 18.7,
+          "p95_cpu_ms": 32.4,
+          "requests_sampled": 15000
+        },
+        "GET_api_users_profile": {
+          "average_cpu_ms": 12.3,
+          "p95_cpu_ms": 24.1,
+          "requests_sampled": 25000
+        },
+        "POST_api_data_upload": {
+          "average_cpu_ms": 45.6,
+          "p95_cpu_ms": 87.2,
+          "requests_sampled": 8000
+        },
+        "GET_api_data_query": {
+          "average_cpu_ms": 28.9,
+          "p95_cpu_ms": 56.7,
+          "requests_sampled": 12000
+        }
+      }
+    },
+
+    "memory_usage_baselines": {
+      "heap_memory": {
+        "idle_state": {
+          "heap_used_mb": 145.8,
+          "heap_total_mb": 256.0,
+          "heap_utilization_percent": 56.9,
+          "fragmentation_ratio": 1.12
+        },
+        "light_load": {
+          "heap_used_mb": 198.4,
+          "heap_total_mb": 320.0,
+          "heap_utilization_percent": 62.0,
+          "fragmentation_ratio": 1.18,
+          "concurrent_users": 50
+        },
+        "moderate_load": {
+          "heap_used_mb": 287.6,
+          "heap_total_mb": 448.0,
+          "heap_utilization_percent": 64.2,
+          "fragmentation_ratio": 1.24,
+          "concurrent_users": 200
+        },
+        "heavy_load": {
+          "heap_used_mb": 412.3,
+          "heap_total_mb": 640.0,
+          "heap_utilization_percent": 64.4,
+          "fragmentation_ratio": 1.31,
+          "concurrent_users": 500
+        },
+        "peak_load": {
+          "heap_used_mb": 518.7,
+          "heap_total_mb": 768.0,
+          "heap_utilization_percent": 67.5,
+          "fragmentation_ratio": 1.36,
+          "concurrent_users": 1000
+        }
+      },
+      "system_memory": {
+        "resident_set_size": {
+          "idle_mb": 187.2,
+          "light_load_mb": 245.8,
+          "moderate_load_mb": 356.4,
+          "heavy_load_mb": 512.7,
+          "peak_load_mb": 634.1
+        },
+        "virtual_memory": {
+          "idle_mb": 2048.5,
+          "light_load_mb": 2234.7,
+          "moderate_load_mb": 2856.2,
+          "heavy_load_mb": 3654.8,
+          "peak_load_mb": 4287.3
+        },
+        "memory_utilization_trend": {
+          "startup_to_stable_minutes": 8.5,
+          "stable_state_variation_percent": 3.2,
+          "peak_usage_duration_minutes": 12.7,
+          "memory_leak_rate_mb_per_hour": 0.0
+        }
+      },
+      "per_component_memory": {
+        "authentication_module": {
+          "baseline_mb": 28.4,
+          "peak_mb": 45.7,
+          "jwt_cache_mb": 12.3
+        },
+        "database_connections": {
+          "mongodb_pool_mb": 67.8,
+          "redis_pool_mb": 24.1,
+          "connection_overhead_mb": 15.6
+        },
+        "business_logic": {
+          "request_processing_mb": 34.9,
+          "data_transformation_mb": 18.2,
+          "validation_engine_mb": 22.1
+        },
+        "http_server": {
+          "express_framework_mb": 42.3,
+          "middleware_stack_mb": 19.7,
+          "request_buffers_mb": 38.5
+        }
+      }
+    },
+
+    "garbage_collection_baselines": {
+      "nodejs_gc_metrics": {
+        "minor_gc": {
+          "average_pause_ms": 3.2,
+          "p50_pause_ms": 2.8,
+          "p90_pause_ms": 5.1,
+          "p95_pause_ms": 6.8,
+          "p99_pause_ms": 12.4,
+          "frequency_per_minute": 18.5,
+          "memory_reclaimed_mb": 23.7
+        },
+        "major_gc": {
+          "average_pause_ms": 28.6,
+          "p50_pause_ms": 24.1,
+          "p90_pause_ms": 45.2,
+          "p95_pause_ms": 58.9,
+          "p99_pause_ms": 78.3,
+          "frequency_per_hour": 4.2,
+          "memory_reclaimed_mb": 156.4
+        },
+        "total_gc_time": {
+          "gc_time_percent": 2.1,
+          "gc_overhead_target": 5.0,
+          "gc_efficiency_ratio": 0.92
+        }
+      },
+      "python_gc_target_metrics": {
+        "generation_0": {
+          "target_pause_ms": 2.8,
+          "warning_threshold_ms": 8.0,
+          "critical_threshold_ms": 15.0,
+          "frequency_target_per_minute": 15.0
+        },
+        "generation_1": {
+          "target_pause_ms": 12.5,
+          "warning_threshold_ms": 25.0,
+          "critical_threshold_ms": 45.0,
+          "frequency_target_per_hour": 8.0
+        },
+        "generation_2": {
+          "target_pause_ms": 45.0,
+          "warning_threshold_ms": 100.0,
+          "critical_threshold_ms": 200.0,
+          "frequency_target_per_hour": 1.5
+        },
+        "overall_targets": {
+          "total_gc_time_percent_max": 2.5,
+          "average_pause_ms_max": 5.0,
+          "p99_pause_ms_max": 20.0
+        }
+      }
+    },
+
+    "resource_allocation_benchmarks": {
+      "worker_processes": {
+        "nodejs_baseline": {
+          "worker_count": 4,
+          "worker_memory_mb": 128.0,
+          "worker_cpu_utilization": 17.1,
+          "request_queue_depth": 8,
+          "worker_restart_frequency_hours": 72.0
+        },
+        "python_targets": {
+          "gunicorn_workers": 4,
+          "worker_memory_limit_mb": 512.0,
+          "worker_cpu_limit_percent": 80.0,
+          "request_queue_limit": 10,
+          "worker_recycling_hours": 24.0
+        }
+      },
+      "connection_pools": {
+        "mongodb_pool": {
+          "baseline_connections": 15,
+          "peak_connections": 25,
+          "connection_overhead_mb": 4.2,
+          "average_utilization_percent": 62.5
+        },
+        "redis_pool": {
+          "baseline_connections": 8,
+          "peak_connections": 12,
+          "connection_overhead_mb": 2.1,
+          "average_utilization_percent": 45.8
+        },
+        "http_clients": {
+          "baseline_connections": 20,
+          "peak_connections": 35,
+          "keep_alive_duration_seconds": 30,
+          "connection_pool_efficiency": 0.87
+        }
+      },
+      "thread_pool_metrics": {
+        "io_thread_pool": {
+          "baseline_threads": 12,
+          "peak_threads": 24,
+          "thread_utilization_percent": 68.4,
+          "queue_depth_average": 5.2
+        },
+        "cpu_bound_tasks": {
+          "baseline_threads": 8,
+          "peak_threads": 16,
+          "thread_utilization_percent": 72.8,
+          "queue_depth_average": 3.1
+        }
+      }
+    },
+
+    "system_resource_trends": {
+      "load_progression": {
+        "startup_phase": {
+          "duration_seconds": 45,
+          "cpu_ramp_percent": 8.5,
+          "memory_ramp_mb": 87.3,
+          "stabilization_time_seconds": 120
+        },
+        "steady_state": {
+          "cpu_variance_percent": 5.2,
+          "memory_variance_percent": 2.8,
+          "resource_efficiency": 0.84
+        },
+        "scaling_characteristics": {
+          "cpu_scaling_factor": 1.24,
+          "memory_scaling_factor": 1.18,
+          "scaling_overhead_percent": 8.5
+        }
+      },
+      "performance_correlation": {
+        "cpu_response_correlation": 0.89,
+        "memory_response_correlation": 0.34,
+        "gc_response_correlation": 0.67,
+        "resource_bottleneck_threshold": 75.0
+      },
+      "degradation_patterns": {
+        "cpu_saturation_point": 85.0,
+        "memory_pressure_point": 90.0,
+        "gc_pressure_threshold_ms": 50.0,
+        "recovery_time_seconds": 180
+      }
+    },
+
+    "monitoring_intervals": {
+      "high_frequency": {
+        "interval_seconds": 5,
+        "metrics": ["cpu_percent", "memory_rss", "active_connections"],
+        "retention_hours": 24
+      },
+      "standard_frequency": {
+        "interval_seconds": 15,
+        "metrics": ["memory_heap", "gc_stats", "worker_metrics"],
+        "retention_days": 7
+      },
+      "low_frequency": {
+        "interval_seconds": 60,
+        "metrics": ["trend_analysis", "capacity_metrics", "efficiency_ratios"],
+        "retention_weeks": 4
+      }
+    },
+
+    "variance_calculation": {
+      "comparison_methods": {
+        "response_time_variance": "percentage_difference",
+        "memory_usage_variance": "absolute_and_percentage",
+        "cpu_utilization_variance": "percentage_difference",
+        "throughput_variance": "percentage_difference"
+      },
+      "acceptable_ranges": {
+        "cpu_variance_percent": 10.0,
+        "memory_variance_percent": 15.0,
+        "gc_pause_variance_percent": 25.0,
+        "overall_performance_variance_percent": 10.0
+      },
+      "measurement_windows": {
+        "short_term_minutes": 5,
+        "medium_term_minutes": 30,
+        "long_term_hours": 24,
+        "baseline_comparison_days": 7
+      }
+    },
+
+    "container_resource_limits": {
+      "production_limits": {
+        "cpu_cores": 2.0,
+        "memory_limit_mb": 1024,
+        "memory_request_mb": 512,
+        "cpu_request_cores": 0.5
+      },
+      "scaling_thresholds": {
+        "cpu_scale_up_percent": 70,
+        "cpu_scale_down_percent": 30,
+        "memory_scale_up_percent": 80,
+        "memory_scale_down_percent": 40
+      },
+      "resource_utilization_targets": {
+        "target_cpu_utilization": 60.0,
+        "target_memory_utilization": 70.0,
+        "efficiency_target": 0.85,
+        "headroom_percent": 20.0
+      }
+    },
+
+    "optimization_targets": {
+      "performance_improvements": {
+        "cpu_efficiency_gain": 5.0,
+        "memory_efficiency_gain": 8.0,
+        "gc_pause_reduction": 15.0,
+        "overall_performance_gain": 3.0
+      },
+      "resource_optimization": {
+        "memory_footprint_reduction": 10.0,
+        "cpu_overhead_reduction": 5.0,
+        "gc_overhead_reduction": 20.0,
+        "startup_time_improvement": 25.0
+      }
+    }
+  }
+}
