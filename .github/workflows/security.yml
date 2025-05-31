@@ -1,1322 +1,1348 @@
-# security.yml
-# Comprehensive Security Scanning Workflow for Flask Migration Project
-# Implements enterprise-grade security validation with container vulnerability assessment,
-# static security analysis, dependency vulnerability scanning, and automated policy enforcement
+# GitHub Actions Security Scanning Workflow for Flask Application Migration
+# ============================================================================
 #
-# Security Framework Components:
+# Comprehensive security validation pipeline implementing enterprise-grade
+# security scanning with container vulnerability assessment, static security
+# analysis, dependency vulnerability scanning, and automated security policy
+# enforcement per Section 8.5.2 container security requirements.
+#
+# This workflow provides multi-layered security validation replacing Node.js
+# security patterns with Python-specific security scanning tools and enterprise
+# compliance validation ensuring zero critical/high-severity findings policy.
+#
+# Key Security Components:
 # - Trivy 0.48+ container vulnerability scanning with critical severity blocking
-# - Bandit 1.7+ static security analysis for Python security vulnerabilities  
-# - Safety 3.0+ and pip-audit 2.7+ dependency vulnerability scanning
-# - SARIF format reporting for GitHub Security tab integration
-# - Automated security remediation guidance and compliance validation
-# - Security team notification system for critical findings
-# - Security baseline validation and trend analysis
+# - bandit 1.7+ static security analysis for Python security vulnerabilities
+# - safety 3.0+ dependency vulnerability scanning with CVE database validation
+# - pip-audit 2.7+ package vulnerability assessment with high severity blocking
+# - SARIF format security report upload for GitHub Security tab integration
+# - Automated security remediation guidance and enterprise compliance validation
+# - Security team notification system for critical findings per Section 8.5.2
+# - Security baseline validation and trend analysis per Section 6.6.3
 #
-# Compliance Coverage:
-# - OWASP Top 10 and SANS Top 25 vulnerability patterns
-# - SOC 2, ISO 27001, PCI DSS security standards
-# - CVE database validation and threat intelligence integration
-# - Enterprise security policy enforcement and audit requirements
+# Enterprise Security Policy Enforcement:
+# - Zero-tolerance for CRITICAL severity vulnerabilities (build termination)
+# - HIGH severity findings require security review approval
+# - MEDIUM/LOW severity findings generate warnings with remediation guidance
+# - Comprehensive security baseline tracking and trend analysis
+# - Automated security team notifications for critical findings
+# - SARIF integration with GitHub Security tab for centralized security visibility
 
-name: Security Scanning Pipeline
+name: 🔒 Security Scanning
 
-# =============================================================================
-# WORKFLOW TRIGGERS AND EXECUTION CONTEXT
-# =============================================================================
+# Trigger Configuration
+# =====================
+# Comprehensive trigger configuration for security scanning across different
+# development workflows with focus on pull request validation, scheduled
+# vulnerability scans, and manual security assessment capabilities
+
 on:
-  # Pull request security validation
+  # Pull request security validation with comprehensive scanning
   pull_request:
-    branches: [main, develop, staging]
+    branches: [ main, develop ]
+    types: [ opened, synchronize, reopened, ready_for_review ]
     paths:
       - 'src/**'
       - 'requirements.txt'
-      - 'requirements.in'
       - 'Dockerfile'
-      - 'docker-compose.yml'
-      - '.github/workflows/**'
       - 'bandit.yaml'
-      - '.security/**'
-  
-  # Push to main branch for comprehensive security assessment
+      - '.github/workflows/security.yml'
+    
+  # Main branch security validation on every commit
   push:
-    branches: [main]
+    branches: [ main ]
     paths:
       - 'src/**'
       - 'requirements.txt'
-      - 'requirements.in'
       - 'Dockerfile'
-      - 'docker-compose.yml'
-      - '.github/workflows/**'
       - 'bandit.yaml'
-  
-  # Scheduled security scans for continuous monitoring
+      - '.github/workflows/security.yml'
+    
+  # Scheduled security scanning for continuous vulnerability monitoring
   schedule:
-    # Daily security scan at 2 AM UTC for fresh vulnerability data
-    - cron: '0 2 * * *'
-    # Weekly comprehensive security assessment on Sundays at 4 AM UTC
-    - cron: '0 4 * * 0'
-  
-  # Manual security scan trigger for incident response
+    # Daily security scanning at 3 AM UTC for dependency vulnerabilities
+    - cron: '0 3 * * *'
+    # Weekly comprehensive security baseline update on Sundays at 2 AM UTC
+    - cron: '0 2 * * 0'
+    
+  # Manual security assessment workflow dispatch
   workflow_dispatch:
     inputs:
       scan_type:
-        description: 'Security scan type'
+        description: 'Type of security scan to perform'
         required: true
         default: 'comprehensive'
         type: choice
         options:
-          - 'comprehensive'
-          - 'dependencies_only'
-          - 'containers_only'
-          - 'static_analysis_only'
-          - 'compliance_validation'
+          - comprehensive
+          - container_only
+          - dependencies_only
+          - code_analysis_only
       severity_threshold:
-        description: 'Minimum severity level to report'
+        description: 'Minimum severity level for blocking deployment'
         required: false
-        default: 'MEDIUM'
+        default: 'HIGH'
         type: choice
         options:
-          - 'CRITICAL'
-          - 'HIGH'
-          - 'MEDIUM'
-          - 'LOW'
+          - CRITICAL
+          - HIGH
+          - MEDIUM
+          - LOW
       notify_security_team:
-        description: 'Notify security team of results'
+        description: 'Send notifications to security team'
         required: false
         default: true
         type: boolean
+      baseline_update:
+        description: 'Update security baseline after successful scan'
+        required: false
+        default: false
+        type: boolean
 
-# =============================================================================
-# ENVIRONMENT VARIABLES AND CONFIGURATION
-# =============================================================================
+# Environment Variables
+# =====================
+# Global security configuration ensuring consistent scanning parameters
+# and enterprise compliance with centralized security policy management
+
 env:
-  # Python environment configuration
-  PYTHON_VERSION: '3.11'
-  PYTHON_CACHE_KEY: 'security-scan-py311'
-  
-  # Security scanning tool versions
+  # Security scanning tool versions per Section 8.5.2 requirements
   TRIVY_VERSION: '0.48.3'
   BANDIT_VERSION: '1.7.5'
   SAFETY_VERSION: '3.0.1'
-  PIP_AUDIT_VERSION: '2.7.3'
+  PIP_AUDIT_VERSION: '2.7.0'
   
-  # Security threshold configuration
-  SECURITY_FAIL_ON_CRITICAL: 'true'
-  SECURITY_FAIL_ON_HIGH: 'true'
-  SECURITY_FAIL_ON_MEDIUM: 'false'
+  # Security policy configuration per Section 8.5.2 container security policy
+  SECURITY_FAIL_ON_CRITICAL: true
+  SECURITY_FAIL_ON_HIGH: true
+  SECURITY_WARN_ON_MEDIUM: true
+  CONTAINER_SCAN_TIMEOUT: 600
   
-  # Reporting and notification configuration
-  SECURITY_REPORT_FORMAT: 'sarif,json,table'
-  SECURITY_BASELINE_PATH: '.security/baseline'
-  SECURITY_REPORTS_PATH: '.security/reports'
+  # Python configuration for security scanning
+  PYTHON_VERSION: '3.11'
+  PIP_NO_CACHE_DIR: 1
   
-  # Enterprise integration configuration
-  ENABLE_SIEM_INTEGRATION: 'true'
-  ENABLE_SECURITY_NOTIFICATIONS: 'true'
-  SECURITY_DASHBOARD_ENABLED: 'true'
-  
-  # Container scanning configuration
+  # Container configuration per Section 8.3.2 base image strategy
+  CONTAINER_IMAGE_NAME: 'flask-app-security-scan'
   CONTAINER_REGISTRY: 'ghcr.io'
-  CONTAINER_IMAGE_NAME: 'flask-app'
-  TRIVY_CACHE_DIR: '/tmp/trivy-cache'
+  BASE_IMAGE: 'python:3.11-slim'
   
-  # Static analysis configuration
-  BANDIT_CONFIG_FILE: 'bandit.yaml'
-  BANDIT_BASELINE_FILE: '.security/bandit-baseline.json'
+  # SARIF report configuration per Section 8.5.2 security reporting
+  SARIF_UPLOAD_ENABLED: true
+  SECURITY_REPORTS_RETENTION: 90
+  BASELINE_FILE: 'security-baseline.json'
   
-  # Dependency scanning configuration
-  REQUIREMENTS_FILES: 'requirements.txt,requirements-dev.txt'
-  DEPENDENCY_SCAN_TIMEOUT: '300'
+  # Notification configuration per Section 8.5.2 security team notification
+  SECURITY_TEAM_CHANNEL: ${{ secrets.SECURITY_TEAM_SLACK_WEBHOOK }}
+  INCIDENT_RESPONSE_WEBHOOK: ${{ secrets.INCIDENT_RESPONSE_WEBHOOK }}
+  
+  # Performance optimization for security scanning
+  PARALLEL_SCAN_ENABLED: true
+  MAX_SCAN_WORKERS: 4
+  SCAN_CACHE_ENABLED: true
 
-# =============================================================================
-# SECURITY JOBS CONFIGURATION
-# =============================================================================
+# Security Scanning Jobs
+# =======================
+# Comprehensive job definition implementing multi-layered security validation
+# with parallel execution optimization and enterprise compliance enforcement
+
 jobs:
-  # ---------------------------------------------------------------------------
-  # SECURITY PREPARATION AND VALIDATION
-  # ---------------------------------------------------------------------------
-  security-preparation:
-    name: Security Scan Preparation
+  # ==========================================================================
+  # SECURITY SCAN SETUP AND PREPARATION
+  # ==========================================================================
+  # Initialize security scanning environment with dependency validation
+  
+  security-setup:
+    name: 🔧 Security Scan Setup
     runs-on: ubuntu-latest
     timeout-minutes: 10
     
     outputs:
       scan-matrix: ${{ steps.scan-config.outputs.scan-matrix }}
+      container-image: ${{ steps.container-config.outputs.image-tag }}
       security-baseline-exists: ${{ steps.baseline-check.outputs.exists }}
-      container-image-tag: ${{ steps.container-config.outputs.image-tag }}
-      python-cache-key: ${{ steps.cache-config.outputs.cache-key }}
-    
+      should-notify: ${{ steps.notification-config.outputs.should-notify }}
+      
     steps:
-      - name: Checkout Repository
+      - name: 📥 Checkout repository
         uses: actions/checkout@v4
         with:
-          # Full history for security trend analysis
-          fetch-depth: 0
-          # Include security configuration files
-          token: ${{ secrets.GITHUB_TOKEN }}
-      
-      - name: Configure Security Scan Matrix
+          fetch-depth: 0  # Full history for security baseline comparison
+          
+      - name: 🐍 Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          
+      - name: 🔧 Configure security scan matrix
         id: scan-config
         run: |
-          # Determine scan types based on trigger and inputs
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            SCAN_TYPE="${{ github.event.inputs.scan_type }}"
-          elif [[ "${{ github.event_name }}" == "schedule" ]]; then
-            SCAN_TYPE="comprehensive"
-          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            SCAN_TYPE="pull_request"
-          else
-            SCAN_TYPE="push"
-          fi
+          # Determine scan types based on workflow input or default comprehensive scan
+          SCAN_TYPE="${{ github.event.inputs.scan_type || 'comprehensive' }}"
           
-          # Configure scan matrix based on scan type
-          case $SCAN_TYPE in
+          case "$SCAN_TYPE" in
             "comprehensive")
-              MATRIX='["dependencies", "static-analysis", "container-security", "compliance-validation"]'
+              SCAN_MATRIX='["container", "dependencies", "code-analysis"]'
+              ;;
+            "container_only")
+              SCAN_MATRIX='["container"]'
               ;;
             "dependencies_only")
-              MATRIX='["dependencies"]'
+              SCAN_MATRIX='["dependencies"]'
               ;;
-            "containers_only")
-              MATRIX='["container-security"]'
-              ;;
-            "static_analysis_only")
-              MATRIX='["static-analysis"]'
-              ;;
-            "compliance_validation")
-              MATRIX='["compliance-validation"]'
-              ;;
-            "pull_request")
-              MATRIX='["dependencies", "static-analysis"]'
-              ;;
-            "push")
-              MATRIX='["dependencies", "static-analysis", "container-security"]'
+            "code_analysis_only")
+              SCAN_MATRIX='["code-analysis"]'
               ;;
             *)
-              MATRIX='["dependencies", "static-analysis"]'
+              SCAN_MATRIX='["container", "dependencies", "code-analysis"]'
               ;;
           esac
           
-          echo "scan-matrix=$MATRIX" >> $GITHUB_OUTPUT
-          echo "Selected scan types: $MATRIX"
-      
-      - name: Check Security Baseline
-        id: baseline-check
-        run: |
-          if [[ -d "${{ env.SECURITY_BASELINE_PATH }}" ]]; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-            echo "Security baseline found"
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-            echo "No security baseline found - will create initial baseline"
-          fi
-      
-      - name: Configure Container Image
+          echo "scan-matrix=$SCAN_MATRIX" >> $GITHUB_OUTPUT
+          echo "📊 Security scan matrix configured: $SCAN_MATRIX" >> $GITHUB_STEP_SUMMARY
+          
+      - name: 🐳 Configure container image for scanning
         id: container-config
         run: |
-          # Generate container image tag for scanning
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            IMAGE_TAG="pr-${{ github.event.pull_request.number }}"
-          else
-            IMAGE_TAG="${{ github.sha }}"
-          fi
-          
+          # Generate unique image tag for security scanning
+          IMAGE_TAG="${{ env.CONTAINER_IMAGE_NAME }}:${{ github.sha }}"
           echo "image-tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
-          echo "Container image tag: $IMAGE_TAG"
-      
-      - name: Configure Python Cache
-        id: cache-config
+          echo "🐳 Container image configured: $IMAGE_TAG" >> $GITHUB_STEP_SUMMARY
+          
+      - name: 📊 Check security baseline existence
+        id: baseline-check
         run: |
-          # Generate cache key for Python dependencies
-          CACHE_KEY="${{ env.PYTHON_CACHE_KEY }}-${{ hashFiles('**/requirements*.txt') }}"
-          echo "cache-key=$CACHE_KEY" >> $GITHUB_OUTPUT
-          echo "Python cache key: $CACHE_KEY"
+          # Check for existing security baseline file
+          if [[ -f "${{ env.BASELINE_FILE }}" ]]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "📊 Security baseline found: ${{ env.BASELINE_FILE }}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "📊 Security baseline not found - will create new baseline" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+      - name: 🔔 Configure notification settings
+        id: notification-config
+        run: |
+          # Determine if security team notifications should be sent
+          SHOULD_NOTIFY="false"
+          
+          # Notify on scheduled scans, main branch, or manual request
+          if [[ "${{ github.event_name }}" == "schedule" ]] || \
+             [[ "${{ github.ref }}" == "refs/heads/main" ]] || \
+             [[ "${{ github.event.inputs.notify_security_team }}" == "true" ]]; then
+            SHOULD_NOTIFY="true"
+          fi
+          
+          echo "should-notify=$SHOULD_NOTIFY" >> $GITHUB_OUTPUT
+          echo "🔔 Security team notifications: $SHOULD_NOTIFY" >> $GITHUB_STEP_SUMMARY
+          
+      - name: 📋 Security scan configuration summary
+        run: |
+          echo "## 🔒 Security Scan Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "| Configuration | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Scan Type | ${{ github.event.inputs.scan_type || 'comprehensive' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Severity Threshold | ${{ github.event.inputs.severity_threshold || 'HIGH' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Trivy Version | ${{ env.TRIVY_VERSION }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Bandit Version | ${{ env.BANDIT_VERSION }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Safety Version | ${{ env.SAFETY_VERSION }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| pip-audit Version | ${{ env.PIP_AUDIT_VERSION }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Container Image | ${{ steps.container-config.outputs.image-tag }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Baseline Exists | ${{ steps.baseline-check.outputs.exists }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Notify Security Team | ${{ steps.notification-config.outputs.should-notify }} |" >> $GITHUB_STEP_SUMMARY
 
-  # ---------------------------------------------------------------------------
-  # DEPENDENCY VULNERABILITY SCANNING
-  # ---------------------------------------------------------------------------
-  dependency-security-scan:
-    name: Dependency Vulnerability Scanning
+  # ==========================================================================
+  # CONTAINER VULNERABILITY SCANNING WITH TRIVY
+  # ==========================================================================
+  # Comprehensive container security assessment per Section 8.5.2
+  
+  container-security:
+    name: 🐳 Container Vulnerability Scan
     runs-on: ubuntu-latest
-    needs: security-preparation
-    if: contains(fromJson(needs.security-preparation.outputs.scan-matrix), 'dependencies')
-    timeout-minutes: 15
-    
-    strategy:
-      matrix:
-        python-version: ['3.8', '3.11']
-        scanner: ['safety', 'pip-audit', 'cyclone-dx']
-      fail-fast: false
-    
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v4
-        with:
-          python-version: ${{ matrix.python-version }}
-          cache: 'pip'
-          cache-dependency-path: '**/requirements*.txt'
-      
-      - name: Cache Python Dependencies
-        uses: actions/cache@v3
-        with:
-          path: ~/.cache/pip
-          key: ${{ needs.security-preparation.outputs.python-cache-key }}-${{ matrix.python-version }}
-          restore-keys: |
-            ${{ env.PYTHON_CACHE_KEY }}-${{ matrix.python-version }}-
-            ${{ env.PYTHON_CACHE_KEY }}-
-      
-      - name: Install Security Scanning Tools
-        run: |
-          python -m pip install --upgrade pip setuptools wheel
-          
-          # Install security scanning tools with pinned versions
-          pip install safety==${{ env.SAFETY_VERSION }}
-          pip install pip-audit==${{ env.PIP_AUDIT_VERSION }}
-          pip install cyclone-dx-bom>=3.11.0
-          
-          # Install project dependencies for comprehensive scanning
-          if [[ -f "requirements.txt" ]]; then
-            pip install -r requirements.txt
-          fi
-          if [[ -f "requirements-dev.txt" ]]; then
-            pip install -r requirements-dev.txt
-          fi
-          
-          # Verify tool installations
-          safety --version
-          pip-audit --version
-          cyclone-dx-py --version
-      
-      - name: Create Security Reports Directory
-        run: |
-          mkdir -p ${{ env.SECURITY_REPORTS_PATH }}/dependencies
-          mkdir -p ${{ env.SECURITY_REPORTS_PATH }}/sarif
-      
-      - name: Safety Dependency Vulnerability Scan
-        if: matrix.scanner == 'safety'
-        run: |
-          echo "Running Safety vulnerability scan for Python ${{ matrix.python-version }}..."
-          
-          # Run Safety scan with multiple output formats
-          safety check \
-            --json \
-            --output ${{ env.SECURITY_REPORTS_PATH }}/dependencies/safety-py${{ matrix.python-version }}.json \
-            --continue-on-error || SAFETY_EXIT_CODE=$?
-          
-          # Generate human-readable report
-          safety check \
-            --output ${{ env.SECURITY_REPORTS_PATH }}/dependencies/safety-py${{ matrix.python-version }}.txt \
-            --continue-on-error || true
-          
-          # Generate detailed report with remediation guidance
-          safety check \
-            --full-report \
-            --output ${{ env.SECURITY_REPORTS_PATH }}/dependencies/safety-detailed-py${{ matrix.python-version }}.txt \
-            --continue-on-error || true
-          
-          # Convert Safety results to SARIF format for GitHub Security tab
-          python .security/scripts/safety_to_sarif.py \
-            --input ${{ env.SECURITY_REPORTS_PATH }}/dependencies/safety-py${{ matrix.python-version }}.json \
-            --output ${{ env.SECURITY_REPORTS_PATH }}/sarif/safety-py${{ matrix.python-version }}.sarif \
-            --tool-name "safety" \
-            --tool-version "${{ env.SAFETY_VERSION }}" || true
-          
-          # Check exit code and set failure if critical vulnerabilities found
-          if [[ "${SAFETY_EXIT_CODE:-0}" -ne 0 && "${{ env.SECURITY_FAIL_ON_CRITICAL }}" == "true" ]]; then
-            echo "::error::Critical vulnerabilities found by Safety scanner"
-            exit 1
-          fi
-      
-      - name: pip-audit Vulnerability Scan
-        if: matrix.scanner == 'pip-audit'
-        run: |
-          echo "Running pip-audit vulnerability scan for Python ${{ matrix.python-version }}..."
-          
-          # Run pip-audit with SARIF output for GitHub Security integration
-          pip-audit \
-            --format=sarif \
-            --output=${{ env.SECURITY_REPORTS_PATH }}/sarif/pip-audit-py${{ matrix.python-version }}.sarif \
-            --progress-spinner=off \
-            --timeout=${{ env.DEPENDENCY_SCAN_TIMEOUT }} || PIP_AUDIT_EXIT_CODE=$?
-          
-          # Generate JSON report for processing
-          pip-audit \
-            --format=json \
-            --output=${{ env.SECURITY_REPORTS_PATH }}/dependencies/pip-audit-py${{ matrix.python-version }}.json \
-            --progress-spinner=off \
-            --timeout=${{ env.DEPENDENCY_SCAN_TIMEOUT }} || true
-          
-          # Generate human-readable report
-          pip-audit \
-            --format=columns \
-            --output=${{ env.SECURITY_REPORTS_PATH }}/dependencies/pip-audit-py${{ matrix.python-version }}.txt \
-            --progress-spinner=off \
-            --timeout=${{ env.DEPENDENCY_SCAN_TIMEOUT }} || true
-          
-          # Check exit code and set failure if high severity vulnerabilities found
-          if [[ "${PIP_AUDIT_EXIT_CODE:-0}" -ne 0 && "${{ env.SECURITY_FAIL_ON_HIGH }}" == "true" ]]; then
-            echo "::error::High severity vulnerabilities found by pip-audit scanner"
-            exit 1
-          fi
-      
-      - name: Generate Software Bill of Materials (SBOM)
-        if: matrix.scanner == 'cyclone-x'
-        run: |
-          echo "Generating Software Bill of Materials for Python ${{ matrix.python-version }}..."
-          
-          # Generate SBOM in CycloneDX format
-          cyclone-dx-py \
-            --output-format=json \
-            --output-file=${{ env.SECURITY_REPORTS_PATH }}/dependencies/sbom-py${{ matrix.python-version }}.json \
-            --include-dev \
-            --validate || true
-          
-          # Generate SBOM in XML format for enterprise tools
-          cyclone-x-py \
-            --output-format=xml \
-            --output-file=${{ env.SECURITY_REPORTS_PATH }}/dependencies/sbom-py${{ matrix.python-version }}.xml \
-            --include-dev \
-            --validate || true
-          
-          # Generate license report
-          cyclone-dx-py \
-            --output-format=json \
-            --license-name \
-            --output-file=${{ env.SECURITY_REPORTS_PATH }}/dependencies/licenses-py${{ matrix.python-version }}.json || true
-      
-      - name: Upload Dependency Scan Results
-        uses: actions/upload-artifact@v3
-        if: always()
-        with:
-          name: dependency-security-reports-py${{ matrix.python-version }}-${{ matrix.scanner }}
-          path: |
-            ${{ env.SECURITY_REPORTS_PATH }}/dependencies/
-            ${{ env.SECURITY_REPORTS_PATH }}/sarif/
-          retention-days: 30
-      
-      - name: Upload SARIF Results to GitHub Security
-        uses: github/codeql-action/upload-sarif@v2
-        if: always() && (matrix.scanner == 'safety' || matrix.scanner == 'pip-audit')
-        with:
-          sarif_file: ${{ env.SECURITY_REPORTS_PATH }}/sarif/
-          category: dependency-security-${{ matrix.scanner }}-py${{ matrix.python-version }}
-        continue-on-error: true
-
-  # ---------------------------------------------------------------------------
-  # STATIC SECURITY ANALYSIS
-  # ---------------------------------------------------------------------------
-  static-security-analysis:
-    name: Static Security Analysis
-    runs-on: ubuntu-latest
-    needs: security-preparation
-    if: contains(fromJson(needs.security-preparation.outputs.scan-matrix), 'static-analysis')
+    needs: security-setup
+    if: contains(fromJson(needs.security-setup.outputs.scan-matrix), 'container')
     timeout-minutes: 20
     
-    strategy:
-      matrix:
-        tool: ['bandit', 'semgrep', 'security-linting']
-      fail-fast: false
-    
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+    permissions:
+      contents: read
+      security-events: write  # Required for SARIF upload
       
-      - name: Set up Python
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: 🐳 Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        
+      - name: 🔨 Build container image for security scanning
+        run: |
+          echo "## 🔨 Building Container Image for Security Scanning" >> $GITHUB_STEP_SUMMARY
+          echo "Building ${{ needs.security-setup.outputs.container-image }} per Section 8.3.1 container platform strategy" >> $GITHUB_STEP_SUMMARY
+          
+          # Build container image for vulnerability scanning
+          docker build \
+            --tag ${{ needs.security-setup.outputs.container-image }} \
+            --file Dockerfile \
+            --target runtime \
+            . || {
+            echo "❌ **CONTAINER BUILD FAILURE**: Failed to build image for security scanning" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          }
+          
+          echo "✅ **SUCCESS**: Container image built successfully" >> $GITHUB_STEP_SUMMARY
+          echo "📊 Image size: $(docker images ${{ needs.security-setup.outputs.container-image }} --format 'table {{.Size}}')" >> $GITHUB_STEP_SUMMARY
+          
+      - name: 📥 Install Trivy container scanner
+        run: |
+          echo "## 📥 Installing Trivy ${{ env.TRIVY_VERSION }}" >> $GITHUB_STEP_SUMMARY
+          echo "Installing Trivy container vulnerability scanner per Section 8.5.2 container security policy" >> $GITHUB_STEP_SUMMARY
+          
+          # Install Trivy from GitHub releases
+          wget -qO- https://github.com/aquasecurity/trivy/releases/download/v${{ env.TRIVY_VERSION }}/trivy_${{ env.TRIVY_VERSION }}_Linux-64bit.tar.gz | tar xz
+          sudo mv trivy /usr/local/bin/trivy
+          
+          # Verify Trivy installation
+          trivy --version || {
+            echo "❌ **TRIVY INSTALLATION FAILURE**: Failed to install Trivy scanner" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          }
+          
+          echo "✅ **SUCCESS**: Trivy ${{ env.TRIVY_VERSION }} installed successfully" >> $GITHUB_STEP_SUMMARY
+          
+      - name: 🛡️ Run Trivy container vulnerability scan
+        run: |
+          echo "## 🛡️ Running Trivy Container Vulnerability Scan" >> $GITHUB_STEP_SUMMARY
+          echo "Comprehensive container security assessment with critical vulnerability blocking per Section 8.5.2" >> $GITHUB_STEP_SUMMARY
+          
+          # Create security reports directory
+          mkdir -p reports/security/container
+          
+          # Run Trivy vulnerability scan with comprehensive configuration
+          trivy image \
+            --format sarif \
+            --output reports/security/container/trivy-results.sarif \
+            --severity CRITICAL,HIGH,MEDIUM,LOW \
+            --vuln-type os,library \
+            --security-checks vuln,config,secret \
+            --timeout ${{ env.CONTAINER_SCAN_TIMEOUT }}s \
+            --no-progress \
+            --exit-code 0 \
+            ${{ needs.security-setup.outputs.container-image }} || {
+            echo "❌ **TRIVY SCAN FAILURE**: Container vulnerability scan failed" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          }
+          
+          # Generate human-readable report
+          trivy image \
+            --format table \
+            --output reports/security/container/trivy-report.txt \
+            --severity CRITICAL,HIGH,MEDIUM,LOW \
+            --vuln-type os,library \
+            --security-checks vuln,config,secret \
+            --timeout ${{ env.CONTAINER_SCAN_TIMEOUT }}s \
+            --no-progress \
+            ${{ needs.security-setup.outputs.container-image }}
+            
+          # Generate JSON report for analysis
+          trivy image \
+            --format json \
+            --output reports/security/container/trivy-results.json \
+            --severity CRITICAL,HIGH,MEDIUM,LOW \
+            --vuln-type os,library \
+            --security-checks vuln,config,secret \
+            --timeout ${{ env.CONTAINER_SCAN_TIMEOUT }}s \
+            --no-progress \
+            ${{ needs.security-setup.outputs.container-image }}
+          
+          echo "✅ **SUCCESS**: Trivy container vulnerability scan completed" >> $GITHUB_STEP_SUMMARY
+          
+      - name: 🔍 Analyze Trivy scan results
+        run: |
+          echo "## 🔍 Analyzing Container Vulnerability Scan Results" >> $GITHUB_STEP_SUMMARY
+          
+          # Check if results file exists
+          if [[ ! -f reports/security/container/trivy-results.json ]]; then
+            echo "❌ **ANALYSIS FAILURE**: Trivy results file not found" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+          
+          # Extract vulnerability counts by severity
+          CRITICAL_COUNT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' reports/security/container/trivy-results.json || echo "0")
+          HIGH_COUNT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' reports/security/container/trivy-results.json || echo "0")
+          MEDIUM_COUNT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "MEDIUM")] | length' reports/security/container/trivy-results.json || echo "0")
+          LOW_COUNT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "LOW")] | length' reports/security/container/trivy-results.json || echo "0")
+          
+          # Generate vulnerability summary
+          echo "### 📊 Container Vulnerability Summary:" >> $GITHUB_STEP_SUMMARY
+          echo "| Severity | Count | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **CRITICAL** | $CRITICAL_COUNT | $([ $CRITICAL_COUNT -eq 0 ] && echo '✅ PASS' || echo '❌ FAIL') |" >> $GITHUB_STEP_SUMMARY
+          echo "| **HIGH** | $HIGH_COUNT | $([ $HIGH_COUNT -eq 0 ] && echo '✅ PASS' || echo '⚠️ REVIEW') |" >> $GITHUB_STEP_SUMMARY
+          echo "| **MEDIUM** | $MEDIUM_COUNT | $([ $MEDIUM_COUNT -eq 0 ] && echo '✅ PASS' || echo '⚠️ WARNING') |" >> $GITHUB_STEP_SUMMARY
+          echo "| **LOW** | $LOW_COUNT | $([ $LOW_COUNT -eq 0 ] && echo '✅ PASS' || echo 'ℹ️ INFO') |" >> $GITHUB_STEP_SUMMARY
+          
+          # Store counts for security gate evaluation
+          echo "CONTAINER_CRITICAL_COUNT=$CRITICAL_COUNT" >> $GITHUB_ENV
+          echo "CONTAINER_HIGH_COUNT=$HIGH_COUNT" >> $GITHUB_ENV
+          echo "CONTAINER_MEDIUM_COUNT=$MEDIUM_COUNT" >> $GITHUB_ENV
+          echo "CONTAINER_LOW_COUNT=$LOW_COUNT" >> $GITHUB_ENV
+          
+          # Display top critical vulnerabilities if any
+          if [[ $CRITICAL_COUNT -gt 0 ]]; then
+            echo "### 🚨 Critical Vulnerabilities Detected:" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL") | "\(.VulnerabilityID): \(.Title) (Package: \(.PkgName))"' reports/security/container/trivy-results.json | head -10 >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+          
+      - name: ⚖️ Apply container security policy enforcement
+        run: |
+          echo "## ⚖️ Container Security Policy Enforcement" >> $GITHUB_STEP_SUMMARY
+          echo "Applying enterprise security policy per Section 8.5.2 container security requirements" >> $GITHUB_STEP_SUMMARY
+          
+          # Apply security policy based on severity thresholds
+          POLICY_VIOLATION=false
+          
+          # Critical vulnerabilities always fail the build
+          if [[ $CONTAINER_CRITICAL_COUNT -gt 0 ]] && [[ "${{ env.SECURITY_FAIL_ON_CRITICAL }}" == "true" ]]; then
+            echo "❌ **POLICY VIOLATION**: $CONTAINER_CRITICAL_COUNT critical vulnerabilities detected - BUILD TERMINATED" >> $GITHUB_STEP_SUMMARY
+            echo "**Action Required**: Immediate remediation of critical security vulnerabilities" >> $GITHUB_STEP_SUMMARY
+            POLICY_VIOLATION=true
+          fi
+          
+          # High vulnerabilities require security review
+          if [[ $CONTAINER_HIGH_COUNT -gt 0 ]] && [[ "${{ env.SECURITY_FAIL_ON_HIGH }}" == "true" ]]; then
+            echo "⚠️ **POLICY WARNING**: $CONTAINER_HIGH_COUNT high-severity vulnerabilities detected - SECURITY REVIEW REQUIRED" >> $GITHUB_STEP_SUMMARY
+            echo "**Action Required**: Security team review and approval for deployment" >> $GITHUB_STEP_SUMMARY
+            
+            # Determine severity threshold from input
+            SEVERITY_THRESHOLD="${{ github.event.inputs.severity_threshold || 'HIGH' }}"
+            if [[ "$SEVERITY_THRESHOLD" == "HIGH" ]]; then
+              POLICY_VIOLATION=true
+            fi
+          fi
+          
+          # Medium vulnerabilities generate warnings
+          if [[ $CONTAINER_MEDIUM_COUNT -gt 0 ]] && [[ "${{ env.SECURITY_WARN_ON_MEDIUM }}" == "true" ]]; then
+            echo "⚠️ **POLICY WARNING**: $CONTAINER_MEDIUM_COUNT medium-severity vulnerabilities detected" >> $GITHUB_STEP_SUMMARY
+            echo "**Recommendation**: Schedule remediation in next development cycle" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Set policy violation flag for downstream jobs
+          echo "CONTAINER_POLICY_VIOLATION=$POLICY_VIOLATION" >> $GITHUB_ENV
+          
+          # Fail the job if policy is violated
+          if [[ "$POLICY_VIOLATION" == "true" ]]; then
+            echo "🚫 **CONTAINER SECURITY GATE FAILED**: Policy violations detected" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+          
+          echo "✅ **CONTAINER SECURITY GATE PASSED**: No policy violations detected" >> $GITHUB_STEP_SUMMARY
+          
+      - name: 📊 Upload Trivy SARIF report to GitHub Security
+        uses: github/codeql-action/upload-sarif@v2
+        if: always() && env.SARIF_UPLOAD_ENABLED == 'true'
+        with:
+          sarif_file: reports/security/container/trivy-results.sarif
+          category: trivy-container-scan
+          
+      - name: 📁 Upload container security reports
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: container-security-reports
+          path: reports/security/container/
+          retention-days: ${{ env.SECURITY_REPORTS_RETENTION }}
+
+  # ==========================================================================
+  # STATIC SECURITY ANALYSIS WITH BANDIT
+  # ==========================================================================
+  # Python code security vulnerability detection per Section 8.5.1
+  
+  code-security:
+    name: 🔍 Static Security Analysis
+    runs-on: ubuntu-latest
+    needs: security-setup
+    if: contains(fromJson(needs.security-setup.outputs.scan-matrix), 'code-analysis')
+    timeout-minutes: 15
+    
+    permissions:
+      contents: read
+      security-events: write  # Required for SARIF upload
+      
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: 🐍 Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v4
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
-      
-      - name: Install Static Analysis Tools
-        run: |
-          python -m pip install --upgrade pip setuptools wheel
           
-          # Install static security analysis tools
+      - name: 📦 Install bandit security analysis tool
+        run: |
+          echo "## 📦 Installing bandit ${{ env.BANDIT_VERSION }}" >> $GITHUB_STEP_SUMMARY
+          echo "Installing bandit static security analysis tool per Section 8.5.1 security scanning requirements" >> $GITHUB_STEP_SUMMARY
+          
+          python -m pip install --upgrade pip
           pip install bandit[toml]==${{ env.BANDIT_VERSION }}
-          pip install semgrep>=1.45.0
-          pip install flake8-bandit>=4.1.1
-          pip install dlint>=0.14.1
-          pip install dodgy>=0.2.1
+          pip install -r requirements.txt  # Install app dependencies for context
           
-          # Install project dependencies for context-aware analysis
-          if [[ -f "requirements.txt" ]]; then
-            pip install -r requirements.txt
-          fi
+          # Verify bandit installation
+          bandit --version || {
+            echo "❌ **BANDIT INSTALLATION FAILURE**: Failed to install bandit security scanner" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          }
           
-          # Verify tool installations
-          bandit --version
-          semgrep --version
-      
-      - name: Create Security Reports Directory
+          echo "✅ **SUCCESS**: bandit ${{ env.BANDIT_VERSION }} installed successfully" >> $GITHUB_STEP_SUMMARY
+          
+      - name: 🛡️ Run bandit static security analysis
         run: |
-          mkdir -p ${{ env.SECURITY_REPORTS_PATH }}/static-analysis
-          mkdir -p ${{ env.SECURITY_REPORTS_PATH }}/sarif
-          mkdir -p ${{ env.SECURITY_BASELINE_PATH }}
-      
-      - name: Bandit Security Analysis
-        if: matrix.tool == 'bandit'
-        run: |
-          echo "Running Bandit static security analysis..."
+          echo "## 🛡️ Running bandit Static Security Analysis" >> $GITHUB_STEP_SUMMARY
+          echo "Comprehensive Python security vulnerability detection per Section 8.5.1 Flask-specific security patterns" >> $GITHUB_STEP_SUMMARY
           
-          # Run Bandit with configuration file
-          bandit \
-            --configfile ${{ env.BANDIT_CONFIG_FILE }} \
-            --format sarif \
-            --output ${{ env.SECURITY_REPORTS_PATH }}/sarif/bandit.sarif \
-            --recursive \
-            --severity-level medium \
-            --confidence-level medium \
-            src/ || BANDIT_EXIT_CODE=$?
+          # Create security reports directory
+          mkdir -p reports/security/static
           
-          # Generate JSON report for processing
+          # Run bandit security scan with comprehensive configuration
           bandit \
-            --configfile ${{ env.BANDIT_CONFIG_FILE }} \
+            --recursive src/ \
             --format json \
-            --output ${{ env.SECURITY_REPORTS_PATH }}/static-analysis/bandit.json \
-            --recursive \
-            --severity-level low \
+            --output reports/security/static/bandit-results.json \
             --confidence-level low \
-            src/ || true
+            --severity-level low \
+            --configfile bandit.yaml \
+            --exit-zero || {
+            echo "❌ **BANDIT SCAN FAILURE**: Static security analysis failed" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          }
           
+          # Generate SARIF format for GitHub Security integration
+          bandit \
+            --recursive src/ \
+            --format sarif \
+            --output reports/security/static/bandit-results.sarif \
+            --confidence-level low \
+            --severity-level low \
+            --configfile bandit.yaml \
+            --exit-zero
+            
           # Generate human-readable report
           bandit \
-            --configfile ${{ env.BANDIT_CONFIG_FILE }} \
+            --recursive src/ \
             --format txt \
-            --output ${{ env.SECURITY_REPORTS_PATH }}/static-analysis/bandit.txt \
-            --recursive \
-            --severity-level low \
+            --output reports/security/static/bandit-report.txt \
             --confidence-level low \
-            src/ || true
+            --severity-level low \
+            --configfile bandit.yaml \
+            --exit-zero
           
-          # Generate CSV report for enterprise tools
-          bandit \
-            --configfile ${{ env.BANDIT_CONFIG_FILE }} \
-            --format csv \
-            --output ${{ env.SECURITY_REPORTS_PATH }}/static-analysis/bandit.csv \
-            --recursive \
-            src/ || true
+          echo "✅ **SUCCESS**: bandit static security analysis completed" >> $GITHUB_STEP_SUMMARY
           
-          # Create baseline if it doesn't exist
-          if [[ "${{ needs.security-preparation.outputs.security-baseline-exists }}" == "false" ]]; then
-            echo "Creating initial Bandit security baseline..."
-            bandit \
-              --configfile ${{ env.BANDIT_CONFIG_FILE }} \
-              --format json \
-              --output ${{ env.BANDIT_BASELINE_FILE }} \
-              --recursive \
-              src/ || true
+      - name: 🔍 Analyze bandit scan results
+        run: |
+          echo "## 🔍 Analyzing Static Security Analysis Results" >> $GITHUB_STEP_SUMMARY
+          
+          # Check if results file exists
+          if [[ ! -f reports/security/static/bandit-results.json ]]; then
+            echo "❌ **ANALYSIS FAILURE**: bandit results file not found" >> $GITHUB_STEP_SUMMARY
+            exit 1
           fi
           
-          # Compare with baseline for trend analysis
-          if [[ -f "${{ env.BANDIT_BASELINE_FILE }}" ]]; then
-            echo "Performing baseline comparison..."
-            python .security/scripts/bandit_baseline_compare.py \
-              --current ${{ env.SECURITY_REPORTS_PATH }}/static-analysis/bandit.json \
-              --baseline ${{ env.BANDIT_BASELINE_FILE }} \
-              --output ${{ env.SECURITY_REPORTS_PATH }}/static-analysis/bandit-comparison.json || true
+          # Extract security issue counts by severity
+          HIGH_COUNT=$(jq '[.results[] | select(.issue_severity == "HIGH")] | length' reports/security/static/bandit-results.json || echo "0")
+          MEDIUM_COUNT=$(jq '[.results[] | select(.issue_severity == "MEDIUM")] | length' reports/security/static/bandit-results.json || echo "0")
+          LOW_COUNT=$(jq '[.results[] | select(.issue_severity == "LOW")] | length' reports/security/static/bandit-results.json || echo "0")
+          
+          # Extract confidence levels
+          HIGH_CONFIDENCE=$(jq '[.results[] | select(.issue_confidence == "HIGH")] | length' reports/security/static/bandit-results.json || echo "0")
+          MEDIUM_CONFIDENCE=$(jq '[.results[] | select(.issue_confidence == "MEDIUM")] | length' reports/security/static/bandit-results.json || echo "0")
+          LOW_CONFIDENCE=$(jq '[.results[] | select(.issue_confidence == "LOW")] | length' reports/security/static/bandit-results.json || echo "0")
+          
+          # Generate security analysis summary
+          echo "### 📊 Static Security Analysis Summary:" >> $GITHUB_STEP_SUMMARY
+          echo "| Severity | Count | Confidence Distribution |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|------------------------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **HIGH** | $HIGH_COUNT | High: $HIGH_CONFIDENCE, Medium: $MEDIUM_CONFIDENCE, Low: $LOW_CONFIDENCE |" >> $GITHUB_STEP_SUMMARY
+          echo "| **MEDIUM** | $MEDIUM_COUNT | $([ $MEDIUM_COUNT -eq 0 ] && echo '✅ No medium severity issues' || echo '⚠️ Review recommended') |" >> $GITHUB_STEP_SUMMARY
+          echo "| **LOW** | $LOW_COUNT | $([ $LOW_COUNT -eq 0 ] && echo '✅ No low severity issues' || echo 'ℹ️ Informational') |" >> $GITHUB_STEP_SUMMARY
+          
+          # Store counts for security gate evaluation
+          echo "CODE_HIGH_COUNT=$HIGH_COUNT" >> $GITHUB_ENV
+          echo "CODE_MEDIUM_COUNT=$MEDIUM_COUNT" >> $GITHUB_ENV
+          echo "CODE_LOW_COUNT=$LOW_COUNT" >> $GITHUB_ENV
+          
+          # Display top security issues if any
+          if [[ $HIGH_COUNT -gt 0 ]]; then
+            echo "### 🚨 High-Severity Security Issues:" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            jq -r '.results[] | select(.issue_severity == "HIGH") | "\(.test_id): \(.issue_text) (File: \(.filename):\(.line_number))"' reports/security/static/bandit-results.json | head -10 >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
           fi
           
-          # Check exit code and fail on critical/high severity findings
-          if [[ "${BANDIT_EXIT_CODE:-0}" -ne 0 ]]; then
-            echo "::error::Security vulnerabilities found by Bandit analysis"
-            if [[ "${{ env.SECURITY_FAIL_ON_HIGH }}" == "true" ]]; then
-              exit 1
+      - name: ⚖️ Apply static security policy enforcement
+        run: |
+          echo "## ⚖️ Static Security Policy Enforcement" >> $GITHUB_STEP_SUMMARY
+          echo "Applying enterprise security policy per Section 8.5.1 security scanning requirements" >> $GITHUB_STEP_SUMMARY
+          
+          # Apply security policy based on severity thresholds
+          POLICY_VIOLATION=false
+          
+          # High-severity security issues require review
+          if [[ $CODE_HIGH_COUNT -gt 0 ]]; then
+            echo "⚠️ **POLICY WARNING**: $CODE_HIGH_COUNT high-severity security issues detected" >> $GITHUB_STEP_SUMMARY
+            echo "**Action Required**: Security code review and remediation required" >> $GITHUB_STEP_SUMMARY
+            
+            # Determine severity threshold from input
+            SEVERITY_THRESHOLD="${{ github.event.inputs.severity_threshold || 'HIGH' }}"
+            if [[ "$SEVERITY_THRESHOLD" == "HIGH" ]]; then
+              POLICY_VIOLATION=true
             fi
           fi
-      
-      - name: Semgrep Security Analysis
-        if: matrix.tool == 'semgrep'
-        run: |
-          echo "Running Semgrep security analysis..."
           
-          # Run Semgrep with security rulesets
-          semgrep \
-            --config=auto \
-            --config=p/security-audit \
-            --config=p/flask \
-            --config=p/python \
-            --sarif \
-            --output=${{ env.SECURITY_REPORTS_PATH }}/sarif/semgrep.sarif \
-            --verbose \
-            --timeout=600 \
-            src/ || SEMGREP_EXIT_CODE=$?
+          # Medium-severity issues generate warnings
+          if [[ $CODE_MEDIUM_COUNT -gt 0 ]]; then
+            echo "⚠️ **POLICY WARNING**: $CODE_MEDIUM_COUNT medium-severity security issues detected" >> $GITHUB_STEP_SUMMARY
+            echo "**Recommendation**: Review and address in development cycle" >> $GITHUB_STEP_SUMMARY
+          fi
           
-          # Generate JSON report
-          semgrep \
-            --config=auto \
-            --config=p/security-audit \
-            --config=p/flask \
-            --config=p/python \
-            --json \
-            --output=${{ env.SECURITY_REPORTS_PATH }}/static-analysis/semgrep.json \
-            --verbose \
-            --timeout=600 \
-            src/ || true
+          # Set policy violation flag for downstream jobs
+          echo "CODE_POLICY_VIOLATION=$POLICY_VIOLATION" >> $GITHUB_ENV
           
-          # Generate text report
-          semgrep \
-            --config=auto \
-            --config=p/security-audit \
-            --config=p/flask \
-            --config=p/python \
-            --output=${{ env.SECURITY_REPORTS_PATH }}/static-analysis/semgrep.txt \
-            --verbose \
-            --timeout=600 \
-            src/ || true
-          
-          # Check exit code for security findings
-          if [[ "${SEMGREP_EXIT_CODE:-0}" -ne 0 && "${{ env.SECURITY_FAIL_ON_HIGH }}" == "true" ]]; then
-            echo "::error::Security issues found by Semgrep analysis"
+          # Fail the job if policy is violated
+          if [[ "$POLICY_VIOLATION" == "true" ]]; then
+            echo "🚫 **STATIC SECURITY GATE FAILED**: Policy violations detected" >> $GITHUB_STEP_SUMMARY
             exit 1
           fi
-      
-      - name: Additional Security Linting
-        if: matrix.tool == 'security-linting'
-        run: |
-          echo "Running additional security linting tools..."
           
-          # Run flake8 with security plugins
-          flake8 \
-            --select=B,S,DUO \
-            --format='%(path)s:%(row)d:%(col)d: %(code)s %(text)s' \
-            --output-file=${{ env.SECURITY_REPORTS_PATH }}/static-analysis/flake8-security.txt \
-            src/ || true
+          echo "✅ **STATIC SECURITY GATE PASSED**: No policy violations detected" >> $GITHUB_STEP_SUMMARY
           
-          # Run dlint for security issues
-          python -m dlint src/ \
-            --print-dlint-errors \
-            > ${{ env.SECURITY_REPORTS_PATH }}/static-analysis/dlint.txt || true
+      - name: 📊 Upload bandit SARIF report to GitHub Security
+        uses: github/codeql-action/upload-sarif@v2
+        if: always() && env.SARIF_UPLOAD_ENABLED == 'true'
+        with:
+          sarif_file: reports/security/static/bandit-results.sarif
+          category: bandit-security-scan
           
-          # Run dodgy for potential secrets
-          dodgy \
-            --ignore-paths=tests \
-            src/ \
-            > ${{ env.SECURITY_REPORTS_PATH }}/static-analysis/dodgy.txt || true
-      
-      - name: Upload Static Analysis Results
+      - name: 📁 Upload static security reports
         uses: actions/upload-artifact@v3
         if: always()
         with:
-          name: static-security-analysis-${{ matrix.tool }}
-          path: |
-            ${{ env.SECURITY_REPORTS_PATH }}/static-analysis/
-            ${{ env.SECURITY_REPORTS_PATH }}/sarif/
-          retention-days: 30
-      
-      - name: Upload SARIF Results to GitHub Security
-        uses: github/codeql-action/upload-sarif@v2
-        if: always() && (matrix.tool == 'bandit' || matrix.tool == 'semgrep')
-        with:
-          sarif_file: ${{ env.SECURITY_REPORTS_PATH }}/sarif/${{ matrix.tool }}.sarif
-          category: static-security-${{ matrix.tool }}
-        continue-on-error: true
+          name: static-security-reports
+          path: reports/security/static/
+          retention-days: ${{ env.SECURITY_REPORTS_RETENTION }}
 
-  # ---------------------------------------------------------------------------
-  # CONTAINER SECURITY SCANNING
-  # ---------------------------------------------------------------------------
-  container-security-scan:
-    name: Container Security Scanning
+  # ==========================================================================
+  # DEPENDENCY VULNERABILITY SCANNING
+  # ==========================================================================
+  # Comprehensive dependency security assessment per Section 8.5.1
+  
+  dependency-security:
+    name: 📦 Dependency Security Scan
     runs-on: ubuntu-latest
-    needs: security-preparation
-    if: contains(fromJson(needs.security-preparation.outputs.scan-matrix), 'container-security')
-    timeout-minutes: 25
+    needs: security-setup
+    if: contains(fromJson(needs.security-setup.outputs.scan-matrix), 'dependencies')
+    timeout-minutes: 15
     
-    strategy:
-      matrix:
-        scanner: ['trivy', 'docker-scout']
-      fail-fast: false
-    
+    permissions:
+      contents: read
+      security-events: write  # Required for SARIF upload
+      
     steps:
-      - name: Checkout Repository
+      - name: 📥 Checkout repository
         uses: actions/checkout@v4
+        
+      - name: 🐍 Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v4
         with:
-          fetch-depth: 0
-      
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-        with:
-          driver-opts: network=host
-      
-      - name: Build Container Image for Scanning
+          python-version: ${{ env.PYTHON_VERSION }}
+          
+      - name: 📦 Install dependency security scanning tools
         run: |
-          echo "Building container image for security scanning..."
+          echo "## 📦 Installing Dependency Security Tools" >> $GITHUB_STEP_SUMMARY
+          echo "Installing safety ${{ env.SAFETY_VERSION }} and pip-audit ${{ env.PIP_AUDIT_VERSION }} per Section 8.5.1" >> $GITHUB_STEP_SUMMARY
           
-          # Build multi-stage container image
-          docker build \
-            --target production \
-            --tag ${{ env.CONTAINER_IMAGE_NAME }}:${{ needs.security-preparation.outputs.container-image-tag }} \
-            --tag ${{ env.CONTAINER_IMAGE_NAME }}:security-scan \
-            --build-arg BUILDKIT_INLINE_CACHE=1 \
-            --cache-from=${{ env.CONTAINER_IMAGE_NAME }}:latest \
-            .
+          python -m pip install --upgrade pip
+          pip install safety==${{ env.SAFETY_VERSION }}
+          pip install pip-audit==${{ env.PIP_AUDIT_VERSION }}
+          pip install -r requirements.txt  # Install dependencies for scanning
           
-          # Verify image was built successfully
-          docker images ${{ env.CONTAINER_IMAGE_NAME }}
-      
-      - name: Create Security Reports Directory
-        run: |
-          mkdir -p ${{ env.SECURITY_REPORTS_PATH }}/container-security
-          mkdir -p ${{ env.SECURITY_REPORTS_PATH }}/sarif
-          mkdir -p ${{ env.TRIVY_CACHE_DIR }}
-      
-      - name: Trivy Container Vulnerability Scan
-        if: matrix.scanner == 'trivy'
-        run: |
-          echo "Running Trivy container vulnerability scan..."
-          
-          # Install Trivy
-          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin v${{ env.TRIVY_VERSION }}
-          
-          # Verify Trivy installation
-          trivy --version
-          
-          # Update Trivy vulnerability database
-          trivy image --download-db-only --cache-dir ${{ env.TRIVY_CACHE_DIR }}
-          
-          # Run Trivy scan with SARIF output for GitHub Security
-          trivy image \
-            --format sarif \
-            --output ${{ env.SECURITY_REPORTS_PATH }}/sarif/trivy-container.sarif \
-            --cache-dir ${{ env.TRIVY_CACHE_DIR }} \
-            --severity CRITICAL,HIGH,MEDIUM,LOW \
-            --ignore-unfixed \
-            --timeout 15m \
-            ${{ env.CONTAINER_IMAGE_NAME }}:security-scan || TRIVY_EXIT_CODE=$?
-          
-          # Generate JSON report for processing
-          trivy image \
-            --format json \
-            --output ${{ env.SECURITY_REPORTS_PATH }}/container-security/trivy-container.json \
-            --cache-dir ${{ env.TRIVY_CACHE_DIR }} \
-            --severity CRITICAL,HIGH,MEDIUM,LOW \
-            --ignore-unfixed \
-            --timeout 15m \
-            ${{ env.CONTAINER_IMAGE_NAME }}:security-scan || true
-          
-          # Generate human-readable table report
-          trivy image \
-            --format table \
-            --output ${{ env.SECURITY_REPORTS_PATH }}/container-security/trivy-container.txt \
-            --cache-dir ${{ env.TRIVY_CACHE_DIR }} \
-            --severity CRITICAL,HIGH,MEDIUM,LOW \
-            --ignore-unfixed \
-            --timeout 15m \
-            ${{ env.CONTAINER_IMAGE_NAME }}:security-scan || true
-          
-          # Scan for secrets and misconfigurations
-          trivy image \
-            --format json \
-            --output ${{ env.SECURITY_REPORTS_PATH }}/container-security/trivy-secrets.json \
-            --cache-dir ${{ env.TRIVY_CACHE_DIR }} \
-            --scanners secret,config \
-            --timeout 10m \
-            ${{ env.CONTAINER_IMAGE_NAME }}:security-scan || true
-          
-          # Generate compliance report
-          trivy image \
-            --format json \
-            --output ${{ env.SECURITY_REPORTS_PATH }}/container-security/trivy-compliance.json \
-            --cache-dir ${{ env.TRIVY_CACHE_DIR }} \
-            --compliance docker-cis \
-            --timeout 10m \
-            ${{ env.CONTAINER_IMAGE_NAME }}:security-scan || true
-          
-          # Check exit code and fail on critical vulnerabilities
-          if [[ "${TRIVY_EXIT_CODE:-0}" -ne 0 && "${{ env.SECURITY_FAIL_ON_CRITICAL }}" == "true" ]]; then
-            echo "::error::Critical container vulnerabilities found by Trivy scanner"
+          # Verify tool installations
+          safety --version || {
+            echo "❌ **SAFETY INSTALLATION FAILURE**: Failed to install safety scanner" >> $GITHUB_STEP_SUMMARY
             exit 1
-          fi
-      
-      - name: Docker Scout Security Scan
-        if: matrix.scanner == 'docker-scout'
+          }
+          
+          pip-audit --version || {
+            echo "❌ **PIP-AUDIT INSTALLATION FAILURE**: Failed to install pip-audit scanner" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          }
+          
+          echo "✅ **SUCCESS**: Dependency security tools installed successfully" >> $GITHUB_STEP_SUMMARY
+          
+      - name: 🔒 Run safety vulnerability scanning
         run: |
-          echo "Running Docker Scout security analysis..."
+          echo "## 🔒 Running safety Dependency Vulnerability Scan" >> $GITHUB_STEP_SUMMARY
+          echo "Comprehensive dependency vulnerability detection per Section 8.5.1 CVE database validation" >> $GITHUB_STEP_SUMMARY
           
-          # Install Docker Scout
-          curl -sSfL https://raw.githubusercontent.com/docker/scout-cli/main/install.sh | sh -s --
+          # Create security reports directory
+          mkdir -p reports/security/dependencies
           
-          # Verify Docker Scout installation
-          docker scout version
-          
-          # Run Docker Scout vulnerability scan
-          docker scout cves \
-            --format sarif \
-            --output ${{ env.SECURITY_REPORTS_PATH }}/sarif/docker-scout.sarif \
-            ${{ env.CONTAINER_IMAGE_NAME }}:security-scan || SCOUT_EXIT_CODE=$?
-          
-          # Generate JSON report
-          docker scout cves \
-            --format json \
-            --output ${{ env.SECURITY_REPORTS_PATH }}/container-security/docker-scout.json \
-            ${{ env.CONTAINER_IMAGE_NAME }}:security-scan || true
+          # Run safety vulnerability scan
+          safety check \
+            --json \
+            --output reports/security/dependencies/safety-results.json \
+            --continue-on-error || {
+            echo "⚠️ **SAFETY SCAN WARNING**: Some vulnerabilities detected" >> $GITHUB_STEP_SUMMARY
+          }
           
           # Generate human-readable report
-          docker scout cves \
-            --format table \
-            --output ${{ env.SECURITY_REPORTS_PATH }}/container-security/docker-scout.txt \
-            ${{ env.CONTAINER_IMAGE_NAME }}:security-scan || true
+          safety check \
+            --output reports/security/dependencies/safety-report.txt \
+            --continue-on-error || true
           
-          # Scan for policy violations
-          docker scout policy \
-            --format json \
-            --output ${{ env.SECURITY_REPORTS_PATH }}/container-security/docker-scout-policy.json \
-            ${{ env.CONTAINER_IMAGE_NAME }}:security-scan || true
+          # Generate detailed vulnerability report if API key available
+          if [[ -n "${{ secrets.SAFETY_API_KEY }}" ]]; then
+            SAFETY_API_KEY="${{ secrets.SAFETY_API_KEY }}" safety check \
+              --json \
+              --output reports/security/dependencies/safety-detailed.json \
+              --continue-on-error || true
+          fi
           
-          # Check exit code for critical findings
-          if [[ "${SCOUT_EXIT_CODE:-0}" -ne 0 && "${{ env.SECURITY_FAIL_ON_CRITICAL }}" == "true" ]]; then
-            echo "::error::Critical vulnerabilities found by Docker Scout"
+          echo "✅ **SUCCESS**: safety vulnerability scan completed" >> $GITHUB_STEP_SUMMARY
+          
+      - name: 🔍 Run pip-audit vulnerability scanning
+        run: |
+          echo "## 🔍 Running pip-audit Package Vulnerability Assessment" >> $GITHUB_STEP_SUMMARY
+          echo "Additional vulnerability scanning per Section 8.5.1 high severity blocking policy" >> $GITHUB_STEP_SUMMARY
+          
+          # Run pip-audit vulnerability scan
+          pip-audit \
+            --format=json \
+            --output=reports/security/dependencies/pip-audit-results.json \
+            --continue-on-error || {
+            echo "⚠️ **PIP-AUDIT SCAN WARNING**: Some vulnerabilities detected" >> $GITHUB_STEP_SUMMARY
+          }
+          
+          # Generate human-readable report
+          pip-audit \
+            --format=text \
+            --output=reports/security/dependencies/pip-audit-report.txt \
+            --continue-on-error || true
+          
+          # Generate SARIF format for GitHub Security integration
+          pip-audit \
+            --format=sarif \
+            --output=reports/security/dependencies/pip-audit-results.sarif \
+            --continue-on-error || true
+          
+          echo "✅ **SUCCESS**: pip-audit vulnerability scan completed" >> $GITHUB_STEP_SUMMARY
+          
+      - name: 🔍 Analyze dependency vulnerability scan results
+        run: |
+          echo "## 🔍 Analyzing Dependency Vulnerability Scan Results" >> $GITHUB_STEP_SUMMARY
+          
+          # Initialize counters
+          SAFETY_CRITICAL=0
+          SAFETY_HIGH=0
+          SAFETY_MEDIUM=0
+          SAFETY_LOW=0
+          
+          PIPAUDIT_CRITICAL=0
+          PIPAUDIT_HIGH=0
+          PIPAUDIT_MEDIUM=0
+          PIPAUDIT_LOW=0
+          
+          # Analyze safety results if file exists
+          if [[ -f reports/security/dependencies/safety-results.json ]]; then
+            # Count vulnerabilities by severity from safety
+            SAFETY_CRITICAL=$(jq '[.[]? | select(.severity == "critical" or .severity == "CRITICAL")] | length' reports/security/dependencies/safety-results.json || echo "0")
+            SAFETY_HIGH=$(jq '[.[]? | select(.severity == "high" or .severity == "HIGH")] | length' reports/security/dependencies/safety-results.json || echo "0")
+            SAFETY_MEDIUM=$(jq '[.[]? | select(.severity == "medium" or .severity == "MEDIUM")] | length' reports/security/dependencies/safety-results.json || echo "0")
+            SAFETY_LOW=$(jq '[.[]? | select(.severity == "low" or .severity == "LOW")] | length' reports/security/dependencies/safety-results.json || echo "0")
+          fi
+          
+          # Analyze pip-audit results if file exists
+          if [[ -f reports/security/dependencies/pip-audit-results.json ]]; then
+            # Count vulnerabilities by severity from pip-audit
+            PIPAUDIT_HIGH=$(jq '[.vulnerabilities[]? | select(.aliases[]? | test("CVE-"))] | length' reports/security/dependencies/pip-audit-results.json || echo "0")
+          fi
+          
+          # Calculate total vulnerability counts
+          TOTAL_CRITICAL=$((SAFETY_CRITICAL + PIPAUDIT_CRITICAL))
+          TOTAL_HIGH=$((SAFETY_HIGH + PIPAUDIT_HIGH))
+          TOTAL_MEDIUM=$((SAFETY_MEDIUM + PIPAUDIT_MEDIUM))
+          TOTAL_LOW=$((SAFETY_LOW + PIPAUDIT_LOW))
+          
+          # Generate dependency security summary
+          echo "### 📊 Dependency Vulnerability Summary:" >> $GITHUB_STEP_SUMMARY
+          echo "| Severity | safety | pip-audit | Total | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|--------|-----------|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **CRITICAL** | $SAFETY_CRITICAL | $PIPAUDIT_CRITICAL | $TOTAL_CRITICAL | $([ $TOTAL_CRITICAL -eq 0 ] && echo '✅ PASS' || echo '❌ FAIL') |" >> $GITHUB_STEP_SUMMARY
+          echo "| **HIGH** | $SAFETY_HIGH | $PIPAUDIT_HIGH | $TOTAL_HIGH | $([ $TOTAL_HIGH -eq 0 ] && echo '✅ PASS' || echo '⚠️ REVIEW') |" >> $GITHUB_STEP_SUMMARY
+          echo "| **MEDIUM** | $SAFETY_MEDIUM | $PIPAUDIT_MEDIUM | $TOTAL_MEDIUM | $([ $TOTAL_MEDIUM -eq 0 ] && echo '✅ PASS' || echo '⚠️ WARNING') |" >> $GITHUB_STEP_SUMMARY
+          echo "| **LOW** | $SAFETY_LOW | $PIPAUDIT_LOW | $TOTAL_LOW | $([ $TOTAL_LOW -eq 0 ] && echo '✅ PASS' || echo 'ℹ️ INFO') |" >> $GITHUB_STEP_SUMMARY
+          
+          # Store counts for security gate evaluation
+          echo "DEPS_CRITICAL_COUNT=$TOTAL_CRITICAL" >> $GITHUB_ENV
+          echo "DEPS_HIGH_COUNT=$TOTAL_HIGH" >> $GITHUB_ENV
+          echo "DEPS_MEDIUM_COUNT=$TOTAL_MEDIUM" >> $GITHUB_ENV
+          echo "DEPS_LOW_COUNT=$TOTAL_LOW" >> $GITHUB_ENV
+          
+          # Display critical vulnerabilities if any
+          if [[ $TOTAL_CRITICAL -gt 0 ]] && [[ -f reports/security/dependencies/safety-results.json ]]; then
+            echo "### 🚨 Critical Dependency Vulnerabilities:" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            jq -r '.[]? | select(.severity == "critical" or .severity == "CRITICAL") | "\(.vulnerability_id): \(.advisory) (Package: \(.package_name))"' reports/security/dependencies/safety-results.json | head -5 >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+          
+      - name: ⚖️ Apply dependency security policy enforcement
+        run: |
+          echo "## ⚖️ Dependency Security Policy Enforcement" >> $GITHUB_STEP_SUMMARY
+          echo "Applying enterprise security policy per Section 8.5.1 dependency vulnerability scanning" >> $GITHUB_STEP_SUMMARY
+          
+          # Apply security policy based on severity thresholds
+          POLICY_VIOLATION=false
+          
+          # Critical dependency vulnerabilities always fail the build
+          if [[ $DEPS_CRITICAL_COUNT -gt 0 ]]; then
+            echo "❌ **POLICY VIOLATION**: $DEPS_CRITICAL_COUNT critical dependency vulnerabilities detected - BUILD TERMINATED" >> $GITHUB_STEP_SUMMARY
+            echo "**Action Required**: Immediate dependency updates required" >> $GITHUB_STEP_SUMMARY
+            POLICY_VIOLATION=true
+          fi
+          
+          # High dependency vulnerabilities require review
+          if [[ $DEPS_HIGH_COUNT -gt 0 ]]; then
+            echo "⚠️ **POLICY WARNING**: $DEPS_HIGH_COUNT high-severity dependency vulnerabilities detected" >> $GITHUB_STEP_SUMMARY
+            echo "**Action Required**: Security review and dependency update planning" >> $GITHUB_STEP_SUMMARY
+            
+            # Determine severity threshold from input
+            SEVERITY_THRESHOLD="${{ github.event.inputs.severity_threshold || 'HIGH' }}"
+            if [[ "$SEVERITY_THRESHOLD" == "HIGH" ]]; then
+              POLICY_VIOLATION=true
+            fi
+          fi
+          
+          # Medium dependency vulnerabilities generate warnings
+          if [[ $DEPS_MEDIUM_COUNT -gt 0 ]]; then
+            echo "⚠️ **POLICY WARNING**: $DEPS_MEDIUM_COUNT medium-severity dependency vulnerabilities detected" >> $GITHUB_STEP_SUMMARY
+            echo "**Recommendation**: Schedule dependency updates in next development cycle" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Set policy violation flag for downstream jobs
+          echo "DEPS_POLICY_VIOLATION=$POLICY_VIOLATION" >> $GITHUB_ENV
+          
+          # Fail the job if policy is violated
+          if [[ "$POLICY_VIOLATION" == "true" ]]; then
+            echo "🚫 **DEPENDENCY SECURITY GATE FAILED**: Policy violations detected" >> $GITHUB_STEP_SUMMARY
             exit 1
           fi
-      
-      - name: Container Security Best Practices Check
-        run: |
-          echo "Checking container security best practices..."
           
-          # Check for non-root user
-          CONTAINER_USER=$(docker run --rm ${{ env.CONTAINER_IMAGE_NAME }}:security-scan whoami 2>/dev/null || echo "unknown")
-          if [[ "$CONTAINER_USER" == "root" ]]; then
-            echo "::warning::Container is running as root user - security risk"
-          else
-            echo "✓ Container is running as non-root user: $CONTAINER_USER"
-          fi
+          echo "✅ **DEPENDENCY SECURITY GATE PASSED**: No policy violations detected" >> $GITHUB_STEP_SUMMARY
           
-          # Check for minimal base image
-          IMAGE_SIZE=$(docker images ${{ env.CONTAINER_IMAGE_NAME }}:security-scan --format "{{.Size}}")
-          echo "Container image size: $IMAGE_SIZE"
+      - name: 📊 Upload pip-audit SARIF report to GitHub Security
+        uses: github/codeql-action/upload-sarif@v2
+        if: always() && env.SARIF_UPLOAD_ENABLED == 'true' && hashFiles('reports/security/dependencies/pip-audit-results.sarif') != ''
+        with:
+          sarif_file: reports/security/dependencies/pip-audit-results.sarif
+          category: pip-audit-dependency-scan
           
-          # Inspect image layers for security issues
-          docker history ${{ env.CONTAINER_IMAGE_NAME }}:security-scan \
-            > ${{ env.SECURITY_REPORTS_PATH }}/container-security/image-history.txt
-          
-          # Check for exposed ports
-          EXPOSED_PORTS=$(docker inspect ${{ env.CONTAINER_IMAGE_NAME }}:security-scan | jq -r '.[0].Config.ExposedPorts | keys[]' 2>/dev/null || echo "none")
-          echo "Exposed ports: $EXPOSED_PORTS"
-          echo "exposed_ports=$EXPOSED_PORTS" >> ${{ env.SECURITY_REPORTS_PATH }}/container-security/metadata.txt
-      
-      - name: Upload Container Security Results
+      - name: 📁 Upload dependency security reports
         uses: actions/upload-artifact@v3
         if: always()
         with:
-          name: container-security-scan-${{ matrix.scanner }}
-          path: |
-            ${{ env.SECURITY_REPORTS_PATH }}/container-security/
-            ${{ env.SECURITY_REPORTS_PATH }}/sarif/
-          retention-days: 30
-      
-      - name: Upload SARIF Results to GitHub Security
-        uses: github/codeql-action/upload-sarif@v2
-        if: always()
-        with:
-          sarif_file: ${{ env.SECURITY_REPORTS_PATH }}/sarif/
-          category: container-security-${{ matrix.scanner }}
-        continue-on-error: true
+          name: dependency-security-reports
+          path: reports/security/dependencies/
+          retention-days: ${{ env.SECURITY_REPORTS_RETENTION }}
 
-  # ---------------------------------------------------------------------------
-  # COMPLIANCE VALIDATION AND SECURITY POLICY ENFORCEMENT
-  # ---------------------------------------------------------------------------
-  compliance-validation:
-    name: Compliance Validation
+  # ==========================================================================
+  # SECURITY BASELINE AND COMPLIANCE VALIDATION
+  # ==========================================================================
+  # Security trend analysis and baseline management per Section 6.6.3
+  
+  security-baseline:
+    name: 📊 Security Baseline & Compliance
     runs-on: ubuntu-latest
-    needs: [security-preparation, dependency-security-scan, static-security-analysis, container-security-scan]
-    if: always() && contains(fromJson(needs.security-preparation.outputs.scan-matrix), 'compliance-validation')
+    needs: [security-setup, container-security, code-security, dependency-security]
+    if: always() && !cancelled()
     timeout-minutes: 15
     
     steps:
-      - name: Checkout Repository
+      - name: 📥 Checkout repository
         uses: actions/checkout@v4
-      
-      - name: Set up Python
+        with:
+          fetch-depth: 0  # Full history for trend analysis
+          
+      - name: 🐍 Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v4
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      
-      - name: Download All Security Reports
+          
+      - name: 📥 Download all security reports
         uses: actions/download-artifact@v3
         with:
-          path: ${{ env.SECURITY_REPORTS_PATH }}/artifacts
-        continue-on-error: true
-      
-      - name: Install Compliance Tools
+          path: reports/security/
+          
+      - name: 🔍 Generate comprehensive security assessment
         run: |
-          python -m pip install --upgrade pip
-          pip install jq yq-python json-schema jsonschema
+          echo "## 📊 Comprehensive Security Assessment" >> $GITHUB_STEP_SUMMARY
+          echo "Enterprise compliance validation and security baseline analysis per Section 6.6.3" >> $GITHUB_STEP_SUMMARY
           
-          # Install custom compliance validation tools
-          if [[ -f ".security/requirements.txt" ]]; then
-            pip install -r .security/requirements.txt
+          # Initialize security assessment
+          OVERALL_SECURITY_STATUS="PASS"
+          TOTAL_CRITICAL=0
+          TOTAL_HIGH=0
+          TOTAL_MEDIUM=0
+          TOTAL_LOW=0
+          
+          # Container security results
+          CONTAINER_CRITICAL="${{ env.CONTAINER_CRITICAL_COUNT || 0 }}"
+          CONTAINER_HIGH="${{ env.CONTAINER_HIGH_COUNT || 0 }}"
+          CONTAINER_MEDIUM="${{ env.CONTAINER_MEDIUM_COUNT || 0 }}"
+          CONTAINER_LOW="${{ env.CONTAINER_LOW_COUNT || 0 }}"
+          
+          # Static analysis results
+          CODE_HIGH="${{ env.CODE_HIGH_COUNT || 0 }}"
+          CODE_MEDIUM="${{ env.CODE_MEDIUM_COUNT || 0 }}"
+          CODE_LOW="${{ env.CODE_LOW_COUNT || 0 }}"
+          
+          # Dependency security results
+          DEPS_CRITICAL="${{ env.DEPS_CRITICAL_COUNT || 0 }}"
+          DEPS_HIGH="${{ env.DEPS_HIGH_COUNT || 0 }}"
+          DEPS_MEDIUM="${{ env.DEPS_MEDIUM_COUNT || 0 }}"
+          DEPS_LOW="${{ env.DEPS_LOW_COUNT || 0 }}"
+          
+          # Calculate totals
+          TOTAL_CRITICAL=$((CONTAINER_CRITICAL + DEPS_CRITICAL))
+          TOTAL_HIGH=$((CONTAINER_HIGH + CODE_HIGH + DEPS_HIGH))
+          TOTAL_MEDIUM=$((CONTAINER_MEDIUM + CODE_MEDIUM + DEPS_MEDIUM))
+          TOTAL_LOW=$((CONTAINER_LOW + CODE_LOW + DEPS_LOW))
+          
+          # Determine overall security status
+          if [[ $TOTAL_CRITICAL -gt 0 ]]; then
+            OVERALL_SECURITY_STATUS="CRITICAL_FAIL"
+          elif [[ $TOTAL_HIGH -gt 0 ]]; then
+            OVERALL_SECURITY_STATUS="HIGH_REVIEW"
+          elif [[ $TOTAL_MEDIUM -gt 0 ]]; then
+            OVERALL_SECURITY_STATUS="MEDIUM_WARNING"
           fi
-      
-      - name: Create Compliance Reports Directory
+          
+          # Generate comprehensive security summary
+          echo "### 🔒 Overall Security Assessment:" >> $GITHUB_STEP_SUMMARY
+          echo "| Category | Critical | High | Medium | Low | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|----------|------|--------|-----|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Container** | $CONTAINER_CRITICAL | $CONTAINER_HIGH | $CONTAINER_MEDIUM | $CONTAINER_LOW | ${{ needs.container-security.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Code Analysis** | 0 | $CODE_HIGH | $CODE_MEDIUM | $CODE_LOW | ${{ needs.code-security.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Dependencies** | $DEPS_CRITICAL | $DEPS_HIGH | $DEPS_MEDIUM | $DEPS_LOW | ${{ needs.dependency-security.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **TOTAL** | **$TOTAL_CRITICAL** | **$TOTAL_HIGH** | **$TOTAL_MEDIUM** | **$TOTAL_LOW** | **$OVERALL_SECURITY_STATUS** |" >> $GITHUB_STEP_SUMMARY
+          
+          # Store overall security status
+          echo "OVERALL_SECURITY_STATUS=$OVERALL_SECURITY_STATUS" >> $GITHUB_ENV
+          echo "TOTAL_CRITICAL_FINDINGS=$TOTAL_CRITICAL" >> $GITHUB_ENV
+          echo "TOTAL_HIGH_FINDINGS=$TOTAL_HIGH" >> $GITHUB_ENV
+          
+      - name: 📊 Generate security baseline data
         run: |
-          mkdir -p ${{ env.SECURITY_REPORTS_PATH }}/compliance
-          mkdir -p ${{ env.SECURITY_REPORTS_PATH }}/sarif
-      
-      - name: Security Policy Compliance Check
+          echo "## 📊 Security Baseline Data Generation" >> $GITHUB_STEP_SUMMARY
+          
+          # Create baseline data directory
+          mkdir -p security-baseline
+          
+          # Generate security baseline JSON
+          cat > security-baseline/current-baseline.json << EOF
+{
+  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "commit_sha": "${{ github.sha }}",
+  "branch": "${{ github.ref_name }}",
+  "scan_type": "${{ github.event.inputs.scan_type || 'comprehensive' }}",
+  "security_summary": {
+    "container_vulnerabilities": {
+      "critical": ${{ env.CONTAINER_CRITICAL_COUNT || 0 }},
+      "high": ${{ env.CONTAINER_HIGH_COUNT || 0 }},
+      "medium": ${{ env.CONTAINER_MEDIUM_COUNT || 0 }},
+      "low": ${{ env.CONTAINER_LOW_COUNT || 0 }}
+    },
+    "static_analysis": {
+      "high": ${{ env.CODE_HIGH_COUNT || 0 }},
+      "medium": ${{ env.CODE_MEDIUM_COUNT || 0 }},
+      "low": ${{ env.CODE_LOW_COUNT || 0 }}
+    },
+    "dependency_vulnerabilities": {
+      "critical": ${{ env.DEPS_CRITICAL_COUNT || 0 }},
+      "high": ${{ env.DEPS_HIGH_COUNT || 0 }},
+      "medium": ${{ env.DEPS_MEDIUM_COUNT || 0 }},
+      "low": ${{ env.DEPS_LOW_COUNT || 0 }}
+    },
+    "total_findings": {
+      "critical": ${{ env.TOTAL_CRITICAL_FINDINGS || 0 }},
+      "high": ${{ env.TOTAL_HIGH_FINDINGS || 0 }},
+      "medium": $((env.CONTAINER_MEDIUM_COUNT + env.CODE_MEDIUM_COUNT + env.DEPS_MEDIUM_COUNT)),
+      "low": $((env.CONTAINER_LOW_COUNT + env.CODE_LOW_COUNT + env.DEPS_LOW_COUNT))
+    }
+  },
+  "policy_compliance": {
+    "overall_status": "${{ env.OVERALL_SECURITY_STATUS }}",
+    "critical_policy_violations": ${{ env.TOTAL_CRITICAL_FINDINGS || 0 }},
+    "high_severity_warnings": ${{ env.TOTAL_HIGH_FINDINGS || 0 }},
+    "requires_security_review": $([ "${{ env.OVERALL_SECURITY_STATUS }}" = "HIGH_REVIEW" ] && echo "true" || echo "false"),
+    "deployment_approved": $([ "${{ env.OVERALL_SECURITY_STATUS }}" = "PASS" ] && echo "true" || echo "false")
+  },
+  "scan_metadata": {
+    "trivy_version": "${{ env.TRIVY_VERSION }}",
+    "bandit_version": "${{ env.BANDIT_VERSION }}",
+    "safety_version": "${{ env.SAFETY_VERSION }}",
+    "pip_audit_version": "${{ env.PIP_AUDIT_VERSION }}",
+    "scan_duration_minutes": ${{ github.run_number }},
+    "github_run_id": "${{ github.run_id }}",
+    "github_run_number": ${{ github.run_number }}
+  }
+}
+EOF
+          
+          echo "✅ **SUCCESS**: Security baseline data generated" >> $GITHUB_STEP_SUMMARY
+          
+      - name: 📈 Compare with previous security baseline
         run: |
-          echo "Validating security policy compliance..."
+          echo "## 📈 Security Baseline Trend Analysis" >> $GITHUB_STEP_SUMMARY
           
-          # Initialize compliance report
-          COMPLIANCE_REPORT='{"timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'", "compliance_checks": []}'
-          
-          # Check Flask-Talisman security headers configuration
-          echo "Checking Flask-Talisman security configuration..."
-          if grep -r "Flask-Talisman" src/ &>/dev/null; then
-            TALISMAN_CHECK='{"check": "flask_talisman", "status": "pass", "description": "Flask-Talisman security headers configured"}'
+          # Check if previous baseline exists
+          if [[ -f "${{ env.BASELINE_FILE }}" ]]; then
+            echo "📊 Comparing with previous security baseline..." >> $GITHUB_STEP_SUMMARY
+            
+            # Extract previous baseline data
+            PREV_CRITICAL=$(jq '.security_summary.total_findings.critical' ${{ env.BASELINE_FILE }} || echo "0")
+            PREV_HIGH=$(jq '.security_summary.total_findings.high' ${{ env.BASELINE_FILE }} || echo "0")
+            PREV_TIMESTAMP=$(jq -r '.timestamp' ${{ env.BASELINE_FILE }} || echo "unknown")
+            
+            CURR_CRITICAL=${{ env.TOTAL_CRITICAL_FINDINGS || 0 }}
+            CURR_HIGH=${{ env.TOTAL_HIGH_FINDINGS || 0 }}
+            
+            # Calculate trend changes
+            CRITICAL_CHANGE=$((CURR_CRITICAL - PREV_CRITICAL))
+            HIGH_CHANGE=$((CURR_HIGH - PREV_HIGH))
+            
+            # Generate trend analysis
+            echo "### 📈 Security Trend Analysis:" >> $GITHUB_STEP_SUMMARY
+            echo "| Metric | Previous | Current | Change | Trend |" >> $GITHUB_STEP_SUMMARY
+            echo "|--------|----------|---------|--------|-------|" >> $GITHUB_STEP_SUMMARY
+            echo "| **Critical Findings** | $PREV_CRITICAL | $CURR_CRITICAL | $CRITICAL_CHANGE | $([ $CRITICAL_CHANGE -eq 0 ] && echo '➡️ STABLE' || ([ $CRITICAL_CHANGE -gt 0 ] && echo '⬆️ WORSENING' || echo '⬇️ IMPROVING')) |" >> $GITHUB_STEP_SUMMARY
+            echo "| **High Findings** | $PREV_HIGH | $CURR_HIGH | $HIGH_CHANGE | $([ $HIGH_CHANGE -eq 0 ] && echo '➡️ STABLE' || ([ $HIGH_CHANGE -gt 0 ] && echo '⬆️ WORSENING' || echo '⬇️ IMPROVING')) |" >> $GITHUB_STEP_SUMMARY
+            echo "| **Previous Scan** | $PREV_TIMESTAMP | - | - | - |" >> $GITHUB_STEP_SUMMARY
+            
+            # Alert on security regression
+            if [[ $CRITICAL_CHANGE -gt 0 ]] || [[ $HIGH_CHANGE -gt 0 ]]; then
+              echo "⚠️ **SECURITY REGRESSION DETECTED**: Security posture has deteriorated since last baseline" >> $GITHUB_STEP_SUMMARY
+              echo "SECURITY_REGRESSION=true" >> $GITHUB_ENV
+            else
+              echo "✅ **SECURITY POSTURE MAINTAINED**: No security regression detected" >> $GITHUB_STEP_SUMMARY
+              echo "SECURITY_REGRESSION=false" >> $GITHUB_ENV
+            fi
           else
-            TALISMAN_CHECK='{"check": "flask_talisman", "status": "fail", "description": "Flask-Talisman security headers not configured"}'
+            echo "📊 No previous baseline found - establishing new security baseline" >> $GITHUB_STEP_SUMMARY
+            echo "SECURITY_REGRESSION=false" >> $GITHUB_ENV
           fi
-          COMPLIANCE_REPORT=$(echo "$COMPLIANCE_REPORT" | jq --argjson check "$TALISMAN_CHECK" '.compliance_checks += [$check]')
           
-          # Check authentication configuration
-          echo "Checking authentication configuration..."
-          if grep -r "PyJWT\|Auth0" src/ &>/dev/null; then
-            AUTH_CHECK='{"check": "authentication", "status": "pass", "description": "JWT authentication configured"}'
-          else
-            AUTH_CHECK='{"check": "authentication", "status": "fail", "description": "JWT authentication not properly configured"}'
-          fi
-          COMPLIANCE_REPORT=$(echo "$COMPLIANCE_REPORT" | jq --argjson check "$AUTH_CHECK" '.compliance_checks += [$check]')
-          
-          # Check encryption configuration
-          echo "Checking encryption configuration..."
-          if grep -r "cryptography\|Fernet" src/ &>/dev/null; then
-            ENCRYPTION_CHECK='{"check": "encryption", "status": "pass", "description": "Encryption libraries configured"}'
-          else
-            ENCRYPTION_CHECK='{"check": "encryption", "status": "fail", "description": "Encryption configuration not found"}'
-          fi
-          COMPLIANCE_REPORT=$(echo "$COMPLIANCE_REPORT" | jq --argjson check "$ENCRYPTION_CHECK" '.compliance_checks += [$check]')
-          
-          # Check input validation
-          echo "Checking input validation configuration..."
-          if grep -r "marshmallow\|pydantic" src/ &>/dev/null; then
-            VALIDATION_CHECK='{"check": "input_validation", "status": "pass", "description": "Input validation frameworks configured"}'
-          else
-            VALIDATION_CHECK='{"check": "input_validation", "status": "fail", "description": "Input validation not properly configured"}'
-          fi
-          COMPLIANCE_REPORT=$(echo "$COMPLIANCE_REPORT" | jq --argjson check "$VALIDATION_CHECK" '.compliance_checks += [$check]')
-          
-          # Save compliance report
-          echo "$COMPLIANCE_REPORT" > ${{ env.SECURITY_REPORTS_PATH }}/compliance/policy-compliance.json
-          
-          # Generate human-readable compliance report
-          echo "$COMPLIANCE_REPORT" | jq -r '.compliance_checks[] | "\(.check): \(.status) - \(.description)"' \
-            > ${{ env.SECURITY_REPORTS_PATH }}/compliance/policy-compliance.txt
-          
-          # Check for compliance failures
-          FAILED_CHECKS=$(echo "$COMPLIANCE_REPORT" | jq -r '.compliance_checks[] | select(.status == "fail") | .check' | wc -l)
-          if [[ "$FAILED_CHECKS" -gt 0 ]]; then
-            echo "::warning::$FAILED_CHECKS compliance checks failed"
-          fi
-      
-      - name: OWASP Top 10 Compliance Validation
+      - name: 💾 Update security baseline
+        if: github.event.inputs.baseline_update == 'true' || (github.ref == 'refs/heads/main' && env.OVERALL_SECURITY_STATUS == 'PASS')
         run: |
-          echo "Validating OWASP Top 10 compliance..."
+          echo "## 💾 Updating Security Baseline" >> $GITHUB_STEP_SUMMARY
           
-          # Initialize OWASP compliance report
-          OWASP_REPORT='{"timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'", "owasp_checks": []}'
+          # Copy current baseline as new baseline
+          cp security-baseline/current-baseline.json ${{ env.BASELINE_FILE }}
           
-          # A01: Broken Access Control
-          ACCESS_CONTROL='{"category": "A01", "name": "Broken Access Control", "status": "pass", "findings": []}'
-          if find ${{ env.SECURITY_REPORTS_PATH }}/artifacts -name "*.json" -exec grep -l "access.control\|authorization" {} \; | wc -l | grep -q "0"; then
-            ACCESS_CONTROL=$(echo "$ACCESS_CONTROL" | jq '.status = "review_required"')
-          fi
-          OWASP_REPORT=$(echo "$OWASP_REPORT" | jq --argjson check "$ACCESS_CONTROL" '.owasp_checks += [$check]')
+          echo "✅ **SUCCESS**: Security baseline updated successfully" >> $GITHUB_STEP_SUMMARY
+          echo "📊 New baseline established for future security trend analysis" >> $GITHUB_STEP_SUMMARY
           
-          # A02: Cryptographic Failures  
-          CRYPTO_FAILURES='{"category": "A02", "name": "Cryptographic Failures", "status": "pass", "findings": []}'
-          if find ${{ env.SECURITY_REPORTS_PATH }}/artifacts -name "*.json" -exec grep -l "crypto\|encryption\|hash" {} \; | wc -l | grep -q "0"; then
-            CRYPTO_FAILURES=$(echo "$CRYPTO_FAILURES" | jq '.status = "review_required"')
-          fi
-          OWASP_REPORT=$(echo "$OWASP_REPORT" | jq --argjson check "$CRYPTO_FAILURES" '.owasp_checks += [$check]')
-          
-          # A03: Injection
-          INJECTION='{"category": "A03", "name": "Injection", "status": "pass", "findings": []}'
-          if find ${{ env.SECURITY_REPORTS_PATH }}/artifacts -name "*.json" -exec grep -l "injection\|sql\|nosql" {} \; | wc -l | gt 0; then
-            INJECTION=$(echo "$INJECTION" | jq '.status = "findings_detected"')
-          fi
-          OWASP_REPORT=$(echo "$OWASP_REPORT" | jq --argjson check "$INJECTION" '.owasp_checks += [$check]')
-          
-          # A06: Vulnerable and Outdated Components
-          VULNERABLE_COMPONENTS='{"category": "A06", "name": "Vulnerable and Outdated Components", "status": "pass", "findings": []}'
-          if find ${{ env.SECURITY_REPORTS_PATH }}/artifacts -name "*safety*" -o -name "*pip-audit*" | xargs -I {} test -f {} && grep -l "vulnerability\|CVE" ${{ env.SECURITY_REPORTS_PATH }}/artifacts/*safety* ${{ env.SECURITY_REPORTS_PATH }}/artifacts/*pip-audit* 2>/dev/null; then
-            VULNERABLE_COMPONENTS=$(echo "$VULNERABLE_COMPONENTS" | jq '.status = "findings_detected"')
-          fi
-          OWASP_REPORT=$(echo "$OWASP_REPORT" | jq --argjson check "$VULNERABLE_COMPONENTS" '.owasp_checks += [$check]')
-          
-          # Save OWASP compliance report
-          echo "$OWASP_REPORT" > ${{ env.SECURITY_REPORTS_PATH }}/compliance/owasp-compliance.json
-          
-          # Generate summary
-          echo "$OWASP_REPORT" | jq -r '.owasp_checks[] | "\(.category) \(.name): \(.status)"' \
-            > ${{ env.SECURITY_REPORTS_PATH }}/compliance/owasp-compliance.txt
-      
-      - name: Generate Security Compliance Summary
-        run: |
-          echo "Generating comprehensive security compliance summary..."
-          
-          # Initialize summary report
-          SUMMARY='{
-            "scan_timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'",
-            "repository": "${{ github.repository }}",
-            "commit_sha": "${{ github.sha }}",
-            "branch": "${{ github.ref_name }}",
-            "scan_type": "comprehensive",
-            "compliance_status": "unknown",
-            "security_findings": {
-              "critical": 0,
-              "high": 0,
-              "medium": 0,
-              "low": 0
-            },
-            "scan_results": []
-          }'
-          
-          # Process dependency scan results
-          if find ${{ env.SECURITY_REPORTS_PATH }}/artifacts -name "*dependency*" -type d | head -1 | xargs test -d; then
-            DEP_CRITICAL=$(find ${{ env.SECURITY_REPORTS_PATH }}/artifacts -name "*.json" -exec grep -l "CRITICAL\|Critical" {} \; | wc -l || echo 0)
-            DEP_HIGH=$(find ${{ env.SECURITY_REPORTS_PATH }}/artifacts -name "*.json" -exec grep -l "HIGH\|High" {} \; | wc -l || echo 0)
-            SUMMARY=$(echo "$SUMMARY" | jq --argjson crit "$DEP_CRITICAL" --argjson high "$DEP_HIGH" '
-              .security_findings.critical += $crit |
-              .security_findings.high += $high |
-              .scan_results += [{"type": "dependency_scan", "critical": $crit, "high": $high}]
-            ')
-          fi
-          
-          # Process static analysis results
-          if find ${{ env.SECURITY_REPORTS_PATH }}/artifacts -name "*static*" -type d | head -1 | xargs test -d; then
-            STATIC_CRITICAL=$(find ${{ env.SECURITY_REPORTS_PATH }}/artifacts -name "*.json" -exec grep -l "SEVERITY.*HIGH\|severity.*high" {} \; | wc -l || echo 0)
-            SUMMARY=$(echo "$SUMMARY" | jq --argjson crit "$STATIC_CRITICAL" '
-              .security_findings.critical += $crit |
-              .scan_results += [{"type": "static_analysis", "critical": $crit}]
-            ')
-          fi
-          
-          # Process container scan results
-          if find ${{ env.SECURITY_REPORTS_PATH }}/artifacts -name "*container*" -type d | head -1 | xargs test -d; then
-            CONTAINER_CRITICAL=$(find ${{ env.SECURITY_REPORTS_PATH }}/artifacts -name "*.json" -exec grep -l "CRITICAL\|Critical" {} \; | wc -l || echo 0)
-            SUMMARY=$(echo "$SUMMARY" | jq --argjson crit "$CONTAINER_CRITICAL" '
-              .security_findings.critical += $crit |
-              .scan_results += [{"type": "container_scan", "critical": $crit}]
-            ')
-          fi
-          
-          # Determine overall compliance status
-          TOTAL_CRITICAL=$(echo "$SUMMARY" | jq '.security_findings.critical')
-          TOTAL_HIGH=$(echo "$SUMMARY" | jq '.security_findings.high')
-          
-          if [[ "$TOTAL_CRITICAL" -gt 0 ]]; then
-            COMPLIANCE_STATUS="non_compliant_critical"
-          elif [[ "$TOTAL_HIGH" -gt 5 ]]; then
-            COMPLIANCE_STATUS="non_compliant_high"
-          else
-            COMPLIANCE_STATUS="compliant"
-          fi
-          
-          SUMMARY=$(echo "$SUMMARY" | jq --arg status "$COMPLIANCE_STATUS" '.compliance_status = $status')
-          
-          # Save summary report
-          echo "$SUMMARY" > ${{ env.SECURITY_REPORTS_PATH }}/compliance/security-summary.json
-          
-          # Generate executive summary
-          cat > ${{ env.SECURITY_REPORTS_PATH }}/compliance/executive-summary.md << EOF
-          # Security Compliance Report
-          
-          **Repository:** ${{ github.repository }}  
-          **Scan Date:** $(date -u +%Y-%m-%d)  
-          **Compliance Status:** $COMPLIANCE_STATUS  
-          
-          ## Security Findings Summary
-          - **Critical:** $TOTAL_CRITICAL
-          - **High:** $TOTAL_HIGH
-          - **Medium:** $(echo "$SUMMARY" | jq '.security_findings.medium')
-          - **Low:** $(echo "$SUMMARY" | jq '.security_findings.low')
-          
-          ## Scan Coverage
-          $(echo "$SUMMARY" | jq -r '.scan_results[] | "- \(.type): \(.critical // 0) critical findings"')
-          
-          ## Compliance Status
-          $(if [[ "$COMPLIANCE_STATUS" == "compliant" ]]; then
-            echo "✅ **COMPLIANT** - All security requirements met"
-          elif [[ "$COMPLIANCE_STATUS" == "non_compliant_high" ]]; then
-            echo "⚠️ **NON-COMPLIANT** - High severity findings require review"
-          else
-            echo "❌ **NON-COMPLIANT** - Critical security findings require immediate attention"
-          fi)
-          EOF
-          
-          # Set job outputs for security gates
-          echo "compliance_status=$COMPLIANCE_STATUS" >> $GITHUB_OUTPUT
-          echo "critical_findings=$TOTAL_CRITICAL" >> $GITHUB_OUTPUT
-          echo "high_findings=$TOTAL_HIGH" >> $GITHUB_OUTPUT
-      
-      - name: Upload Compliance Reports
+      - name: 📁 Upload security baseline and reports
         uses: actions/upload-artifact@v3
         if: always()
         with:
-          name: security-compliance-reports
-          path: ${{ env.SECURITY_REPORTS_PATH }}/compliance/
-          retention-days: 90
+          name: security-baseline-reports
+          path: |
+            security-baseline/
+            ${{ env.BASELINE_FILE }}
+          retention-days: ${{ env.SECURITY_REPORTS_RETENTION }}
 
-  # ---------------------------------------------------------------------------
-  # SECURITY NOTIFICATION AND REPORTING
-  # ---------------------------------------------------------------------------
-  security-notification:
-    name: Security Notification
+  # ==========================================================================
+  # SECURITY GATE ENFORCEMENT AND NOTIFICATIONS
+  # ==========================================================================
+  # Final security policy enforcement and team notifications
+  
+  security-gate:
+    name: 🚪 Security Gate Enforcement
     runs-on: ubuntu-latest
-    needs: [security-preparation, dependency-security-scan, static-security-analysis, container-security-scan, compliance-validation]
-    if: always() && (failure() || (needs.compliance-validation.outputs.critical_findings > 0))
+    needs: [security-setup, container-security, code-security, dependency-security, security-baseline]
+    if: always() && !cancelled()
     timeout-minutes: 10
     
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-      
-      - name: Download Security Reports
-        uses: actions/download-artifact@v3
-        with:
-          path: ${{ env.SECURITY_REPORTS_PATH }}/notifications
-        continue-on-error: true
-      
-      - name: Generate Security Alert
-        id: security-alert
+      - name: 📊 Evaluate comprehensive security gate
         run: |
-          # Determine alert severity
-          if [[ "${{ needs.compliance-validation.outputs.critical_findings || 0 }}" -gt 0 ]]; then
-            ALERT_SEVERITY="CRITICAL"
-            ALERT_COLOR="danger"
-            ALERT_EMOJI="🚨"
-          elif [[ "${{ needs.compliance-validation.outputs.high_findings || 0 }}" -gt 0 ]]; then
-            ALERT_SEVERITY="HIGH"
-            ALERT_COLOR="warning"
-            ALERT_EMOJI="⚠️"
+          echo "## 🚪 Security Gate Enforcement" >> $GITHUB_STEP_SUMMARY
+          echo "Comprehensive security policy enforcement per Section 8.5.2 enterprise security requirements" >> $GITHUB_STEP_SUMMARY
+          
+          # Initialize security gate status
+          SECURITY_GATE_PASSED=true
+          CRITICAL_VIOLATIONS=false
+          HIGH_SEVERITY_ISSUES=false
+          SECURITY_REVIEW_REQUIRED=false
+          
+          # Evaluate container security results
+          if [[ "${{ needs.container-security.result }}" == "failure" ]]; then
+            echo "❌ **Container Security**: FAILED" >> $GITHUB_STEP_SUMMARY
+            SECURITY_GATE_PASSED=false
+            if [[ "${{ env.CONTAINER_CRITICAL_COUNT || 0 }}" -gt 0 ]]; then
+              CRITICAL_VIOLATIONS=true
+            fi
+            if [[ "${{ env.CONTAINER_HIGH_COUNT || 0 }}" -gt 0 ]]; then
+              HIGH_SEVERITY_ISSUES=true
+            fi
           else
-            ALERT_SEVERITY="MEDIUM"
-            ALERT_COLOR="warning"
-            ALERT_EMOJI="⚠️"
+            echo "✅ **Container Security**: PASSED" >> $GITHUB_STEP_SUMMARY
           fi
           
-          # Create alert message
-          ALERT_MESSAGE="$ALERT_EMOJI **Security Alert: $ALERT_SEVERITY Findings Detected**
+          # Evaluate static analysis results
+          if [[ "${{ needs.code-security.result }}" == "failure" ]]; then
+            echo "❌ **Static Security Analysis**: FAILED" >> $GITHUB_STEP_SUMMARY
+            SECURITY_GATE_PASSED=false
+            if [[ "${{ env.CODE_HIGH_COUNT || 0 }}" -gt 0 ]]; then
+              HIGH_SEVERITY_ISSUES=true
+            fi
+          else
+            echo "✅ **Static Security Analysis**: PASSED" >> $GITHUB_STEP_SUMMARY
+          fi
           
-          **Repository:** ${{ github.repository }}
-          **Branch:** ${{ github.ref_name }}
-          **Commit:** ${{ github.sha }}
-          **Scan Time:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          # Evaluate dependency security results
+          if [[ "${{ needs.dependency-security.result }}" == "failure" ]]; then
+            echo "❌ **Dependency Security**: FAILED" >> $GITHUB_STEP_SUMMARY
+            SECURITY_GATE_PASSED=false
+            if [[ "${{ env.DEPS_CRITICAL_COUNT || 0 }}" -gt 0 ]]; then
+              CRITICAL_VIOLATIONS=true
+            fi
+            if [[ "${{ env.DEPS_HIGH_COUNT || 0 }}" -gt 0 ]]; then
+              HIGH_SEVERITY_ISSUES=true
+            fi
+          else
+            echo "✅ **Dependency Security**: PASSED" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Determine security review requirement
+          if [[ "$HIGH_SEVERITY_ISSUES" == "true" ]] && [[ "$CRITICAL_VIOLATIONS" == "false" ]]; then
+            SECURITY_REVIEW_REQUIRED=true
+          fi
+          
+          # Overall security gate result
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [[ "$SECURITY_GATE_PASSED" == "true" ]]; then
+            echo "🎉 **OVERALL SECURITY GATE**: ✅ PASSED" >> $GITHUB_STEP_SUMMARY
+            echo "All security validations successful - deployment approved" >> $GITHUB_STEP_SUMMARY
+            echo "SECURITY_GATE_STATUS=PASSED" >> $GITHUB_ENV
+          elif [[ "$CRITICAL_VIOLATIONS" == "true" ]]; then
+            echo "🚫 **OVERALL SECURITY GATE**: ❌ CRITICAL FAILURE" >> $GITHUB_STEP_SUMMARY
+            echo "Critical security vulnerabilities detected - BUILD TERMINATED" >> $GITHUB_STEP_SUMMARY
+            echo "SECURITY_GATE_STATUS=CRITICAL_FAILURE" >> $GITHUB_ENV
+          elif [[ "$SECURITY_REVIEW_REQUIRED" == "true" ]]; then
+            echo "⚠️ **OVERALL SECURITY GATE**: 🔍 REVIEW REQUIRED" >> $GITHUB_STEP_SUMMARY
+            echo "High-severity security issues detected - Security team review required" >> $GITHUB_STEP_SUMMARY
+            echo "SECURITY_GATE_STATUS=REVIEW_REQUIRED" >> $GITHUB_ENV
+          else
+            echo "⚠️ **OVERALL SECURITY GATE**: ⚠️ WARNING" >> $GITHUB_STEP_SUMMARY
+            echo "Medium-severity security issues detected - Remediation recommended" >> $GITHUB_STEP_SUMMARY
+            echo "SECURITY_GATE_STATUS=WARNING" >> $GITHUB_ENV
+          fi
+          
+          # Set environment variables for notifications
+          echo "CRITICAL_VIOLATIONS=$CRITICAL_VIOLATIONS" >> $GITHUB_ENV
+          echo "HIGH_SEVERITY_ISSUES=$HIGH_SEVERITY_ISSUES" >> $GITHUB_ENV
+          echo "SECURITY_REVIEW_REQUIRED=$SECURITY_REVIEW_REQUIRED" >> $GITHUB_ENV
+          echo "SECURITY_GATE_PASSED=$SECURITY_GATE_PASSED" >> $GITHUB_ENV
+          
+      - name: 🚨 Send critical security notifications
+        if: env.CRITICAL_VIOLATIONS == 'true' && needs.security-setup.outputs.should-notify == 'true'
+        run: |
+          echo "🚨 Sending critical security notifications" >> $GITHUB_STEP_SUMMARY
+          
+          # Prepare critical security alert message
+          ALERT_MESSAGE="🚨 CRITICAL SECURITY ALERT: ${{ github.repository }}
+          
+          **Critical vulnerabilities detected in security scan**
+          
+          - Repository: ${{ github.repository }}
+          - Branch: ${{ github.ref_name }}
+          - Commit: ${{ github.sha }}
+          - PR/Issue: #${{ github.event.number || 'N/A' }}
+          - Triggered by: ${{ github.actor }}
+          - Scan Type: ${{ github.event.inputs.scan_type || 'comprehensive' }}
           
           **Security Findings:**
-          - Critical: ${{ needs.compliance-validation.outputs.critical_findings || 0 }}
-          - High: ${{ needs.compliance-validation.outputs.high_findings || 0 }}
+          - Container Critical: ${{ env.CONTAINER_CRITICAL_COUNT || 0 }}
+          - Dependency Critical: ${{ env.DEPS_CRITICAL_COUNT || 0 }}
+          - Total Critical: ${{ env.TOTAL_CRITICAL_FINDINGS || 0 }}
           
-          **Action Required:** Review security findings in GitHub Security tab
-          **Compliance Status:** ${{ needs.compliance-validation.outputs.compliance_status || 'unknown' }}
+          **Action Required:** Immediate remediation required before deployment
           
-          **Next Steps:**
-          1. Review detailed findings in the Security tab
-          2. Address critical vulnerabilities immediately
-          3. Update dependencies and configurations as needed
-          4. Re-run security scan to verify fixes"
+          View detailed reports: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           
-          # Save alert for notification systems
-          echo "$ALERT_MESSAGE" > security-alert.md
-          echo "alert_severity=$ALERT_SEVERITY" >> $GITHUB_OUTPUT
-          echo "alert_color=$ALERT_COLOR" >> $GITHUB_OUTPUT
-      
-      - name: Create GitHub Issue for Critical Findings
-        if: needs.compliance-validation.outputs.critical_findings > 0
-        uses: actions/github-script@v6
-        with:
-          script: |
-            const alertContent = require('fs').readFileSync('security-alert.md', 'utf8');
-            
-            const issue = await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: `🚨 CRITICAL Security Findings - ${{ github.sha }}`,
-              body: alertContent,
-              labels: ['security', 'critical', 'vulnerability']
-            });
-            
-            console.log(`Created security issue: ${issue.data.html_url}`);
-      
-      - name: Notify Security Team (Slack/Teams)
-        if: env.ENABLE_SECURITY_NOTIFICATIONS == 'true'
+          # Send Slack notification to security team
+          if [[ -n "${{ env.SECURITY_TEAM_CHANNEL }}" ]]; then
+            curl -X POST -H 'Content-type: application/json' \
+              --data "{\"text\":\"$ALERT_MESSAGE\"}" \
+              "${{ env.SECURITY_TEAM_CHANNEL }}"
+          fi
+          
+          # Send incident response webhook
+          if [[ -n "${{ env.INCIDENT_RESPONSE_WEBHOOK }}" ]]; then
+            curl -X POST -H 'Content-type: application/json' \
+              --data "{
+                \"severity\": \"critical\",
+                \"title\": \"Critical Security Vulnerabilities - ${{ github.repository }}\",
+                \"description\": \"$ALERT_MESSAGE\",
+                \"source\": \"github-security-scan\",
+                \"repository\": \"${{ github.repository }}\",
+                \"commit_sha\": \"${{ github.sha }}\",
+                \"run_id\": \"${{ github.run_id }}\"
+              }" \
+              "${{ env.INCIDENT_RESPONSE_WEBHOOK }}"
+          fi
+          
+      - name: 📧 Send security review notifications
+        if: env.SECURITY_REVIEW_REQUIRED == 'true' && needs.security-setup.outputs.should-notify == 'true'
         run: |
-          echo "Security team notification would be sent here"
-          echo "Alert Severity: ${{ steps.security-alert.outputs.alert_severity }}"
-          echo "Alert sent for ${{ needs.compliance-validation.outputs.critical_findings || 0 }} critical findings"
+          echo "📧 Sending security review notifications" >> $GITHUB_STEP_SUMMARY
           
-          # Placeholder for actual notification integration
-          # Examples:
-          # - Slack webhook
-          # - Microsoft Teams webhook  
-          # - Email notification
-          # - PagerDuty alert
-          # - JIRA ticket creation
-      
-      - name: Update Security Dashboard
-        if: env.SECURITY_DASHBOARD_ENABLED == 'true'
+          # Prepare security review message
+          REVIEW_MESSAGE="🔍 Security Review Required: ${{ github.repository }}
+          
+          **High-severity security issues detected**
+          
+          - Repository: ${{ github.repository }}
+          - Branch: ${{ github.ref_name }}
+          - Commit: ${{ github.sha }}
+          - PR/Issue: #${{ github.event.number || 'N/A' }}
+          - Triggered by: ${{ github.actor }}
+          
+          **Security Findings:**
+          - Container High: ${{ env.CONTAINER_HIGH_COUNT || 0 }}
+          - Code Analysis High: ${{ env.CODE_HIGH_COUNT || 0 }}
+          - Dependency High: ${{ env.DEPS_HIGH_COUNT || 0 }}
+          - Total High: ${{ env.TOTAL_HIGH_FINDINGS || 0 }}
+          
+          **Action Required:** Security team review and approval required for deployment
+          
+          View detailed reports: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          
+          # Send Slack notification
+          if [[ -n "${{ env.SECURITY_TEAM_CHANNEL }}" ]]; then
+            curl -X POST -H 'Content-type: application/json' \
+              --data "{\"text\":\"$REVIEW_MESSAGE\"}" \
+              "${{ env.SECURITY_TEAM_CHANNEL }}"
+          fi
+          
+      - name: ✅ Send security success notifications
+        if: env.SECURITY_GATE_PASSED == 'true' && needs.security-setup.outputs.should-notify == 'true' && github.ref == 'refs/heads/main'
         run: |
-          echo "Security dashboard update would be triggered here"
-          echo "Compliance Status: ${{ needs.compliance-validation.outputs.compliance_status || 'unknown' }}"
+          echo "✅ Sending security success notifications" >> $GITHUB_STEP_SUMMARY
           
-          # Placeholder for dashboard integration
-          # Examples:
-          # - Update Grafana dashboard
-          # - Send metrics to Prometheus
-          # - Update security management platform
-          # - Update compliance tracking system
-
-  # ---------------------------------------------------------------------------
-  # SECURITY GATE ENFORCEMENT
-  # ---------------------------------------------------------------------------
-  security-gate:
-    name: Security Gate Enforcement
-    runs-on: ubuntu-latest
-    needs: [security-preparation, dependency-security-scan, static-security-analysis, container-security-scan, compliance-validation]
-    if: always()
-    timeout-minutes: 5
-    
-    outputs:
-      security_gate_passed: ${{ steps.gate-decision.outputs.passed }}
-      security_gate_reason: ${{ steps.gate-decision.outputs.reason }}
-    
-    steps:
-      - name: Evaluate Security Gate
-        id: gate-decision
+          # Prepare success message
+          SUCCESS_MESSAGE="✅ Security Scan Passed: ${{ github.repository }}
+          
+          **All security validations successful**
+          
+          - Repository: ${{ github.repository }}
+          - Branch: ${{ github.ref_name }}
+          - Commit: ${{ github.sha }}
+          - Scan Type: ${{ github.event.inputs.scan_type || 'comprehensive' }}
+          
+          **Security Summary:**
+          - Container vulnerabilities: ✅ Clean
+          - Static analysis: ✅ Clean  
+          - Dependencies: ✅ Clean
+          
+          **Status:** Deployment approved - no security concerns detected
+          
+          View reports: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          
+          # Send Slack notification
+          if [[ -n "${{ env.SECURITY_TEAM_CHANNEL }}" ]]; then
+            curl -X POST -H 'Content-type: application/json' \
+              --data "{\"text\":\"$SUCCESS_MESSAGE\"}" \
+              "${{ env.SECURITY_TEAM_CHANNEL }}"
+          fi
+          
+      - name: 🚫 Fail job on critical security violations
+        if: env.CRITICAL_VIOLATIONS == 'true'
         run: |
-          # Initialize gate status
-          GATE_PASSED="true"
-          GATE_REASON="All security checks passed"
-          
-          # Check critical findings
-          if [[ "${{ needs.compliance-validation.outputs.critical_findings || 0 }}" -gt 0 ]]; then
-            GATE_PASSED="false"
-            GATE_REASON="Critical security vulnerabilities detected (count: ${{ needs.compliance-validation.outputs.critical_findings }})"
-          fi
-          
-          # Check high findings threshold
-          if [[ "${{ needs.compliance-validation.outputs.high_findings || 0 }}" -gt 10 ]]; then
-            GATE_PASSED="false"
-            GATE_REASON="Too many high severity findings (count: ${{ needs.compliance-validation.outputs.high_findings }}, threshold: 10)"
-          fi
-          
-          # Check compliance status
-          if [[ "${{ needs.compliance-validation.outputs.compliance_status }}" == "non_compliant_critical" ]]; then
-            GATE_PASSED="false"
-            GATE_REASON="Non-compliant with critical security requirements"
-          fi
-          
-          # Check job failures
-          if [[ "${{ needs.dependency-security-scan.result }}" == "failure" && "${{ env.SECURITY_FAIL_ON_HIGH }}" == "true" ]]; then
-            GATE_PASSED="false"
-            GATE_REASON="Dependency security scan failed with high severity findings"
-          fi
-          
-          if [[ "${{ needs.static-security-analysis.result }}" == "failure" && "${{ env.SECURITY_FAIL_ON_HIGH }}" == "true" ]]; then
-            GATE_PASSED="false"
-            GATE_REASON="Static security analysis failed with high severity findings"
-          fi
-          
-          if [[ "${{ needs.container-security-scan.result }}" == "failure" && "${{ env.SECURITY_FAIL_ON_CRITICAL }}" == "true" ]]; then
-            GATE_PASSED="false"
-            GATE_REASON="Container security scan failed with critical vulnerabilities"
-          fi
-          
-          # Output results
-          echo "passed=$GATE_PASSED" >> $GITHUB_OUTPUT
-          echo "reason=$GATE_REASON" >> $GITHUB_OUTPUT
-          
-          # Log gate decision
-          if [[ "$GATE_PASSED" == "true" ]]; then
-            echo "✅ Security gate PASSED: $GATE_REASON"
-          else
-            echo "❌ Security gate FAILED: $GATE_REASON"
-            echo "::error::Security gate enforcement failed: $GATE_REASON"
-          fi
-      
-      - name: Enforce Security Gate
-        if: steps.gate-decision.outputs.passed == 'false'
-        run: |
-          echo "Security gate enforcement is blocking this workflow"
-          echo "Reason: ${{ steps.gate-decision.outputs.reason }}"
-          echo ""
-          echo "To resolve:"
-          echo "1. Review security findings in the GitHub Security tab"
-          echo "2. Address critical and high severity vulnerabilities"
-          echo "3. Update dependencies and fix security issues"
-          echo "4. Re-run the security scan workflow"
-          echo ""
-          echo "For assistance, contact the security team or create a security issue"
+          echo "🚫 **SECURITY GATE ENFORCEMENT**: Failing job due to critical security violations" >> $GITHUB_STEP_SUMMARY
+          echo "Critical security vulnerabilities must be resolved before deployment" >> $GITHUB_STEP_SUMMARY
           exit 1
-      
-      - name: Security Gate Summary
-        if: always()
+          
+      - name: ⚠️ Warning on high-severity issues
+        if: env.HIGH_SEVERITY_ISSUES == 'true' && env.CRITICAL_VIOLATIONS != 'true'
         run: |
-          echo "### Security Gate Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Gate Status:** ${{ steps.gate-decision.outputs.passed == 'true' && '✅ PASSED' || '❌ FAILED' }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Reason:** ${{ steps.gate-decision.outputs.reason }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Security Findings:**" >> $GITHUB_STEP_SUMMARY
-          echo "- Critical: ${{ needs.compliance-validation.outputs.critical_findings || 0 }}" >> $GITHUB_STEP_SUMMARY
-          echo "- High: ${{ needs.compliance-validation.outputs.high_findings || 0 }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Compliance Status:** ${{ needs.compliance-validation.outputs.compliance_status || 'unknown' }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          if [[ "${{ steps.gate-decision.outputs.passed }}" == "false" ]]; then
-            echo "**Action Required:** Address security findings before deployment" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "**Status:** Cleared for deployment" >> $GITHUB_STEP_SUMMARY
+          echo "⚠️ **SECURITY WARNING**: High-severity security issues detected" >> $GITHUB_STEP_SUMMARY
+          echo "Security team review recommended before production deployment" >> $GITHUB_STEP_SUMMARY
+          
+          # Determine if we should fail based on severity threshold
+          SEVERITY_THRESHOLD="${{ github.event.inputs.severity_threshold || 'HIGH' }}"
+          if [[ "$SEVERITY_THRESHOLD" == "HIGH" ]]; then
+            echo "🚫 **SECURITY GATE ENFORCEMENT**: Failing job due to high-severity threshold policy" >> $GITHUB_STEP_SUMMARY
+            exit 1
           fi
+          
+      - name: 🎉 Security gate success summary
+        if: env.SECURITY_GATE_PASSED == 'true'
+        run: |
+          echo "## 🎉 Security Gate Success Summary" >> $GITHUB_STEP_SUMMARY
+          echo "All security validations have passed successfully!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ✅ Security Validations Completed:" >> $GITHUB_STEP_SUMMARY
+          echo "- 🐳 **Container Security**: No critical vulnerabilities in base image or application layers" >> $GITHUB_STEP_SUMMARY
+          echo "- 🔍 **Static Analysis**: No high-severity security issues in Python code" >> $GITHUB_STEP_SUMMARY
+          echo "- 📦 **Dependency Security**: No critical vulnerabilities in pip dependencies" >> $GITHUB_STEP_SUMMARY
+          echo "- 📊 **Baseline Compliance**: Security posture maintained or improved" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🚀 Deployment Status:" >> $GITHUB_STEP_SUMMARY
+          echo "✅ **APPROVED** - Code meets enterprise security standards and is ready for deployment" >> $GITHUB_STEP_SUMMARY
 
 # =============================================================================
-# WORKFLOW SUMMARY AND DOCUMENTATION
+# SECURITY WORKFLOW SUMMARY
 # =============================================================================
-
-# This comprehensive security scanning workflow implements enterprise-grade
-# security validation for the Flask migration project with the following capabilities:
 #
-# 🔍 SCANNING CAPABILITIES:
-# - Container vulnerability scanning with Trivy 0.48+ and Docker Scout
-# - Static security analysis with Bandit 1.7+ and Semgrep 1.45+
-# - Dependency vulnerability scanning with Safety 3.0+ and pip-audit 2.7+
-# - Security linting with flake8-bandit and custom security rules
-# - Compliance validation for OWASP Top 10 and enterprise security standards
+# This comprehensive security workflow implements enterprise-grade security
+# scanning for the Flask application migration with the following capabilities:
 #
-# 📊 REPORTING AND INTEGRATION:
-# - SARIF format reporting for GitHub Security tab integration
-# - JSON and human-readable reports for enterprise security tools
-# - Automated security baseline creation and trend analysis
-# - Executive summary reports for stakeholder communication
-# - Comprehensive compliance dashboards and metrics
+# 🔒 **Multi-Layer Security Validation:**
+# - Container vulnerability scanning with Trivy 0.48+ (CRITICAL blocking)
+# - Static security analysis with bandit 1.7+ (HIGH severity blocking)
+# - Dependency vulnerability scanning with safety 3.0+ and pip-audit 2.7+
+# - Comprehensive SARIF reporting for GitHub Security tab integration
 #
-# 🛡️ SECURITY GATES AND ENFORCEMENT:
-# - Critical and high severity finding blocking with configurable thresholds
-# - Automated security policy compliance validation
-# - Enterprise security standard enforcement (SOC 2, ISO 27001, PCI DSS)
-# - Automated security team notification for critical findings
-# - Integration with incident response and security management platforms
+# 📊 **Enterprise Compliance Features:**
+# - Security baseline tracking and trend analysis per Section 6.6.3
+# - Automated security policy enforcement with configurable thresholds
+# - Security team notifications for critical findings per Section 8.5.2
+# - Comprehensive security gate enforcement with deployment blocking
 #
-# 🔄 AUTOMATION AND CI/CD INTEGRATION:
-# - Multi-trigger support (PR, push, scheduled, manual)
-# - Matrix strategy for comprehensive coverage across Python versions
-# - Artifact management and retention for compliance requirements
-# - Integration with existing CI/CD pipeline and deployment workflows
-# - Automated remediation guidance and security improvement recommendations
+# 🚀 **Performance Optimizations:**
+# - Parallel security scanning execution for reduced pipeline time
+# - Intelligent caching for security tool downloads and dependencies
+# - Configurable scan types for different workflow scenarios
+# - Efficient artifact management with configurable retention policies
 #
-# 📈 ENTERPRISE FEATURES:
-# - Security baseline validation and trend analysis per Section 6.6.3
-# - Automated compliance reporting for audit requirements
-# - Integration with enterprise monitoring and alerting systems
-# - SIEM integration for security event correlation and analysis
-# - Stakeholder notification system for security findings and compliance status
+# 🔔 **Notification Integration:**
+# - Critical security alerts with incident response webhook integration
+# - Security team notifications via Slack/Teams for review requirements
+# - Success notifications for main branch deployments
+# - Comprehensive security status reporting in GitHub summaries
+#
+# 🛡️ **Security Policy Enforcement:**
+# - Zero-tolerance for CRITICAL severity vulnerabilities (build termination)
+# - HIGH severity findings require security review approval
+# - MEDIUM/LOW severity findings generate warnings with remediation guidance
+# - Configurable severity thresholds for different deployment environments
 #
 # This workflow ensures comprehensive security validation while maintaining
-# development velocity through intelligent automation, clear reporting, and
-# integration with enterprise security infrastructure and compliance requirements.
+# development velocity through intelligent automation and clear security
+# governance aligned with enterprise security requirements.
+# =============================================================================
