@@ -1,923 +1,999 @@
 """
-General-purpose decorators providing cross-cutting functionality for the Flask application.
+General-purpose decorators providing cross-cutting functionality including timing decorators,
+caching decorators, logging decorators, and validation decorators.
 
-This module implements enterprise-grade decorators for performance monitoring, caching,
-logging, validation, and other cross-cutting concerns. All decorators are designed to
-maintain ≤10% performance variance from the Node.js baseline while providing enhanced
-observability and reliability features.
+This module implements reusable decorator patterns with comprehensive type hints and 
+enterprise-grade functionality support as specified in Section 5.4.1 cross-cutting concerns
+and Section 5.4.4 performance requirements.
 
 Key Features:
-- Performance measurement and monitoring decorators
-- Redis-backed caching decorators with TTL support
-- Structured logging decorators with enterprise integration
-- Validation decorators supporting marshmallow and pydantic
-- Authentication and authorization decorators with JWT validation
-- Rate limiting decorators for external service protection
-- Metrics collection decorators for Prometheus integration
-- Error handling decorators with circuit breaker patterns
-
-Dependencies:
-- structlog 23.1+ for structured logging
-- redis-py 5.0+ for caching operations
-- prometheus-client 0.17+ for metrics collection
-- PyJWT 2.8+ for authentication validation
-- marshmallow 3.20+ and pydantic 2.3+ for validation
-- Flask-Limiter for rate limiting functionality
+- Performance measurement decorators supporting ≤10% variance monitoring
+- Caching decorators with Redis integration for performance optimization
+- Logging decorators with structured logging for enterprise observability
+- Validation decorators supporting marshmallow and pydantic schemas
+- Circuit breaker integration for resilience patterns
+- Prometheus metrics collection for monitoring integration
+- Comprehensive error handling with custom exception support
 """
 
-import time
+import asyncio
 import functools
-import hashlib
-import json
-import inspect
-from typing import Any, Callable, Dict, List, Optional, Union, TypeVar, cast
+import time
 from datetime import datetime, timedelta
+from typing import Any, Callable, Dict, List, Optional, Type, TypeVar, Union
+from uuid import uuid4
 
 import structlog
-import redis
-from flask import request, g, current_app
-from werkzeug.exceptions import BadRequest, Unauthorized, TooManyRequests
-from prometheus_client import Counter, Histogram, Gauge
-import jwt
-from marshmallow import Schema, ValidationError
+from flask import current_app, g, request
+from marshmallow import Schema, ValidationError as MarshmallowValidationError
+from prometheus_client import Counter, Histogram, Summary
 from pydantic import BaseModel, ValidationError as PydanticValidationError
 
-# Type definitions for enhanced type safety
-F = TypeVar('F', bound=Callable[..., Any])
-DecoratorFunction = Callable[[F], F]
+try:
+    import redis
+    from redis import Redis
+except ImportError:
+    # Fallback for testing environments without Redis
+    redis = None
+    Redis = None
 
-# Global logger instance with structured logging
+# Import application-specific exceptions
+from src.utils.exceptions import (
+    BaseApplicationError,
+    CircuitBreakerError,
+    ExternalServiceError,
+    PerformanceError,
+    ValidationError
+)
+
+# Type variables for generic decorator support
+F = TypeVar('F', bound=Callable[..., Any])
+T = TypeVar('T')
+
+# Get structured logger
 logger = structlog.get_logger(__name__)
 
-# Prometheus metrics for performance monitoring
-REQUEST_COUNT = Counter('flask_requests_total', 'Total Flask requests', ['method', 'endpoint', 'status'])
-REQUEST_DURATION = Histogram('flask_request_duration_seconds', 'Flask request duration')
-CACHE_OPERATIONS = Counter('redis_cache_operations_total', 'Redis cache operations', ['operation', 'result'])
-VALIDATION_ERRORS = Counter('validation_errors_total', 'Validation errors', ['validator_type', 'error_type'])
-AUTH_ATTEMPTS = Counter('auth_attempts_total', 'Authentication attempts', ['result'])
+# Prometheus metrics for decorator performance tracking
+decorator_execution_time = Histogram(
+    'decorator_execution_seconds',
+    'Time spent in decorator execution',
+    ['decorator_type', 'function_name', 'status']
+)
 
-# Redis client instance for caching operations
-redis_client: Optional[redis.Redis] = None
+decorator_call_counter = Counter(
+    'decorator_calls_total',
+    'Total number of decorator calls',
+    ['decorator_type', 'function_name', 'status']
+)
+
+performance_variance_gauge = Summary(
+    'performance_variance_ratio',
+    'Performance variance ratio from baseline',
+    ['function_name', 'measurement_type']
+)
+
+cache_operation_time = Histogram(
+    'cache_operation_seconds',
+    'Time spent in cache operations',
+    ['operation_type', 'cache_key_pattern', 'status']
+)
+
+validation_time = Histogram(
+    'validation_execution_seconds',
+    'Time spent in validation operations',
+    ['validation_type', 'schema_name', 'status']
+)
 
 
-def initialize_redis(app=None) -> None:
+class PerformanceBaseline:
     """
-    Initialize Redis client for caching decorators.
+    Performance baseline tracking for ≤10% variance compliance.
     
-    Args:
-        app: Flask application instance for configuration
+    Implements performance measurement and comparison against Node.js baseline
+    as specified in Section 5.4.4 performance requirements.
     """
-    global redis_client
-    try:
-        if app:
-            redis_url = app.config.get('REDIS_URL', 'redis://localhost:6379/0')
-        else:
-            redis_url = 'redis://localhost:6379/0'
-            
-        redis_client = redis.from_url(
-            redis_url,
-            decode_responses=True,
-            socket_connect_timeout=5,
-            socket_timeout=5,
-            retry_on_timeout=True,
-            health_check_interval=30
+    
+    _baselines: Dict[str, Dict[str, float]] = {}
+    _measurements: Dict[str, List[float]] = {}
+    
+    @classmethod
+    def set_baseline(cls, function_name: str, baseline_time: float) -> None:
+        """Set performance baseline for a function."""
+        if function_name not in cls._baselines:
+            cls._baselines[function_name] = {}
+        cls._baselines[function_name]['time'] = baseline_time
+        logger.info(
+            "Performance baseline set",
+            function=function_name,
+            baseline_time=baseline_time
         )
-        
-        # Test connection
-        redis_client.ping()
-        logger.info("Redis client initialized successfully", redis_url=redis_url)
-        
-    except Exception as e:
-        logger.error("Failed to initialize Redis client", error=str(e))
-        redis_client = None
-
-
-class DecoratorError(Exception):
-    """Base exception for decorator-related errors."""
-    pass
-
-
-class CacheError(DecoratorError):
-    """Exception raised for cache-related errors."""
-    pass
-
-
-class ValidationDecoratorError(DecoratorError):
-    """Exception raised for validation decorator errors."""
-    pass
-
-
-class AuthenticationDecoratorError(DecoratorError):
-    """Exception raised for authentication decorator errors."""
-    pass
-
-
-def timeit(
-    metric_name: Optional[str] = None,
-    include_args: bool = False,
-    log_slow_threshold: float = 1.0
-) -> DecoratorFunction:
-    """
-    Performance timing decorator with enterprise-grade monitoring.
     
-    Measures function execution time and logs performance metrics. Supports
-    Prometheus metrics collection and slow query detection for ≤10% variance monitoring.
+    @classmethod
+    def record_measurement(cls, function_name: str, execution_time: float) -> float:
+        """Record measurement and calculate variance from baseline."""
+        if function_name not in cls._measurements:
+            cls._measurements[function_name] = []
+        
+        cls._measurements[function_name].append(execution_time)
+        
+        # Keep only last 100 measurements
+        if len(cls._measurements[function_name]) > 100:
+            cls._measurements[function_name] = cls._measurements[function_name][-100:]
+        
+        # Calculate variance if baseline exists
+        if function_name in cls._baselines:
+            baseline = cls._baselines[function_name]['time']
+            variance_ratio = (execution_time - baseline) / baseline
+            
+            # Update Prometheus metrics
+            performance_variance_gauge.labels(
+                function_name=function_name,
+                measurement_type='execution_time'
+            ).observe(variance_ratio)
+            
+            # Alert if variance exceeds 10%
+            if variance_ratio > 0.10:
+                logger.warning(
+                    "Performance variance exceeded threshold",
+                    function=function_name,
+                    execution_time=execution_time,
+                    baseline_time=baseline,
+                    variance_ratio=variance_ratio,
+                    threshold=0.10
+                )
+            
+            return variance_ratio
+        
+        return 0.0
+
+
+def timing(
+    baseline: Optional[float] = None,
+    alert_threshold: float = 0.10,
+    include_args: bool = False,
+    metrics_labels: Optional[Dict[str, str]] = None
+) -> Callable[[F], F]:
+    """
+    Decorator for measuring function execution time and performance variance.
+    
+    Implements performance measurement decorators supporting ≤10% variance monitoring
+    per Section 5.4.4 performance requirements.
     
     Args:
-        metric_name: Optional custom metric name for Prometheus
-        include_args: Whether to include function arguments in logs
-        log_slow_threshold: Threshold in seconds for slow operation logging
-        
+        baseline: Expected baseline execution time in seconds
+        alert_threshold: Variance threshold for performance alerts (default: 10%)
+        include_args: Whether to include function arguments in logging
+        metrics_labels: Additional labels for Prometheus metrics
+    
     Returns:
-        Decorated function with timing measurement
-        
+        Decorated function with timing capabilities
+    
     Example:
-        @timeit(metric_name='user_lookup', log_slow_threshold=0.5)
-        def get_user(user_id: str) -> Dict[str, Any]:
-            return database.find_user(user_id)
+        @timing(baseline=0.1, alert_threshold=0.10)
+        def process_data(data):
+            # Function implementation
+            pass
     """
     def decorator(func: F) -> F:
+        function_name = f"{func.__module__}.{func.__qualname__}"
+        
+        # Set baseline if provided
+        if baseline is not None:
+            PerformanceBaseline.set_baseline(function_name, baseline)
+        
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            start_time = time.time()
-            func_name = f"{func.__module__}.{func.__qualname__}"
-            
-            # Create execution context for logging
-            context = {
-                'function': func_name,
-                'start_time': datetime.utcnow().isoformat()
-            }
-            
-            if include_args and args:
-                context['args_count'] = len(args)
-            if include_args and kwargs:
-                context['kwargs_keys'] = list(kwargs.keys())
+            start_time = time.perf_counter()
+            correlation_id = getattr(g, 'correlation_id', str(uuid4()))
+            status = 'success'
             
             try:
-                # Execute function with timing measurement
-                with REQUEST_DURATION.time():
-                    result = func(*args, **kwargs)
+                # Log function entry
+                log_data = {
+                    'function': function_name,
+                    'correlation_id': correlation_id,
+                    'action': 'function_start'
+                }
                 
-                execution_time = time.time() - start_time
+                if include_args:
+                    log_data['args'] = str(args)[:200]  # Truncate for security
+                    log_data['kwargs'] = {k: str(v)[:100] for k, v in kwargs.items()}
                 
-                # Log performance metrics
-                context.update({
-                    'execution_time': execution_time,
-                    'status': 'success'
-                })
+                logger.debug("Function execution started", **log_data)
                 
-                if execution_time > log_slow_threshold:
-                    logger.warning("Slow operation detected", **context)
-                else:
-                    logger.debug("Function execution completed", **context)
-                
-                # Record Prometheus metrics
-                if metric_name:
-                    metric_histogram = Histogram(
-                        f'{metric_name}_duration_seconds',
-                        f'Execution time for {metric_name}'
-                    )
-                    metric_histogram.observe(execution_time)
+                # Execute function
+                result = func(*args, **kwargs)
                 
                 return result
                 
             except Exception as e:
-                execution_time = time.time() - start_time
-                context.update({
-                    'execution_time': execution_time,
-                    'status': 'error',
-                    'error': str(e),
-                    'error_type': type(e).__name__
-                })
-                
-                logger.error("Function execution failed", **context)
+                status = 'error'
+                logger.error(
+                    "Function execution failed",
+                    function=function_name,
+                    correlation_id=correlation_id,
+                    error=str(e),
+                    exception_type=e.__class__.__name__
+                )
                 raise
                 
-        return cast(F, wrapper)
+            finally:
+                # Measure execution time
+                end_time = time.perf_counter()
+                execution_time = end_time - start_time
+                
+                # Record measurement and check variance
+                variance_ratio = PerformanceBaseline.record_measurement(
+                    function_name, execution_time
+                )
+                
+                # Update Prometheus metrics
+                labels = {
+                    'function_name': function_name,
+                    'status': status
+                }
+                if metrics_labels:
+                    labels.update(metrics_labels)
+                
+                decorator_execution_time.labels(
+                    decorator_type='timing',
+                    **labels
+                ).observe(execution_time)
+                
+                decorator_call_counter.labels(
+                    decorator_type='timing',
+                    **labels
+                ).inc()
+                
+                # Log execution completion
+                logger.info(
+                    "Function execution completed",
+                    function=function_name,
+                    correlation_id=correlation_id,
+                    execution_time=execution_time,
+                    variance_ratio=variance_ratio,
+                    status=status
+                )
+        
+        return wrapper
     return decorator
 
 
-def cached(
+def cache(
     ttl: int = 300,
-    key_prefix: str = '',
-    exclude_args: Optional[List[str]] = None,
-    cache_none: bool = False,
-    serializer: str = 'json'
-) -> DecoratorFunction:
+    key_prefix: Optional[str] = None,
+    cache_null_values: bool = False,
+    ignore_exceptions: bool = True,
+    redis_client: Optional[Redis] = None
+) -> Callable[[F], F]:
     """
-    Redis-backed caching decorator with TTL and key management.
+    Decorator for Redis-based function result caching.
     
-    Provides high-performance caching with Redis integration supporting
-    enterprise-grade cache patterns including TTL management, key prefixing,
-    and selective argument caching.
+    Implements caching decorators with Redis integration for performance optimization
+    per Section 5.4.4 cache strategy.
     
     Args:
-        ttl: Time-to-live in seconds (default: 300)
-        key_prefix: Prefix for cache keys (default: '')
-        exclude_args: Arguments to exclude from cache key generation
-        cache_none: Whether to cache None results (default: False)
-        serializer: Serialization method ('json' or 'pickle')
-        
+        ttl: Time-to-live in seconds for cached values
+        key_prefix: Optional prefix for cache keys
+        cache_null_values: Whether to cache None/null return values
+        ignore_exceptions: Whether to ignore cache failures and execute function
+        redis_client: Optional Redis client instance
+    
     Returns:
-        Decorated function with caching capability
-        
+        Decorated function with caching capabilities
+    
     Example:
-        @cached(ttl=600, key_prefix='user_data', exclude_args=['request_id'])
-        def get_user_profile(user_id: str, request_id: str = None) -> Dict[str, Any]:
-            return fetch_user_from_database(user_id)
+        @cache(ttl=600, key_prefix="user_data")
+        def get_user_data(user_id):
+            # Expensive database operation
+            return user_data
     """
     def decorator(func: F) -> F:
+        function_name = f"{func.__module__}.{func.__qualname__}"
+        
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            if not redis_client:
-                logger.warning("Redis client not available, executing without cache")
+            # Skip caching if Redis is not available
+            if redis is None or not hasattr(current_app, 'redis'):
+                logger.warning(
+                    "Redis not available, executing function without caching",
+                    function=function_name
+                )
                 return func(*args, **kwargs)
+            
+            # Get Redis client
+            client = redis_client or getattr(current_app, 'redis', None)
+            if not client:
+                if ignore_exceptions:
+                    return func(*args, **kwargs)
+                raise ExternalServiceError(
+                    "Redis client not available",
+                    service_name="redis"
+                )
             
             # Generate cache key
             cache_key = _generate_cache_key(
-                func, args, kwargs, key_prefix, exclude_args or []
+                function_name, args, kwargs, key_prefix
             )
             
+            correlation_id = getattr(g, 'correlation_id', str(uuid4()))
+            
             try:
-                # Attempt to retrieve from cache
-                cached_result = redis_client.get(cache_key)
-                if cached_result is not None:
-                    CACHE_OPERATIONS.labels(operation='get', result='hit').inc()
-                    logger.debug("Cache hit", cache_key=cache_key, function=func.__qualname__)
+                # Try to get from cache
+                start_time = time.perf_counter()
+                cached_value = client.get(cache_key)
+                cache_get_time = time.perf_counter() - start_time
+                
+                # Update cache operation metrics
+                cache_operation_time.labels(
+                    operation_type='get',
+                    cache_key_pattern=_get_key_pattern(cache_key),
+                    status='success'
+                ).observe(cache_get_time)
+                
+                if cached_value is not None:
+                    # Cache hit
+                    import pickle
+                    result = pickle.loads(cached_value)
                     
-                    if serializer == 'json':
-                        return json.loads(cached_result)
-                    else:
-                        import pickle
-                        return pickle.loads(cached_result.encode('latin1'))
+                    logger.debug(
+                        "Cache hit",
+                        function=function_name,
+                        cache_key=cache_key,
+                        correlation_id=correlation_id,
+                        cache_get_time=cache_get_time
+                    )
+                    
+                    return result
                 
-                CACHE_OPERATIONS.labels(operation='get', result='miss').inc()
-                
-                # Execute function and cache result
-                result = func(*args, **kwargs)
-                
-                # Cache the result if it's not None or if cache_none is True
-                if result is not None or cache_none:
-                    try:
-                        if serializer == 'json':
-                            serialized_result = json.dumps(result, default=str)
-                        else:
-                            import pickle
-                            serialized_result = pickle.dumps(result).decode('latin1')
-                            
-                        redis_client.setex(cache_key, ttl, serialized_result)
-                        CACHE_OPERATIONS.labels(operation='set', result='success').inc()
-                        
-                        logger.debug(
-                            "Result cached",
-                            cache_key=cache_key,
-                            function=func.__qualname__,
-                            ttl=ttl
-                        )
-                    except Exception as e:
-                        CACHE_OPERATIONS.labels(operation='set', result='error').inc()
-                        logger.error("Cache set operation failed", error=str(e), cache_key=cache_key)
-                
-                return result
+                # Cache miss - execute function
+                logger.debug(
+                    "Cache miss",
+                    function=function_name,
+                    cache_key=cache_key,
+                    correlation_id=correlation_id
+                )
                 
             except Exception as e:
-                CACHE_OPERATIONS.labels(operation='get', result='error').inc()
-                logger.error("Cache operation failed", error=str(e), cache_key=cache_key)
-                # Fallback to executing function without cache
-                return func(*args, **kwargs)
+                # Cache get failed
+                cache_operation_time.labels(
+                    operation_type='get',
+                    cache_key_pattern=_get_key_pattern(cache_key),
+                    status='error'
+                ).observe(0)
                 
-        return cast(F, wrapper)
+                logger.warning(
+                    "Cache get failed",
+                    function=function_name,
+                    cache_key=cache_key,
+                    error=str(e),
+                    correlation_id=correlation_id
+                )
+                
+                if not ignore_exceptions:
+                    raise ExternalServiceError(
+                        "Cache operation failed",
+                        service_name="redis",
+                        details={'operation': 'get', 'error': str(e)}
+                    )
+            
+            # Execute original function
+            result = func(*args, **kwargs)
+            
+            # Cache the result if appropriate
+            if result is not None or cache_null_values:
+                try:
+                    import pickle
+                    start_time = time.perf_counter()
+                    serialized_result = pickle.dumps(result)
+                    client.setex(cache_key, ttl, serialized_result)
+                    cache_set_time = time.perf_counter() - start_time
+                    
+                    # Update cache operation metrics
+                    cache_operation_time.labels(
+                        operation_type='set',
+                        cache_key_pattern=_get_key_pattern(cache_key),
+                        status='success'
+                    ).observe(cache_set_time)
+                    
+                    logger.debug(
+                        "Result cached",
+                        function=function_name,
+                        cache_key=cache_key,
+                        ttl=ttl,
+                        correlation_id=correlation_id,
+                        cache_set_time=cache_set_time
+                    )
+                    
+                except Exception as e:
+                    # Cache set failed
+                    cache_operation_time.labels(
+                        operation_type='set',
+                        cache_key_pattern=_get_key_pattern(cache_key),
+                        status='error'
+                    ).observe(0)
+                    
+                    logger.warning(
+                        "Cache set failed",
+                        function=function_name,
+                        cache_key=cache_key,
+                        error=str(e),
+                        correlation_id=correlation_id
+                    )
+                    
+                    if not ignore_exceptions:
+                        raise ExternalServiceError(
+                            "Cache operation failed",
+                            service_name="redis",
+                            details={'operation': 'set', 'error': str(e)}
+                        )
+            
+            return result
+        
+        return wrapper
     return decorator
 
 
 def logged(
     level: str = 'info',
-    include_result: bool = False,
     include_args: bool = False,
+    include_result: bool = False,
     exclude_fields: Optional[List[str]] = None,
-    sensitive_fields: Optional[List[str]] = None
-) -> DecoratorFunction:
+    mask_fields: Optional[List[str]] = None
+) -> Callable[[F], F]:
     """
-    Structured logging decorator with enterprise integration.
+    Decorator for structured logging with enterprise observability.
     
-    Provides comprehensive logging with structured format, sensitive data protection,
-    and enterprise log aggregation compatibility. Supports Splunk and ELK Stack integration.
+    Implements logging decorators with structlog integration per Section 5.4.1
+    structured logging strategy.
     
     Args:
         level: Logging level ('debug', 'info', 'warning', 'error')
-        include_result: Whether to include function result in logs
         include_args: Whether to include function arguments in logs
+        include_result: Whether to include function result in logs
         exclude_fields: Fields to exclude from logging
-        sensitive_fields: Fields to mask in logs for security
-        
+        mask_fields: Fields to mask for security (replace with '***')
+    
     Returns:
         Decorated function with structured logging
-        
+    
     Example:
-        @logged(level='info', include_args=True, sensitive_fields=['password', 'token'])
-        def authenticate_user(username: str, password: str) -> Dict[str, Any]:
-            return perform_authentication(username, password)
+        @logged(level='info', include_args=True, mask_fields=['password'])
+        def authenticate_user(username, password):
+            # Authentication logic
+            return user_data
     """
     def decorator(func: F) -> F:
+        function_name = f"{func.__module__}.{func.__qualname__}"
+        exclude_fields = exclude_fields or []
+        mask_fields = mask_fields or ['password', 'token', 'secret', 'key']
+        
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            func_name = f"{func.__module__}.{func.__qualname__}"
-            start_time = datetime.utcnow()
+            correlation_id = getattr(g, 'correlation_id', str(uuid4()))
+            start_time = time.perf_counter()
             
-            # Build log context
-            context = {
-                'function': func_name,
-                'timestamp': start_time.isoformat(),
-                'execution_id': hashlib.md5(f"{func_name}_{start_time}".encode()).hexdigest()[:8]
+            # Prepare log data
+            log_data = {
+                'function': function_name,
+                'correlation_id': correlation_id,
+                'timestamp': datetime.utcnow().isoformat(),
+                'endpoint': getattr(request, 'endpoint', None) if request else None,
+                'method': getattr(request, 'method', None) if request else None,
+                'user_id': getattr(g, 'user_id', None) if hasattr(g, 'user_id') else None
             }
-            
-            # Add request context if available
-            if request:
-                context.update({
-                    'request_id': getattr(request, 'id', None),
-                    'user_id': getattr(g, 'user_id', None),
-                    'endpoint': request.endpoint,
-                    'method': request.method
-                })
             
             # Include arguments if requested
             if include_args:
-                func_signature = inspect.signature(func)
-                bound_args = func_signature.bind(*args, **kwargs)
-                bound_args.apply_defaults()
+                # Safely process arguments with masking
+                safe_args = []
+                for arg in args:
+                    safe_args.append(_mask_sensitive_data(arg, mask_fields))
                 
-                sanitized_args = _sanitize_log_data(
-                    dict(bound_args.arguments),
-                    exclude_fields or [],
-                    sensitive_fields or []
-                )
-                context['arguments'] = sanitized_args
+                safe_kwargs = {}
+                for key, value in kwargs.items():
+                    if key not in exclude_fields:
+                        safe_kwargs[key] = _mask_sensitive_data(value, mask_fields)
+                
+                log_data['args'] = safe_args
+                log_data['kwargs'] = safe_kwargs
             
             # Log function entry
-            log_method = getattr(logger, level, logger.info)
-            log_method("Function execution started", **context)
+            getattr(logger, level.lower())(
+                f"Function {function_name} started",
+                **log_data
+            )
             
             try:
+                # Execute function
                 result = func(*args, **kwargs)
                 
                 # Calculate execution time
-                execution_time = (datetime.utcnow() - start_time).total_seconds()
-                context.update({
+                execution_time = time.perf_counter() - start_time
+                
+                # Prepare success log data
+                success_log_data = {
+                    **log_data,
                     'execution_time': execution_time,
                     'status': 'success'
-                })
+                }
                 
-                # Include result if requested and not sensitive
+                # Include result if requested
                 if include_result and result is not None:
-                    sanitized_result = _sanitize_log_data(
-                        result if isinstance(result, dict) else {'result': result},
-                        exclude_fields or [],
-                        sensitive_fields or []
+                    success_log_data['result'] = _mask_sensitive_data(
+                        result, mask_fields
                     )
-                    context['result'] = sanitized_result
                 
-                log_method("Function execution completed", **context)
+                # Log successful completion
+                getattr(logger, level.lower())(
+                    f"Function {function_name} completed successfully",
+                    **success_log_data
+                )
+                
                 return result
                 
             except Exception as e:
-                execution_time = (datetime.utcnow() - start_time).total_seconds()
-                context.update({
+                # Calculate execution time for failed calls
+                execution_time = time.perf_counter() - start_time
+                
+                # Log error
+                error_log_data = {
+                    **log_data,
                     'execution_time': execution_time,
                     'status': 'error',
                     'error': str(e),
-                    'error_type': type(e).__name__
-                })
+                    'exception_type': e.__class__.__name__
+                }
                 
-                logger.error("Function execution failed", **context)
+                logger.error(
+                    f"Function {function_name} failed",
+                    **error_log_data
+                )
+                
+                # Re-raise the exception
                 raise
-                
-        return cast(F, wrapper)
+        
+        return wrapper
     return decorator
 
 
 def validate_input(
-    schema: Union[Schema, BaseModel, Dict[str, Any]],
-    source: str = 'json',
-    validate_args: bool = False
-) -> DecoratorFunction:
+    schema: Union[Type[Schema], Type[BaseModel], Schema, BaseModel],
+    validate_json: bool = True,
+    validate_args: bool = False,
+    location: str = 'json'
+) -> Callable[[F], F]:
     """
-    Input validation decorator supporting marshmallow and pydantic.
+    Decorator for input validation using marshmallow or pydantic schemas.
     
-    Provides comprehensive input validation with support for multiple validation
-    frameworks and flexible data source handling. Includes enterprise-grade
-    error reporting and validation metrics collection.
+    Implements validation decorators supporting marshmallow and pydantic
+    per Section 3.2.3 validation requirements.
     
     Args:
-        schema: Validation schema (marshmallow Schema, pydantic BaseModel, or dict)
-        source: Data source ('json', 'form', 'args', or 'function_args')
-        validate_args: Whether to validate function arguments directly
-        
+        schema: Marshmallow schema class/instance or Pydantic model class
+        validate_json: Whether to validate JSON request body
+        validate_args: Whether to validate function arguments
+        location: Location of data to validate ('json', 'args', 'form')
+    
     Returns:
         Decorated function with input validation
-        
+    
     Example:
-        from marshmallow import Schema, fields
-        
-        class UserSchema(Schema):
-            username = fields.Str(required=True)
-            email = fields.Email(required=True)
-            
-        @validate_input(UserSchema(), source='json')
+        @validate_input(UserSchema, validate_json=True)
         def create_user():
-            data = request.get_json()
-            return create_user_in_database(data)
+            # Function receives validated data in g.validated_data
+            user_data = g.validated_data
+            return create_user_in_db(user_data)
     """
     def decorator(func: F) -> F:
+        function_name = f"{func.__module__}.{func.__qualname__}"
+        
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            try:
-                if validate_args:
-                    # Validate function arguments
-                    _validate_function_args(func, args, kwargs, schema)
-                else:
-                    # Validate request data
-                    _validate_request_data(schema, source)
-                
-                return func(*args, **kwargs)
-                
-            except ValidationError as e:
-                VALIDATION_ERRORS.labels(validator_type='marshmallow', error_type='validation').inc()
-                logger.warning(
-                    "Marshmallow validation failed",
-                    function=func.__qualname__,
-                    errors=e.messages,
-                    source=source
-                )
-                raise BadRequest(f"Validation error: {e.messages}")
-                
-            except PydanticValidationError as e:
-                VALIDATION_ERRORS.labels(validator_type='pydantic', error_type='validation').inc()
-                logger.warning(
-                    "Pydantic validation failed",
-                    function=func.__qualname__,
-                    errors=e.errors(),
-                    source=source
-                )
-                raise BadRequest(f"Validation error: {e.errors()}")
-                
-            except Exception as e:
-                VALIDATION_ERRORS.labels(validator_type='unknown', error_type='error').inc()
-                logger.error(
-                    "Validation decorator error",
-                    function=func.__qualname__,
-                    error=str(e),
-                    error_type=type(e).__name__
-                )
-                raise
-                
-        return cast(F, wrapper)
-    return decorator
-
-
-def require_auth(
-    required_scopes: Optional[List[str]] = None,
-    allow_anonymous: bool = False,
-    jwt_secret_key: Optional[str] = None
-) -> DecoratorFunction:
-    """
-    JWT authentication decorator with scope-based authorization.
-    
-    Provides enterprise-grade authentication with JWT token validation,
-    scope-based authorization, and comprehensive security logging.
-    
-    Args:
-        required_scopes: List of required permission scopes
-        allow_anonymous: Whether to allow anonymous access
-        jwt_secret_key: Custom JWT secret key (defaults to app config)
-        
-    Returns:
-        Decorated function with authentication requirement
-        
-    Example:
-        @require_auth(required_scopes=['user:read', 'user:write'])
-        def update_user_profile(user_id: str):
-            return update_user_data(user_id, request.get_json())
-    """
-    def decorator(func: F) -> F:
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            try:
-                # Extract JWT token from request
-                token = _extract_jwt_token()
-                
-                if not token and not allow_anonymous:
-                    AUTH_ATTEMPTS.labels(result='missing_token').inc()
-                    logger.warning("Authentication required but no token provided")
-                    raise Unauthorized("Authentication token required")
-                
-                if token:
-                    # Validate JWT token
-                    user_context = _validate_jwt_token(token, jwt_secret_key)
-                    
-                    # Check required scopes
-                    if required_scopes:
-                        _validate_user_scopes(user_context, required_scopes)
-                    
-                    # Store user context in Flask g object
-                    g.current_user = user_context
-                    g.user_id = user_context.get('sub', user_context.get('user_id'))
-                    
-                    AUTH_ATTEMPTS.labels(result='success').inc()
-                    logger.debug(
-                        "Authentication successful",
-                        user_id=g.user_id,
-                        scopes=user_context.get('scopes', [])
-                    )
-                elif allow_anonymous:
-                    g.current_user = None
-                    g.user_id = None
-                    logger.debug("Anonymous access allowed")
-                
-                return func(*args, **kwargs)
-                
-            except jwt.ExpiredSignatureError:
-                AUTH_ATTEMPTS.labels(result='expired_token').inc()
-                logger.warning("JWT token has expired")
-                raise Unauthorized("Token has expired")
-                
-            except jwt.InvalidTokenError as e:
-                AUTH_ATTEMPTS.labels(result='invalid_token').inc()
-                logger.warning("Invalid JWT token", error=str(e))
-                raise Unauthorized("Invalid authentication token")
-                
-            except Exception as e:
-                AUTH_ATTEMPTS.labels(result='error').inc()
-                logger.error("Authentication error", error=str(e), error_type=type(e).__name__)
-                raise
-                
-        return cast(F, wrapper)
-    return decorator
-
-
-def rate_limit(
-    max_requests: int = 100,
-    window: int = 3600,
-    per_user: bool = True,
-    key_func: Optional[Callable] = None
-) -> DecoratorFunction:
-    """
-    Rate limiting decorator with Redis-backed storage.
-    
-    Provides enterprise-grade rate limiting with configurable windows,
-    per-user or global limits, and custom key generation functions.
-    
-    Args:
-        max_requests: Maximum requests allowed in the time window
-        window: Time window in seconds (default: 1 hour)
-        per_user: Whether to apply rate limit per user (default: True)
-        key_func: Custom function to generate rate limit keys
-        
-    Returns:
-        Decorated function with rate limiting
-        
-    Example:
-        @rate_limit(max_requests=50, window=900, per_user=True)
-        def api_endpoint():
-            return {"message": "API response"}
-    """
-    def decorator(func: F) -> F:
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            if not redis_client:
-                logger.warning("Redis client not available, skipping rate limit")
-                return func(*args, **kwargs)
+            correlation_id = getattr(g, 'correlation_id', str(uuid4()))
             
             try:
-                # Generate rate limit key
-                rate_limit_key = _generate_rate_limit_key(func, per_user, key_func)
+                start_time = time.perf_counter()
                 
-                # Check current request count
-                current_requests = redis_client.get(rate_limit_key)
-                if current_requests is None:
-                    current_requests = 0
+                # Determine validation data source
+                if validate_json and request and request.is_json:
+                    data_to_validate = request.get_json()
+                elif location == 'form' and request:
+                    data_to_validate = request.form.to_dict()
+                elif validate_args:
+                    # Validate function arguments
+                    # Combine args and kwargs into a dictionary
+                    import inspect
+                    sig = inspect.signature(func)
+                    bound_args = sig.bind(*args, **kwargs)
+                    bound_args.apply_defaults()
+                    data_to_validate = dict(bound_args.arguments)
                 else:
-                    current_requests = int(current_requests)
+                    data_to_validate = {}
                 
-                if current_requests >= max_requests:
-                    logger.warning(
-                        "Rate limit exceeded",
-                        function=func.__qualname__,
-                        key=rate_limit_key,
-                        current_requests=current_requests,
-                        max_requests=max_requests
-                    )
-                    raise TooManyRequests(f"Rate limit exceeded: {max_requests} requests per {window} seconds")
+                # Perform validation based on schema type
+                if isinstance(schema, type) and issubclass(schema, BaseModel):
+                    # Pydantic validation
+                    try:
+                        validated_data = schema(**data_to_validate)
+                        # Convert to dict for consistent handling
+                        g.validated_data = validated_data.dict()
+                    except PydanticValidationError as e:
+                        validation_time.labels(
+                            validation_type='pydantic',
+                            schema_name=schema.__name__,
+                            status='error'
+                        ).observe(time.perf_counter() - start_time)
+                        
+                        # Convert pydantic errors to our format
+                        field_errors = {}
+                        for error in e.errors():
+                            field_name = '.'.join(str(loc) for loc in error['loc'])
+                            if field_name not in field_errors:
+                                field_errors[field_name] = []
+                            field_errors[field_name].append(error['msg'])
+                        
+                        raise ValidationError(
+                            message="Input validation failed",
+                            field_errors=field_errors,
+                            correlation_id=correlation_id
+                        )
                 
-                # Increment request count
-                pipe = redis_client.pipeline()
-                pipe.incr(rate_limit_key)
-                pipe.expire(rate_limit_key, window)
-                pipe.execute()
+                elif isinstance(schema, (type, Schema)) and (
+                    isinstance(schema, Schema) or issubclass(schema, Schema)
+                ):
+                    # Marshmallow validation
+                    try:
+                        schema_instance = schema if isinstance(schema, Schema) else schema()
+                        validated_data = schema_instance.load(data_to_validate)
+                        g.validated_data = validated_data
+                    except MarshmallowValidationError as e:
+                        validation_time.labels(
+                            validation_type='marshmallow',
+                            schema_name=schema.__class__.__name__,
+                            status='error'
+                        ).observe(time.perf_counter() - start_time)
+                        
+                        raise ValidationError(
+                            message="Input validation failed",
+                            field_errors=e.messages,
+                            correlation_id=correlation_id
+                        )
+                
+                else:
+                    raise ValueError(f"Unsupported schema type: {type(schema)}")
+                
+                # Record successful validation
+                validation_time.labels(
+                    validation_type='pydantic' if issubclass(schema, BaseModel) else 'marshmallow',
+                    schema_name=schema.__name__ if hasattr(schema, '__name__') else schema.__class__.__name__,
+                    status='success'
+                ).observe(time.perf_counter() - start_time)
                 
                 logger.debug(
-                    "Rate limit check passed",
-                    function=func.__qualname__,
-                    key=rate_limit_key,
-                    current_requests=current_requests + 1,
-                    max_requests=max_requests
+                    "Input validation successful",
+                    function=function_name,
+                    schema_name=schema.__name__ if hasattr(schema, '__name__') else schema.__class__.__name__,
+                    correlation_id=correlation_id,
+                    validation_time=time.perf_counter() - start_time
                 )
                 
+                # Execute function with validated data
                 return func(*args, **kwargs)
                 
-            except TooManyRequests:
+            except ValidationError:
+                # Re-raise validation errors
                 raise
             except Exception as e:
-                logger.error("Rate limiting error", error=str(e), function=func.__qualname__)
-                # Allow request to proceed if rate limiting fails
-                return func(*args, **kwargs)
-                
-        return cast(F, wrapper)
+                # Handle unexpected validation errors
+                logger.error(
+                    "Validation decorator error",
+                    function=function_name,
+                    error=str(e),
+                    correlation_id=correlation_id
+                )
+                raise ValidationError(
+                    message="Validation processing failed",
+                    details={'error': str(e)},
+                    correlation_id=correlation_id
+                )
+        
+        return wrapper
     return decorator
 
 
 def circuit_breaker(
     failure_threshold: int = 5,
     recovery_timeout: int = 60,
-    expected_exception: type = Exception
-) -> DecoratorFunction:
+    expected_exception: Type[Exception] = Exception
+) -> Callable[[F], F]:
     """
-    Circuit breaker decorator for external service resilience.
+    Circuit breaker decorator for external service protection.
     
-    Implements the circuit breaker pattern to prevent cascading failures
-    in external service integrations with automatic recovery detection.
+    Implements circuit breaker patterns per Section 5.4.2 error recovery mechanisms.
     
     Args:
         failure_threshold: Number of failures before opening circuit
-        recovery_timeout: Seconds to wait before attempting recovery
-        expected_exception: Exception type that triggers circuit breaking
-        
+        recovery_timeout: Time in seconds before attempting recovery
+        expected_exception: Exception type that triggers circuit breaker
+    
     Returns:
         Decorated function with circuit breaker protection
-        
+    
     Example:
         @circuit_breaker(failure_threshold=3, recovery_timeout=30)
         def call_external_api():
-            return requests.get('https://external-api.com/data')
+            # External service call
+            return api_response
     """
     def decorator(func: F) -> F:
-        circuit_state = {
-            'failures': 0,
+        function_name = f"{func.__module__}.{func.__qualname__}"
+        
+        # Circuit breaker state
+        state = {
+            'failure_count': 0,
             'last_failure_time': None,
-            'state': 'closed'  # closed, open, half-open
+            'state': 'closed'  # closed, open, half_open
         }
         
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
+            correlation_id = getattr(g, 'correlation_id', str(uuid4()))
             current_time = time.time()
             
-            # Check if circuit should transition from open to half-open
-            if (circuit_state['state'] == 'open' and 
-                circuit_state['last_failure_time'] and
-                current_time - circuit_state['last_failure_time'] > recovery_timeout):
-                circuit_state['state'] = 'half-open'
-                logger.info(
-                    "Circuit breaker transitioning to half-open",
-                    function=func.__qualname__
-                )
-            
-            # Reject requests if circuit is open
-            if circuit_state['state'] == 'open':
-                logger.warning(
-                    "Circuit breaker is open, rejecting request",
-                    function=func.__qualname__,
-                    failures=circuit_state['failures']
-                )
-                raise Exception(f"Circuit breaker is open for {func.__qualname__}")
+            # Check circuit state
+            if state['state'] == 'open':
+                # Check if recovery timeout has passed
+                if (current_time - state['last_failure_time']) >= recovery_timeout:
+                    state['state'] = 'half_open'
+                    logger.info(
+                        "Circuit breaker attempting recovery",
+                        function=function_name,
+                        correlation_id=correlation_id,
+                        failure_count=state['failure_count']
+                    )
+                else:
+                    # Circuit is still open
+                    raise CircuitBreakerError(
+                        message=f"Circuit breaker is open for {function_name}",
+                        service_name=function_name,
+                        circuit_state='open',
+                        correlation_id=correlation_id
+                    )
             
             try:
+                # Execute function
                 result = func(*args, **kwargs)
                 
-                # Reset circuit on successful call
-                if circuit_state['failures'] > 0:
-                    circuit_state['failures'] = 0
-                    circuit_state['state'] = 'closed'
+                # Success - reset circuit breaker if it was half_open
+                if state['state'] == 'half_open':
+                    state['state'] = 'closed'
+                    state['failure_count'] = 0
+                    state['last_failure_time'] = None
+                    
                     logger.info(
-                        "Circuit breaker reset to closed",
-                        function=func.__qualname__
+                        "Circuit breaker recovered",
+                        function=function_name,
+                        correlation_id=correlation_id
                     )
                 
                 return result
                 
             except expected_exception as e:
-                circuit_state['failures'] += 1
-                circuit_state['last_failure_time'] = current_time
+                # Handle expected failures
+                state['failure_count'] += 1
+                state['last_failure_time'] = current_time
                 
-                # Open circuit if failure threshold reached
-                if circuit_state['failures'] >= failure_threshold:
-                    circuit_state['state'] = 'open'
+                # Check if we should open the circuit
+                if state['failure_count'] >= failure_threshold:
+                    state['state'] = 'open'
+                    
                     logger.error(
-                        "Circuit breaker opened due to repeated failures",
-                        function=func.__qualname__,
-                        failures=circuit_state['failures'],
-                        threshold=failure_threshold
+                        "Circuit breaker opened",
+                        function=function_name,
+                        correlation_id=correlation_id,
+                        failure_count=state['failure_count'],
+                        threshold=failure_threshold,
+                        error=str(e)
+                    )
+                    
+                    raise CircuitBreakerError(
+                        message=f"Circuit breaker opened for {function_name}",
+                        service_name=function_name,
+                        circuit_state='open',
+                        correlation_id=correlation_id,
+                        details={'original_error': str(e)}
                     )
                 else:
                     logger.warning(
                         "Circuit breaker failure recorded",
-                        function=func.__qualname__,
-                        failures=circuit_state['failures'],
-                        threshold=failure_threshold
+                        function=function_name,
+                        correlation_id=correlation_id,
+                        failure_count=state['failure_count'],
+                        threshold=failure_threshold,
+                        error=str(e)
                     )
-                
-                raise
-                
-        return cast(F, wrapper)
+                    
+                    # Re-raise original exception
+                    raise
+        
+        return wrapper
     return decorator
 
 
-# Helper Functions
+def retry(
+    max_attempts: int = 3,
+    delay: float = 1.0,
+    backoff_factor: float = 2.0,
+    exceptions: tuple = (Exception,)
+) -> Callable[[F], F]:
+    """
+    Retry decorator with exponential backoff.
+    
+    Implements retry logic for transient failures per Section 5.4.2
+    error recovery mechanisms.
+    
+    Args:
+        max_attempts: Maximum number of retry attempts
+        delay: Initial delay between retries in seconds
+        backoff_factor: Multiplier for exponential backoff
+        exceptions: Tuple of exception types to retry on
+    
+    Returns:
+        Decorated function with retry capabilities
+    
+    Example:
+        @retry(max_attempts=3, delay=1.0, backoff_factor=2.0)
+        def unstable_external_call():
+            # Call that might fail transiently
+            return response
+    """
+    def decorator(func: F) -> F:
+        function_name = f"{func.__module__}.{func.__qualname__}"
+        
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            correlation_id = getattr(g, 'correlation_id', str(uuid4()))
+            last_exception = None
+            
+            for attempt in range(max_attempts):
+                try:
+                    # Log retry attempt
+                    if attempt > 0:
+                        logger.info(
+                            "Retrying function call",
+                            function=function_name,
+                            attempt=attempt + 1,
+                            max_attempts=max_attempts,
+                            correlation_id=correlation_id
+                        )
+                    
+                    # Execute function
+                    result = func(*args, **kwargs)
+                    
+                    # Success
+                    if attempt > 0:
+                        logger.info(
+                            "Function retry successful",
+                            function=function_name,
+                            successful_attempt=attempt + 1,
+                            correlation_id=correlation_id
+                        )
+                    
+                    return result
+                    
+                except exceptions as e:
+                    last_exception = e
+                    
+                    if attempt < max_attempts - 1:
+                        # Calculate delay with exponential backoff
+                        current_delay = delay * (backoff_factor ** attempt)
+                        
+                        logger.warning(
+                            "Function call failed, will retry",
+                            function=function_name,
+                            attempt=attempt + 1,
+                            max_attempts=max_attempts,
+                            error=str(e),
+                            retry_delay=current_delay,
+                            correlation_id=correlation_id
+                        )
+                        
+                        time.sleep(current_delay)
+                    else:
+                        # Final attempt failed
+                        logger.error(
+                            "Function retry exhausted",
+                            function=function_name,
+                            total_attempts=max_attempts,
+                            final_error=str(e),
+                            correlation_id=correlation_id
+                        )
+                
+                except Exception as e:
+                    # Non-retryable exception
+                    logger.error(
+                        "Non-retryable exception in function",
+                        function=function_name,
+                        attempt=attempt + 1,
+                        error=str(e),
+                        exception_type=e.__class__.__name__,
+                        correlation_id=correlation_id
+                    )
+                    raise
+            
+            # All retries exhausted
+            if last_exception:
+                raise last_exception
+        
+        return wrapper
+    return decorator
+
+
+# Helper functions
 
 def _generate_cache_key(
-    func: Callable,
+    function_name: str,
     args: tuple,
     kwargs: dict,
-    prefix: str,
-    exclude_args: List[str]
+    prefix: Optional[str] = None
 ) -> str:
-    """Generate a consistent cache key for function calls."""
-    func_name = f"{func.__module__}.{func.__qualname__}"
+    """Generate cache key from function name and arguments."""
+    import hashlib
+    import json
     
-    # Create a signature for the arguments
-    func_signature = inspect.signature(func)
-    bound_args = func_signature.bind(*args, **kwargs)
-    bound_args.apply_defaults()
-    
-    # Filter out excluded arguments
-    filtered_args = {
-        k: v for k, v in bound_args.arguments.items()
-        if k not in exclude_args
+    # Create a deterministic representation of arguments
+    key_data = {
+        'function': function_name,
+        'args': [str(arg) for arg in args],
+        'kwargs': {k: str(v) for k, v in sorted(kwargs.items())}
     }
     
-    # Create hash of arguments
-    args_hash = hashlib.md5(
-        json.dumps(filtered_args, sort_keys=True, default=str).encode()
-    ).hexdigest()
+    # Generate hash
+    key_string = json.dumps(key_data, sort_keys=True)
+    key_hash = hashlib.sha256(key_string.encode('utf-8')).hexdigest()[:16]
     
-    # Combine prefix, function name, and arguments hash
-    cache_key = f"{prefix}:{func_name}:{args_hash}" if prefix else f"{func_name}:{args_hash}"
+    # Add prefix if provided
+    if prefix:
+        return f"{prefix}:{function_name}:{key_hash}"
+    else:
+        return f"cache:{function_name}:{key_hash}"
+
+
+def _get_key_pattern(cache_key: str) -> str:
+    """Extract pattern from cache key for metrics labeling."""
+    parts = cache_key.split(':')
+    if len(parts) >= 2:
+        return ':'.join(parts[:-1]) + ':*'
     return cache_key
 
 
-def _sanitize_log_data(
-    data: Dict[str, Any],
-    exclude_fields: List[str],
-    sensitive_fields: List[str]
-) -> Dict[str, Any]:
-    """Sanitize data for logging by excluding and masking sensitive fields."""
-    if not isinstance(data, dict):
+def _mask_sensitive_data(data: Any, mask_fields: List[str]) -> Any:
+    """Mask sensitive fields in data for logging."""
+    if isinstance(data, dict):
+        masked_data = {}
+        for key, value in data.items():
+            if any(field.lower() in key.lower() for field in mask_fields):
+                masked_data[key] = '***'
+            else:
+                masked_data[key] = _mask_sensitive_data(value, mask_fields)
+        return masked_data
+    elif isinstance(data, (list, tuple)):
+        return [_mask_sensitive_data(item, mask_fields) for item in data]
+    elif isinstance(data, str) and len(data) > 100:
+        # Truncate long strings
+        return data[:100] + '...'
+    else:
         return data
-    
-    sanitized = {}
-    for key, value in data.items():
-        if key in exclude_fields:
-            continue
-        elif key in sensitive_fields:
-            sanitized[key] = '***MASKED***'
-        elif isinstance(value, dict):
-            sanitized[key] = _sanitize_log_data(value, exclude_fields, sensitive_fields)
-        else:
-            sanitized[key] = value
-    
-    return sanitized
 
 
-def _validate_function_args(
-    func: Callable,
-    args: tuple,
-    kwargs: dict,
-    schema: Union[Schema, BaseModel, Dict[str, Any]]
-) -> None:
-    """Validate function arguments against a schema."""
-    func_signature = inspect.signature(func)
-    bound_args = func_signature.bind(*args, **kwargs)
-    bound_args.apply_defaults()
-    
-    if isinstance(schema, Schema):
-        schema.load(bound_args.arguments)
-    elif isinstance(schema, type) and issubclass(schema, BaseModel):
-        schema(**bound_args.arguments)
-    else:
-        # Simple dict validation
-        for key, validator in schema.items():
-            if key in bound_args.arguments:
-                if not validator(bound_args.arguments[key]):
-                    raise ValidationError(f"Validation failed for argument: {key}")
-
-
-def _validate_request_data(
-    schema: Union[Schema, BaseModel, Dict[str, Any]],
-    source: str
-) -> None:
-    """Validate request data from the specified source."""
-    if source == 'json':
-        data = request.get_json()
-    elif source == 'form':
-        data = request.form.to_dict()
-    elif source == 'args':
-        data = request.args.to_dict()
-    else:
-        raise ValidationDecoratorError(f"Unsupported validation source: {source}")
-    
-    if data is None:
-        raise BadRequest("No data provided for validation")
-    
-    if isinstance(schema, Schema):
-        schema.load(data)
-    elif isinstance(schema, type) and issubclass(schema, BaseModel):
-        schema(**data)
-    else:
-        # Simple dict validation
-        for key, validator in schema.items():
-            if key in data:
-                if not validator(data[key]):
-                    raise ValidationError(f"Validation failed for field: {key}")
-
-
-def _extract_jwt_token() -> Optional[str]:
-    """Extract JWT token from request headers."""
-    auth_header = request.headers.get('Authorization')
-    if auth_header and auth_header.startswith('Bearer '):
-        return auth_header[7:]  # Remove 'Bearer ' prefix
-    return None
-
-
-def _validate_jwt_token(token: str, secret_key: Optional[str] = None) -> Dict[str, Any]:
-    """Validate JWT token and return decoded payload."""
-    if not secret_key:
-        secret_key = current_app.config.get('JWT_SECRET_KEY')
-        if not secret_key:
-            raise AuthenticationDecoratorError("JWT secret key not configured")
-    
-    try:
-        payload = jwt.decode(
-            token,
-            secret_key,
-            algorithms=['HS256'],
-            verify=True
-        )
-        return payload
-    except jwt.InvalidTokenError:
-        raise
-
-
-def _validate_user_scopes(user_context: Dict[str, Any], required_scopes: List[str]) -> None:
-    """Validate that user has required scopes."""
-    user_scopes = user_context.get('scopes', [])
-    if isinstance(user_scopes, str):
-        user_scopes = user_scopes.split(' ')
-    
-    missing_scopes = set(required_scopes) - set(user_scopes)
-    if missing_scopes:
-        logger.warning(
-            "Insufficient permissions",
-            user_id=user_context.get('sub', user_context.get('user_id')),
-            required_scopes=required_scopes,
-            user_scopes=user_scopes,
-            missing_scopes=list(missing_scopes)
-        )
-        raise Unauthorized(f"Insufficient permissions. Missing scopes: {list(missing_scopes)}")
-
-
-def _generate_rate_limit_key(
-    func: Callable,
-    per_user: bool,
-    key_func: Optional[Callable]
-) -> str:
-    """Generate rate limit key."""
-    if key_func:
-        return key_func()
-    
-    base_key = f"rate_limit:{func.__module__}.{func.__qualname__}"
-    
-    if per_user:
-        user_id = getattr(g, 'user_id', None)
-        if user_id:
-            return f"{base_key}:user:{user_id}"
-        else:
-            # Fall back to IP address if no user context
-            client_ip = request.remote_addr
-            return f"{base_key}:ip:{client_ip}"
-    
-    return base_key
-
-
-# Export public decorator functions
+# Export decorator functions
 __all__ = [
-    'timeit',
-    'cached',
+    'timing',
+    'cache',
     'logged',
     'validate_input',
-    'require_auth',
-    'rate_limit',
     'circuit_breaker',
-    'initialize_redis',
-    'DecoratorError',
-    'CacheError',
-    'ValidationDecoratorError',
-    'AuthenticationDecoratorError'
+    'retry',
+    'PerformanceBaseline'
 ]
