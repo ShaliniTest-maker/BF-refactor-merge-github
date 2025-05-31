@@ -1,104 +1,141 @@
 """
 Dynamic Test Data Generation Fixtures using factory_boy Patterns
 
-This module provides comprehensive test data generation fixtures using factory_boy patterns
-for creating realistic test objects, user profiles, business data models, and complex data
-scenarios with comprehensive validation and edge case coverage per Section 6.6.1 requirements.
+This module provides comprehensive factory_boy integration for dynamic test object generation
+with realistic test data models, production data model parity, and edge case coverage for
+the Flask application migration. Implements Section 6.6.1 enhanced mocking strategy and
+test data management patterns per technical specification requirements.
 
-The factory fixtures implement:
-- factory_boy integration for dynamic test object generation per Section 6.6.1 enhanced mocking strategy
+Key Features:
+- factory_boy integration for dynamic test object generation per Section 6.6.1
 - Production data model parity per Section 6.6.1 test data management
 - pydantic model validation in test fixtures per Section 6.6.1
 - Date/time handling with python-dateutil per Section 6.6.1
 - Comprehensive validation testing with marshmallow schemas per Section 6.6.1
-- Realistic test data volumes for performance testing per Section 6.6.1 production data model parity
-- Edge case data factories for validation testing per Section 6.6.1 factory pattern
-- Complex data scenario factories for integration testing per Section 6.6.1 fixture-based data
+- Edge case data factories for validation testing per Section 6.6.1
+- Realistic test data volumes for performance testing per Section 6.6.1
 
-Key Features:
-- Dynamic user profile generation for authentication and authorization testing
-- Business model factories with full pydantic 2.3+ validation support
-- Date/time factory patterns using python-dateutil 2.8+ for realistic temporal data
-- Edge case and boundary condition testing for comprehensive validation coverage
-- Performance test data generation with configurable volumes and complexity
-- Integration test scenario factories for multi-component workflows
-- MongoDB document structure preservation for seamless data layer testing
-- Marshmallow schema validation integration for comprehensive data validation testing
+Factory Categories:
+    Core Business Factories:
+        UserFactory: User account and profile test data generation
+        OrganizationFactory: Organization and company test data
+        ProductFactory: Product catalog and inventory test data
+        OrderFactory: Order and transaction test data
+        PaymentTransactionFactory: Payment processing test data
+        
+    Authentication Factories:
+        AuthUserFactory: Authentication-specific user data
+        JWTTokenFactory: JWT token generation for auth testing
+        SessionFactory: User session data for authentication
+        PermissionFactory: User permissions and roles
+        
+    Utility Factories:
+        AddressFactory: Geographic address test data
+        ContactInfoFactory: Contact information test data
+        MonetaryAmountFactory: Financial amount test data
+        DateTimeRangeFactory: Temporal range test data
+        FileUploadFactory: File metadata test data
+        
+    API Testing Factories:
+        PaginationParamsFactory: Pagination parameter generation
+        SearchParamsFactory: Search and filtering test data
+        ApiResponseFactory: API response structure generation
+        
+    Edge Case Factories:
+        InvalidDataFactory: Invalid data for validation testing
+        BoundaryValueFactory: Boundary condition test data
+        SecurityTestFactory: Security validation test data
+        PerformanceDataFactory: Large volume test data for performance
+
+Integration Points:
+- Section 3.2.3: pydantic 2.3+ model validation integration
+- Section 3.2.3: python-dateutil 2.8+ for date/time handling
+- Section 6.6.1: factory_boy for dynamic test object generation
+- Section 6.6.1: production data model parity validation
+- Section 6.6.1: comprehensive validation testing patterns
+- Section 6.6.1: edge case and boundary condition coverage
+- Section 6.6.1: performance testing data volume generation
+
+Performance Requirements:
+- Realistic test data volumes per Section 6.6.1 production data model parity
+- Edge case coverage per Section 6.6.1 factory pattern validation
+- Performance testing data generation per Section 6.6.1 test data management
 
 Dependencies:
-- factory_boy (≥3.3.0) for dynamic test object generation
-- pydantic (≥2.3.0) for data model validation and type checking
-- python-dateutil (≥2.8.0) for advanced date/time manipulation
-- marshmallow (≥3.20.0) for schema validation testing
-- faker (≥19.0.0) for realistic test data generation
-- pytest (≥7.4.0) for test framework integration
+- factory_boy for dynamic object generation and test data patterns
+- python-dateutil 2.8+ for comprehensive date/time test scenarios
+- pydantic 2.3+ for data model validation and type checking
+- faker for realistic test data generation with localization support
+- pytest integration for fixture-based test data management
+
+Author: Flask Migration Team
+Version: 1.0.0
+Test Coverage Target: 95% per Section 6.6.3 quality metrics
 """
 
+import secrets
 import uuid
-import random
-import string
-from datetime import datetime, date, timezone, timedelta
+from datetime import datetime, timedelta, timezone, date
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Set, Union, Type, Callable
-from enum import Enum
-import json
+from urllib.parse import urljoin
 import re
 
-# Third-party imports for test data generation
+# factory_boy integration for dynamic test object generation per Section 6.6.1
 import factory
-from factory import fuzzy, SubFactory, LazyFunction, LazyAttribute, Sequence
-from factory.alchemy import SQLAlchemyModelFactory
-from factory.faker import Faker
-from faker import Factory as FakerFactory
-from faker.providers import BaseProvider
-import pytest
+from factory import LazyAttribute, LazyFunction, SubFactory, Iterator, Trait
+from factory.fuzzy import (
+    FuzzyChoice, FuzzyDecimal, FuzzyFloat, FuzzyInteger, 
+    FuzzyText, FuzzyDate, FuzzyDateTime
+)
 
-# Date/time handling with python-dateutil per Section 6.6.1
+# python-dateutil integration per Section 6.6.1 date/time handling
 from dateutil.relativedelta import relativedelta
 from dateutil.parser import parse as parse_date
 from dateutil.tz import tzutc, tzlocal, gettz
-from dateutil.utils import today
+import dateutil.utils
 
-# Pydantic and marshmallow for validation testing per Section 6.6.1
-from pydantic import ValidationError as PydanticValidationError
-from marshmallow import ValidationError as MarshmallowValidationError
+# faker integration for realistic test data generation
+from faker import Faker
+from faker.providers import BaseProvider
 
-# Application imports for model validation and factory integration
-try:
-    from src.business.models import (
-        User, UserStatus, UserRole, Organization, Product, ProductCategory, ProductStatus,
-        Order, OrderItem, OrderStatus, PaymentTransaction, PaymentStatus, PaymentMethod,
-        Address, ContactInfo, ContactMethod, MonetaryAmount, DateTimeRange,
-        FileUpload, SystemConfiguration, Priority,
-        PaginationParams, SortParams, SearchParams, ApiResponse, PaginatedResponse,
-        BaseBusinessModel, BUSINESS_MODEL_REGISTRY
-    )
-    from src.business.exceptions import (
-        DataValidationError, BusinessRuleViolationError, ErrorSeverity
-    )
-    from src.business.validators import ValidationMode, ValidationType
-    from src.data.models import (
-        User as DataUser, UserSession, FileMetadata, ApplicationLog, CacheEntry,
-        ExternalAPIRequest, Configuration, PyObjectId, MongoBaseModel
-    )
-except ImportError:
-    # Graceful handling if application modules don't exist yet
-    # Create mock classes for development purposes
-    class BaseBusinessModel:
-        pass
+# Import business models for pydantic validation per Section 6.6.1
+from src.business.models import (
+    # Core business models
+    User, Organization, Product, ProductCategory, Order, OrderItem,
+    PaymentTransaction, SystemConfiguration,
     
-    class User:
-        pass
+    # Utility models
+    Address, ContactInfo, MonetaryAmount, DateTimeRange, FileUpload,
     
-    UserStatus = UserRole = ProductStatus = OrderStatus = PaymentStatus = None
-    PaymentMethod = ContactMethod = Priority = ErrorSeverity = None
+    # API models
+    PaginationParams, SortParams, SearchParams, ApiResponse, PaginatedResponse,
+    
+    # Enumerations
+    UserStatus, UserRole, OrderStatus, PaymentStatus, PaymentMethod, 
+    ProductStatus, Priority, ContactMethod
+)
+
+# Import data models for MongoDB integration
+from src.data.models import MongoBaseModel, PyObjectId
+
+# Import business validators for validation testing per Section 6.6.1
+from src.business.validators import ValidationConfig
+
+# Import business exceptions for error testing
+from src.business.exceptions import (
+    BusinessRuleViolationError, DataValidationError, ErrorSeverity
+)
 
 # Configure structured logging for factory operations
 import structlog
-logger = structlog.get_logger("tests.factories")
+logger = structlog.get_logger("tests.fixtures.factory_fixtures")
 
-# Initialize Faker instance with locale support
-fake = FakerFactory.create(['en_US', 'en_GB', 'de_DE', 'fr_FR', 'es_ES'])
+# Initialize Faker with multiple locales for comprehensive test coverage
+fake = Faker(['en_US', 'en_GB', 'de_DE', 'fr_FR', 'ja_JP'])
+
+# Configure factory_boy for performance optimization
+factory.Faker._DEFAULT_LOCALE = 'en_US'
 
 
 # ============================================================================
@@ -107,133 +144,108 @@ fake = FakerFactory.create(['en_US', 'en_GB', 'de_DE', 'fr_FR', 'es_ES'])
 
 class BusinessDataProvider(BaseProvider):
     """
-    Custom Faker provider for business-specific data generation.
+    Custom Faker provider for business-specific test data generation.
     
-    Provides domain-specific data patterns for realistic business test scenarios
-    including industry-standard identifiers, business terms, and workflow patterns.
+    Provides domain-specific data generation for business entities, financial
+    data, and industry-specific patterns not available in standard Faker.
     """
     
-    # Business industry classifications
-    industries = [
-        'Technology', 'Healthcare', 'Finance', 'Retail', 'Manufacturing',
-        'Education', 'Real Estate', 'Transportation', 'Energy', 'Agriculture',
-        'Entertainment', 'Hospitality', 'Construction', 'Consulting', 'Non-Profit'
-    ]
-    
-    # Business organization types
-    organization_types = [
+    # Business entity types for organization testing
+    business_types = [
         'Corporation', 'LLC', 'Partnership', 'Sole Proprietorship',
-        'Non-Profit', 'Government', 'Cooperative', 'Trust'
+        'Non-Profit', 'Government Agency', 'Educational Institution',
+        'Healthcare Organization', 'Technology Startup', 'Consulting Firm'
     ]
     
-    # Payment processor names
-    payment_processors = [
-        'Stripe', 'PayPal', 'Square', 'Authorize.Net', 'Braintree',
-        'Adyen', 'Worldpay', 'First Data', 'Chase Paymentech'
+    # Industry classifications for realistic business scenarios
+    industries = [
+        'Technology', 'Healthcare', 'Finance', 'Education', 'Retail',
+        'Manufacturing', 'Consulting', 'Real Estate', 'Media', 'Transportation',
+        'Energy', 'Agriculture', 'Construction', 'Entertainment', 'Hospitality'
     ]
     
-    # Product categories
+    # Product categories for e-commerce testing
     product_categories = [
         'Electronics', 'Clothing', 'Books', 'Home & Garden', 'Sports',
-        'Toys', 'Automotive', 'Health & Beauty', 'Grocery', 'Software'
+        'Automotive', 'Health & Beauty', 'Toys', 'Food & Beverage', 'Tools'
     ]
     
-    # File categories for uploads
+    # Payment processor names for financial testing
+    payment_processors = [
+        'Stripe', 'PayPal', 'Square', 'Authorize.Net', 'Braintree',
+        'Adyen', 'Worldpay', 'Chase Paymentech', 'First Data', 'Merchant One'
+    ]
+    
+    # File categories for upload testing
     file_categories = [
-        'profile_image', 'document', 'invoice', 'contract', 'report',
-        'presentation', 'spreadsheet', 'archive', 'media', 'backup'
+        'document', 'image', 'video', 'audio', 'spreadsheet',
+        'presentation', 'archive', 'code', 'data', 'backup'
     ]
     
-    # System configuration categories
-    config_categories = [
-        'authentication', 'database', 'cache', 'monitoring', 'security',
-        'feature_flags', 'api_limits', 'notifications', 'logging', 'performance'
-    ]
+    def business_type(self) -> str:
+        """Generate random business type."""
+        return self.random_element(self.business_types)
     
     def industry(self) -> str:
-        """Generate a random industry name."""
+        """Generate random industry classification."""
         return self.random_element(self.industries)
     
-    def organization_type(self) -> str:
-        """Generate a random organization type."""
-        return self.random_element(self.organization_types)
-    
-    def payment_processor(self) -> str:
-        """Generate a random payment processor name."""
-        return self.random_element(self.payment_processors)
-    
     def product_category(self) -> str:
-        """Generate a random product category."""
+        """Generate random product category."""
         return self.random_element(self.product_categories)
     
+    def payment_processor(self) -> str:
+        """Generate random payment processor name."""
+        return self.random_element(self.payment_processors)
+    
     def file_category(self) -> str:
-        """Generate a random file category."""
+        """Generate random file category."""
         return self.random_element(self.file_categories)
     
-    def config_category(self) -> str:
-        """Generate a random configuration category."""
-        return self.random_element(self.config_categories)
-    
-    def sku(self, prefix: str = "SKU") -> str:
-        """Generate a realistic SKU identifier."""
-        return f"{prefix}-{self.random_int(min=1000, max=9999)}-{self.random_letters(length=3).upper()}"
+    def sku(self, length: int = 8) -> str:
+        """Generate realistic product SKU."""
+        prefix = self.random_element(['SKU', 'PROD', 'ITEM', 'CODE'])
+        number = ''.join([str(self.random_int(0, 9)) for _ in range(length)])
+        return f"{prefix}-{number}"
     
     def order_number(self) -> str:
-        """Generate a realistic order number."""
-        timestamp = datetime.now().strftime("%Y%m%d")
-        sequence = self.random_int(min=1000, max=9999)
+        """Generate realistic order number."""
+        timestamp = datetime.now().strftime('%Y%m%d')
+        sequence = str(self.random_int(1000, 9999))
         return f"ORD-{timestamp}-{sequence}"
     
     def transaction_id(self) -> str:
-        """Generate a realistic transaction ID."""
-        return f"TXN-{uuid.uuid4().hex[:16].upper()}"
-    
-    def session_id(self) -> str:
-        """Generate a realistic session ID."""
-        return f"sess_{uuid.uuid4().hex}"
-    
-    def api_key(self) -> str:
-        """Generate a realistic API key."""
-        return f"ak_{uuid.uuid4().hex}"
-    
-    def jwt_token(self) -> str:
-        """Generate a mock JWT token format."""
-        header = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
-        payload = self.random_letters(length=64)
-        signature = self.random_letters(length=32)
-        return f"{header}.{payload}.{signature}"
-    
-    def phone_number_international(self) -> str:
-        """Generate an international phone number."""
-        country_codes = ['+1', '+44', '+49', '+33', '+34', '+39', '+31', '+46']
-        country_code = self.random_element(country_codes)
-        area_code = self.random_int(min=100, max=999)
-        number = self.random_int(min=1000000, max=9999999)
-        return f"{country_code} {area_code} {number}"
+        """Generate realistic transaction ID."""
+        prefix = 'TXN'
+        uuid_part = str(uuid.uuid4()).replace('-', '')[:12].upper()
+        return f"{prefix}_{uuid_part}"
     
     def currency_code(self) -> str:
-        """Generate a random currency code."""
+        """Generate realistic currency code."""
         currencies = ['USD', 'EUR', 'GBP', 'JPY', 'CAD', 'AUD', 'CHF', 'CNY']
         return self.random_element(currencies)
     
-    def file_extension(self, category: str = None) -> str:
-        """Generate a file extension based on category."""
-        extensions_by_category = {
-            'image': ['jpg', 'jpeg', 'png', 'gif', 'webp'],
-            'document': ['pdf', 'doc', 'docx', 'txt', 'rtf'],
-            'spreadsheet': ['xls', 'xlsx', 'csv'],
-            'presentation': ['ppt', 'pptx'],
-            'archive': ['zip', 'tar', 'gz', 'rar'],
-            'media': ['mp4', 'mp3', 'avi', 'mov']
-        }
+    def permissions_set(self) -> Set[str]:
+        """Generate realistic user permissions set."""
+        available_permissions = [
+            'user.read', 'user.write', 'user.delete',
+            'order.read', 'order.write', 'order.process',
+            'product.read', 'product.write', 'product.manage',
+            'payment.read', 'payment.process', 'payment.refund',
+            'report.read', 'report.generate', 'system.admin'
+        ]
+        count = self.random_int(1, 6)
+        return set(self.random_sample(available_permissions, count))
+    
+    def slug(self, text: str = None) -> str:
+        """Generate URL-friendly slug."""
+        if not text:
+            text = fake.catch_phrase()
         
-        if category and category in extensions_by_category:
-            return self.random_element(extensions_by_category[category])
-        
-        all_extensions = []
-        for exts in extensions_by_category.values():
-            all_extensions.extend(exts)
-        return self.random_element(all_extensions)
+        # Convert to lowercase and replace spaces/special chars with hyphens
+        slug = re.sub(r'[^\w\s-]', '', text.lower())
+        slug = re.sub(r'[-\s]+', '-', slug)
+        return slug.strip('-')
 
 
 # Add custom provider to Faker instance
@@ -241,138 +253,154 @@ fake.add_provider(BusinessDataProvider)
 
 
 # ============================================================================
-# UTILITY FUNCTIONS FOR FACTORY OPERATIONS
+# DATE/TIME FACTORY UTILITIES WITH PYTHON-DATEUTIL INTEGRATION
 # ============================================================================
 
-def generate_future_datetime(min_days: int = 1, max_days: int = 365) -> datetime:
+class DateTimeFactoryUtils:
     """
-    Generate a future datetime using python-dateutil per Section 6.6.1.
+    Utility class for advanced date/time generation using python-dateutil.
     
-    Args:
-        min_days: Minimum days in the future
-        max_days: Maximum days in the future
+    Provides comprehensive date/time test scenarios including timezone handling,
+    business hours, holidays, and temporal edge cases per Section 6.6.1
+    date/time handling requirements.
+    """
+    
+    @staticmethod
+    def business_hours_datetime(
+        date_obj: datetime = None,
+        timezone_name: str = 'UTC'
+    ) -> datetime:
+        """
+        Generate datetime within business hours (9 AM - 5 PM).
         
-    Returns:
-        Future datetime with timezone awareness
-    """
-    base_date = datetime.now(timezone.utc)
-    days_ahead = random.randint(min_days, max_days)
-    return base_date + relativedelta(days=days_ahead)
-
-
-def generate_past_datetime(min_days: int = 1, max_days: int = 365) -> datetime:
-    """
-    Generate a past datetime using python-dateutil per Section 6.6.1.
-    
-    Args:
-        min_days: Minimum days in the past
-        max_days: Maximum days in the past
+        Args:
+            date_obj: Base date (defaults to random recent date)
+            timezone_name: Timezone name for localization
+            
+        Returns:
+            Datetime within business hours
+        """
+        if date_obj is None:
+            date_obj = fake.date_between(start_date='-30d', end_date='today')
         
-    Returns:
-        Past datetime with timezone awareness
-    """
-    base_date = datetime.now(timezone.utc)
-    days_back = random.randint(min_days, max_days)
-    return base_date - relativedelta(days=days_back)
-
-
-def generate_date_range(duration_days: int = None) -> tuple[datetime, datetime]:
-    """
-    Generate a date range using python-dateutil per Section 6.6.1.
-    
-    Args:
-        duration_days: Duration in days (random if None)
+        # Generate time between 9 AM and 5 PM
+        hour = fake.random_int(9, 16)  # 9 AM to 4 PM (before 5 PM)
+        minute = fake.random_int(0, 59)
+        second = fake.random_int(0, 59)
         
-    Returns:
-        Tuple of (start_datetime, end_datetime)
-    """
-    start_date = generate_past_datetime(max_days=30)
-    
-    if duration_days is None:
-        duration_days = random.randint(1, 30)
-    
-    end_date = start_date + relativedelta(days=duration_days)
-    return start_date, end_date
-
-
-def generate_business_hours_range() -> tuple[datetime, datetime]:
-    """
-    Generate a date range within business hours using python-dateutil.
-    
-    Returns:
-        Tuple of business hours datetime range
-    """
-    today_date = today()
-    start_hour = random.randint(9, 16)  # 9 AM to 4 PM
-    duration_hours = random.randint(1, 8 - (start_hour - 9))
-    
-    start_datetime = datetime.combine(today_date, datetime.min.time().replace(hour=start_hour))
-    start_datetime = start_datetime.replace(tzinfo=timezone.utc)
-    
-    end_datetime = start_datetime + relativedelta(hours=duration_hours)
-    return start_datetime, end_datetime
-
-
-def generate_realistic_decimal(min_value: float = 0.01, max_value: float = 999999.99, 
-                              decimal_places: int = 2) -> Decimal:
-    """
-    Generate realistic decimal values for monetary amounts.
-    
-    Args:
-        min_value: Minimum decimal value
-        max_value: Maximum decimal value
-        decimal_places: Number of decimal places
+        business_dt = datetime.combine(
+            date_obj, 
+            datetime.min.time().replace(hour=hour, minute=minute, second=second)
+        )
         
-    Returns:
-        Decimal value with proper precision
-    """
-    value = random.uniform(min_value, max_value)
-    format_str = f"{{:.{decimal_places}f}}"
-    return Decimal(format_str.format(value))
-
-
-def generate_weighted_choice(choices: List[tuple]) -> Any:
-    """
-    Generate weighted random choice for realistic distributions.
-    
-    Args:
-        choices: List of (value, weight) tuples
-        
-    Returns:
-        Weighted random choice
-    """
-    values, weights = zip(*choices)
-    return random.choices(values, weights=weights)[0]
-
-
-def validate_factory_output(model_class: Type, factory_data: Dict[str, Any]) -> bool:
-    """
-    Validate factory output against pydantic model per Section 6.6.1.
-    
-    Args:
-        model_class: Pydantic model class for validation
-        factory_data: Factory-generated data
-        
-    Returns:
-        True if validation passes, False otherwise
-    """
-    try:
-        if hasattr(model_class, 'model_validate'):
-            # Pydantic v2 validation
-            model_class.model_validate(factory_data)
-        elif hasattr(model_class, 'parse_obj'):
-            # Pydantic v1 validation (fallback)
-            model_class.parse_obj(factory_data)
+        # Apply timezone
+        if timezone_name != 'UTC':
+            tz = gettz(timezone_name)
+            business_dt = business_dt.replace(tzinfo=tz)
         else:
-            # Non-Pydantic class
-            model_class(**factory_data)
-        return True
-    except Exception as e:
-        logger.warning("Factory validation failed", 
-                      model=model_class.__name__,
-                      error=str(e),
-                      data_keys=list(factory_data.keys()))
-        return False
+            business_dt = business_dt.replace(tzinfo=timezone.utc)
+        
+        return business_dt
+    
+    @staticmethod
+    def random_timezone_datetime(
+        base_datetime: datetime = None,
+        common_timezones: bool = True
+    ) -> datetime:
+        """
+        Generate datetime with random timezone.
+        
+        Args:
+            base_datetime: Base datetime (defaults to now)
+            common_timezones: Use common business timezones
+            
+        Returns:
+            Datetime with random timezone
+        """
+        if base_datetime is None:
+            base_datetime = datetime.now()
+        
+        if common_timezones:
+            timezones = [
+                'UTC', 'US/Eastern', 'US/Central', 'US/Mountain', 'US/Pacific',
+                'Europe/London', 'Europe/Paris', 'Europe/Berlin', 'Asia/Tokyo',
+                'Asia/Shanghai', 'Australia/Sydney'
+            ]
+        else:
+            timezones = ['UTC', 'US/Eastern', 'Europe/London', 'Asia/Tokyo']
+        
+        tz_name = fake.random_element(timezones)
+        tz = gettz(tz_name)
+        
+        # Convert to selected timezone
+        if base_datetime.tzinfo is None:
+            base_datetime = base_datetime.replace(tzinfo=timezone.utc)
+        
+        return base_datetime.astimezone(tz)
+    
+    @staticmethod
+    def date_range_with_duration(
+        start_days_ago: int = 30,
+        min_duration_hours: int = 1,
+        max_duration_hours: int = 168  # 1 week
+    ) -> tuple[datetime, datetime]:
+        """
+        Generate realistic date range with specified duration constraints.
+        
+        Args:
+            start_days_ago: Maximum days ago for start date
+            min_duration_hours: Minimum duration in hours
+            max_duration_hours: Maximum duration in hours
+            
+        Returns:
+            Tuple of (start_datetime, end_datetime)
+        """
+        # Generate start datetime
+        start_date = fake.date_between(start_date=f'-{start_days_ago}d', end_date='today')
+        start_time = fake.time_object()
+        start_datetime = datetime.combine(start_date, start_time, tzinfo=timezone.utc)
+        
+        # Generate duration
+        duration_hours = fake.random_int(min_duration_hours, max_duration_hours)
+        end_datetime = start_datetime + timedelta(hours=duration_hours)
+        
+        return start_datetime, end_datetime
+    
+    @staticmethod
+    def future_expiration_datetime(
+        min_days: int = 1,
+        max_days: int = 365
+    ) -> datetime:
+        """
+        Generate future expiration datetime.
+        
+        Args:
+            min_days: Minimum days in future
+            max_days: Maximum days in future
+            
+        Returns:
+            Future datetime for expiration scenarios
+        """
+        days_offset = fake.random_int(min_days, max_days)
+        return datetime.now(timezone.utc) + timedelta(days=days_offset)
+    
+    @staticmethod
+    def past_datetime_with_age(
+        min_age_days: int = 1,
+        max_age_days: int = 365
+    ) -> datetime:
+        """
+        Generate past datetime with specified age constraints.
+        
+        Args:
+            min_age_days: Minimum age in days
+            max_age_days: Maximum age in days
+            
+        Returns:
+            Past datetime within age constraints
+        """
+        days_ago = fake.random_int(min_age_days, max_age_days)
+        return datetime.now(timezone.utc) - timedelta(days=days_ago)
 
 
 # ============================================================================
@@ -381,1787 +409,1764 @@ def validate_factory_output(model_class: Type, factory_data: Dict[str, Any]) -> 
 
 class PydanticModelFactory(factory.Factory):
     """
-    Base factory class for Pydantic model generation with validation support.
+    Base factory class for Pydantic model integration.
     
-    Provides comprehensive factory patterns for Pydantic 2.3+ models with
-    built-in validation, error handling, and business rule compliance per
-    Section 6.6.1 enhanced mocking strategy.
-    
-    Features:
-    - Automatic pydantic model validation
-    - Business rule compliance checking
-    - Edge case and boundary condition testing
-    - Realistic data distribution patterns
-    - Integration with marshmallow schema validation
+    Provides standardized factory patterns for Pydantic model creation with
+    validation, error handling, and business rule enforcement per Section 6.6.1
+    pydantic model validation requirements.
     """
     
     class Meta:
         abstract = True
     
     @classmethod
-    def _create(cls, model_class, *args, **kwargs):
+    def _create(cls, model_class: Type, *args, **kwargs):
         """
-        Override create method to add pydantic validation per Section 6.6.1.
+        Create Pydantic model instance with validation.
         
         Args:
-            model_class: Pydantic model class
+            model_class: Pydantic model class to instantiate
             *args: Positional arguments
-            **kwargs: Factory data
+            **kwargs: Keyword arguments for model fields
             
         Returns:
-            Validated model instance
+            Validated Pydantic model instance
             
         Raises:
-            ValidationError: If pydantic validation fails
+            DataValidationError: If model validation fails
         """
         try:
-            # Remove any None values to let defaults work
-            clean_kwargs = {k: v for k, v in kwargs.items() if v is not None}
+            # Filter out None values to use model defaults
+            filtered_kwargs = {k: v for k, v in kwargs.items() if v is not None}
             
-            # Create model instance with validation
-            if hasattr(model_class, 'model_validate'):
-                # Pydantic v2
-                instance = model_class.model_validate(clean_kwargs)
-            elif hasattr(model_class, 'parse_obj'):
-                # Pydantic v1 fallback
-                instance = model_class.parse_obj(clean_kwargs)
-            else:
-                # Regular class instantiation
-                instance = model_class(**clean_kwargs)
+            # Create and validate model instance
+            instance = model_class(**filtered_kwargs)
             
-            # Log successful creation for debugging
-            logger.debug("Factory created model instance",
-                        model_type=model_class.__name__,
-                        field_count=len(clean_kwargs))
+            # Log factory creation for debugging
+            logger.debug(
+                "Factory created Pydantic model",
+                model_type=model_class.__name__,
+                field_count=len(filtered_kwargs)
+            )
             
             return instance
             
         except Exception as e:
-            logger.error("Factory creation failed",
-                        model_type=model_class.__name__,
-                        error=str(e),
-                        kwargs_keys=list(kwargs.keys()))
-            
-            # Re-raise with context
-            raise DataValidationError(
-                message=f"Factory failed to create {model_class.__name__}",
-                error_code="FACTORY_CREATION_FAILED",
-                context={
-                    'model_type': model_class.__name__,
-                    'provided_fields': list(kwargs.keys())
-                },
-                cause=e
+            logger.error(
+                "Factory failed to create Pydantic model",
+                model_type=model_class.__name__,
+                error=str(e),
+                kwargs_keys=list(kwargs.keys())
             )
+            
+            # Re-raise with factory context
+            if hasattr(e, 'errors'):
+                # Pydantic validation error
+                raise DataValidationError(
+                    message=f"Factory validation failed for {model_class.__name__}",
+                    error_code="FACTORY_VALIDATION_FAILED",
+                    validation_errors=[{
+                        'field': '.'.join(str(loc) for loc in error['loc']),
+                        'message': error['msg'],
+                        'type': error['type']
+                    } for error in e.errors()],
+                    context={'factory_class': cls.__name__},
+                    cause=e,
+                    severity=ErrorSeverity.HIGH
+                )
+            else:
+                # Other creation error
+                raise DataValidationError(
+                    message=f"Factory failed to create {model_class.__name__}",
+                    error_code="FACTORY_CREATION_FAILED",
+                    context={'factory_class': cls.__name__},
+                    cause=e,
+                    severity=ErrorSeverity.HIGH
+                )
     
     @classmethod
-    def create_batch_validated(cls, size: int, **kwargs) -> List[Any]:
+    def build_dict(cls, **kwargs) -> Dict[str, Any]:
         """
-        Create a batch of validated model instances.
+        Build dictionary representation without creating model instance.
         
         Args:
-            size: Number of instances to create
-            **kwargs: Factory parameters
+            **kwargs: Keyword arguments for model fields
             
         Returns:
-            List of validated model instances
+            Dictionary with generated field values
         """
-        instances = []
-        for i in range(size):
-            try:
-                instance = cls.create(**kwargs)
-                instances.append(instance)
-            except Exception as e:
-                logger.warning("Batch creation failed for item",
-                              index=i,
-                              error=str(e))
-                # Continue with next item rather than failing entire batch
-                continue
+        # Use factory.build to generate values without creating instance
+        generated = factory.build(dict, FACTORY_FOR=cls, **kwargs)
         
-        logger.info("Batch creation completed",
-                   requested_size=size,
-                   created_size=len(instances))
-        
-        return instances
-    
-    @classmethod
-    def create_edge_case(cls, edge_case_type: str = "boundary", **kwargs) -> Any:
-        """
-        Create edge case test instances for comprehensive validation testing.
-        
-        Args:
-            edge_case_type: Type of edge case ('boundary', 'invalid', 'minimal', 'maximal')
-            **kwargs: Override parameters
-            
-        Returns:
-            Edge case model instance
-        """
-        edge_kwargs = kwargs.copy()
-        
-        if edge_case_type == "minimal":
-            # Create instance with minimal required fields
-            edge_kwargs.update({
-                # Add minimal value overrides based on model type
-                'email': 'a@b.co',  # Minimal valid email
-                'name': 'A',        # Minimal name
-                'amount': Decimal('0.01'),  # Minimal amount
-            })
-        
-        elif edge_case_type == "maximal":
-            # Create instance with maximum allowed values
-            edge_kwargs.update({
-                'email': 'a' * 50 + '@' + 'b' * 50 + '.com',  # Long email
-                'name': 'A' * 200,  # Long name
-                'description': 'D' * 2000,  # Long description
-            })
-        
-        elif edge_case_type == "boundary":
-            # Create instance at boundary conditions
-            edge_kwargs.update({
-                'created_at': datetime.now(timezone.utc),
-                'updated_at': datetime.now(timezone.utc),
-            })
-        
-        return cls.create(**edge_kwargs)
+        # Filter out factory metadata
+        return {k: v for k, v in generated.items() 
+                if not k.startswith('FACTORY_') and v is not None}
 
 
 class MongoModelFactory(PydanticModelFactory):
     """
-    Base factory class for MongoDB model generation with ObjectId support.
+    Base factory class for MongoDB model integration.
     
-    Extends PydanticModelFactory with MongoDB-specific patterns including
-    ObjectId generation, document structure preservation, and database-ready
-    test data generation per Section 6.6.1 test data management.
+    Provides specialized factory patterns for MongoDB document models with
+    ObjectId generation, timestamp handling, and document structure preservation.
     """
     
     class Meta:
         abstract = True
     
-    # Standard MongoDB fields
-    id = LazyFunction(lambda: str(uuid.uuid4()))
-    created_at = LazyFunction(lambda: datetime.now(timezone.utc))
-    updated_at = LazyFunction(lambda: datetime.now(timezone.utc))
+    # MongoDB ObjectId generation
+    id = LazyFunction(lambda: PyObjectId())
     
-    @classmethod
-    def _create(cls, model_class, *args, **kwargs):
-        """Override to handle MongoDB ObjectId conversion."""
-        # Convert string IDs to ObjectId if needed
-        if 'id' in kwargs and isinstance(kwargs['id'], str):
-            try:
-                from bson import ObjectId
-                if not kwargs['id'].startswith('ObjectId'):
-                    kwargs['id'] = str(ObjectId())
-            except ImportError:
-                # If bson not available, keep as string
-                pass
+    # Timestamp generation with realistic age variation
+    created_at = LazyFunction(
+        lambda: DateTimeFactoryUtils.past_datetime_with_age(
+            min_age_days=1, max_age_days=180
+        )
+    )
+    
+    updated_at = LazyAttribute(
+        lambda obj: obj.created_at + timedelta(
+            seconds=fake.random_int(0, 86400)  # 0 to 24 hours later
+        )
+    )
+
+
+# ============================================================================
+# UTILITY MODEL FACTORIES
+# ============================================================================
+
+class AddressFactory(PydanticModelFactory):
+    """
+    Factory for Address model test data generation.
+    
+    Generates realistic geographic addresses with proper validation,
+    postal code formats, and international address patterns.
+    """
+    
+    class Meta:
+        model = Address
+    
+    street_line_1 = LazyFunction(lambda: fake.street_address())
+    street_line_2 = factory.LazyFunction(
+        lambda: fake.secondary_address() if fake.boolean(chance_of_getting_true=30) else None
+    )
+    city = LazyFunction(lambda: fake.city())
+    state_province = LazyFunction(lambda: fake.state())
+    postal_code = LazyFunction(lambda: fake.postcode())
+    country_code = FuzzyChoice(['US', 'CA', 'GB', 'DE', 'FR', 'AU', 'JP'])
+    
+    class Params:
+        # Trait for US addresses with proper formatting
+        us_address = Trait(
+            country_code='US',
+            state_province=LazyFunction(lambda: fake.state_abbr()),
+            postal_code=LazyFunction(lambda: fake.zipcode())
+        )
         
-        return super()._create(model_class, *args, **kwargs)
+        # Trait for international addresses
+        international = Trait(
+            country_code=FuzzyChoice(['GB', 'DE', 'FR', 'AU', 'JP', 'CA']),
+            postal_code=LazyFunction(lambda: fake.postcode())
+        )
+        
+        # Trait for PO Box addresses
+        po_box = Trait(
+            street_line_1=LazyFunction(lambda: f"PO Box {fake.random_int(1, 9999)}"),
+            street_line_2=None
+        )
+
+
+class ContactInfoFactory(PydanticModelFactory):
+    """
+    Factory for ContactInfo model test data generation.
+    
+    Generates realistic contact information with proper email and phone
+    validation, communication preferences, and timezone handling.
+    """
+    
+    class Meta:
+        model = ContactInfo
+    
+    primary_email = LazyFunction(lambda: fake.email())
+    secondary_email = factory.LazyFunction(
+        lambda: fake.email() if fake.boolean(chance_of_getting_true=40) else None
+    )
+    primary_phone = LazyFunction(lambda: fake.phone_number())
+    secondary_phone = factory.LazyFunction(
+        lambda: fake.phone_number() if fake.boolean(chance_of_getting_true=30) else None
+    )
+    preferred_contact_method = FuzzyChoice([method.value for method in ContactMethod])
+    allow_marketing = FuzzyChoice([True, False])
+    timezone = FuzzyChoice([
+        'UTC', 'US/Eastern', 'US/Central', 'US/Mountain', 'US/Pacific',
+        'Europe/London', 'Europe/Paris', 'Asia/Tokyo'
+    ])
+    
+    class Params:
+        # Trait for business contact information
+        business_contact = Trait(
+            primary_phone=LazyFunction(lambda: fake.phone_number()),
+            preferred_contact_method=ContactMethod.EMAIL,
+            allow_marketing=True
+        )
+        
+        # Trait for personal contact information
+        personal_contact = Trait(
+            preferred_contact_method=FuzzyChoice([ContactMethod.EMAIL, ContactMethod.PHONE]),
+            allow_marketing=FuzzyChoice([True, False])
+        )
+        
+        # Trait for minimal contact (email only)
+        minimal_contact = Trait(
+            secondary_email=None,
+            primary_phone=None,
+            secondary_phone=None,
+            preferred_contact_method=ContactMethod.EMAIL
+        )
+
+
+class MonetaryAmountFactory(PydanticModelFactory):
+    """
+    Factory for MonetaryAmount model test data generation.
+    
+    Generates realistic monetary amounts with proper decimal precision,
+    currency codes, and business-appropriate value ranges.
+    """
+    
+    class Meta:
+        model = MonetaryAmount
+    
+    amount = FuzzyDecimal(low=0.01, high=9999.99, precision=2)
+    currency_code = LazyFunction(lambda: fake.currency_code())
+    
+    class Params:
+        # Trait for small amounts (under $100)
+        small_amount = Trait(
+            amount=FuzzyDecimal(low=0.01, high=99.99, precision=2)
+        )
+        
+        # Trait for large amounts (over $1000)
+        large_amount = Trait(
+            amount=FuzzyDecimal(low=1000.00, high=999999.99, precision=2)
+        )
+        
+        # Trait for USD currency
+        usd_amount = Trait(
+            currency_code='USD'
+        )
+        
+        # Trait for EUR currency
+        eur_amount = Trait(
+            currency_code='EUR'
+        )
+        
+        # Trait for zero amount
+        zero_amount = Trait(
+            amount=Decimal('0.00')
+        )
+
+
+class DateTimeRangeFactory(PydanticModelFactory):
+    """
+    Factory for DateTimeRange model test data generation.
+    
+    Generates realistic date/time ranges with proper duration validation,
+    timezone handling, and business hour patterns.
+    """
+    
+    class Meta:
+        model = DateTimeRange
+    
+    start_datetime = LazyFunction(
+        lambda: DateTimeFactoryUtils.past_datetime_with_age(1, 30)
+    )
+    end_datetime = LazyAttribute(
+        lambda obj: obj.start_datetime + timedelta(
+            hours=fake.random_int(1, 48)
+        )
+    )
+    timezone_name = FuzzyChoice([
+        'UTC', 'US/Eastern', 'US/Pacific', 'Europe/London', 'Asia/Tokyo'
+    ])
+    all_day = FuzzyChoice([True, False])
+    
+    class Params:
+        # Trait for business hours range
+        business_hours = Trait(
+            start_datetime=LazyFunction(
+                lambda: DateTimeFactoryUtils.business_hours_datetime()
+            ),
+            end_datetime=LazyAttribute(
+                lambda obj: obj.start_datetime + timedelta(hours=8)
+            ),
+            all_day=False
+        )
+        
+        # Trait for short duration (under 2 hours)
+        short_duration = Trait(
+            end_datetime=LazyAttribute(
+                lambda obj: obj.start_datetime + timedelta(
+                    minutes=fake.random_int(15, 120)
+                )
+            )
+        )
+        
+        # Trait for all-day event
+        all_day_event = Trait(
+            all_day=True,
+            start_datetime=LazyFunction(
+                lambda: datetime.combine(
+                    fake.date_between(start_date='-30d', end_date='+30d'),
+                    datetime.min.time(),
+                    tzinfo=timezone.utc
+                )
+            ),
+            end_datetime=LazyAttribute(
+                lambda obj: obj.start_datetime + timedelta(days=1)
+            )
+        )
+
+
+class FileUploadFactory(PydanticModelFactory):
+    """
+    Factory for FileUpload model test data generation.
+    
+    Generates realistic file upload metadata with proper content types,
+    file sizes, and security validation patterns.
+    """
+    
+    class Meta:
+        model = FileUpload
+    
+    filename = LazyFunction(
+        lambda: f"{fake.file_name(extension=fake.random_element(['pdf', 'jpg', 'png', 'docx', 'xlsx']))}"
+    )
+    content_type = LazyAttribute(
+        lambda obj: {
+            'pdf': 'application/pdf',
+            'jpg': 'image/jpeg',
+            'jpeg': 'image/jpeg',
+            'png': 'image/png',
+            'gif': 'image/gif',
+            'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'txt': 'text/plain',
+            'csv': 'text/csv'
+        }.get(obj.filename.split('.')[-1].lower(), 'application/octet-stream')
+    )
+    file_size = FuzzyInteger(low=1024, high=10485760)  # 1KB to 10MB
+    storage_path = LazyFunction(
+        lambda: f"uploads/{fake.uuid4()}/{fake.file_name()}"
+    )
+    storage_url = LazyFunction(lambda: fake.url())
+    checksum = LazyFunction(lambda: fake.sha256())
+    is_virus_scanned = FuzzyChoice([True, False])
+    scan_result = LazyAttribute(
+        lambda obj: 'clean' if obj.is_virus_scanned else None
+    )
+    uploaded_by = LazyFunction(lambda: str(fake.uuid4()))
+    upload_date = LazyFunction(
+        lambda: DateTimeFactoryUtils.past_datetime_with_age(0, 30)
+    )
+    expires_at = factory.LazyFunction(
+        lambda: DateTimeFactoryUtils.future_expiration_datetime(30, 365)
+        if fake.boolean(chance_of_getting_true=60) else None
+    )
+    category = LazyFunction(lambda: fake.file_category())
+    tags = LazyFunction(
+        lambda: set(fake.words(nb=fake.random_int(1, 5)))
+    )
+    
+    class Params:
+        # Trait for image files
+        image_file = Trait(
+            filename=LazyFunction(
+                lambda: f"{fake.word()}.{fake.random_element(['jpg', 'png', 'gif'])}"
+            ),
+            content_type=LazyAttribute(
+                lambda obj: f"image/{obj.filename.split('.')[-1]}"
+            ),
+            category='image'
+        )
+        
+        # Trait for document files
+        document_file = Trait(
+            filename=LazyFunction(
+                lambda: f"{fake.catch_phrase().replace(' ', '_')}.{fake.random_element(['pdf', 'docx', 'txt'])}"
+            ),
+            content_type=LazyAttribute(
+                lambda obj: {
+                    'pdf': 'application/pdf',
+                    'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                    'txt': 'text/plain'
+                }.get(obj.filename.split('.')[-1], 'application/octet-stream')
+            ),
+            category='document'
+        )
+        
+        # Trait for large files
+        large_file = Trait(
+            file_size=FuzzyInteger(low=50485760, high=100000000)  # 50MB to 100MB
+        )
 
 
 # ============================================================================
 # USER AND AUTHENTICATION FACTORIES
 # ============================================================================
 
-class UserStatusFactory(factory.Factory):
-    """Factory for generating user status values with realistic distribution."""
-    
-    class Meta:
-        model = dict
-    
-    @classmethod
-    def _create(cls, model_class, *args, **kwargs):
-        # Realistic distribution of user statuses
-        status_weights = [
-            ('active', 70),      # Most users are active
-            ('inactive', 15),    # Some inactive users
-            ('pending', 10),     # New pending users
-            ('suspended', 4),    # Few suspended users
-            ('archived', 1),     # Very few archived users
-        ]
-        return generate_weighted_choice(status_weights)
-
-
-class UserRoleFactory(factory.Factory):
-    """Factory for generating user roles with realistic distribution."""
-    
-    class Meta:
-        model = dict
-    
-    @classmethod
-    def _create(cls, model_class, *args, **kwargs):
-        # Realistic distribution of user roles
-        role_weights = [
-            ('user', 80),        # Most users are regular users
-            ('manager', 15),     # Some managers
-            ('admin', 4),        # Few admins
-            ('guest', 1),        # Very few guests
-        ]
-        return generate_weighted_choice(role_weights)
-
-
-class ContactInfoFactory(PydanticModelFactory):
-    """
-    Factory for generating realistic contact information.
-    
-    Creates comprehensive contact data with realistic phone numbers,
-    email addresses, and communication preferences for authentication
-    and user profile testing per Section 6.6.1.
-    """
-    
-    class Meta:
-        model = ContactInfo if 'ContactInfo' in globals() else dict
-    
-    primary_email = Faker('email')
-    secondary_email = Faker('email')
-    primary_phone = LazyFunction(lambda: fake.phone_number_international())
-    secondary_phone = LazyFunction(lambda: fake.phone_number_international())
-    preferred_contact_method = LazyFunction(lambda: generate_weighted_choice([
-        ('email', 60),
-        ('phone', 30),
-        ('sms', 8),
-        ('in_app', 2)
-    ]))
-    allow_marketing = LazyFunction(lambda: random.choice([True, False]))
-    timezone = Faker('timezone')
-
-
-class AddressFactory(PydanticModelFactory):
-    """
-    Factory for generating realistic address information.
-    
-    Creates geographically consistent address data with proper postal codes,
-    country codes, and regional formatting for comprehensive location testing.
-    """
-    
-    class Meta:
-        model = Address if 'Address' in globals() else dict
-    
-    street_line_1 = Faker('street_address')
-    street_line_2 = LazyFunction(lambda: fake.secondary_address() if random.random() < 0.3 else None)
-    city = Faker('city')
-    state_province = Faker('state')
-    postal_code = Faker('postcode')
-    country_code = LazyFunction(lambda: generate_weighted_choice([
-        ('US', 40),
-        ('CA', 15),
-        ('GB', 10),
-        ('DE', 8),
-        ('FR', 7),
-        ('AU', 5),
-        ('NL', 3),
-        ('ES', 3),
-        ('IT', 3),
-        ('SE', 2),
-        ('NO', 2),
-        ('DK', 2)
-    ]))
-
-
 class UserFactory(PydanticModelFactory):
     """
-    Comprehensive user profile factory for authentication and authorization testing.
+    Factory for User model test data generation.
     
-    Generates realistic user profiles with proper authentication data, contact
-    information, preferences, and access control patterns per Section 6.6.1
-    test data management requirements.
-    
-    Features:
-    - Realistic user data distribution
-    - Proper email and username generation
-    - Authentication metadata
-    - Contact information integration
-    - Role-based permission assignment
-    - Account status and security settings
+    Generates realistic user profiles with authentication data, permissions,
+    contact information, and account status patterns for comprehensive testing.
     """
     
     class Meta:
-        model = User if 'User' in globals() else dict
+        model = User
     
-    # Core identification
-    id = LazyFunction(lambda: str(uuid.uuid4()))
-    username = Sequence(lambda n: f"user_{n:04d}")
-    email = Faker('email')
+    id = LazyFunction(lambda: str(fake.uuid4()))
+    username = LazyFunction(
+        lambda: fake.user_name().lower().replace('.', '_')
+    )
+    email = LazyFunction(lambda: fake.email())
+    first_name = LazyFunction(lambda: fake.first_name())
+    last_name = LazyFunction(lambda: fake.last_name())
+    display_name = LazyAttribute(
+        lambda obj: f"{obj.first_name} {obj.last_name}"
+    )
+    avatar_url = factory.LazyFunction(
+        lambda: fake.image_url() if fake.boolean(chance_of_getting_true=70) else None
+    )
     
-    # Personal information
-    first_name = Faker('first_name')
-    last_name = Faker('last_name')
-    display_name = LazyAttribute(lambda obj: f"{obj.first_name} {obj.last_name}")
-    avatar_url = LazyFunction(lambda: f"https://api.dicebear.com/7.x/avataaars/svg?seed={uuid.uuid4().hex}")
-    
-    # Account status and role
-    status = LazyFunction(UserStatusFactory._create)
-    role = LazyFunction(UserRoleFactory._create)
-    permissions = LazyFunction(lambda: random.sample([
-        'read_profile', 'update_profile', 'read_orders', 'create_orders',
-        'read_products', 'manage_products', 'read_users', 'manage_users',
-        'read_reports', 'create_reports', 'system_admin'
-    ], k=random.randint(1, 5)))
+    # Account status and permissions
+    status = FuzzyChoice([status.value for status in UserStatus])
+    role = FuzzyChoice([role.value for role in UserRole])
+    permissions = LazyFunction(lambda: fake.permissions_set())
     
     # Contact information
     contact_info = SubFactory(ContactInfoFactory)
     
     # Authentication and security
-    last_login_at = LazyFunction(lambda: generate_past_datetime(max_days=30))
-    password_changed_at = LazyFunction(lambda: generate_past_datetime(max_days=90))
-    login_attempts = LazyFunction(lambda: random.randint(0, 3))
-    is_locked = LazyFunction(lambda: random.random() < 0.05)  # 5% locked accounts
-    lock_expires_at = LazyFunction(lambda: generate_future_datetime(max_days=7) if random.random() < 0.05 else None)
+    last_login_at = factory.LazyFunction(
+        lambda: DateTimeFactoryUtils.past_datetime_with_age(0, 30)
+        if fake.boolean(chance_of_getting_true=80) else None
+    )
+    password_changed_at = factory.LazyFunction(
+        lambda: DateTimeFactoryUtils.past_datetime_with_age(1, 90)
+    )
+    login_attempts = FuzzyInteger(low=0, high=5)
+    is_locked = FuzzyChoice([True, False])
+    lock_expires_at = LazyAttribute(
+        lambda obj: DateTimeFactoryUtils.future_expiration_datetime(1, 7)
+        if obj.is_locked else None
+    )
     
-    # Preferences
-    language_code = LazyFunction(lambda: generate_weighted_choice([
-        ('en', 60),
-        ('es', 15),
-        ('fr', 8),
-        ('de', 7),
-        ('it', 5),
-        ('pt', 3),
-        ('nl', 2)
-    ]))
-    timezone = Faker('timezone')
-    date_format = LazyFunction(lambda: generate_weighted_choice([
-        ('YYYY-MM-DD', 40),
-        ('MM/DD/YYYY', 30),
-        ('DD/MM/YYYY', 20),
-        ('DD-MM-YYYY', 10)
-    ]))
+    # Profile and preferences
+    language_code = FuzzyChoice(['en', 'es', 'fr', 'de', 'ja', 'zh'])
+    timezone = FuzzyChoice([
+        'UTC', 'US/Eastern', 'US/Central', 'US/Mountain', 'US/Pacific',
+        'Europe/London', 'Europe/Paris', 'Europe/Berlin', 'Asia/Tokyo'
+    ])
+    date_format = FuzzyChoice(['YYYY-MM-DD', 'MM/DD/YYYY', 'DD/MM/YYYY'])
     
-    # Audit fields
-    created_at = LazyFunction(lambda: generate_past_datetime(max_days=365))
-    updated_at = LazyFunction(lambda: datetime.now(timezone.utc))
-    version = 1
-    
-    @classmethod
-    def create_admin_user(cls, **kwargs) -> Any:
-        """Create an admin user with elevated permissions."""
-        admin_kwargs = {
-            'role': 'admin',
-            'status': 'active',
-            'permissions': [
-                'read_profile', 'update_profile', 'read_orders', 'create_orders',
-                'manage_orders', 'read_products', 'manage_products', 'read_users',
-                'manage_users', 'read_reports', 'create_reports', 'manage_reports',
-                'system_admin', 'user_admin', 'content_admin'
-            ],
-            'is_locked': False,
-            'email_verified': True,
-        }
-        admin_kwargs.update(kwargs)
-        return cls.create(**admin_kwargs)
-    
-    @classmethod
-    def create_locked_user(cls, **kwargs) -> Any:
-        """Create a locked user for security testing."""
-        locked_kwargs = {
-            'status': 'suspended',
-            'is_locked': True,
-            'lock_expires_at': generate_future_datetime(min_days=1, max_days=30),
-            'failed_login_attempts': random.randint(5, 10),
-            'last_login_at': generate_past_datetime(min_days=7, max_days=30),
-        }
-        locked_kwargs.update(kwargs)
-        return cls.create(**locked_kwargs)
-    
-    @classmethod
-    def create_new_user(cls, **kwargs) -> Any:
-        """Create a new pending user for registration testing."""
-        new_kwargs = {
-            'status': 'pending',
-            'email_verified': False,
-            'phone_verified': False,
-            'login_count': 0,
-            'last_login_at': None,
-            'permissions': ['read_profile'],
-            'created_at': datetime.now(timezone.utc),
-            'updated_at': datetime.now(timezone.utc),
-        }
-        new_kwargs.update(kwargs)
-        return cls.create(**new_kwargs)
-
-
-class DataUserFactory(MongoModelFactory):
-    """
-    Data layer user factory for MongoDB document testing.
-    
-    Creates MongoDB-compatible user documents preserving existing document
-    structures from Node.js implementation for data layer integration testing.
-    """
-    
-    class Meta:
-        model = DataUser if 'DataUser' in globals() else dict
-    
-    # MongoDB document structure preservation
-    email = Faker('email')
-    username = Sequence(lambda n: f"datauser_{n:04d}")
-    password_hash = LazyFunction(lambda: f"$2b$12${uuid.uuid4().hex}")
-    salt = LazyFunction(lambda: uuid.uuid4().hex[:16])
-    
-    # Profile data
-    first_name = Faker('first_name')
-    last_name = Faker('last_name')
-    display_name = LazyAttribute(lambda obj: f"{obj.first_name} {obj.last_name}")
-    avatar_url = LazyFunction(lambda: f"https://api.dicebear.com/7.x/avataaars/svg?seed={uuid.uuid4().hex}")
-    
-    # Status and role
-    status = LazyFunction(UserStatusFactory._create)
-    role = LazyFunction(UserRoleFactory._create)
-    permissions = LazyFunction(lambda: random.sample([
-        'read_profile', 'update_profile', 'read_orders', 'create_orders'
-    ], k=random.randint(1, 3)))
-    
-    # External auth integration
-    auth0_user_id = LazyFunction(lambda: f"auth0|{uuid.uuid4().hex}")
-    external_ids = LazyFunction(lambda: {
-        'google': f"google_{uuid.uuid4().hex}",
-        'facebook': f"facebook_{random.randint(100000, 999999)}"
-    } if random.random() < 0.3 else {})
-    
-    # Account verification
-    email_verified = LazyFunction(lambda: random.random() < 0.8)
-    phone_number = LazyFunction(lambda: fake.phone_number_international() if random.random() < 0.6 else None)
-    phone_verified = LazyFunction(lambda: random.random() < 0.7)
-    
-    # Activity tracking
-    last_login = LazyFunction(lambda: generate_past_datetime(max_days=30))
-    last_activity = LazyFunction(lambda: generate_past_datetime(max_days=7))
-    login_count = LazyFunction(lambda: random.randint(1, 100))
-    
-    # Security fields
-    failed_login_attempts = LazyFunction(lambda: random.randint(0, 3))
-    account_locked_until = LazyFunction(lambda: generate_future_datetime(max_days=7) if random.random() < 0.05 else None)
-    password_changed_at = LazyFunction(lambda: generate_past_datetime(max_days=90))
-    
-    # User preferences
-    preferences = LazyFunction(lambda: {
-        'theme': random.choice(['light', 'dark']),
-        'notifications': random.choice([True, False]),
-        'language': random.choice(['en', 'es', 'fr', 'de']),
-        'timezone': fake.timezone()
-    })
-    privacy_settings = LazyFunction(lambda: {
-        'public_profile': random.choice([True, False]),
-        'show_email': random.choice([True, False]),
-        'marketing_emails': random.choice([True, False])
-    })
-
-
-class UserSessionFactory(MongoModelFactory):
-    """
-    User session factory for session management testing.
-    
-    Creates realistic user session data for authentication state testing,
-    Redis session storage validation, and distributed session management.
-    """
-    
-    class Meta:
-        model = UserSession if 'UserSession' in globals() else dict
-    
-    session_id = LazyFunction(lambda: fake.session_id())
-    user_id = LazyFunction(lambda: str(uuid.uuid4()))
-    
-    # Session metadata
-    status = LazyFunction(lambda: generate_weighted_choice([
-        ('active', 80),
-        ('expired', 15),
-        ('revoked', 5)
-    ]))
-    ip_address = Faker('ipv4')
-    user_agent = Faker('user_agent')
-    
-    # Session lifecycle
-    expires_at = LazyFunction(lambda: generate_future_datetime(min_days=1, max_days=30))
-    last_accessed = LazyFunction(lambda: generate_past_datetime(max_days=1))
-    
-    # Security tokens
-    csrf_token = LazyFunction(lambda: uuid.uuid4().hex)
-    refresh_token = LazyFunction(lambda: uuid.uuid4().hex)
-    login_method = LazyFunction(lambda: random.choice(['password', 'oauth', 'sso', 'api_key']))
-    
-    # Session data
-    data = LazyFunction(lambda: {
-        'user_preferences': {
-            'theme': random.choice(['light', 'dark']),
-            'language': random.choice(['en', 'es', 'fr', 'de'])
-        },
-        'cart_items': random.randint(0, 5),
-        'last_page': fake.uri_path(),
-        'session_start': datetime.now(timezone.utc).isoformat()
-    })
-
-
-# ============================================================================
-# BUSINESS MODEL FACTORIES
-# ============================================================================
-
-class MonetaryAmountFactory(PydanticModelFactory):
-    """
-    Factory for generating realistic monetary amounts with proper precision.
-    
-    Creates monetary data with appropriate currency codes, decimal precision,
-    and realistic value distributions for financial testing scenarios.
-    """
-    
-    class Meta:
-        model = MonetaryAmount if 'MonetaryAmount' in globals() else dict
-    
-    amount = LazyFunction(lambda: generate_realistic_decimal(0.01, 999999.99))
-    currency_code = LazyFunction(lambda: fake.currency_code())
-    
-    @classmethod
-    def create_small_amount(cls, **kwargs) -> Any:
-        """Create small monetary amounts for micro-transaction testing."""
-        small_kwargs = {
-            'amount': generate_realistic_decimal(0.01, 9.99),
-            'currency_code': 'USD'
-        }
-        small_kwargs.update(kwargs)
-        return cls.create(**small_kwargs)
-    
-    @classmethod
-    def create_large_amount(cls, **kwargs) -> Any:
-        """Create large monetary amounts for enterprise transaction testing."""
-        large_kwargs = {
-            'amount': generate_realistic_decimal(10000.00, 999999.99),
-            'currency_code': 'USD'
-        }
-        large_kwargs.update(kwargs)
-        return cls.create(**large_kwargs)
-    
-    @classmethod
-    def create_zero_amount(cls, **kwargs) -> Any:
-        """Create zero amount for free product/service testing."""
-        zero_kwargs = {
-            'amount': Decimal('0.00'),
-            'currency_code': 'USD'
-        }
-        zero_kwargs.update(kwargs)
-        return cls.create(**zero_kwargs)
-
-
-class DateTimeRangeFactory(PydanticModelFactory):
-    """
-    Factory for generating date/time ranges using python-dateutil per Section 6.6.1.
-    
-    Creates realistic temporal ranges for appointment scheduling, business hours,
-    event management, and time-based business logic testing.
-    """
-    
-    class Meta:
-        model = DateTimeRange if 'DateTimeRange' in globals() else dict
-    
-    start_datetime = LazyFunction(lambda: generate_past_datetime(max_days=30))
-    end_datetime = LazyFunction(lambda: generate_future_datetime(min_days=1, max_days=60))
-    timezone_name = Faker('timezone')
-    all_day = LazyFunction(lambda: random.random() < 0.2)  # 20% all-day events
-    
-    @classmethod
-    def create_business_hours(cls, **kwargs) -> Any:
-        """Create business hours range for scheduling testing."""
-        start_dt, end_dt = generate_business_hours_range()
-        business_kwargs = {
-            'start_datetime': start_dt,
-            'end_datetime': end_dt,
-            'timezone_name': 'UTC',
-            'all_day': False
-        }
-        business_kwargs.update(kwargs)
-        return cls.create(**business_kwargs)
-    
-    @classmethod
-    def create_all_day_event(cls, **kwargs) -> Any:
-        """Create all-day event range for calendar testing."""
-        today_date = today()
-        start_dt = datetime.combine(today_date, datetime.min.time()).replace(tzinfo=timezone.utc)
-        end_dt = start_dt + relativedelta(days=1)
+    class Params:
+        # Trait for admin users
+        admin_user = Trait(
+            role=UserRole.ADMIN,
+            status=UserStatus.ACTIVE,
+            permissions=LazyFunction(
+                lambda: {
+                    'user.read', 'user.write', 'user.delete',
+                    'order.read', 'order.write', 'order.process',
+                    'product.read', 'product.write', 'product.manage',
+                    'payment.read', 'payment.process', 'payment.refund',
+                    'report.read', 'report.generate', 'system.admin'
+                }
+            ),
+            is_locked=False
+        )
         
-        all_day_kwargs = {
-            'start_datetime': start_dt,
-            'end_datetime': end_dt,
-            'timezone_name': 'UTC',
-            'all_day': True
-        }
-        all_day_kwargs.update(kwargs)
-        return cls.create(**all_day_kwargs)
+        # Trait for regular users
+        regular_user = Trait(
+            role=UserRole.USER,
+            status=UserStatus.ACTIVE,
+            permissions=LazyFunction(
+                lambda: {'user.read', 'order.read', 'product.read'}
+            ),
+            is_locked=False
+        )
+        
+        # Trait for locked accounts
+        locked_account = Trait(
+            is_locked=True,
+            status=UserStatus.SUSPENDED,
+            login_attempts=FuzzyInteger(low=5, high=10),
+            lock_expires_at=LazyFunction(
+                lambda: DateTimeFactoryUtils.future_expiration_datetime(1, 7)
+            )
+        )
+        
+        # Trait for new users
+        new_user = Trait(
+            status=UserStatus.PENDING,
+            last_login_at=None,
+            login_attempts=0,
+            is_locked=False,
+            created_at=LazyFunction(
+                lambda: DateTimeFactoryUtils.past_datetime_with_age(0, 7)
+            )
+        )
 
+
+class AuthUserFactory(UserFactory):
+    """
+    Extended factory for authentication-specific user data.
+    
+    Provides specialized user profiles for authentication testing including
+    JWT token data, session management, and security validation scenarios.
+    """
+    
+    # Authentication-specific fields
+    auth_provider = FuzzyChoice(['local', 'auth0', 'google', 'github'])
+    auth_provider_id = LazyFunction(lambda: str(fake.uuid4()))
+    two_factor_enabled = FuzzyChoice([True, False])
+    two_factor_secret = LazyAttribute(
+        lambda obj: fake.password(length=32) if obj.two_factor_enabled else None
+    )
+    
+    # Security context
+    last_ip_address = LazyFunction(lambda: fake.ipv4())
+    last_user_agent = LazyFunction(lambda: fake.user_agent())
+    security_questions = LazyFunction(
+        lambda: [
+            {'question': 'What was your first pet?', 'answer': fake.word()},
+            {'question': 'What city were you born in?', 'answer': fake.city()}
+        ] if fake.boolean(chance_of_getting_true=60) else []
+    )
+    
+    class Params:
+        # Trait for Auth0 users
+        auth0_user = Trait(
+            auth_provider='auth0',
+            auth_provider_id=LazyFunction(lambda: f"auth0|{fake.uuid4()}"),
+            two_factor_enabled=FuzzyChoice([True, False])
+        )
+        
+        # Trait for local authentication users
+        local_user = Trait(
+            auth_provider='local',
+            auth_provider_id=None,
+            two_factor_enabled=FuzzyChoice([True, False])
+        )
+        
+        # Trait for high-security users
+        high_security = Trait(
+            two_factor_enabled=True,
+            role=UserRole.ADMIN,
+            password_changed_at=LazyFunction(
+                lambda: DateTimeFactoryUtils.past_datetime_with_age(1, 30)
+            )
+        )
+
+
+# ============================================================================
+# BUSINESS ENTITY FACTORIES
+# ============================================================================
 
 class OrganizationFactory(PydanticModelFactory):
     """
-    Organization factory for business entity testing.
+    Factory for Organization model test data generation.
     
-    Creates realistic organization data with proper business identifiers,
-    contact information, and hierarchical relationships for B2B testing scenarios.
+    Generates realistic business organizations with proper business details,
+    contact information, and verification status patterns.
     """
     
     class Meta:
-        model = Organization if 'Organization' in globals() else dict
+        model = Organization
     
-    id = LazyFunction(lambda: str(uuid.uuid4()))
-    name = Faker('company')
-    legal_name = LazyAttribute(lambda obj: f"{obj.name} LLC")
-    business_type = LazyFunction(lambda: fake.organization_type())
+    id = LazyFunction(lambda: str(fake.uuid4()))
+    name = LazyFunction(lambda: fake.company())
+    legal_name = LazyAttribute(
+        lambda obj: f"{obj.name} {fake.company_suffix()}"
+    )
+    business_type = LazyFunction(lambda: fake.business_type())
     
     # Business identifiers
-    tax_id = LazyFunction(lambda: f"{random.randint(10, 99)}-{random.randint(1000000, 9999999)}")
-    registration_number = LazyFunction(lambda: f"REG{random.randint(100000, 999999)}")
+    tax_id = LazyFunction(
+        lambda: f"{fake.random_int(10, 99)}-{fake.random_int(1000000, 9999999)}"
+    )
+    registration_number = LazyFunction(
+        lambda: f"REG-{fake.random_int(100000, 999999)}"
+    )
     
     # Contact information
-    primary_contact = SubFactory(ContactInfoFactory)
-    billing_address = SubFactory(AddressFactory)
-    shipping_address = SubFactory(AddressFactory)
+    primary_contact = SubFactory(ContactInfoFactory, business_contact=True)
+    billing_address = SubFactory(AddressFactory, us_address=True)
+    shipping_address = SubFactory(AddressFactory, us_address=True)
     
     # Business details
-    website_url = Faker('url')
-    description = Faker('text', max_nb_chars=500)
+    website_url = LazyFunction(lambda: fake.url())
+    description = LazyFunction(lambda: fake.text(max_nb_chars=500))
     industry = LazyFunction(lambda: fake.industry())
-    employee_count = LazyFunction(lambda: generate_weighted_choice([
-        (random.randint(1, 10), 30),      # Small business
-        (random.randint(11, 50), 25),     # Medium business
-        (random.randint(51, 200), 20),    # Large business
-        (random.randint(201, 1000), 15),  # Enterprise
-        (random.randint(1001, 5000), 10), # Large enterprise
-    ]))
+    employee_count = FuzzyInteger(low=1, high=10000)
     
-    # Status and verification
-    status = LazyFunction(UserStatusFactory._create)
-    is_verified = LazyFunction(lambda: random.random() < 0.7)  # 70% verified
-    verification_date = LazyFunction(lambda: generate_past_datetime(max_days=180) if random.random() < 0.7 else None)
+    # Status and settings
+    status = FuzzyChoice([status.value for status in UserStatus])
+    is_verified = FuzzyChoice([True, False])
+    verification_date = LazyAttribute(
+        lambda obj: DateTimeFactoryUtils.past_datetime_with_age(1, 365)
+        if obj.is_verified else None
+    )
     
-    # Hierarchy
-    parent_organization_id = LazyFunction(lambda: str(uuid.uuid4()) if random.random() < 0.2 else None)
+    parent_organization_id = factory.LazyFunction(
+        lambda: str(fake.uuid4()) if fake.boolean(chance_of_getting_true=20) else None
+    )
     
-    # Audit fields
-    created_at = LazyFunction(lambda: generate_past_datetime(max_days=365))
-    updated_at = LazyFunction(lambda: datetime.now(timezone.utc))
-    version = 1
+    class Params:
+        # Trait for startup organizations
+        startup = Trait(
+            business_type='Technology Startup',
+            industry='Technology',
+            employee_count=FuzzyInteger(low=1, high=50),
+            is_verified=False
+        )
+        
+        # Trait for enterprise organizations
+        enterprise = Trait(
+            business_type='Corporation',
+            employee_count=FuzzyInteger(low=1000, high=50000),
+            is_verified=True,
+            verification_date=LazyFunction(
+                lambda: DateTimeFactoryUtils.past_datetime_with_age(30, 365)
+            )
+        )
+        
+        # Trait for small businesses
+        small_business = Trait(
+            business_type=FuzzyChoice(['LLC', 'Partnership', 'Sole Proprietorship']),
+            employee_count=FuzzyInteger(low=1, high=25),
+            is_verified=FuzzyChoice([True, False])
+        )
 
 
 class ProductCategoryFactory(PydanticModelFactory):
     """
-    Product category factory for catalog organization testing.
+    Factory for ProductCategory model test data generation.
     
-    Creates hierarchical product categories with realistic names, descriptions,
-    and display settings for e-commerce catalog management testing.
+    Generates product categories with hierarchical relationships,
+    sorting orders, and display configuration.
     """
     
     class Meta:
-        model = ProductCategory if 'ProductCategory' in globals() else dict
+        model = ProductCategory
     
-    id = LazyFunction(lambda: str(uuid.uuid4()))
+    id = LazyFunction(lambda: str(fake.uuid4()))
     name = LazyFunction(lambda: fake.product_category())
-    slug = LazyAttribute(lambda obj: re.sub(r'[^a-z0-9\-]', '', obj.name.lower().replace(' ', '-')))
-    description = Faker('text', max_nb_chars=300)
+    slug = LazyAttribute(lambda obj: fake.slug(obj.name))
+    description = LazyFunction(
+        lambda: fake.text(max_nb_chars=300) if fake.boolean(chance_of_getting_true=70) else None
+    )
     
-    # Hierarchy
-    parent_category_id = LazyFunction(lambda: str(uuid.uuid4()) if random.random() < 0.3 else None)
-    sort_order = LazyFunction(lambda: random.randint(0, 100))
+    parent_category_id = factory.LazyFunction(
+        lambda: str(fake.uuid4()) if fake.boolean(chance_of_getting_true=30) else None
+    )
+    sort_order = FuzzyInteger(low=0, high=100)
     
-    # Display settings
-    image_url = LazyFunction(lambda: f"https://picsum.photos/400/300?random={random.randint(1, 1000)}")
-    is_visible = LazyFunction(lambda: random.random() < 0.9)  # 90% visible
+    image_url = factory.LazyFunction(
+        lambda: fake.image_url() if fake.boolean(chance_of_getting_true=60) else None
+    )
+    is_visible = FuzzyChoice([True, False])
     
-    # Audit fields
-    created_at = LazyFunction(lambda: generate_past_datetime(max_days=365))
-    updated_at = LazyFunction(lambda: datetime.now(timezone.utc))
-    version = 1
+    class Params:
+        # Trait for top-level categories
+        top_level = Trait(
+            parent_category_id=None,
+            sort_order=FuzzyInteger(low=0, high=20),
+            is_visible=True
+        )
+        
+        # Trait for subcategories
+        subcategory = Trait(
+            parent_category_id=LazyFunction(lambda: str(fake.uuid4())),
+            sort_order=FuzzyInteger(low=0, high=50)
+        )
 
 
 class ProductFactory(PydanticModelFactory):
     """
-    Product factory for catalog and inventory testing.
+    Factory for Product model test data generation.
     
-    Creates comprehensive product data with pricing, inventory, categorization,
-    and metadata for e-commerce testing scenarios per Section 6.6.1.
+    Generates realistic products with pricing, inventory, categorization,
+    and metadata for e-commerce testing scenarios.
     """
     
     class Meta:
-        model = Product if 'Product' in globals() else dict
+        model = Product
     
-    id = LazyFunction(lambda: str(uuid.uuid4()))
+    id = LazyFunction(lambda: str(fake.uuid4()))
     sku = LazyFunction(lambda: fake.sku())
-    name = Faker('catch_phrase')
-    slug = LazyAttribute(lambda obj: re.sub(r'[^a-z0-9\-]', '', obj.name.lower().replace(' ', '-')))
-    description = Faker('text', max_nb_chars=1500)
-    short_description = Faker('text', max_nb_chars=300)
+    name = LazyFunction(lambda: fake.catch_phrase())
+    slug = LazyAttribute(lambda obj: fake.slug(obj.name))
+    description = LazyFunction(lambda: fake.text(max_nb_chars=1500))
+    short_description = LazyFunction(lambda: fake.text(max_nb_chars=300))
     
     # Categorization
-    category_id = LazyFunction(lambda: str(uuid.uuid4()))
-    tags = LazyFunction(lambda: random.sample([
-        'electronics', 'clothing', 'home', 'sports', 'books', 'toys',
-        'automotive', 'health', 'beauty', 'garden', 'tools', 'music'
-    ], k=random.randint(1, 4)))
-    brand = Faker('company')
+    category_id = LazyFunction(lambda: str(fake.uuid4()))
+    tags = LazyFunction(
+        lambda: set(fake.words(nb=fake.random_int(2, 8)))
+    )
+    brand = LazyFunction(lambda: fake.company())
     
     # Pricing
-    base_price = SubFactory(MonetaryAmountFactory)
-    sale_price = LazyFunction(lambda: MonetaryAmountFactory.create_small_amount() if random.random() < 0.3 else None)
-    cost_price = LazyFunction(lambda: MonetaryAmountFactory.create_small_amount() if random.random() < 0.8 else None)
+    base_price = SubFactory(MonetaryAmountFactory, usd_amount=True)
+    sale_price = SubFactory(
+        MonetaryAmountFactory, 
+        usd_amount=True,
+        small_amount=True
+    ) if fake.boolean(chance_of_getting_true=30) else None
+    cost_price = SubFactory(
+        MonetaryAmountFactory,
+        usd_amount=True,
+        small_amount=True
+    ) if fake.boolean(chance_of_getting_true=60) else None
     
     # Inventory
-    status = LazyFunction(lambda: generate_weighted_choice([
-        ('active', 70),
-        ('inactive', 15),
-        ('out_of_stock', 10),
-        ('discontinued', 4),
-        ('draft', 1)
-    ]))
-    inventory_quantity = LazyFunction(lambda: random.randint(0, 1000))
-    low_stock_threshold = LazyFunction(lambda: random.randint(5, 20))
-    track_inventory = LazyFunction(lambda: random.random() < 0.9)  # 90% track inventory
+    status = FuzzyChoice([status.value for status in ProductStatus])
+    inventory_quantity = FuzzyInteger(low=0, high=1000)
+    low_stock_threshold = FuzzyInteger(low=1, high=20)
+    track_inventory = FuzzyChoice([True, False])
     
     # Physical attributes
-    weight = LazyFunction(lambda: generate_realistic_decimal(0.1, 50.0) if random.random() < 0.8 else None)
-    dimensions = LazyFunction(lambda: {
-        'length': float(generate_realistic_decimal(1.0, 100.0)),
-        'width': float(generate_realistic_decimal(1.0, 100.0)),
-        'height': float(generate_realistic_decimal(1.0, 100.0))
-    } if random.random() < 0.7 else None)
+    weight = FuzzyDecimal(low=0.1, high=50.0, precision=2) if fake.boolean(chance_of_getting_true=80) else None
+    dimensions = LazyFunction(
+        lambda: {
+            'length': Decimal(str(fake.random_int(1, 100))),
+            'width': Decimal(str(fake.random_int(1, 100))),
+            'height': Decimal(str(fake.random_int(1, 100)))
+        } if fake.boolean(chance_of_getting_true=70) else None
+    )
     
     # Digital content
-    images = LazyFunction(lambda: [
-        f"https://picsum.photos/800/600?random={random.randint(1, 1000) + i}"
-        for i in range(random.randint(1, 5))
-    ])
-    documents = LazyFunction(lambda: [
-        {
-            'name': f'document_{i}.pdf',
-            'url': f'https://example.com/docs/document_{i}.pdf',
-            'type': 'manual'
-        }
-        for i in range(random.randint(0, 3))
-    ])
+    images = LazyFunction(
+        lambda: [fake.image_url() for _ in range(fake.random_int(1, 5))]
+    )
+    documents = LazyFunction(
+        lambda: [
+            {'name': f"{fake.word()}.pdf", 'url': fake.url(), 'type': 'manual'},
+            {'name': f"{fake.word()}.pdf", 'url': fake.url(), 'type': 'warranty'}
+        ] if fake.boolean(chance_of_getting_true=40) else []
+    )
     
-    # SEO
-    meta_title = LazyAttribute(lambda obj: obj.name[:60])
-    meta_description = LazyAttribute(lambda obj: obj.short_description[:160] if obj.short_description else None)
+    # SEO and metadata
+    meta_title = LazyAttribute(
+        lambda obj: obj.name[:60] if fake.boolean(chance_of_getting_true=80) else None
+    )
+    meta_description = LazyAttribute(
+        lambda obj: obj.short_description[:160] if fake.boolean(chance_of_getting_true=80) else None
+    )
     
-    # Audit fields
-    created_at = LazyFunction(lambda: generate_past_datetime(max_days=365))
-    updated_at = LazyFunction(lambda: datetime.now(timezone.utc))
-    version = 1
-    
-    @classmethod
-    def create_digital_product(cls, **kwargs) -> Any:
-        """Create digital product without physical attributes."""
-        digital_kwargs = {
-            'weight': None,
-            'dimensions': None,
-            'track_inventory': False,
-            'inventory_quantity': 999999,  # Unlimited digital inventory
-        }
-        digital_kwargs.update(kwargs)
-        return cls.create(**digital_kwargs)
-    
-    @classmethod
-    def create_out_of_stock_product(cls, **kwargs) -> Any:
-        """Create out-of-stock product for inventory testing."""
-        oos_kwargs = {
-            'status': 'out_of_stock',
-            'inventory_quantity': 0,
-            'track_inventory': True,
-        }
-        oos_kwargs.update(kwargs)
-        return cls.create(**oos_kwargs)
+    class Params:
+        # Trait for electronics products
+        electronics = Trait(
+            category_id='electronics',
+            brand=FuzzyChoice(['Apple', 'Samsung', 'Sony', 'LG', 'Microsoft']),
+            weight=FuzzyDecimal(low=0.5, high=10.0, precision=2),
+            track_inventory=True,
+            status=ProductStatus.ACTIVE
+        )
+        
+        # Trait for clothing products
+        clothing = Trait(
+            category_id='clothing',
+            brand=FuzzyChoice(['Nike', 'Adidas', 'H&M', 'Zara', 'Uniqlo']),
+            weight=FuzzyDecimal(low=0.1, high=2.0, precision=2),
+            track_inventory=True
+        )
+        
+        # Trait for out of stock products
+        out_of_stock = Trait(
+            inventory_quantity=0,
+            status=ProductStatus.OUT_OF_STOCK,
+            track_inventory=True
+        )
+        
+        # Trait for sale products
+        on_sale = Trait(
+            sale_price=SubFactory(
+                MonetaryAmountFactory,
+                amount=LazyAttribute(
+                    lambda obj: obj.base_price.amount * Decimal('0.8')  # 20% off
+                )
+            ),
+            status=ProductStatus.ACTIVE
+        )
 
+
+# ============================================================================
+# ORDER AND TRANSACTION FACTORIES
+# ============================================================================
 
 class OrderItemFactory(PydanticModelFactory):
     """
-    Order item factory for line item testing.
+    Factory for OrderItem model test data generation.
     
-    Creates realistic order line items with product references, quantities,
-    pricing calculations, and discount applications for order processing testing.
+    Generates realistic order line items with product references,
+    quantities, pricing, and discount calculations.
     """
     
     class Meta:
-        model = OrderItem if 'OrderItem' in globals() else dict
+        model = OrderItem
     
-    product_id = LazyFunction(lambda: str(uuid.uuid4()))
+    product_id = LazyFunction(lambda: str(fake.uuid4()))
     product_sku = LazyFunction(lambda: fake.sku())
-    product_name = Faker('catch_phrase')
-    quantity = LazyFunction(lambda: random.randint(1, 10))
-    unit_price = SubFactory(MonetaryAmountFactory)
+    product_name = LazyFunction(lambda: fake.catch_phrase())
+    quantity = FuzzyInteger(low=1, high=10)
+    unit_price = SubFactory(MonetaryAmountFactory, usd_amount=True)
     
     # Calculated fields
-    total_price = LazyAttribute(lambda obj: MonetaryAmount(
-        amount=obj.unit_price.amount * obj.quantity,
-        currency_code=obj.unit_price.currency_code
-    ))
+    total_price = LazyAttribute(
+        lambda obj: MonetaryAmount(
+            amount=obj.unit_price.amount * obj.quantity,
+            currency_code=obj.unit_price.currency_code
+        )
+    )
     
-    # Optional discounts and taxes
-    discount_amount = LazyFunction(lambda: MonetaryAmountFactory.create_small_amount() if random.random() < 0.2 else None)
-    tax_amount = LazyFunction(lambda: MonetaryAmountFactory.create_small_amount() if random.random() < 0.8 else None)
+    # Discounts and adjustments
+    discount_amount = SubFactory(
+        MonetaryAmountFactory,
+        small_amount=True,
+        usd_amount=True
+    ) if fake.boolean(chance_of_getting_true=25) else None
+    tax_amount = LazyAttribute(
+        lambda obj: MonetaryAmount(
+            amount=obj.total_price.amount * Decimal('0.08'),  # 8% tax
+            currency_code=obj.unit_price.currency_code
+        ) if fake.boolean(chance_of_getting_true=80) else None
+    )
     
     # Product snapshot
-    product_attributes = LazyFunction(lambda: {
-        'color': random.choice(['red', 'blue', 'green', 'black', 'white']),
-        'size': random.choice(['XS', 'S', 'M', 'L', 'XL']),
-        'material': random.choice(['cotton', 'polyester', 'wool', 'silk', 'denim'])
-    } if random.random() < 0.6 else None)
+    product_attributes = LazyFunction(
+        lambda: {
+            'color': fake.color_name(),
+            'size': fake.random_element(['S', 'M', 'L', 'XL']),
+            'material': fake.word()
+        } if fake.boolean(chance_of_getting_true=60) else None
+    )
+    
+    class Params:
+        # Trait for high-quantity items
+        bulk_item = Trait(
+            quantity=FuzzyInteger(low=10, high=100),
+            discount_amount=SubFactory(
+                MonetaryAmountFactory,
+                amount=LazyAttribute(
+                    lambda obj: obj.unit_price.amount * obj.quantity * Decimal('0.1')
+                )
+            )
+        )
+        
+        # Trait for single items
+        single_item = Trait(
+            quantity=1,
+            discount_amount=None
+        )
 
 
 class OrderFactory(PydanticModelFactory):
     """
-    Order factory for transaction and order management testing.
+    Factory for Order model test data generation.
     
-    Creates comprehensive order data with customer information, line items,
-    pricing calculations, and status tracking for e-commerce workflow testing.
+    Generates realistic orders with customer information, line items,
+    pricing calculations, and status tracking.
     """
     
     class Meta:
-        model = Order if 'Order' in globals() else dict
+        model = Order
     
-    id = LazyFunction(lambda: str(uuid.uuid4()))
+    id = LazyFunction(lambda: str(fake.uuid4()))
     order_number = LazyFunction(lambda: fake.order_number())
     
     # Customer information
-    customer_id = LazyFunction(lambda: str(uuid.uuid4()) if random.random() < 0.8 else None)
-    customer_email = Faker('email')
-    customer_name = Faker('name')
+    customer_id = LazyFunction(lambda: str(fake.uuid4()))
+    customer_email = LazyFunction(lambda: fake.email())
+    customer_name = LazyFunction(lambda: fake.name())
     
     # Order items - create 1-5 items per order
-    items = LazyFunction(lambda: OrderItemFactory.create_batch_validated(random.randint(1, 5)))
+    items = factory.LazyFunction(
+        lambda: [
+            OrderItemFactory.build_dict()
+            for _ in range(fake.random_int(1, 5))
+        ]
+    )
     
     # Pricing calculations
-    subtotal = LazyFunction(lambda: MonetaryAmountFactory.create_large_amount())
-    tax_amount = LazyFunction(lambda: MonetaryAmountFactory.create_small_amount())
-    shipping_amount = LazyFunction(lambda: MonetaryAmountFactory.create_small_amount())
-    discount_amount = LazyFunction(lambda: MonetaryAmountFactory.create_small_amount() if random.random() < 0.3 else MonetaryAmount(amount=Decimal('0.00'), currency_code='USD'))
-    total_amount = LazyAttribute(lambda obj: MonetaryAmount(
-        amount=obj.subtotal.amount + obj.tax_amount.amount + obj.shipping_amount.amount - obj.discount_amount.amount,
-        currency_code=obj.subtotal.currency_code
-    ))
+    subtotal = LazyAttribute(
+        lambda obj: MonetaryAmount(
+            amount=sum(
+                Decimal(str(item.get('unit_price', {}).get('amount', 0))) * 
+                item.get('quantity', 1)
+                for item in obj.items
+            ),
+            currency_code='USD'
+        )
+    )
+    tax_amount = LazyAttribute(
+        lambda obj: MonetaryAmount(
+            amount=obj.subtotal.amount * Decimal('0.08'),  # 8% tax
+            currency_code='USD'
+        )
+    )
+    shipping_amount = SubFactory(
+        MonetaryAmountFactory,
+        amount=FuzzyDecimal(low=0.00, high=25.00, precision=2),
+        usd_amount=True
+    )
+    discount_amount = SubFactory(
+        MonetaryAmountFactory,
+        amount=FuzzyDecimal(low=0.00, high=50.00, precision=2),
+        usd_amount=True
+    ) if fake.boolean(chance_of_getting_true=30) else MonetaryAmount(amount=Decimal('0'), currency_code='USD')
+    
+    total_amount = LazyAttribute(
+        lambda obj: MonetaryAmount(
+            amount=(
+                obj.subtotal.amount + 
+                obj.tax_amount.amount + 
+                obj.shipping_amount.amount - 
+                obj.discount_amount.amount
+            ),
+            currency_code='USD'
+        )
+    )
     
     # Addresses
-    billing_address = SubFactory(AddressFactory)
-    shipping_address = SubFactory(AddressFactory)
+    billing_address = SubFactory(AddressFactory, us_address=True)
+    shipping_address = SubFactory(AddressFactory, us_address=True)
     
     # Status and tracking
-    status = LazyFunction(lambda: generate_weighted_choice([
-        ('pending', 20),
-        ('confirmed', 25),
-        ('processing', 20),
-        ('shipped', 20),
-        ('delivered', 10),
-        ('cancelled', 4),
-        ('refunded', 1)
-    ]))
-    order_date = LazyFunction(lambda: generate_past_datetime(max_days=30))
-    shipped_date = LazyFunction(lambda: generate_past_datetime(max_days=14) if random.random() < 0.6 else None)
-    delivered_date = LazyFunction(lambda: generate_past_datetime(max_days=7) if random.random() < 0.4 else None)
+    status = FuzzyChoice([status.value for status in OrderStatus])
+    order_date = LazyFunction(
+        lambda: DateTimeFactoryUtils.past_datetime_with_age(0, 30)
+    )
+    shipped_date = LazyAttribute(
+        lambda obj: obj.order_date + timedelta(days=fake.random_int(1, 5))
+        if obj.status in [OrderStatus.SHIPPED.value, OrderStatus.DELIVERED.value] else None
+    )
+    delivered_date = LazyAttribute(
+        lambda obj: obj.shipped_date + timedelta(days=fake.random_int(1, 7))
+        if obj.status == OrderStatus.DELIVERED.value and obj.shipped_date else None
+    )
     
     # Additional information
-    notes = LazyFunction(lambda: fake.text(max_nb_chars=200) if random.random() < 0.3 else None)
-    tracking_number = LazyFunction(lambda: f"TRK{random.randint(100000000, 999999999)}" if random.random() < 0.6 else None)
-    payment_method = LazyFunction(lambda: generate_weighted_choice([
-        ('credit_card', 60),
-        ('debit_card', 20),
-        ('digital_wallet', 10),
-        ('bank_transfer', 5),
-        ('cash', 3),
-        ('cryptocurrency', 2)
-    ]))
+    notes = LazyFunction(
+        lambda: fake.text(max_nb_chars=200) if fake.boolean(chance_of_getting_true=40) else None
+    )
+    tracking_number = LazyAttribute(
+        lambda obj: f"TRK{fake.random_int(100000000, 999999999)}"
+        if obj.status in [OrderStatus.SHIPPED.value, OrderStatus.DELIVERED.value] else None
+    )
+    payment_method = FuzzyChoice([method.value for method in PaymentMethod])
     
-    # Audit fields
-    created_at = LazyFunction(lambda: generate_past_datetime(max_days=90))
-    updated_at = LazyFunction(lambda: datetime.now(timezone.utc))
-    version = 1
-    
-    @classmethod
-    def create_completed_order(cls, **kwargs) -> Any:
-        """Create completed order for fulfillment testing."""
-        completed_kwargs = {
-            'status': 'delivered',
-            'shipped_date': generate_past_datetime(min_days=7, max_days=21),
-            'delivered_date': generate_past_datetime(min_days=1, max_days=7),
-            'tracking_number': f"TRK{random.randint(100000000, 999999999)}"
-        }
-        completed_kwargs.update(kwargs)
-        return cls.create(**completed_kwargs)
-    
-    @classmethod
-    def create_cancelled_order(cls, **kwargs) -> Any:
-        """Create cancelled order for refund testing."""
-        cancelled_kwargs = {
-            'status': 'cancelled',
-            'shipped_date': None,
-            'delivered_date': None,
-            'tracking_number': None,
-            'notes': 'Order cancelled by customer request'
-        }
-        cancelled_kwargs.update(kwargs)
-        return cls.create(**cancelled_kwargs)
+    class Params:
+        # Trait for completed orders
+        completed_order = Trait(
+            status=OrderStatus.DELIVERED,
+            shipped_date=LazyAttribute(
+                lambda obj: obj.order_date + timedelta(days=2)
+            ),
+            delivered_date=LazyAttribute(
+                lambda obj: obj.shipped_date + timedelta(days=3)
+            ),
+            tracking_number=LazyFunction(
+                lambda: f"TRK{fake.random_int(100000000, 999999999)}"
+            )
+        )
+        
+        # Trait for pending orders
+        pending_order = Trait(
+            status=OrderStatus.PENDING,
+            shipped_date=None,
+            delivered_date=None,
+            tracking_number=None
+        )
+        
+        # Trait for large orders
+        large_order = Trait(
+            items=factory.LazyFunction(
+                lambda: [
+                    OrderItemFactory.build_dict(bulk_item=True)
+                    for _ in range(fake.random_int(5, 15))
+                ]
+            ),
+            discount_amount=SubFactory(
+                MonetaryAmountFactory,
+                amount=FuzzyDecimal(low=50.00, high=200.00, precision=2),
+                usd_amount=True
+            )
+        )
 
 
 class PaymentTransactionFactory(PydanticModelFactory):
     """
-    Payment transaction factory for financial processing testing.
+    Factory for PaymentTransaction model test data generation.
     
-    Creates realistic payment transaction data with security metadata,
-    processor integration, and status tracking for payment workflow testing.
+    Generates realistic payment transactions with processing details,
+    security information, and status tracking.
     """
     
     class Meta:
-        model = PaymentTransaction if 'PaymentTransaction' in globals() else dict
+        model = PaymentTransaction
     
-    id = LazyFunction(lambda: str(uuid.uuid4()))
+    id = LazyFunction(lambda: str(fake.uuid4()))
     transaction_id = LazyFunction(lambda: fake.transaction_id())
     
     # Related entities
-    order_id = LazyFunction(lambda: str(uuid.uuid4()))
-    customer_id = LazyFunction(lambda: str(uuid.uuid4()))
+    order_id = LazyFunction(lambda: str(fake.uuid4()))
+    customer_id = LazyFunction(lambda: str(fake.uuid4()))
     
     # Payment details
-    amount = SubFactory(MonetaryAmountFactory)
-    payment_method = LazyFunction(lambda: generate_weighted_choice([
-        ('credit_card', 60),
-        ('debit_card', 20),
-        ('digital_wallet', 10),
-        ('bank_transfer', 5),
-        ('cash', 3),
-        ('cryptocurrency', 2)
-    ]))
-    payment_status = LazyFunction(lambda: generate_weighted_choice([
-        ('completed', 70),
-        ('pending', 15),
-        ('processing', 8),
-        ('failed', 5),
-        ('cancelled', 2)
-    ]))
+    amount = SubFactory(MonetaryAmountFactory, usd_amount=True)
+    payment_method = FuzzyChoice([method.value for method in PaymentMethod])
+    payment_status = FuzzyChoice([status.value for status in PaymentStatus])
     
-    # Payment processor
+    # Payment processor information
     processor_name = LazyFunction(lambda: fake.payment_processor())
-    processor_response = LazyFunction(lambda: {
-        'transaction_id': fake.transaction_id(),
-        'authorization_code': f"AUTH{random.randint(100000, 999999)}",
-        'response_code': '00' if random.random() < 0.9 else '05',
-        'message': 'Approved' if random.random() < 0.9 else 'Declined'
-    })
+    processor_response = LazyFunction(
+        lambda: {
+            'transaction_id': fake.uuid4(),
+            'status': 'approved',
+            'auth_code': fake.random_int(100000, 999999),
+            'processor_fee': str(fake.random_int(29, 350) / 100)  # $0.29 to $3.50
+        } if fake.boolean(chance_of_getting_true=80) else None
+    )
     
     # Security and fraud detection
-    risk_score = LazyFunction(lambda: round(random.uniform(0.0, 1.0), 3))
-    ip_address = Faker('ipv4')
-    user_agent = Faker('user_agent')
+    risk_score = FuzzyFloat(low=0.0, high=1.0, precision=3)
+    ip_address = LazyFunction(lambda: fake.ipv4())
+    user_agent = LazyFunction(lambda: fake.user_agent())
     
     # Timestamps
-    initiated_at = LazyFunction(lambda: generate_past_datetime(max_days=30))
-    processed_at = LazyAttribute(lambda obj: obj.initiated_at + relativedelta(seconds=random.randint(1, 300)) if obj.payment_status == 'completed' else None)
-    expires_at = LazyFunction(lambda: generate_future_datetime(min_days=1, max_days=7))
+    initiated_at = LazyFunction(
+        lambda: DateTimeFactoryUtils.past_datetime_with_age(0, 30)
+    )
+    processed_at = LazyAttribute(
+        lambda obj: obj.initiated_at + timedelta(
+            seconds=fake.random_int(5, 300)  # 5 seconds to 5 minutes
+        ) if obj.payment_status in [
+            PaymentStatus.COMPLETED.value, PaymentStatus.FAILED.value
+        ] else None
+    )
+    expires_at = LazyAttribute(
+        lambda obj: obj.initiated_at + timedelta(hours=24)
+        if obj.payment_status == PaymentStatus.PENDING.value else None
+    )
     
     # Additional information
-    description = Faker('text', max_nb_chars=200)
-    reference_number = LazyFunction(lambda: f"REF{random.randint(100000, 999999)}")
-    failure_reason = LazyFunction(lambda: random.choice([
-        'Insufficient funds', 'Card expired', 'Invalid card number',
-        'Transaction declined by issuer', 'Security verification failed'
-    ]) if random.random() < 0.1 else None)
+    description = LazyFunction(
+        lambda: f"Payment for order #{fake.order_number()}"
+    )
+    reference_number = LazyFunction(
+        lambda: fake.bothify(text='REF-########') if fake.boolean(chance_of_getting_true=60) else None
+    )
+    failure_reason = LazyAttribute(
+        lambda obj: fake.random_element([
+            'Insufficient funds', 'Card declined', 'Invalid card number',
+            'Expired card', 'Processing error', 'Fraud detected'
+        ]) if obj.payment_status == PaymentStatus.FAILED.value else None
+    )
     
-    # Audit fields
-    created_at = LazyFunction(lambda: generate_past_datetime(max_days=90))
-    updated_at = LazyFunction(lambda: datetime.now(timezone.utc))
-    version = 1
-    
-    @classmethod
-    def create_failed_transaction(cls, **kwargs) -> Any:
-        """Create failed transaction for error handling testing."""
-        failed_kwargs = {
-            'payment_status': 'failed',
-            'processed_at': None,
-            'failure_reason': random.choice([
-                'Insufficient funds', 'Card expired', 'Invalid card number',
-                'Transaction declined by issuer', 'Security verification failed'
+    class Params:
+        # Trait for successful payments
+        successful_payment = Trait(
+            payment_status=PaymentStatus.COMPLETED,
+            processed_at=LazyAttribute(
+                lambda obj: obj.initiated_at + timedelta(seconds=fake.random_int(5, 60))
+            ),
+            failure_reason=None,
+            risk_score=FuzzyFloat(low=0.0, high=0.3, precision=3)
+        )
+        
+        # Trait for failed payments
+        failed_payment = Trait(
+            payment_status=PaymentStatus.FAILED,
+            processed_at=LazyAttribute(
+                lambda obj: obj.initiated_at + timedelta(seconds=fake.random_int(5, 30))
+            ),
+            failure_reason=FuzzyChoice([
+                'Insufficient funds', 'Card declined', 'Invalid card number',
+                'Expired card', 'Processing error'
             ]),
-            'processor_response': {
-                'response_code': '05',
-                'message': 'Declined'
-            }
-        }
-        failed_kwargs.update(kwargs)
-        return cls.create(**failed_kwargs)
+            risk_score=FuzzyFloat(low=0.0, high=1.0, precision=3)
+        )
+        
+        # Trait for high-risk payments
+        high_risk_payment = Trait(
+            risk_score=FuzzyFloat(low=0.7, high=1.0, precision=3),
+            payment_status=PaymentStatus.PENDING
+        )
+        
+        # Trait for large amount payments
+        large_payment = Trait(
+            amount=SubFactory(
+                MonetaryAmountFactory,
+                amount=FuzzyDecimal(low=1000.00, high=50000.00, precision=2),
+                usd_amount=True
+            ),
+            risk_score=FuzzyFloat(low=0.2, high=0.8, precision=3)
+        )
 
 
 # ============================================================================
-# FILE AND SYSTEM MODEL FACTORIES
-# ============================================================================
-
-class FileUploadFactory(PydanticModelFactory):
-    """
-    File upload factory for file management testing.
-    
-    Creates realistic file upload data with proper MIME types, size validation,
-    security metadata, and storage information for file processing workflows.
-    """
-    
-    class Meta:
-        model = FileUpload if 'FileUpload' in globals() else dict
-    
-    id = LazyFunction(lambda: str(uuid.uuid4()))
-    filename = LazyFunction(lambda: f"{fake.word()}.{fake.file_extension()}")
-    content_type = LazyFunction(lambda: generate_weighted_choice([
-        ('image/jpeg', 25),
-        ('image/png', 20),
-        ('application/pdf', 20),
-        ('text/plain', 10),
-        ('application/msword', 8),
-        ('application/vnd.openxmlformats-officedocument.wordprocessingml.document', 7),
-        ('application/vnd.ms-excel', 5),
-        ('text/csv', 3),
-        ('application/json', 2)
-    ]))
-    file_size = LazyFunction(lambda: random.randint(1024, 10_000_000))  # 1KB to 10MB
-    
-    # Storage information
-    storage_path = LazyFunction(lambda: f"uploads/{uuid.uuid4().hex[:8]}/{uuid.uuid4().hex}")
-    storage_url = LazyAttribute(lambda obj: f"https://cdn.example.com/{obj.storage_path}")
-    
-    # Security and validation
-    checksum = LazyFunction(lambda: uuid.uuid4().hex)
-    is_virus_scanned = LazyFunction(lambda: random.random() < 0.95)  # 95% scanned
-    scan_result = LazyFunction(lambda: 'clean' if random.random() < 0.99 else 'threat_detected')
-    
-    # Metadata
-    uploaded_by = LazyFunction(lambda: str(uuid.uuid4()))
-    upload_date = LazyFunction(lambda: generate_past_datetime(max_days=30))
-    expires_at = LazyFunction(lambda: generate_future_datetime(min_days=30, max_days=365))
-    
-    # Categorization
-    category = LazyFunction(lambda: fake.file_category())
-    tags = LazyFunction(lambda: random.sample([
-        'document', 'image', 'report', 'invoice', 'contract',
-        'presentation', 'media', 'backup', 'import', 'export'
-    ], k=random.randint(1, 3)))
-    
-    # Audit fields
-    created_at = LazyFunction(lambda: generate_past_datetime(max_days=90))
-    updated_at = LazyFunction(lambda: datetime.now(timezone.utc))
-    version = 1
-    
-    @classmethod
-    def create_image_file(cls, **kwargs) -> Any:
-        """Create image file for media testing."""
-        image_kwargs = {
-            'filename': f"image_{random.randint(1000, 9999)}.jpg",
-            'content_type': 'image/jpeg',
-            'file_size': random.randint(50000, 2000000),  # 50KB to 2MB
-            'category': 'profile_image',
-            'tags': ['image', 'media', 'profile']
-        }
-        image_kwargs.update(kwargs)
-        return cls.create(**image_kwargs)
-    
-    @classmethod
-    def create_large_file(cls, **kwargs) -> Any:
-        """Create large file for performance testing."""
-        large_kwargs = {
-            'filename': f"large_file_{random.randint(1000, 9999)}.zip",
-            'content_type': 'application/zip',
-            'file_size': random.randint(50_000_000, 100_000_000),  # 50MB to 100MB
-            'category': 'archive',
-            'tags': ['large', 'archive', 'backup']
-        }
-        large_kwargs.update(kwargs)
-        return cls.create(**large_kwargs)
-
-
-class SystemConfigurationFactory(PydanticModelFactory):
-    """
-    System configuration factory for application settings testing.
-    
-    Creates realistic system configuration data with proper value types,
-    validation constraints, and environment-specific settings for configuration
-    management testing.
-    """
-    
-    class Meta:
-        model = SystemConfiguration if 'SystemConfiguration' in globals() else dict
-    
-    id = LazyFunction(lambda: str(uuid.uuid4()))
-    key = LazyFunction(lambda: f"{fake.config_category()}.{fake.word()}_{fake.word()}")
-    value = LazyFunction(lambda: generate_weighted_choice([
-        (fake.word(), 30),               # String values
-        (random.randint(1, 1000), 25),   # Integer values
-        (round(random.uniform(0.1, 100.0), 2), 20),  # Float values
-        (random.choice([True, False]), 15),  # Boolean values
-        ({fake.word(): fake.word()}, 10)     # JSON values
-    ]))
-    value_type = LazyAttribute(lambda obj: {
-        str: 'string',
-        int: 'integer',
-        float: 'float',
-        bool: 'boolean',
-        dict: 'json'
-    }.get(type(obj.value), 'string'))
-    
-    # Metadata
-    description = Faker('text', max_nb_chars=300)
-    category = LazyFunction(lambda: fake.config_category())
-    is_sensitive = LazyFunction(lambda: random.random() < 0.1)  # 10% sensitive
-    is_readonly = LazyFunction(lambda: random.random() < 0.2)   # 20% readonly
-    
-    # Validation constraints
-    min_value = LazyFunction(lambda: random.randint(0, 10) if random.random() < 0.3 else None)
-    max_value = LazyFunction(lambda: random.randint(100, 1000) if random.random() < 0.3 else None)
-    allowed_values = LazyFunction(lambda: [fake.word() for _ in range(random.randint(2, 5))] if random.random() < 0.2 else None)
-    
-    # Environment settings
-    environment = LazyFunction(lambda: generate_weighted_choice([
-        ('production', 40),
-        ('staging', 30),
-        ('development', 20),
-        ('testing', 10)
-    ]))
-    requires_restart = LazyFunction(lambda: random.random() < 0.3)  # 30% require restart
-    
-    # Audit fields
-    created_at = LazyFunction(lambda: generate_past_datetime(max_days=180))
-    updated_at = LazyFunction(lambda: datetime.now(timezone.utc))
-    version = 1
-
-
-# ============================================================================
-# API AND RESPONSE MODEL FACTORIES
+# API AND SYSTEM FACTORIES
 # ============================================================================
 
 class PaginationParamsFactory(PydanticModelFactory):
     """
-    Pagination parameters factory for API request testing.
+    Factory for PaginationParams model test data generation.
     
-    Creates realistic pagination parameters with boundary conditions and
-    edge cases for comprehensive API pagination testing.
+    Generates realistic pagination parameters for API testing
+    with various page sizes and navigation scenarios.
     """
     
     class Meta:
-        model = PaginationParams if 'PaginationParams' in globals() else dict
+        model = PaginationParams
     
-    page = LazyFunction(lambda: random.randint(1, 10))
-    page_size = LazyFunction(lambda: generate_weighted_choice([
-        (10, 20),    # Small pages
-        (20, 40),    # Standard pages
-        (50, 25),    # Large pages
-        (100, 15)    # Maximum pages
-    ]))
+    page = FuzzyInteger(low=1, high=100)
+    page_size = FuzzyChoice([10, 20, 25, 50, 100])
     
-    @classmethod
-    def create_first_page(cls, **kwargs) -> Any:
-        """Create first page parameters for initial request testing."""
-        first_kwargs = {'page': 1, 'page_size': 20}
-        first_kwargs.update(kwargs)
-        return cls.create(**first_kwargs)
-    
-    @classmethod
-    def create_large_page(cls, **kwargs) -> Any:
-        """Create large page parameters for performance testing."""
-        large_kwargs = {'page': 1, 'page_size': 100}
-        large_kwargs.update(kwargs)
-        return cls.create(**large_kwargs)
+    class Params:
+        # Trait for first page requests
+        first_page = Trait(
+            page=1,
+            page_size=20
+        )
+        
+        # Trait for large page sizes
+        large_page = Trait(
+            page_size=100
+        )
+        
+        # Trait for small page sizes
+        small_page = Trait(
+            page_size=10
+        )
 
 
 class SearchParamsFactory(PydanticModelFactory):
     """
-    Search parameters factory for API search testing.
+    Factory for SearchParams model test data generation.
     
-    Creates realistic search parameters with query strings, filters, and
-    options for comprehensive search functionality testing.
+    Generates realistic search parameters with queries, filters,
+    and search configuration options.
     """
     
     class Meta:
-        model = SearchParams if 'SearchParams' in globals() else dict
+        model = SearchParams
     
-    query = LazyFunction(lambda: fake.word() if random.random() < 0.8 else None)
-    filters = LazyFunction(lambda: {
-        'category': random.choice(['electronics', 'clothing', 'books']),
-        'price_min': random.randint(10, 50),
-        'price_max': random.randint(100, 500),
-        'in_stock': random.choice([True, False])
-    } if random.random() < 0.6 else None)
-    include_inactive = LazyFunction(lambda: random.random() < 0.2)  # 20% include inactive
+    query = LazyFunction(
+        lambda: fake.catch_phrase() if fake.boolean(chance_of_getting_true=70) else None
+    )
+    filters = LazyFunction(
+        lambda: {
+            'category': fake.word(),
+            'status': fake.random_element(['active', 'inactive']),
+            'price_range': f"{fake.random_int(10, 50)}-{fake.random_int(100, 500)}"
+        } if fake.boolean(chance_of_getting_true=60) else None
+    )
+    include_inactive = FuzzyChoice([True, False])
     
-    @classmethod
-    def create_empty_search(cls, **kwargs) -> Any:
-        """Create empty search for default result testing."""
-        empty_kwargs = {'query': None, 'filters': None, 'include_inactive': False}
-        empty_kwargs.update(kwargs)
-        return cls.create(**empty_kwargs)
-    
-    @classmethod
-    def create_complex_search(cls, **kwargs) -> Any:
-        """Create complex search with multiple filters."""
-        complex_kwargs = {
-            'query': fake.words(nb=3, ext_word_list=None),
-            'filters': {
-                'category': random.choice(['electronics', 'clothing', 'books']),
-                'brand': fake.company(),
-                'price_min': random.randint(10, 50),
-                'price_max': random.randint(100, 500),
-                'rating_min': random.randint(1, 4),
-                'in_stock': True,
-                'featured': random.choice([True, False]),
-                'created_after': generate_past_datetime(max_days=30).isoformat()
-            },
-            'include_inactive': False
-        }
-        complex_kwargs.update(kwargs)
-        return cls.create(**complex_kwargs)
+    class Params:
+        # Trait for simple text search
+        text_search = Trait(
+            query=LazyFunction(lambda: fake.words(nb=fake.random_int(1, 4))),
+            filters=None
+        )
+        
+        # Trait for filtered search
+        filtered_search = Trait(
+            query=None,
+            filters=LazyFunction(
+                lambda: {
+                    'category': fake.word(),
+                    'brand': fake.company(),
+                    'price_min': fake.random_int(1, 100),
+                    'price_max': fake.random_int(200, 1000)
+                }
+            )
+        )
+        
+        # Trait for empty search (list all)
+        empty_search = Trait(
+            query=None,
+            filters=None,
+            include_inactive=False
+        )
 
 
-class ApiResponseFactory(PydanticModelFactory):
+class SystemConfigurationFactory(PydanticModelFactory):
     """
-    API response factory for response format testing.
+    Factory for SystemConfiguration model test data generation.
     
-    Creates standardized API response structures with success/error patterns,
-    metadata, and consistent formatting for API contract testing.
+    Generates realistic system configuration entries with proper
+    type validation and environment-specific settings.
     """
     
     class Meta:
-        model = ApiResponse if 'ApiResponse' in globals() else dict
+        model = SystemConfiguration
     
-    success = LazyFunction(lambda: random.random() < 0.85)  # 85% success rate
-    data = LazyFunction(lambda: {
-        'id': str(uuid.uuid4()),
-        'name': fake.word(),
-        'value': random.randint(1, 100)
-    } if random.random() < 0.9 else None)
-    message = LazyFunction(lambda: random.choice([
-        'Operation completed successfully',
-        'Data retrieved successfully',
-        'Resource created successfully',
-        'Resource updated successfully'
-    ]) if random.random() < 0.7 else None)
-    errors = LazyFunction(lambda: [
-        {
-            'field': 'email',
-            'message': 'Invalid email format',
-            'code': 'VALIDATION_ERROR'
-        }
-    ] if random.random() < 0.15 else None)
-    metadata = LazyFunction(lambda: {
-        'request_duration_ms': random.randint(10, 500),
-        'api_version': '1.0',
-        'rate_limit_remaining': random.randint(90, 100)
-    } if random.random() < 0.5 else None)
-    timestamp = LazyFunction(lambda: datetime.now(timezone.utc))
-    request_id = LazyFunction(lambda: str(uuid.uuid4()))
+    id = LazyFunction(lambda: str(fake.uuid4()))
+    key = LazyFunction(
+        lambda: f"{fake.word()}.{fake.word()}.{fake.word()}".lower()
+    )
+    value = LazyAttribute(
+        lambda obj: {
+            'string': fake.sentence(),
+            'integer': fake.random_int(1, 1000),
+            'float': float(fake.random_int(1, 100)),
+            'boolean': fake.boolean(),
+            'json': {'nested': fake.word(), 'value': fake.random_int(1, 100)}
+        }[obj.value_type]
+    )
+    value_type = FuzzyChoice(['string', 'integer', 'float', 'boolean', 'json'])
     
-    @classmethod
-    def create_success_response(cls, data: Any = None, **kwargs) -> Any:
-        """Create successful API response."""
-        success_kwargs = {
-            'success': True,
-            'data': data or {'result': 'success'},
-            'errors': None,
-            'message': 'Operation completed successfully'
-        }
-        success_kwargs.update(kwargs)
-        return cls.create(**success_kwargs)
+    description = LazyFunction(
+        lambda: fake.text(max_nb_chars=300) if fake.boolean(chance_of_getting_true=80) else None
+    )
+    category = FuzzyChoice([
+        'authentication', 'payment', 'email', 'storage', 'cache', 'security'
+    ])
+    is_sensitive = LazyAttribute(
+        lambda obj: any(sensitive in obj.key.lower() 
+                       for sensitive in ['password', 'secret', 'key', 'token'])
+    )
+    is_readonly = FuzzyChoice([True, False])
     
-    @classmethod
-    def create_error_response(cls, errors: List[Dict] = None, **kwargs) -> Any:
-        """Create error API response."""
-        error_kwargs = {
-            'success': False,
-            'data': None,
-            'errors': errors or [{'field': 'general', 'message': 'An error occurred', 'code': 'GENERAL_ERROR'}],
-            'message': 'Operation failed'
-        }
-        error_kwargs.update(kwargs)
-        return cls.create(**error_kwargs)
+    # Validation constraints
+    min_value = LazyAttribute(
+        lambda obj: fake.random_int(1, 10) 
+        if obj.value_type in ['integer', 'float'] and fake.boolean(chance_of_getting_true=40) 
+        else None
+    )
+    max_value = LazyAttribute(
+        lambda obj: fake.random_int(100, 1000) 
+        if obj.value_type in ['integer', 'float'] and fake.boolean(chance_of_getting_true=40) 
+        else None
+    )
+    allowed_values = LazyAttribute(
+        lambda obj: fake.words(nb=fake.random_int(2, 6))
+        if obj.value_type == 'string' and fake.boolean(chance_of_getting_true=30)
+        else None
+    )
+    
+    # Environment and deployment
+    environment = FuzzyChoice(['dev', 'staging', 'prod'])
+    requires_restart = FuzzyChoice([True, False])
+    
+    class Params:
+        # Trait for sensitive configurations
+        sensitive_config = Trait(
+            key=LazyFunction(
+                lambda: f"auth.{fake.word()}.secret"
+            ),
+            value_type='string',
+            is_sensitive=True,
+            is_readonly=True
+        )
+        
+        # Trait for feature flags
+        feature_flag = Trait(
+            key=LazyFunction(
+                lambda: f"feature.{fake.word()}.enabled"
+            ),
+            value_type='boolean',
+            category='feature',
+            is_sensitive=False
+        )
+        
+        # Trait for numeric limits
+        numeric_limit = Trait(
+            value_type=FuzzyChoice(['integer', 'float']),
+            min_value=1,
+            max_value=LazyFunction(lambda: fake.random_int(100, 10000))
+        )
 
 
 # ============================================================================
-# COMPLEX DATA SCENARIO FACTORIES
+# EDGE CASE AND BOUNDARY VALUE FACTORIES
 # ============================================================================
 
-class IntegrationTestScenarioFactory:
+class EdgeCaseDataFactory:
     """
-    Complex data scenario factory for integration testing per Section 6.6.1.
+    Factory for generating edge case and boundary condition test data.
     
-    Creates comprehensive test scenarios with multiple related models for
-    end-to-end workflow testing and complex business logic validation.
+    Provides specialized data generation for validation testing including
+    boundary values, invalid data scenarios, and security test cases per
+    Section 6.6.1 edge case coverage requirements.
     """
     
     @staticmethod
-    def create_e_commerce_scenario() -> Dict[str, Any]:
+    def boundary_string_values(field_name: str = None) -> List[str]:
         """
-        Create complete e-commerce scenario with user, products, and orders.
-        
-        Returns:
-            Dictionary containing all related models for e-commerce testing
-        """
-        # Create organization
-        organization = OrganizationFactory.create()
-        
-        # Create users
-        admin_user = UserFactory.create_admin_user()
-        customer_user = UserFactory.create()
-        
-        # Create product categories
-        categories = ProductCategoryFactory.create_batch_validated(3)
-        
-        # Create products
-        products = []
-        for category in categories:
-            category_products = ProductFactory.create_batch_validated(
-                random.randint(2, 5),
-                category_id=category.id if hasattr(category, 'id') else str(uuid.uuid4())
-            )
-            products.extend(category_products)
-        
-        # Create orders
-        orders = []
-        for _ in range(random.randint(2, 5)):
-            # Select random products for order
-            order_products = random.sample(products, k=random.randint(1, 3))
-            order_items = []
-            
-            for product in order_products:
-                item = OrderItemFactory.create(
-                    product_id=product.id if hasattr(product, 'id') else str(uuid.uuid4()),
-                    product_sku=product.sku if hasattr(product, 'sku') else fake.sku(),
-                    product_name=product.name if hasattr(product, 'name') else fake.word()
-                )
-                order_items.append(item)
-            
-            order = OrderFactory.create(
-                customer_id=customer_user.id if hasattr(customer_user, 'id') else str(uuid.uuid4()),
-                customer_email=customer_user.email if hasattr(customer_user, 'email') else fake.email(),
-                items=order_items
-            )
-            orders.append(order)
-        
-        # Create payment transactions
-        transactions = []
-        for order in orders:
-            transaction = PaymentTransactionFactory.create(
-                order_id=order.id if hasattr(order, 'id') else str(uuid.uuid4()),
-                customer_id=customer_user.id if hasattr(customer_user, 'id') else str(uuid.uuid4()),
-                amount=order.total_amount if hasattr(order, 'total_amount') else MonetaryAmountFactory.create()
-            )
-            transactions.append(transaction)
-        
-        return {
-            'organization': organization,
-            'admin_user': admin_user,
-            'customer_user': customer_user,
-            'categories': categories,
-            'products': products,
-            'orders': orders,
-            'transactions': transactions,
-            'scenario_type': 'e_commerce',
-            'created_at': datetime.now(timezone.utc)
-        }
-    
-    @staticmethod
-    def create_user_lifecycle_scenario() -> Dict[str, Any]:
-        """
-        Create user lifecycle scenario from registration to activity.
-        
-        Returns:
-            Dictionary containing user lifecycle models for testing
-        """
-        # Create new pending user
-        new_user = UserFactory.create_new_user()
-        
-        # Create user sessions
-        sessions = UserSessionFactory.create_batch_validated(
-            random.randint(2, 5),
-            user_id=new_user.id if hasattr(new_user, 'id') else str(uuid.uuid4())
-        )
-        
-        # Create file uploads
-        files = FileUploadFactory.create_batch_validated(
-            random.randint(1, 3),
-            uploaded_by=new_user.id if hasattr(new_user, 'id') else str(uuid.uuid4())
-        )
-        
-        # Create configuration for user
-        configs = SystemConfigurationFactory.create_batch_validated(
-            random.randint(2, 4),
-            environment='development'
-        )
-        
-        return {
-            'user': new_user,
-            'sessions': sessions,
-            'files': files,
-            'configurations': configs,
-            'scenario_type': 'user_lifecycle',
-            'created_at': datetime.now(timezone.utc)
-        }
-    
-    @staticmethod
-    def create_performance_test_dataset(volume: str = 'medium') -> Dict[str, Any]:
-        """
-        Create performance test dataset with configurable volume per Section 6.6.1.
+        Generate boundary string values for validation testing.
         
         Args:
-            volume: Dataset volume ('small', 'medium', 'large', 'xlarge')
+            field_name: Name of field for context-specific boundaries
             
         Returns:
-            Dictionary containing performance test dataset
+            List of boundary string values
         """
-        volume_configs = {
-            'small': {'users': 10, 'products': 50, 'orders': 20},
-            'medium': {'users': 100, 'products': 500, 'orders': 200},
-            'large': {'users': 1000, 'products': 5000, 'orders': 2000},
-            'xlarge': {'users': 10000, 'products': 50000, 'orders': 20000}
-        }
-        
-        config = volume_configs.get(volume, volume_configs['medium'])
-        
-        # Create users with realistic distribution
-        users = []
-        admin_count = max(1, config['users'] // 20)  # 5% admins
-        manager_count = config['users'] // 10        # 10% managers
-        regular_count = config['users'] - admin_count - manager_count
-        
-        users.extend(UserFactory.create_batch_validated(admin_count, role='admin'))
-        users.extend(UserFactory.create_batch_validated(manager_count, role='manager'))
-        users.extend(UserFactory.create_batch_validated(regular_count, role='user'))
-        
-        # Create product categories
-        category_count = max(5, config['products'] // 100)
-        categories = ProductCategoryFactory.create_batch_validated(category_count)
-        
-        # Create products distributed across categories
-        products = []
-        products_per_category = config['products'] // len(categories)
-        for category in categories:
-            category_products = ProductFactory.create_batch_validated(
-                products_per_category,
-                category_id=category.id if hasattr(category, 'id') else str(uuid.uuid4())
-            )
-            products.extend(category_products)
-        
-        # Create orders with random distribution
-        orders = []
-        for _ in range(config['orders']):
-            customer = random.choice(users)
-            order_products = random.sample(products, k=random.randint(1, 5))
-            
-            order_items = []
-            for product in order_products:
-                item = OrderItemFactory.create(
-                    product_id=product.id if hasattr(product, 'id') else str(uuid.uuid4()),
-                    product_sku=product.sku if hasattr(product, 'sku') else fake.sku(),
-                    product_name=product.name if hasattr(product, 'name') else fake.word()
-                )
-                order_items.append(item)
-            
-            order = OrderFactory.create(
-                customer_id=customer.id if hasattr(customer, 'id') else str(uuid.uuid4()),
-                customer_email=customer.email if hasattr(customer, 'email') else fake.email(),
-                items=order_items
-            )
-            orders.append(order)
-        
-        return {
-            'users': users,
-            'categories': categories,
-            'products': products,
-            'orders': orders,
-            'volume': volume,
-            'config': config,
-            'scenario_type': 'performance_dataset',
-            'created_at': datetime.now(timezone.utc)
-        }
+        return [
+            '',  # Empty string
+            ' ',  # Single space
+            'a',  # Single character
+            'a' * 50,  # Medium length
+            'a' * 255,  # Common max length
+            'a' * 1000,  # Long string
+            'a' * 10000,  # Very long string
+            '漢字テスト',  # Unicode characters
+            '<script>alert("xss")</script>',  # XSS attempt
+            '"; DROP TABLE users; --',  # SQL injection attempt
+            '\n\r\t',  # Whitespace characters
+            'null',  # String representation of null
+            'undefined',  # String representation of undefined
+        ]
     
     @staticmethod
-    def create_edge_case_scenario() -> Dict[str, Any]:
+    def boundary_numeric_values() -> List[Union[int, float]]:
         """
-        Create edge case scenario for boundary testing per Section 6.6.1.
+        Generate boundary numeric values for validation testing.
         
         Returns:
-            Dictionary containing edge case models for validation testing
+            List of boundary numeric values
         """
-        # Edge case users
-        edge_users = [
-            UserFactory.create_edge_case('minimal'),
-            UserFactory.create_edge_case('maximal'),
-            UserFactory.create_locked_user(),
-            UserFactory.create_new_user()
+        return [
+            0,  # Zero
+            -1,  # Negative one
+            1,  # Positive one
+            -2147483648,  # 32-bit int min
+            2147483647,  # 32-bit int max
+            -9223372036854775808,  # 64-bit int min
+            9223372036854775807,  # 64-bit int max
+            0.1,  # Small decimal
+            0.0001,  # Very small decimal
+            999999.99,  # Large decimal
+            float('inf'),  # Infinity
+            float('-inf'),  # Negative infinity
+            float('nan'),  # Not a number
         ]
+    
+    @staticmethod
+    def invalid_email_addresses() -> List[str]:
+        """
+        Generate invalid email addresses for validation testing.
         
-        # Edge case products
-        edge_products = [
-            ProductFactory.create_edge_case('minimal'),
-            ProductFactory.create_edge_case('maximal'),
-            ProductFactory.create_digital_product(),
-            ProductFactory.create_out_of_stock_product()
+        Returns:
+            List of invalid email addresses
+        """
+        return [
+            '',  # Empty
+            'invalid',  # No @ symbol
+            '@domain.com',  # Missing local part
+            'user@',  # Missing domain
+            'user@domain',  # Missing TLD
+            'user..double.dot@domain.com',  # Double dots
+            'user@domain..com',  # Double dots in domain
+            'user name@domain.com',  # Space in local part
+            'user@domain .com',  # Space in domain
+            'user@domain.com.',  # Trailing dot
+            'user@.domain.com',  # Leading dot in domain
+            'a' * 100 + '@domain.com',  # Very long local part
+            'user@' + 'a' * 100 + '.com',  # Very long domain
         ]
+    
+    @staticmethod
+    def invalid_phone_numbers() -> List[str]:
+        """
+        Generate invalid phone numbers for validation testing.
         
-        # Edge case orders
-        edge_orders = [
-            OrderFactory.create_completed_order(),
-            OrderFactory.create_cancelled_order()
+        Returns:
+            List of invalid phone numbers
+        """
+        return [
+            '',  # Empty
+            '123',  # Too short
+            '1' * 20,  # Too long
+            'abc-def-ghij',  # Letters only
+            '123-abc-4567',  # Mixed letters and numbers
+            '+++1234567890',  # Multiple plus signs
+            '--1234567890',  # Multiple hyphens
+            '123 456 7890 ext',  # Invalid extension format
+            '(123) 456-78901',  # Too many digits
+            '1234567890123456',  # Way too long
         ]
+    
+    @staticmethod
+    def security_test_strings() -> List[str]:
+        """
+        Generate security test strings for injection testing.
         
-        # Edge case transactions
-        edge_transactions = [
-            PaymentTransactionFactory.create_failed_transaction()
+        Returns:
+            List of security test strings
+        """
+        return [
+            # XSS attempts
+            '<script>alert("xss")</script>',
+            '<img src="x" onerror="alert(1)">',
+            'javascript:alert("xss")',
+            
+            # SQL injection attempts
+            "'; DROP TABLE users; --",
+            "' OR '1'='1",
+            "1; DELETE FROM users WHERE '1'='1",
+            
+            # NoSQL injection attempts
+            '{"$gt": ""}',
+            '{"$ne": null}',
+            
+            # Path traversal attempts
+            '../../../etc/passwd',
+            '..\\..\\..\\windows\\system32\\config\\sam',
+            
+            # Command injection attempts
+            '; ls -la',
+            '| cat /etc/passwd',
+            '`whoami`',
+            
+            # Buffer overflow attempts
+            'A' * 1000,
+            'A' * 10000,
+            
+            # Format string attacks
+            '%s%s%s%s%s%s%s%s%s%s',
+            '%x%x%x%x%x%x%x%x%x%x',
         ]
-        
-        # Edge case files
-        edge_files = [
-            FileUploadFactory.create_image_file(),
-            FileUploadFactory.create_large_file()
-        ]
-        
+
+
+class InvalidDataFactory:
+    """
+    Factory for generating intentionally invalid data for validation testing.
+    
+    Creates data that should fail validation to test error handling,
+    business rule enforcement, and security validation patterns.
+    """
+    
+    @classmethod
+    def invalid_user_data(cls) -> Dict[str, Any]:
+        """Generate invalid user data for validation testing."""
         return {
-            'edge_users': edge_users,
-            'edge_products': edge_products,
-            'edge_orders': edge_orders,
-            'edge_transactions': edge_transactions,
-            'edge_files': edge_files,
-            'scenario_type': 'edge_case_testing',
-            'created_at': datetime.now(timezone.utc)
+            'username': fake.random_element(EdgeCaseDataFactory.boundary_string_values()),
+            'email': fake.random_element(EdgeCaseDataFactory.invalid_email_addresses()),
+            'first_name': fake.random_element(EdgeCaseDataFactory.security_test_strings()),
+            'last_name': '',
+            'status': 'invalid_status',
+            'role': 'invalid_role',
+            'permissions': 'not_a_set',
+            'login_attempts': -1,
+            'language_code': 'invalid_lang_code_too_long',
+        }
+    
+    @classmethod
+    def invalid_order_data(cls) -> Dict[str, Any]:
+        """Generate invalid order data for validation testing."""
+        return {
+            'customer_email': fake.random_element(EdgeCaseDataFactory.invalid_email_addresses()),
+            'customer_name': '',
+            'items': [],  # Empty items list
+            'subtotal': {'amount': -100, 'currency_code': 'INVALID'},
+            'tax_amount': {'amount': 'not_a_number', 'currency_code': 'USD'},
+            'total_amount': {'amount': 0, 'currency_code': ''},
+            'status': 'invalid_status',
+            'order_date': 'not_a_date',
+            'shipped_date': 'invalid_date_format',
+        }
+    
+    @classmethod
+    def invalid_product_data(cls) -> Dict[str, Any]:
+        """Generate invalid product data for validation testing."""
+        return {
+            'sku': '',  # Empty SKU
+            'name': fake.random_element(EdgeCaseDataFactory.security_test_strings()),
+            'slug': 'invalid slug with spaces!@#',
+            'base_price': {'amount': -50, 'currency_code': 'INVALID'},
+            'sale_price': {'amount': 200, 'currency_code': 'USD'},  # Higher than base
+            'inventory_quantity': -10,
+            'status': 'invalid_status',
+            'weight': -5.0,
+            'dimensions': {'length': -1, 'width': 0},  # Missing height, negative values
         }
 
 
-# ============================================================================
-# PYTEST FIXTURES INTEGRATION
-# ============================================================================
-
-@pytest.fixture
-def user_factory():
-    """Pytest fixture providing UserFactory for test functions."""
-    return UserFactory
-
-
-@pytest.fixture
-def product_factory():
-    """Pytest fixture providing ProductFactory for test functions."""
-    return ProductFactory
-
-
-@pytest.fixture
-def order_factory():
-    """Pytest fixture providing OrderFactory for test functions."""
-    return OrderFactory
-
-
-@pytest.fixture
-def organization_factory():
-    """Pytest fixture providing OrganizationFactory for test functions."""
-    return OrganizationFactory
-
-
-@pytest.fixture
-def integration_scenario_factory():
-    """Pytest fixture providing IntegrationTestScenarioFactory for test functions."""
-    return IntegrationTestScenarioFactory
-
-
-@pytest.fixture
-def sample_user(user_factory):
-    """Pytest fixture providing a sample user instance."""
-    return user_factory.create()
-
-
-@pytest.fixture
-def sample_admin_user(user_factory):
-    """Pytest fixture providing a sample admin user instance."""
-    return user_factory.create_admin_user()
-
-
-@pytest.fixture
-def sample_product(product_factory):
-    """Pytest fixture providing a sample product instance."""
-    return product_factory.create()
-
-
-@pytest.fixture
-def sample_order(order_factory):
-    """Pytest fixture providing a sample order instance."""
-    return order_factory.create()
-
-
-@pytest.fixture
-def e_commerce_scenario(integration_scenario_factory):
-    """Pytest fixture providing complete e-commerce test scenario."""
-    return integration_scenario_factory.create_e_commerce_scenario()
-
-
-@pytest.fixture
-def performance_dataset_small(integration_scenario_factory):
-    """Pytest fixture providing small performance test dataset."""
-    return integration_scenario_factory.create_performance_test_dataset('small')
-
-
-@pytest.fixture
-def edge_case_scenario(integration_scenario_factory):
-    """Pytest fixture providing edge case test scenario."""
-    return integration_scenario_factory.create_edge_case_scenario()
-
-
-# ============================================================================
-# FACTORY VALIDATION AND TESTING UTILITIES
-# ============================================================================
-
-def validate_all_factories():
+class PerformanceDataFactory:
     """
-    Validate all factory outputs for consistency and correctness.
+    Factory for generating large volumes of test data for performance testing.
     
-    Runs comprehensive validation tests on all factory classes to ensure
-    they generate valid data according to pydantic models and business rules.
-    
-    Returns:
-        Dict with validation results for each factory
+    Creates realistic data volumes for performance validation per Section 6.6.1
+    production data model parity and performance testing requirements.
     """
-    results = {}
     
-    # List all factory classes
-    factory_classes = [
-        UserFactory, DataUserFactory, UserSessionFactory,
-        OrganizationFactory, ProductCategoryFactory, ProductFactory,
-        OrderItemFactory, OrderFactory, PaymentTransactionFactory,
-        FileUploadFactory, SystemConfigurationFactory,
-        PaginationParamsFactory, SearchParamsFactory, ApiResponseFactory,
-        ContactInfoFactory, AddressFactory, MonetaryAmountFactory,
-        DateTimeRangeFactory
-    ]
-    
-    for factory_class in factory_classes:
-        factory_name = factory_class.__name__
-        try:
-            # Test basic creation
-            instance = factory_class.create()
-            results[factory_name] = {
-                'basic_creation': True,
-                'instance_type': type(instance).__name__,
-                'validation_passed': True
-            }
-            
-            # Test batch creation
-            batch = factory_class.create_batch_validated(3)
-            results[factory_name]['batch_creation'] = len(batch) == 3
-            
-            logger.info("Factory validation passed", factory=factory_name)
-            
-        except Exception as e:
-            results[factory_name] = {
-                'basic_creation': False,
-                'error': str(e),
-                'validation_passed': False
-            }
-            logger.error("Factory validation failed", factory=factory_name, error=str(e))
-    
-    return results
-
-
-def generate_test_data_summary(scenario_data: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Generate summary statistics for test data scenarios.
-    
-    Args:
-        scenario_data: Test scenario data from factory
+    @classmethod
+    def bulk_users(cls, count: int = 1000) -> List[Dict[str, Any]]:
+        """
+        Generate bulk user data for performance testing.
         
-    Returns:
-        Summary statistics and metadata
+        Args:
+            count: Number of user records to generate
+            
+        Returns:
+            List of user data dictionaries
+        """
+        logger.info(f"Generating {count} user records for performance testing")
+        
+        users = []
+        for i in range(count):
+            user_data = UserFactory.build_dict()
+            # Add sequential elements for predictable testing
+            user_data['username'] = f"testuser_{i:06d}"
+            user_data['email'] = f"testuser_{i:06d}@example.com"
+            users.append(user_data)
+        
+        return users
+    
+    @classmethod
+    def bulk_products(cls, count: int = 5000) -> List[Dict[str, Any]]:
+        """
+        Generate bulk product data for performance testing.
+        
+        Args:
+            count: Number of product records to generate
+            
+        Returns:
+            List of product data dictionaries
+        """
+        logger.info(f"Generating {count} product records for performance testing")
+        
+        products = []
+        categories = [str(fake.uuid4()) for _ in range(50)]  # 50 categories
+        
+        for i in range(count):
+            product_data = ProductFactory.build_dict()
+            # Add sequential elements for predictable testing
+            product_data['sku'] = f"PERF-{i:08d}"
+            product_data['category_id'] = fake.random_element(categories)
+            products.append(product_data)
+        
+        return products
+    
+    @classmethod
+    def bulk_orders(cls, count: int = 10000) -> List[Dict[str, Any]]:
+        """
+        Generate bulk order data for performance testing.
+        
+        Args:
+            count: Number of order records to generate
+            
+        Returns:
+            List of order data dictionaries
+        """
+        logger.info(f"Generating {count} order records for performance testing")
+        
+        orders = []
+        customer_ids = [str(fake.uuid4()) for _ in range(1000)]  # 1000 customers
+        
+        for i in range(count):
+            order_data = OrderFactory.build_dict()
+            # Add sequential elements for predictable testing
+            order_data['order_number'] = f"PERF-{i:08d}"
+            order_data['customer_id'] = fake.random_element(customer_ids)
+            orders.append(order_data)
+        
+        return orders
+
+
+# ============================================================================
+# FACTORY REGISTRY AND UTILITIES
+# ============================================================================
+
+class FactoryRegistry:
     """
-    summary = {
-        'scenario_type': scenario_data.get('scenario_type', 'unknown'),
-        'created_at': scenario_data.get('created_at'),
-        'total_objects': 0,
-        'object_counts': {},
-        'data_volume_mb': 0
+    Registry for managing all factory classes and providing factory discovery.
+    
+    Provides centralized access to all factory classes with type validation
+    and factory pattern management per Section 6.6.1 factory pattern requirements.
+    """
+    
+    _factories = {
+        # Utility model factories
+        'Address': AddressFactory,
+        'ContactInfo': ContactInfoFactory,
+        'MonetaryAmount': MonetaryAmountFactory,
+        'DateTimeRange': DateTimeRangeFactory,
+        'FileUpload': FileUploadFactory,
+        
+        # User and authentication factories
+        'User': UserFactory,
+        'AuthUser': AuthUserFactory,
+        
+        # Business entity factories
+        'Organization': OrganizationFactory,
+        'ProductCategory': ProductCategoryFactory,
+        'Product': ProductFactory,
+        
+        # Order and transaction factories
+        'OrderItem': OrderItemFactory,
+        'Order': OrderFactory,
+        'PaymentTransaction': PaymentTransactionFactory,
+        
+        # API and system factories
+        'PaginationParams': PaginationParamsFactory,
+        'SearchParams': SearchParamsFactory,
+        'SystemConfiguration': SystemConfigurationFactory,
     }
     
-    for key, value in scenario_data.items():
-        if isinstance(value, list):
-            summary['object_counts'][key] = len(value)
-            summary['total_objects'] += len(value)
-        elif hasattr(value, '__dict__'):
-            summary['object_counts'][key] = 1
-            summary['total_objects'] += 1
-    
-    # Estimate data volume (rough calculation)
-    import sys
-    try:
-        data_size = sys.getsizeof(str(scenario_data))
-        summary['data_volume_mb'] = round(data_size / (1024 * 1024), 2)
-    except Exception:
-        summary['data_volume_mb'] = 0
-    
-    return summary
-
-
-# ============================================================================
-# FACTORY REGISTRY AND EXPORT
-# ============================================================================
-
-# Registry of all factory classes for dynamic access
-FACTORY_REGISTRY = {
-    # User and authentication factories
-    'UserFactory': UserFactory,
-    'DataUserFactory': DataUserFactory,
-    'UserSessionFactory': UserSessionFactory,
-    'ContactInfoFactory': ContactInfoFactory,
-    'AddressFactory': AddressFactory,
-    
-    # Business model factories
-    'OrganizationFactory': OrganizationFactory,
-    'ProductCategoryFactory': ProductCategoryFactory,
-    'ProductFactory': ProductFactory,
-    'OrderItemFactory': OrderItemFactory,
-    'OrderFactory': OrderFactory,
-    'PaymentTransactionFactory': PaymentTransactionFactory,
-    
-    # Utility model factories
-    'MonetaryAmountFactory': MonetaryAmountFactory,
-    'DateTimeRangeFactory': DateTimeRangeFactory,
-    'FileUploadFactory': FileUploadFactory,
-    'SystemConfigurationFactory': SystemConfigurationFactory,
-    
-    # API model factories
-    'PaginationParamsFactory': PaginationParamsFactory,
-    'SearchParamsFactory': SearchParamsFactory,
-    'ApiResponseFactory': ApiResponseFactory,
-    
-    # Scenario factories
-    'IntegrationTestScenarioFactory': IntegrationTestScenarioFactory,
-}
-
-
-def get_factory_by_name(factory_name: str) -> Optional[Type]:
-    """
-    Get factory class by name from registry.
-    
-    Args:
-        factory_name: Name of the factory class to retrieve
+    @classmethod
+    def get_factory(cls, model_name: str) -> Optional[Type[PydanticModelFactory]]:
+        """
+        Get factory class by model name.
         
-    Returns:
-        Factory class if found, None otherwise
+        Args:
+            model_name: Name of the model to get factory for
+            
+        Returns:
+            Factory class if found, None otherwise
+        """
+        return cls._factories.get(model_name)
+    
+    @classmethod
+    def list_factories(cls) -> List[str]:
+        """
+        Get list of available factory names.
+        
+        Returns:
+            List of factory names
+        """
+        return list(cls._factories.keys())
+    
+    @classmethod
+    def create_instance(cls, model_name: str, **kwargs) -> Any:
+        """
+        Create model instance using registered factory.
+        
+        Args:
+            model_name: Name of the model to create
+            **kwargs: Factory parameters
+            
+        Returns:
+            Created model instance
+            
+        Raises:
+            ValueError: If factory not found
+        """
+        factory_class = cls.get_factory(model_name)
+        if not factory_class:
+            raise ValueError(f"No factory registered for model: {model_name}")
+        
+        return factory_class(**kwargs)
+    
+    @classmethod
+    def create_batch(cls, model_name: str, count: int, **kwargs) -> List[Any]:
+        """
+        Create batch of model instances using registered factory.
+        
+        Args:
+            model_name: Name of the model to create
+            count: Number of instances to create
+            **kwargs: Factory parameters
+            
+        Returns:
+            List of created model instances
+        """
+        factory_class = cls.get_factory(model_name)
+        if not factory_class:
+            raise ValueError(f"No factory registered for model: {model_name}")
+        
+        return factory_class.create_batch(count, **kwargs)
+
+
+# ============================================================================
+# PYTEST FIXTURES FOR FACTORY INTEGRATION
+# ============================================================================
+
+def pytest_factory_fixtures():
     """
-    return FACTORY_REGISTRY.get(factory_name)
+    Generate pytest fixtures for all registered factories.
+    
+    This function can be used to automatically generate pytest fixtures
+    for all factory classes, enabling easy access in test functions.
+    """
+    fixtures = {}
+    
+    for model_name, factory_class in FactoryRegistry._factories.items():
+        fixture_name = f"{model_name.lower()}_factory"
+        
+        def create_fixture(factory_cls):
+            def fixture_func():
+                return factory_cls
+            return fixture_func
+        
+        fixtures[fixture_name] = create_fixture(factory_class)
+    
+    return fixtures
 
 
-# Export all factories and utilities
+# ============================================================================
+# MODULE INITIALIZATION AND LOGGING
+# ============================================================================
+
+# Log successful module initialization
+logger.info(
+    "Factory fixtures module initialized successfully",
+    factory_count=len(FactoryRegistry._factories),
+    factory_names=FactoryRegistry.list_factories(),
+    faker_locales=['en_US', 'en_GB', 'de_DE', 'fr_FR', 'ja_JP'],
+    edge_case_coverage=True,
+    performance_testing_enabled=True,
+    pydantic_integration=True,
+    python_dateutil_integration=True
+)
+
+# Export main factory classes and utilities for easy import
 __all__ = [
-    # Factory classes
-    'PydanticModelFactory', 'MongoModelFactory',
-    'UserFactory', 'DataUserFactory', 'UserSessionFactory',
-    'ContactInfoFactory', 'AddressFactory',
-    'OrganizationFactory', 'ProductCategoryFactory', 'ProductFactory',
-    'OrderItemFactory', 'OrderFactory', 'PaymentTransactionFactory',
-    'MonetaryAmountFactory', 'DateTimeRangeFactory',
-    'FileUploadFactory', 'SystemConfigurationFactory',
-    'PaginationParamsFactory', 'SearchParamsFactory', 'ApiResponseFactory',
-    'IntegrationTestScenarioFactory',
+    # Base factory classes
+    'PydanticModelFactory',
+    'MongoModelFactory',
     
-    # Utility functions
-    'generate_future_datetime', 'generate_past_datetime', 'generate_date_range',
-    'generate_business_hours_range', 'generate_realistic_decimal',
-    'generate_weighted_choice', 'validate_factory_output',
-    'validate_all_factories', 'generate_test_data_summary',
-    'get_factory_by_name',
+    # Utility factories
+    'AddressFactory',
+    'ContactInfoFactory', 
+    'MonetaryAmountFactory',
+    'DateTimeRangeFactory',
+    'FileUploadFactory',
     
-    # Registry
-    'FACTORY_REGISTRY',
+    # User and authentication factories
+    'UserFactory',
+    'AuthUserFactory',
     
-    # Faker instance and provider
-    'fake', 'BusinessDataProvider'
+    # Business entity factories
+    'OrganizationFactory',
+    'ProductCategoryFactory',
+    'ProductFactory',
+    
+    # Order and transaction factories
+    'OrderItemFactory',
+    'OrderFactory',
+    'PaymentTransactionFactory',
+    
+    # API and system factories
+    'PaginationParamsFactory',
+    'SearchParamsFactory',
+    'SystemConfigurationFactory',
+    
+    # Edge case and performance factories
+    'EdgeCaseDataFactory',
+    'InvalidDataFactory',
+    'PerformanceDataFactory',
+    
+    # Utilities
+    'FactoryRegistry',
+    'DateTimeFactoryUtils',
+    'BusinessDataProvider',
+    
+    # Test data volume constants
+    'pytest_factory_fixtures',
 ]
-
-
-# Module initialization
-logger.info("Factory fixtures module initialized successfully",
-           factory_count=len(FACTORY_REGISTRY),
-           faker_providers=['BusinessDataProvider'],
-           pydantic_integration=True,
-           dateutil_integration=True)
