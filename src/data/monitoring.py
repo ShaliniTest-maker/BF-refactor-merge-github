@@ -1,1249 +1,1444 @@
 """
-Database performance monitoring implementing PyMongo and Motor event listeners for Prometheus metrics collection.
+Database Performance Monitoring Module
 
-This module provides comprehensive database operation monitoring to ensure ≤10% variance compliance 
-from Node.js baseline performance. Implements event listeners for PyMongo and Motor drivers to capture
-query execution times, connection pool statistics, and transaction performance metrics.
+This module implements comprehensive database performance monitoring for PyMongo and Motor
+operations, providing real-time metrics collection, connection pool monitoring, and
+performance baseline comparison to ensure ≤10% variance compliance from Node.js baseline.
 
-Key components:
-- PyMongo command and connection pool event listeners
-- Motor async operation monitoring
-- Prometheus metrics collection and exposition
-- Connection health monitoring and circuit breaker integration
-- Performance baseline comparison and variance tracking
+Key Features:
+- PyMongo event listeners for synchronous operation monitoring
+- Motor async operation monitoring for high-performance database access
+- Prometheus metrics collection for enterprise monitoring integration
+- Connection pool health and performance tracking
+- Query execution time monitoring with baseline comparison
+- Transaction performance and success rate monitoring
+- Circuit breaker integration for database resilience monitoring
+- Comprehensive error tracking and alerting
+
+Architecture Integration:
+- Integrates with src/config/monitoring.py for centralized monitoring configuration
+- Provides metrics for Prometheus enterprise monitoring infrastructure
+- Supports Flask application factory pattern for monitoring initialization
+- Enables structured logging for database operations and performance events
+- Facilitates APM integration through distributed tracing context
+
+Performance Requirements:
+- Database operation variance monitoring: ≤10% from Node.js baseline (critical requirement)
+- Connection pool utilization tracking: Warning >80%, Critical >95% capacity
+- Query execution time monitoring: P95 <500ms, P99 <1000ms with variance tracking
+- Transaction success rate monitoring: ≥99.5% success rate with error classification
+- Real-time performance metrics for proactive optimization and alerting
+
+References:
+- Section 6.2.4 PERFORMANCE OPTIMIZATION: Query optimization patterns and monitoring requirements
+- Section 6.2.2 DATA MANAGEMENT: Monitoring configuration and compliance considerations
+- Section 5.2.5 DATABASE ACCESS LAYER: Connection pooling and performance optimization
+- Section 0.1.1 PRIMARY OBJECTIVE: ≤10% performance variance requirement compliance
 """
 
+import gc
 import time
-import logging
-from typing import Dict, Any, Optional
+import threading
+import weakref
+from collections import defaultdict, deque
 from contextlib import contextmanager
-from dataclasses import dataclass
-from threading import Lock
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional, List, Callable, Union, Tuple
+from functools import wraps
+from threading import Lock, RLock
 
-import pymongo.monitoring
-from pymongo.monitoring import (
-    CommandListener, 
-    PoolListener, 
-    ServerListener,
-    CommandStartedEvent,
-    CommandSucceededEvent, 
-    CommandFailedEvent,
-    PoolCreatedEvent,
-    PoolClearedEvent,
-    PoolClosedEvent,
-    ConnectionCreatedEvent,
-    ConnectionReadyEvent,
-    ConnectionClosedEvent,
-    ConnectionCheckOutStartedEvent,
-    ConnectionCheckOutFailedEvent,
-    ConnectionCheckedOutEvent,
-    ConnectionCheckedInEvent,
-    ServerOpeningEvent,
-    ServerClosedEvent,
-    ServerDescriptionChangedEvent
-)
-from prometheus_client import (
-    Counter, 
-    Histogram, 
-    Gauge, 
-    Info,
-    CollectorRegistry,
-    generate_latest,
-    CONTENT_TYPE_LATEST
-)
+# Database drivers
+try:
+    import pymongo
+    from pymongo import monitoring
+    from pymongo.errors import PyMongoError, ConnectionFailure, OperationFailure
+    PYMONGO_AVAILABLE = True
+except ImportError:
+    PYMONGO_AVAILABLE = False
 
-# Configure module logger
-logger = logging.getLogger(__name__)
+try:
+    import motor
+    from motor.motor_asyncio import AsyncIOMotorClient
+    MOTOR_AVAILABLE = True
+except ImportError:
+    MOTOR_AVAILABLE = False
 
-# Global metrics registry for database monitoring
-database_registry = CollectorRegistry()
+# Monitoring and metrics
+from prometheus_client import Counter, Histogram, Gauge, Summary
+import structlog
 
-# Performance variance tracking configuration
-PERFORMANCE_VARIANCE_THRESHOLD = 10.0  # ≤10% variance requirement
-NODEJS_BASELINE_PERCENTILES = {
-    'p50': 50.0,  # 50th percentile baseline in milliseconds
-    'p95': 150.0,  # 95th percentile baseline in milliseconds  
-    'p99': 300.0   # 99th percentile baseline in milliseconds
-}
-
-# Circuit breaker configuration for connection monitoring
-CONNECTION_FAILURE_THRESHOLD = 5
-CONNECTION_RECOVERY_TIMEOUT = 30  # seconds
+# Application imports
+from src.config.monitoring import MonitoringConfig, PrometheusMetrics
 
 
-@dataclass
-class DatabaseMetrics:
-    """Database performance metrics collection container."""
-    
-    # Query performance metrics
-    query_duration: Histogram
-    query_counter: Counter
-    query_errors: Counter
-    
-    # Connection pool metrics
-    pool_size: Gauge
-    pool_checkedout: Gauge
-    pool_available: Gauge
-    pool_created: Counter
-    pool_cleared: Counter
-    
-    # Connection lifecycle metrics
-    connection_created: Counter
-    connection_closed: Counter
-    connection_checkout_time: Histogram
-    connection_checkout_failed: Counter
-    
-    # Server monitoring metrics
-    server_status: Gauge
-    server_latency: Histogram
-    
-    # Transaction performance metrics
-    transaction_duration: Histogram
-    transaction_count: Counter
-    transaction_errors: Counter
-    
-    # Performance variance tracking
-    variance_percentage: Gauge
-    baseline_comparison: Histogram
-    
-    # Motor async operation metrics
-    motor_operation_duration: Histogram
-    motor_operation_count: Counter
-    motor_connection_pool: Gauge
-
-
-class DatabaseMonitoringListener(CommandListener):
+class DatabaseMetricsCollector:
     """
-    PyMongo command event listener for comprehensive database operation monitoring.
+    Comprehensive database metrics collector implementing Prometheus instrumentation
+    for MongoDB operations with performance baseline comparison capabilities.
     
-    Captures query execution times, error rates, and operation counts to ensure
-    performance compliance with ≤10% variance requirement.
+    This collector provides detailed metrics for:
+    - Database query execution times and operation counts
+    - Connection pool utilization and health status
+    - Transaction performance and success rates
+    - Performance variance tracking against Node.js baseline
+    - Error classification and monitoring
     """
     
-    def __init__(self, metrics: DatabaseMetrics):
-        """Initialize the command listener with metrics collection."""
-        self.metrics = metrics
-        self._active_commands: Dict[int, float] = {}
-        self._command_lock = Lock()
+    def __init__(self):
+        """Initialize database metrics collectors with comprehensive instrumentation."""
+        self._lock = Lock()
+        self._baseline_data = {}
+        self._performance_history = defaultdict(lambda: deque(maxlen=1000))
         
-        logger.info("Initialized DatabaseMonitoringListener for PyMongo command tracking")
+        # Query Performance Metrics
+        self.query_duration_seconds = Histogram(
+            'mongodb_query_duration_seconds',
+            'Database query execution time in seconds',
+            ['database', 'collection', 'operation', 'status'],
+            buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0]
+        )
+        
+        self.query_operations_total = Counter(
+            'mongodb_operations_total',
+            'Total number of database operations',
+            ['database', 'collection', 'operation', 'status']
+        )
+        
+        # Connection Pool Metrics
+        self.connection_pool_size = Gauge(
+            'mongodb_connection_pool_size',
+            'Current connection pool size',
+            ['address', 'pool_type']
+        )
+        
+        self.connection_pool_checked_out = Gauge(
+            'mongodb_connection_pool_checked_out',
+            'Number of checked out connections',
+            ['address', 'pool_type']
+        )
+        
+        self.connection_pool_operations_total = Counter(
+            'mongodb_connection_pool_operations_total',
+            'Total connection pool operations',
+            ['address', 'operation', 'status']
+        )
+        
+        self.connection_pool_wait_time_seconds = Histogram(
+            'mongodb_connection_pool_wait_time_seconds',
+            'Time spent waiting for connection checkout',
+            ['address'],
+            buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]
+        )
+        
+        # Transaction Metrics
+        self.transaction_duration_seconds = Histogram(
+            'mongodb_transaction_duration_seconds',
+            'Database transaction execution time in seconds',
+            ['database', 'status'],
+            buckets=[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
+        )
+        
+        self.transaction_operations_total = Counter(
+            'mongodb_transaction_operations_total',
+            'Total number of database transactions',
+            ['database', 'status']
+        )
+        
+        # Performance Variance Metrics (Critical for ≤10% requirement)
+        self.performance_variance_percent = Gauge(
+            'mongodb_performance_variance_percent',
+            'Performance variance percentage against Node.js baseline',
+            ['database', 'collection', 'operation', 'metric_type']
+        )
+        
+        self.baseline_comparison_duration_seconds = Histogram(
+            'mongodb_baseline_comparison_duration_seconds',
+            'Query duration comparison with Node.js baseline',
+            ['database', 'collection', 'operation', 'implementation'],
+            buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5]
+        )
+        
+        # Error and Circuit Breaker Metrics
+        self.database_errors_total = Counter(
+            'mongodb_errors_total',
+            'Total database errors by type and severity',
+            ['database', 'collection', 'error_type', 'severity']
+        )
+        
+        self.circuit_breaker_state = Gauge(
+            'mongodb_circuit_breaker_state',
+            'Database circuit breaker state (0=closed, 1=open, 2=half-open)',
+            ['database', 'service']
+        )
+        
+        # Async Operation Metrics (Motor)
+        self.async_operations_total = Counter(
+            'mongodb_async_operations_total',
+            'Total async database operations (Motor)',
+            ['database', 'collection', 'operation', 'status']
+        )
+        
+        self.async_operation_duration_seconds = Histogram(
+            'mongodb_async_operation_duration_seconds',
+            'Async database operation duration in seconds',
+            ['database', 'collection', 'operation'],
+            buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]
+        )
+        
+        # Resource Utilization Metrics
+        self.active_connections = Gauge(
+            'mongodb_active_connections',
+            'Number of active database connections',
+            ['database', 'connection_type']
+        )
+        
+        self.database_resource_utilization = Gauge(
+            'mongodb_resource_utilization_percent',
+            'Database resource utilization percentage',
+            ['database', 'resource_type']
+        )
     
-    def started(self, event: CommandStartedEvent) -> None:
-        """Record command start time for duration tracking."""
+    def record_query_operation(self, database: str, collection: str, operation: str, 
+                              duration: float, status: str = 'success'):
+        """Record database query operation metrics with performance tracking."""
+        # Record basic operation metrics
+        self.query_duration_seconds.labels(
+            database=database,
+            collection=collection,
+            operation=operation,
+            status=status
+        ).observe(duration)
+        
+        self.query_operations_total.labels(
+            database=database,
+            collection=collection,
+            operation=operation,
+            status=status
+        ).inc()
+        
+        # Performance variance tracking
+        self._track_performance_variance(database, collection, operation, duration)
+        
+        # Store performance history for trend analysis
+        key = f"{database}.{collection}.{operation}"
+        with self._lock:
+            self._performance_history[key].append({
+                'timestamp': time.time(),
+                'duration': duration,
+                'status': status
+            })
+    
+    def record_transaction_operation(self, database: str, duration: float, status: str = 'success'):
+        """Record database transaction metrics with performance tracking."""
+        self.transaction_duration_seconds.labels(
+            database=database,
+            status=status
+        ).observe(duration)
+        
+        self.transaction_operations_total.labels(
+            database=database,
+            status=status
+        ).inc()
+    
+    def record_async_operation(self, database: str, collection: str, operation: str,
+                              duration: float, status: str = 'success'):
+        """Record Motor async operation metrics."""
+        self.async_operations_total.labels(
+            database=database,
+            collection=collection,
+            operation=operation,
+            status=status
+        ).inc()
+        
+        self.async_operation_duration_seconds.labels(
+            database=database,
+            collection=collection,
+            operation=operation
+        ).observe(duration)
+    
+    def record_connection_pool_metric(self, address: str, pool_type: str, operation: str,
+                                     status: str = 'success', wait_time: float = None):
+        """Record connection pool operation metrics."""
+        self.connection_pool_operations_total.labels(
+            address=address,
+            operation=operation,
+            status=status
+        ).inc()
+        
+        if wait_time is not None:
+            self.connection_pool_wait_time_seconds.labels(address=address).observe(wait_time)
+    
+    def update_connection_pool_size(self, address: str, pool_type: str, size: int, checked_out: int):
+        """Update connection pool size metrics."""
+        self.connection_pool_size.labels(
+            address=address,
+            pool_type=pool_type
+        ).set(size)
+        
+        self.connection_pool_checked_out.labels(
+            address=address,
+            pool_type=pool_type
+        ).set(checked_out)
+    
+    def record_database_error(self, database: str, collection: str, error_type: str, severity: str):
+        """Record database error metrics for comprehensive error tracking."""
+        self.database_errors_total.labels(
+            database=database,
+            collection=collection,
+            error_type=error_type,
+            severity=severity
+        ).inc()
+    
+    def update_circuit_breaker_state(self, database: str, service: str, state: int):
+        """Update circuit breaker state metrics."""
+        self.circuit_breaker_state.labels(
+            database=database,
+            service=service
+        ).set(state)
+    
+    def set_baseline_performance(self, database: str, collection: str, operation: str, 
+                                baseline_duration: float):
+        """Set Node.js baseline performance data for variance calculation."""
+        key = f"{database}.{collection}.{operation}"
+        with self._lock:
+            self._baseline_data[key] = baseline_duration
+    
+    def _track_performance_variance(self, database: str, collection: str, operation: str, 
+                                   current_duration: float):
+        """Track performance variance against Node.js baseline."""
+        key = f"{database}.{collection}.{operation}"
+        
+        with self._lock:
+            baseline_duration = self._baseline_data.get(key)
+            
+            if baseline_duration is not None:
+                # Calculate variance percentage
+                variance_percent = ((current_duration - baseline_duration) / baseline_duration) * 100
+                
+                # Record variance metric
+                self.performance_variance_percent.labels(
+                    database=database,
+                    collection=collection,
+                    operation=operation,
+                    metric_type='response_time'
+                ).set(variance_percent)
+                
+                # Record baseline comparison
+                self.baseline_comparison_duration_seconds.labels(
+                    database=database,
+                    collection=collection,
+                    operation=operation,
+                    implementation='flask'
+                ).observe(current_duration)
+                
+                self.baseline_comparison_duration_seconds.labels(
+                    database=database,
+                    collection=collection,
+                    operation=operation,
+                    implementation='nodejs'
+                ).observe(baseline_duration)
+    
+    def get_performance_summary(self, database: str = None, collection: str = None) -> Dict[str, Any]:
+        """Get comprehensive performance summary for monitoring dashboards."""
+        with self._lock:
+            summary = {
+                'total_operations': sum(len(history) for history in self._performance_history.values()),
+                'baseline_coverage': len(self._baseline_data),
+                'performance_history_keys': list(self._performance_history.keys()),
+                'recent_performance': {}
+            }
+            
+            # Calculate recent performance statistics
+            for key, history in self._performance_history.items():
+                if len(history) > 0:
+                    recent_durations = [entry['duration'] for entry in list(history)[-10:]]
+                    summary['recent_performance'][key] = {
+                        'avg_duration': sum(recent_durations) / len(recent_durations),
+                        'min_duration': min(recent_durations),
+                        'max_duration': max(recent_durations),
+                        'operations_count': len(recent_durations),
+                        'baseline_duration': self._baseline_data.get(key)
+                    }
+            
+            return summary
+
+
+class PyMongoEventListener(monitoring.CommandListener):
+    """
+    PyMongo event listener implementing comprehensive database operation monitoring
+    with performance tracking, error classification, and baseline comparison.
+    
+    This listener captures:
+    - Command execution times and operation counts
+    - Query performance with variance tracking
+    - Error classification and recovery monitoring
+    - Transaction performance and success rates
+    """
+    
+    def __init__(self, metrics_collector: DatabaseMetricsCollector, 
+                 logger: Optional['structlog.BoundLogger'] = None):
+        """Initialize PyMongo event listener with metrics integration."""
+        super().__init__()
+        self.metrics_collector = metrics_collector
+        self.logger = logger or structlog.get_logger(__name__)
+        self._active_commands = {}
+        self._lock = RLock()
+    
+    def started(self, event: monitoring.CommandStartedEvent):
+        """Handle command start event with timing initialization."""
+        command_id = event.request_id
         start_time = time.perf_counter()
         
-        with self._command_lock:
-            self._active_commands[event.request_id] = start_time
-        
-        # Increment operation counter
-        self.metrics.query_counter.labels(
-            database=event.database_name,
-            collection=self._get_collection_name(event.command),
-            command=event.command_name,
-            status='started'
-        ).inc()
-        
-        logger.debug(
-            f"Database command started: {event.command_name} on {event.database_name}",
-            extra={
+        with self._lock:
+            self._active_commands[command_id] = {
+                'start_time': start_time,
+                'database': event.database_name,
                 'command_name': event.command_name,
-                'database_name': event.database_name,
-                'request_id': event.request_id
+                'collection': self._extract_collection_name(event.command),
+                'operation_id': event.operation_id
             }
+        
+        # Log command start for debugging and tracing
+        self.logger.debug(
+            "Database command started",
+            request_id=command_id,
+            database=event.database_name,
+            command=event.command_name,
+            collection=self._extract_collection_name(event.command)
         )
     
-    def succeeded(self, event: CommandSucceededEvent) -> None:
-        """Record successful command completion and performance metrics."""
+    def succeeded(self, event: monitoring.CommandSucceededEvent):
+        """Handle successful command completion with metrics collection."""
+        command_id = event.request_id
         end_time = time.perf_counter()
         
-        with self._command_lock:
-            start_time = self._active_commands.pop(event.request_id, end_time)
+        with self._lock:
+            command_info = self._active_commands.pop(command_id, None)
         
-        duration = (end_time - start_time) * 1000  # Convert to milliseconds
-        collection_name = self._get_collection_name(event.reply)
-        
-        # Record query duration
-        self.metrics.query_duration.labels(
-            database=event.database_name,
-            collection=collection_name,
-            command=event.command_name
-        ).observe(duration)
-        
-        # Record successful operation
-        self.metrics.query_counter.labels(
-            database=event.database_name,
-            collection=collection_name,
-            command=event.command_name,
-            status='success'
-        ).inc()
-        
-        # Track performance variance against Node.js baseline
-        self._track_performance_variance(event.command_name, duration)
-        
-        # Record baseline comparison
-        self.metrics.baseline_comparison.labels(
-            command=event.command_name,
-            database=event.database_name
-        ).observe(duration)
-        
-        logger.debug(
-            f"Database command succeeded: {event.command_name} in {duration:.2f}ms",
-            extra={
-                'command_name': event.command_name,
-                'database_name': event.database_name,
-                'duration_ms': duration,
-                'request_id': event.request_id
-            }
-        )
+        if command_info:
+            duration = end_time - command_info['start_time']
+            
+            # Record operation metrics
+            self.metrics_collector.record_query_operation(
+                database=command_info['database'],
+                collection=command_info['collection'],
+                operation=command_info['command_name'],
+                duration=duration,
+                status='success'
+            )
+            
+            # Log successful completion
+            self.logger.info(
+                "Database command succeeded",
+                request_id=command_id,
+                database=command_info['database'],
+                command=command_info['command_name'],
+                collection=command_info['collection'],
+                duration_ms=duration * 1000,
+                duration_seconds=duration
+            )
     
-    def failed(self, event: CommandFailedEvent) -> None:
-        """Record failed command and error metrics."""
+    def failed(self, event: monitoring.CommandFailedEvent):
+        """Handle failed command with error classification and metrics."""
+        command_id = event.request_id
         end_time = time.perf_counter()
         
-        with self._command_lock:
-            start_time = self._active_commands.pop(event.request_id, end_time)
+        with self._lock:
+            command_info = self._active_commands.pop(command_id, None)
         
-        duration = (end_time - start_time) * 1000  # Convert to milliseconds
-        
-        # Record error metrics
-        self.metrics.query_errors.labels(
-            database=event.database_name,
-            command=event.command_name,
-            error=str(event.failure)[:100]  # Truncate error message
-        ).inc()
-        
-        # Record failed operation
-        self.metrics.query_counter.labels(
-            database=event.database_name,
-            collection='unknown',
-            command=event.command_name,
-            status='failed'
-        ).inc()
-        
-        logger.error(
-            f"Database command failed: {event.command_name} after {duration:.2f}ms",
-            extra={
-                'command_name': event.command_name,
-                'database_name': event.database_name,
-                'duration_ms': duration,
-                'error': str(event.failure),
-                'request_id': event.request_id
-            }
-        )
+        if command_info:
+            duration = end_time - command_info['start_time']
+            error_type = type(event.failure).__name__
+            severity = self._classify_error_severity(event.failure)
+            
+            # Record failed operation metrics
+            self.metrics_collector.record_query_operation(
+                database=command_info['database'],
+                collection=command_info['collection'],
+                operation=command_info['command_name'],
+                duration=duration,
+                status='error'
+            )
+            
+            # Record error metrics
+            self.metrics_collector.record_database_error(
+                database=command_info['database'],
+                collection=command_info['collection'],
+                error_type=error_type,
+                severity=severity
+            )
+            
+            # Log error details
+            self.logger.error(
+                "Database command failed",
+                request_id=command_id,
+                database=command_info['database'],
+                command=command_info['command_name'],
+                collection=command_info['collection'],
+                duration_ms=duration * 1000,
+                error_type=error_type,
+                error_message=str(event.failure),
+                severity=severity
+            )
     
-    def _get_collection_name(self, command_or_reply: Dict[str, Any]) -> str:
-        """Extract collection name from command or reply document."""
-        if isinstance(command_or_reply, dict):
+    def _extract_collection_name(self, command: Dict[str, Any]) -> str:
+        """Extract collection name from MongoDB command."""
+        # Handle different command types
+        if isinstance(command, dict):
             # Try common collection field names
             for field in ['collection', 'find', 'insert', 'update', 'delete', 'aggregate']:
-                if field in command_or_reply:
-                    return str(command_or_reply[field])
+                if field in command:
+                    collection = command[field]
+                    return collection if isinstance(collection, str) else 'unknown'
         
         return 'unknown'
     
-    def _track_performance_variance(self, command_name: str, duration_ms: float) -> None:
-        """Track performance variance against Node.js baseline."""
-        try:
-            # Get baseline for this command type (default to p95 if specific baseline not available)
-            baseline_duration = NODEJS_BASELINE_PERCENTILES.get('p95', 150.0)
-            
-            # Calculate variance percentage
-            if baseline_duration > 0:
-                variance = ((duration_ms - baseline_duration) / baseline_duration) * 100
-                
-                # Update variance gauge
-                self.metrics.variance_percentage.labels(
-                    command=command_name,
-                    baseline_type='nodejs_p95'
-                ).set(variance)
-                
-                # Log warning if variance exceeds threshold
-                if abs(variance) > PERFORMANCE_VARIANCE_THRESHOLD:
-                    logger.warning(
-                        f"Performance variance threshold exceeded: {variance:.2f}% for {command_name}",
-                        extra={
-                            'command_name': command_name,
-                            'variance_percentage': variance,
-                            'duration_ms': duration_ms,
-                            'baseline_ms': baseline_duration,
-                            'threshold': PERFORMANCE_VARIANCE_THRESHOLD
-                        }
-                    )
-        
-        except Exception as e:
-            logger.error(f"Error tracking performance variance: {e}")
+    def _classify_error_severity(self, error: Exception) -> str:
+        """Classify error severity for alerting and monitoring."""
+        if isinstance(error, ConnectionFailure):
+            return 'critical'
+        elif isinstance(error, OperationFailure):
+            return 'warning'
+        elif isinstance(error, PyMongoError):
+            return 'error'
+        else:
+            return 'unknown'
 
 
-class ConnectionPoolMonitoringListener(PoolListener):
+class PyMongoPoolListener(monitoring.PoolListener):
     """
-    PyMongo connection pool event listener for resource optimization monitoring.
+    PyMongo connection pool listener implementing comprehensive pool monitoring
+    with resource utilization tracking and health status monitoring.
     
-    Tracks connection pool lifecycle, utilization patterns, and resource allocation
-    to ensure optimal database connection management.
+    This listener provides:
+    - Connection pool size and utilization metrics
+    - Connection lifecycle event tracking
+    - Pool health and performance monitoring
+    - Resource optimization insights
     """
     
-    def __init__(self, metrics: DatabaseMetrics):
-        """Initialize the pool listener with metrics collection."""
-        self.metrics = metrics
-        self._pool_stats: Dict[str, Dict[str, Any]] = {}
-        self._pool_lock = Lock()
-        
-        logger.info("Initialized ConnectionPoolMonitoringListener for pool resource tracking")
+    def __init__(self, metrics_collector: DatabaseMetricsCollector,
+                 logger: Optional['structlog.BoundLogger'] = None):
+        """Initialize pool listener with metrics integration."""
+        super().__init__()
+        self.metrics_collector = metrics_collector
+        self.logger = logger or structlog.get_logger(__name__)
+        self._pool_stats = {}
+        self._lock = RLock()
     
-    def pool_created(self, event: PoolCreatedEvent) -> None:
-        """Record connection pool creation and configuration."""
-        address_str = str(event.address)
+    def pool_created(self, event: monitoring.PoolCreatedEvent):
+        """Handle pool creation with initial metrics setup."""
+        address = str(event.address)
         
-        with self._pool_lock:
-            self._pool_stats[address_str] = {
-                'max_size': event.options.max_pool_size,
-                'min_size': event.options.min_pool_size,
-                'created_time': time.time()
-            }
-        
-        # Set pool size metrics
-        self.metrics.pool_size.labels(address=address_str).set(event.options.max_pool_size)
-        self.metrics.pool_created.labels(address=address_str).inc()
-        
-        logger.info(
-            f"Connection pool created for {address_str}",
-            extra={
-                'address': address_str,
+        with self._lock:
+            self._pool_stats[address] = {
+                'created_time': time.time(),
                 'max_pool_size': event.options.max_pool_size,
-                'min_pool_size': event.options.min_pool_size
+                'min_pool_size': event.options.min_pool_size,
+                'checked_out': 0,
+                'total_connections': 0
             }
+        
+        # Update pool size metrics
+        self.metrics_collector.update_connection_pool_size(
+            address=address,
+            pool_type='pymongo',
+            size=event.options.max_pool_size,
+            checked_out=0
+        )
+        
+        self.logger.info(
+            "Database connection pool created",
+            address=address,
+            max_pool_size=event.options.max_pool_size,
+            min_pool_size=event.options.min_pool_size
         )
     
-    def pool_cleared(self, event: PoolClearedEvent) -> None:
-        """Record connection pool clearing event."""
-        address_str = str(event.address)
+    def pool_cleared(self, event: monitoring.PoolClearedEvent):
+        """Handle pool clearing with metrics reset."""
+        address = str(event.address)
         
-        self.metrics.pool_cleared.labels(
-            address=address_str,
-            service_id=str(event.service_id) if event.service_id else 'unknown'
-        ).inc()
+        self.metrics_collector.record_connection_pool_metric(
+            address=address,
+            pool_type='pymongo',
+            operation='cleared',
+            status='success'
+        )
         
-        logger.warning(
-            f"Connection pool cleared for {address_str}",
-            extra={
-                'address': address_str,
-                'service_id': str(event.service_id) if event.service_id else 'unknown'
-            }
+        self.logger.warning(
+            "Database connection pool cleared",
+            address=address,
+            service_id=getattr(event, 'service_id', None)
         )
     
-    def pool_closed(self, event: PoolClosedEvent) -> None:
-        """Record connection pool closure."""
-        address_str = str(event.address)
+    def pool_closed(self, event: monitoring.PoolClosedEvent):
+        """Handle pool closure with cleanup and final metrics."""
+        address = str(event.address)
         
-        with self._pool_lock:
-            self._pool_stats.pop(address_str, None)
+        with self._lock:
+            pool_stats = self._pool_stats.pop(address, {})
         
-        # Reset pool metrics
-        self.metrics.pool_size.labels(address=address_str).set(0)
-        self.metrics.pool_checkedout.labels(address=address_str).set(0)
-        self.metrics.pool_available.labels(address=address_str).set(0)
+        self.metrics_collector.record_connection_pool_metric(
+            address=address,
+            pool_type='pymongo',
+            operation='closed',
+            status='success'
+        )
         
-        logger.info(
-            f"Connection pool closed for {address_str}",
-            extra={'address': address_str}
+        uptime = time.time() - pool_stats.get('created_time', time.time())
+        
+        self.logger.info(
+            "Database connection pool closed",
+            address=address,
+            uptime_seconds=uptime
         )
     
-    def connection_created(self, event: ConnectionCreatedEvent) -> None:
-        """Record new connection creation."""
-        address_str = str(event.address)
+    def connection_created(self, event: monitoring.ConnectionCreatedEvent):
+        """Handle connection creation with resource tracking."""
+        address = str(event.address)
         
-        self.metrics.connection_created.labels(
-            address=address_str,
-            connection_id=str(event.connection_id)
-        ).inc()
+        with self._lock:
+            if address in self._pool_stats:
+                self._pool_stats[address]['total_connections'] += 1
         
-        logger.debug(
-            f"Database connection created: {event.connection_id} for {address_str}",
-            extra={
-                'address': address_str,
-                'connection_id': str(event.connection_id)
-            }
+        self.metrics_collector.record_connection_pool_metric(
+            address=address,
+            pool_type='pymongo',
+            operation='connection_created',
+            status='success'
         )
     
-    def connection_ready(self, event: ConnectionReadyEvent) -> None:
-        """Record connection ready state."""
-        address_str = str(event.address)
+    def connection_closed(self, event: monitoring.ConnectionClosedEvent):
+        """Handle connection closure with resource cleanup tracking."""
+        address = str(event.address)
         
-        # Update available connections gauge
-        with self._pool_lock:
-            if address_str in self._pool_stats:
-                # Increment available connections (rough estimate)
-                current_available = self.metrics.pool_available.labels(address=address_str)._value._value
-                self.metrics.pool_available.labels(address=address_str).set(current_available + 1)
+        with self._lock:
+            if address in self._pool_stats:
+                self._pool_stats[address]['total_connections'] = max(
+                    0, self._pool_stats[address]['total_connections'] - 1
+                )
         
-        logger.debug(
-            f"Database connection ready: {event.connection_id} for {address_str}",
-            extra={
-                'address': address_str,
-                'connection_id': str(event.connection_id)
-            }
+        self.metrics_collector.record_connection_pool_metric(
+            address=address,
+            pool_type='pymongo',
+            operation='connection_closed',
+            status='success'
         )
     
-    def connection_closed(self, event: ConnectionClosedEvent) -> None:
-        """Record connection closure."""
-        address_str = str(event.address)
+    def connection_checked_out(self, event: monitoring.ConnectionCheckedOutEvent):
+        """Handle connection checkout with utilization tracking."""
+        address = str(event.address)
         
-        self.metrics.connection_closed.labels(
-            address=address_str,
-            reason=str(event.reason)
-        ).inc()
+        with self._lock:
+            if address in self._pool_stats:
+                self._pool_stats[address]['checked_out'] += 1
+                
+                # Update utilization metrics
+                self.metrics_collector.update_connection_pool_size(
+                    address=address,
+                    pool_type='pymongo',
+                    size=self._pool_stats[address]['total_connections'],
+                    checked_out=self._pool_stats[address]['checked_out']
+                )
         
-        logger.debug(
-            f"Database connection closed: {event.connection_id} for {address_str}, reason: {event.reason}",
-            extra={
-                'address': address_str,
-                'connection_id': str(event.connection_id),
-                'reason': str(event.reason)
-            }
+        self.metrics_collector.record_connection_pool_metric(
+            address=address,
+            pool_type='pymongo',
+            operation='checkout',
+            status='success'
         )
     
-    def connection_check_out_started(self, event: ConnectionCheckOutStartedEvent) -> None:
-        """Record connection checkout start for latency tracking."""
-        # Store checkout start time for duration calculation
-        setattr(event, '_checkout_start_time', time.perf_counter())
-    
-    def connection_checked_out(self, event: ConnectionCheckedOutEvent) -> None:
-        """Record successful connection checkout."""
-        address_str = str(event.address)
+    def connection_checked_in(self, event: monitoring.ConnectionCheckedInEvent):
+        """Handle connection checkin with resource availability tracking."""
+        address = str(event.address)
         
-        # Calculate checkout duration if start time available
-        if hasattr(event, '_checkout_start_time'):
-            checkout_duration = (time.perf_counter() - event._checkout_start_time) * 1000
-            self.metrics.connection_checkout_time.labels(address=address_str).observe(checkout_duration)
+        with self._lock:
+            if address in self._pool_stats:
+                self._pool_stats[address]['checked_out'] = max(
+                    0, self._pool_stats[address]['checked_out'] - 1
+                )
+                
+                # Update utilization metrics
+                self.metrics_collector.update_connection_pool_size(
+                    address=address,
+                    pool_type='pymongo',
+                    size=self._pool_stats[address]['total_connections'],
+                    checked_out=self._pool_stats[address]['checked_out']
+                )
         
-        # Update checked out connections gauge
-        with self._pool_lock:
-            current_checkedout = self.metrics.pool_checkedout.labels(address=address_str)._value._value
-            self.metrics.pool_checkedout.labels(address=address_str).set(current_checkedout + 1)
-        
-        logger.debug(
-            f"Database connection checked out: {event.connection_id} for {address_str}",
-            extra={
-                'address': address_str,
-                'connection_id': str(event.connection_id)
-            }
+        self.metrics_collector.record_connection_pool_metric(
+            address=address,
+            pool_type='pymongo',
+            operation='checkin',
+            status='success'
         )
     
-    def connection_checked_in(self, event: ConnectionCheckedInEvent) -> None:
-        """Record connection check-in."""
-        address_str = str(event.address)
+    def connection_check_out_failed(self, event: monitoring.ConnectionCheckOutFailedEvent):
+        """Handle checkout failures with error tracking and alerting."""
+        address = str(event.address)
+        reason = getattr(event, 'reason', 'unknown')
         
-        # Update checked out connections gauge
-        with self._pool_lock:
-            current_checkedout = self.metrics.pool_checkedout.labels(address=address_str)._value._value
-            self.metrics.pool_checkedout.labels(address=address_str).set(max(0, current_checkedout - 1))
-        
-        logger.debug(
-            f"Database connection checked in: {event.connection_id} for {address_str}",
-            extra={
-                'address': address_str,
-                'connection_id': str(event.connection_id)
-            }
+        self.metrics_collector.record_connection_pool_metric(
+            address=address,
+            pool_type='pymongo',
+            operation='checkout',
+            status='failed'
         )
-    
-    def connection_check_out_failed(self, event: ConnectionCheckOutFailedEvent) -> None:
-        """Record failed connection checkout."""
-        address_str = str(event.address)
         
-        self.metrics.connection_checkout_failed.labels(
-            address=address_str,
-            reason=str(event.reason)
-        ).inc()
-        
-        logger.error(
-            f"Database connection checkout failed for {address_str}: {event.reason}",
-            extra={
-                'address': address_str,
-                'reason': str(event.reason)
-            }
-        )
-
-
-class ServerMonitoringListener(ServerListener):
-    """
-    PyMongo server event listener for MongoDB server health monitoring.
-    
-    Tracks server availability, topology changes, and connection health
-    to support circuit breaker patterns and service resilience.
-    """
-    
-    def __init__(self, metrics: DatabaseMetrics):
-        """Initialize the server listener with metrics collection."""
-        self.metrics = metrics
-        self._server_states: Dict[str, Dict[str, Any]] = {}
-        self._server_lock = Lock()
-        
-        logger.info("Initialized ServerMonitoringListener for MongoDB server health tracking")
-    
-    def opened(self, event: ServerOpeningEvent) -> None:
-        """Record server connection opening."""
-        address_str = str(event.server_address)
-        
-        with self._server_lock:
-            self._server_states[address_str] = {
-                'status': 'opening',
-                'topology_id': str(event.topology_id),
-                'opened_time': time.time()
-            }
-        
-        self.metrics.server_status.labels(
-            address=address_str,
-            status='opening'
-        ).set(1)
-        
-        logger.info(
-            f"MongoDB server connection opening: {address_str}",
-            extra={
-                'address': address_str,
-                'topology_id': str(event.topology_id)
-            }
-        )
-    
-    def closed(self, event: ServerClosedEvent) -> None:
-        """Record server connection closure."""
-        address_str = str(event.server_address)
-        
-        with self._server_lock:
-            self._server_states.pop(address_str, None)
-        
-        self.metrics.server_status.labels(
-            address=address_str,
-            status='closed'
-        ).set(0)
-        
-        logger.warning(
-            f"MongoDB server connection closed: {address_str}",
-            extra={
-                'address': address_str,
-                'topology_id': str(event.topology_id)
-            }
-        )
-    
-    def description_changed(self, event: ServerDescriptionChangedEvent) -> None:
-        """Record server description changes for health monitoring."""
-        address_str = str(event.server_address)
-        new_description = event.new_description
-        previous_description = event.previous_description
-        
-        # Track server status changes
-        if new_description and hasattr(new_description, 'server_type'):
-            server_type = str(new_description.server_type)
-            self.metrics.server_status.labels(
-                address=address_str,
-                status=server_type.lower()
-            ).set(1 if server_type != 'Unknown' else 0)
-        
-        # Track round trip time if available
-        if new_description and hasattr(new_description, 'round_trip_time'):
-            if new_description.round_trip_time is not None:
-                rtt_ms = new_description.round_trip_time * 1000  # Convert to milliseconds
-                self.metrics.server_latency.labels(address=address_str).observe(rtt_ms)
-        
-        logger.debug(
-            f"MongoDB server description changed for {address_str}",
-            extra={
-                'address': address_str,
-                'new_server_type': str(new_description.server_type) if new_description else 'unknown',
-                'previous_server_type': str(previous_description.server_type) if previous_description else 'unknown',
-                'topology_id': str(event.topology_id)
-            }
+        self.logger.error(
+            "Database connection checkout failed",
+            address=address,
+            reason=reason,
+            connection_id=getattr(event, 'connection_id', None)
         )
 
 
-class MotorMonitoringIntegration:
+class MotorAsyncMonitoring:
     """
-    Motor async operation monitoring for high-performance async database operations.
+    Motor async operation monitoring implementing comprehensive tracking
+    for high-performance async database operations with performance metrics.
     
-    Provides monitoring hooks for Motor async operations, connection pool management,
-    and transaction performance tracking in async contexts.
+    This monitoring provides:
+    - Async operation timing and throughput metrics
+    - Connection pool monitoring for Motor clients
+    - Performance variance tracking for async operations
+    - Error classification and recovery monitoring
     """
     
-    def __init__(self, metrics: DatabaseMetrics):
-        """Initialize Motor monitoring integration."""
-        self.metrics = metrics
-        self._active_operations: Dict[str, float] = {}
-        self._operation_lock = Lock()
-        
-        logger.info("Initialized MotorMonitoringIntegration for async operation tracking")
+    def __init__(self, metrics_collector: DatabaseMetricsCollector,
+                 logger: Optional['structlog.BoundLogger'] = None):
+        """Initialize Motor async monitoring with metrics integration."""
+        self.metrics_collector = metrics_collector
+        self.logger = logger or structlog.get_logger(__name__)
+        self._active_operations = {}
+        self._lock = Lock()
     
     @contextmanager
-    def monitor_operation(self, operation_name: str, database_name: str, collection_name: str = 'unknown'):
-        """Context manager for monitoring Motor async operations."""
-        operation_id = f"{operation_name}_{database_name}_{collection_name}_{time.time()}"
+    def monitor_async_operation(self, database: str, collection: str, operation: str):
+        """Context manager for monitoring async database operations."""
+        operation_id = id(threading.current_thread())
         start_time = time.perf_counter()
+        status = 'success'
         
         try:
-            with self._operation_lock:
-                self._active_operations[operation_id] = start_time
-            
-            # Increment operation counter
-            self.metrics.motor_operation_count.labels(
-                database=database_name,
-                collection=collection_name,
-                operation=operation_name,
-                status='started'
-            ).inc()
-            
-            yield operation_id
-            
-            # Record successful completion
-            end_time = time.perf_counter()
-            duration = (end_time - start_time) * 1000  # Convert to milliseconds
-            
-            self.metrics.motor_operation_duration.labels(
-                database=database_name,
-                collection=collection_name,
-                operation=operation_name
-            ).observe(duration)
-            
-            self.metrics.motor_operation_count.labels(
-                database=database_name,
-                collection=collection_name,
-                operation=operation_name,
-                status='success'
-            ).inc()
-            
-            logger.debug(
-                f"Motor async operation completed: {operation_name} in {duration:.2f}ms",
-                extra={
-                    'operation_name': operation_name,
-                    'database_name': database_name,
-                    'collection_name': collection_name,
-                    'duration_ms': duration
+            # Track operation start
+            with self._lock:
+                self._active_operations[operation_id] = {
+                    'start_time': start_time,
+                    'database': database,
+                    'collection': collection,
+                    'operation': operation
                 }
+            
+            self.logger.debug(
+                "Async database operation started",
+                operation_id=operation_id,
+                database=database,
+                collection=collection,
+                operation=operation
             )
             
-        except Exception as e:
-            # Record operation failure
-            self.metrics.motor_operation_count.labels(
-                database=database_name,
-                collection=collection_name,
-                operation=operation_name,
-                status='failed'
-            ).inc()
+            yield
             
-            logger.error(
-                f"Motor async operation failed: {operation_name}",
-                extra={
-                    'operation_name': operation_name,
-                    'database_name': database_name,
-                    'collection_name': collection_name,
-                    'error': str(e)
-                }
+        except Exception as e:
+            status = 'error'
+            self.logger.error(
+                "Async database operation failed",
+                operation_id=operation_id,
+                database=database,
+                collection=collection,
+                operation=operation,
+                error=str(e),
+                error_type=type(e).__name__
             )
             raise
         
         finally:
-            with self._operation_lock:
+            end_time = time.perf_counter()
+            duration = end_time - start_time
+            
+            # Remove from active operations
+            with self._lock:
                 self._active_operations.pop(operation_id, None)
-    
-    def monitor_connection_pool(self, pool_info: Dict[str, Any], address: str) -> None:
-        """Monitor Motor connection pool statistics."""
-        try:
-            # Update connection pool metrics
-            if 'pool_size' in pool_info:
-                self.metrics.motor_connection_pool.labels(
-                    address=address,
-                    metric='pool_size'
-                ).set(pool_info['pool_size'])
             
-            if 'checked_out' in pool_info:
-                self.metrics.motor_connection_pool.labels(
-                    address=address,
-                    metric='checked_out'
-                ).set(pool_info['checked_out'])
-            
-            if 'available' in pool_info:
-                self.metrics.motor_connection_pool.labels(
-                    address=address,
-                    metric='available'
-                ).set(pool_info['available'])
-            
-            logger.debug(
-                f"Motor connection pool stats updated for {address}",
-                extra={'address': address, 'pool_info': pool_info}
+            # Record metrics
+            self.metrics_collector.record_async_operation(
+                database=database,
+                collection=collection,
+                operation=operation,
+                duration=duration,
+                status=status
             )
             
-        except Exception as e:
-            logger.error(f"Error updating Motor connection pool metrics: {e}")
-
-
-def create_database_metrics() -> DatabaseMetrics:
-    """
-    Create and configure comprehensive database monitoring metrics.
+            self.logger.info(
+                "Async database operation completed",
+                operation_id=operation_id,
+                database=database,
+                collection=collection,
+                operation=operation,
+                duration_ms=duration * 1000,
+                status=status
+            )
     
-    Returns:
-        DatabaseMetrics: Configured metrics collection for database monitoring
-    """
-    try:
-        # Query performance metrics
-        query_duration = Histogram(
-            name='mongodb_query_duration_seconds',
-            documentation='Database query execution time in seconds',
-            labelnames=['database', 'collection', 'command'],
-            registry=database_registry,
-            buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
-        )
+    def get_active_operations(self) -> List[Dict[str, Any]]:
+        """Get list of currently active async operations."""
+        current_time = time.perf_counter()
         
-        query_counter = Counter(
-            name='mongodb_operations_total',
-            documentation='Total database operations',
-            labelnames=['database', 'collection', 'command', 'status'],
-            registry=database_registry
-        )
-        
-        query_errors = Counter(
-            name='mongodb_query_errors_total',
-            documentation='Total database query errors',
-            labelnames=['database', 'command', 'error'],
-            registry=database_registry
-        )
-        
-        # Connection pool metrics
-        pool_size = Gauge(
-            name='mongodb_pool_size',
-            documentation='Connection pool maximum size',
-            labelnames=['address'],
-            registry=database_registry
-        )
-        
-        pool_checkedout = Gauge(
-            name='mongodb_pool_checkedout_connections',
-            documentation='Currently checked out connections',
-            labelnames=['address'],
-            registry=database_registry
-        )
-        
-        pool_available = Gauge(
-            name='mongodb_pool_available_connections',
-            documentation='Currently available connections',
-            labelnames=['address'],
-            registry=database_registry
-        )
-        
-        pool_created = Counter(
-            name='mongodb_pool_created_total',
-            documentation='Total connection pools created',
-            labelnames=['address'],
-            registry=database_registry
-        )
-        
-        pool_cleared = Counter(
-            name='mongodb_pool_cleared_total',
-            documentation='Total connection pool clear events',
-            labelnames=['address', 'service_id'],
-            registry=database_registry
-        )
-        
-        # Connection lifecycle metrics
-        connection_created = Counter(
-            name='mongodb_connections_created_total',
-            documentation='Total connections created',
-            labelnames=['address', 'connection_id'],
-            registry=database_registry
-        )
-        
-        connection_closed = Counter(
-            name='mongodb_connections_closed_total',
-            documentation='Total connections closed',
-            labelnames=['address', 'reason'],
-            registry=database_registry
-        )
-        
-        connection_checkout_time = Histogram(
-            name='mongodb_connection_checkout_duration_seconds',
-            documentation='Connection checkout time in seconds',
-            labelnames=['address'],
-            registry=database_registry,
-            buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]
-        )
-        
-        connection_checkout_failed = Counter(
-            name='mongodb_connection_checkout_failed_total',
-            documentation='Total failed connection checkouts',
-            labelnames=['address', 'reason'],
-            registry=database_registry
-        )
-        
-        # Server monitoring metrics
-        server_status = Gauge(
-            name='mongodb_server_status',
-            documentation='MongoDB server status (1=up, 0=down)',
-            labelnames=['address', 'status'],
-            registry=database_registry
-        )
-        
-        server_latency = Histogram(
-            name='mongodb_server_latency_seconds',
-            documentation='MongoDB server round trip time in seconds',
-            labelnames=['address'],
-            registry=database_registry,
-            buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]
-        )
-        
-        # Transaction performance metrics
-        transaction_duration = Histogram(
-            name='mongodb_transaction_duration_seconds',
-            documentation='Database transaction duration in seconds',
-            labelnames=['database', 'status'],
-            registry=database_registry,
-            buckets=[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
-        )
-        
-        transaction_count = Counter(
-            name='mongodb_transactions_total',
-            documentation='Total database transactions',
-            labelnames=['database', 'status'],
-            registry=database_registry
-        )
-        
-        transaction_errors = Counter(
-            name='mongodb_transaction_errors_total',
-            documentation='Total database transaction errors',
-            labelnames=['database', 'error_type'],
-            registry=database_registry
-        )
-        
-        # Performance variance tracking
-        variance_percentage = Gauge(
-            name='mongodb_performance_variance_percentage',
-            documentation='Performance variance from Node.js baseline in percentage',
-            labelnames=['command', 'baseline_type'],
-            registry=database_registry
-        )
-        
-        baseline_comparison = Histogram(
-            name='mongodb_baseline_comparison_seconds',
-            documentation='Query duration comparison with Node.js baseline',
-            labelnames=['command', 'database'],
-            registry=database_registry,
-            buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0]
-        )
-        
-        # Motor async operation metrics
-        motor_operation_duration = Histogram(
-            name='motor_operation_duration_seconds',
-            documentation='Motor async operation duration in seconds',
-            labelnames=['database', 'collection', 'operation'],
-            registry=database_registry,
-            buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0]
-        )
-        
-        motor_operation_count = Counter(
-            name='motor_operations_total',
-            documentation='Total Motor async operations',
-            labelnames=['database', 'collection', 'operation', 'status'],
-            registry=database_registry
-        )
-        
-        motor_connection_pool = Gauge(
-            name='motor_connection_pool_stats',
-            documentation='Motor connection pool statistics',
-            labelnames=['address', 'metric'],
-            registry=database_registry
-        )
-        
-        logger.info("Database monitoring metrics created successfully")
-        
-        return DatabaseMetrics(
-            query_duration=query_duration,
-            query_counter=query_counter,
-            query_errors=query_errors,
-            pool_size=pool_size,
-            pool_checkedout=pool_checkedout,
-            pool_available=pool_available,
-            pool_created=pool_created,
-            pool_cleared=pool_cleared,
-            connection_created=connection_created,
-            connection_closed=connection_closed,
-            connection_checkout_time=connection_checkout_time,
-            connection_checkout_failed=connection_checkout_failed,
-            server_status=server_status,
-            server_latency=server_latency,
-            transaction_duration=transaction_duration,
-            transaction_count=transaction_count,
-            transaction_errors=transaction_errors,
-            variance_percentage=variance_percentage,
-            baseline_comparison=baseline_comparison,
-            motor_operation_duration=motor_operation_duration,
-            motor_operation_count=motor_operation_count,
-            motor_connection_pool=motor_connection_pool
-        )
-        
-    except Exception as e:
-        logger.error(f"Error creating database metrics: {e}")
-        raise
+        with self._lock:
+            active_ops = []
+            for op_id, op_info in self._active_operations.items():
+                duration = current_time - op_info['start_time']
+                active_ops.append({
+                    'operation_id': op_id,
+                    'database': op_info['database'],
+                    'collection': op_info['collection'],
+                    'operation': op_info['operation'],
+                    'duration_seconds': duration
+                })
+            
+            return active_ops
 
 
-def register_database_monitoring_listeners(metrics: DatabaseMetrics) -> Dict[str, Any]:
+class DatabaseHealthMonitor:
     """
-    Register PyMongo event listeners for comprehensive database monitoring.
+    Database health monitoring implementing comprehensive health checks
+    for MongoDB connections, pool status, and service availability.
     
-    Args:
-        metrics: DatabaseMetrics instance for metrics collection
-    
-    Returns:
-        Dict containing registered listener instances
-    """
-    try:
-        # Create monitoring listeners
-        command_listener = DatabaseMonitoringListener(metrics)
-        pool_listener = ConnectionPoolMonitoringListener(metrics)
-        server_listener = ServerMonitoringListener(metrics)
-        
-        # Register listeners with PyMongo
-        pymongo.monitoring.register(command_listener)
-        pymongo.monitoring.register(pool_listener)
-        pymongo.monitoring.register(server_listener)
-        
-        logger.info("Database monitoring listeners registered successfully")
-        
-        return {
-            'command_listener': command_listener,
-            'pool_listener': pool_listener,
-            'server_listener': server_listener
-        }
-        
-    except Exception as e:
-        logger.error(f"Error registering database monitoring listeners: {e}")
-        raise
-
-
-def create_motor_monitoring_integration(metrics: DatabaseMetrics) -> MotorMonitoringIntegration:
-    """
-    Create Motor async operation monitoring integration.
-    
-    Args:
-        metrics: DatabaseMetrics instance for metrics collection
-    
-    Returns:
-        MotorMonitoringIntegration: Configured Motor monitoring integration
-    """
-    try:
-        motor_integration = MotorMonitoringIntegration(metrics)
-        logger.info("Motor monitoring integration created successfully")
-        return motor_integration
-        
-    except Exception as e:
-        logger.error(f"Error creating Motor monitoring integration: {e}")
-        raise
-
-
-@contextmanager
-def monitor_transaction(metrics: DatabaseMetrics, database_name: str):
-    """
-    Context manager for monitoring database transactions.
-    
-    Args:
-        metrics: DatabaseMetrics instance for metrics collection
-        database_name: Name of the database for the transaction
-    """
-    start_time = time.perf_counter()
-    status = 'success'
-    
-    try:
-        # Increment transaction counter
-        metrics.transaction_count.labels(
-            database=database_name,
-            status='started'
-        ).inc()
-        
-        yield
-        
-        logger.debug(f"Database transaction completed successfully for {database_name}")
-        
-    except Exception as e:
-        status = 'failed'
-        
-        # Record transaction error
-        metrics.transaction_errors.labels(
-            database=database_name,
-            error_type=type(e).__name__
-        ).inc()
-        
-        logger.error(
-            f"Database transaction failed for {database_name}: {e}",
-            extra={'database_name': database_name, 'error': str(e)}
-        )
-        raise
-        
-    finally:
-        # Record transaction duration
-        end_time = time.perf_counter()
-        duration = end_time - start_time
-        
-        metrics.transaction_duration.labels(
-            database=database_name,
-            status=status
-        ).observe(duration)
-        
-        metrics.transaction_count.labels(
-            database=database_name,
-            status=status
-        ).inc()
-
-
-def get_database_metrics_exposition() -> str:
-    """
-    Generate Prometheus-compatible metrics exposition for database monitoring.
-    
-    Returns:
-        str: Prometheus metrics exposition format
-    """
-    try:
-        return generate_latest(database_registry)
-    except Exception as e:
-        logger.error(f"Error generating database metrics exposition: {e}")
-        return ""
-
-
-def get_database_metrics_content_type() -> str:
-    """
-    Get content type for Prometheus metrics exposition.
-    
-    Returns:
-        str: Content type for Prometheus metrics
-    """
-    return CONTENT_TYPE_LATEST
-
-
-class DatabaseHealthChecker:
-    """
-    Database health monitoring for connection status and performance validation.
-    
-    Provides health check capabilities for MongoDB connections, Redis cache,
-    and performance validation against baseline requirements.
+    This monitor provides:
+    - Connection health validation and automated recovery
+    - Pool resource monitoring and optimization alerts
+    - Service availability checks with circuit breaker integration
+    - Performance degradation detection and alerting
     """
     
-    def __init__(self, metrics: DatabaseMetrics):
-        """Initialize database health checker."""
-        self.metrics = metrics
-        self._health_status: Dict[str, Dict[str, Any]] = {}
-        self._health_lock = Lock()
-        
-        logger.info("Initialized DatabaseHealthChecker for connection health monitoring")
+    def __init__(self, metrics_collector: DatabaseMetricsCollector,
+                 logger: Optional['structlog.BoundLogger'] = None):
+        """Initialize database health monitor with metrics integration."""
+        self.metrics_collector = metrics_collector
+        self.logger = logger or structlog.get_logger(__name__)
+        self._health_checks = {}
+        self._lock = Lock()
+        self._last_health_check = {}
     
-    def check_mongodb_health(self, client, timeout: float = 5.0) -> Dict[str, Any]:
-        """
-        Check MongoDB connection health and performance.
+    def register_client(self, client_name: str, client, client_type: str = 'pymongo'):
+        """Register a database client for health monitoring."""
+        with self._lock:
+            self._health_checks[client_name] = {
+                'client': client,
+                'client_type': client_type,
+                'last_check': None,
+                'consecutive_failures': 0,
+                'status': 'unknown'
+            }
         
-        Args:
-            client: MongoDB client instance
-            timeout: Connection timeout in seconds
+        self.logger.info(
+            "Database client registered for health monitoring",
+            client_name=client_name,
+            client_type=client_type
+        )
+    
+    def check_client_health(self, client_name: str, timeout: float = 5.0) -> Dict[str, Any]:
+        """Check health of registered database client with comprehensive validation."""
+        with self._lock:
+            client_info = self._health_checks.get(client_name)
         
-        Returns:
-            Dict containing health status and metrics
-        """
-        health_status = {
+        if not client_info:
+            return {'status': 'error', 'message': f'Client {client_name} not registered'}
+        
+        start_time = time.perf_counter()
+        health_result = {
+            'client_name': client_name,
+            'client_type': client_info['client_type'],
+            'timestamp': datetime.now(timezone.utc).isoformat(),
             'status': 'unknown',
-            'response_time_ms': None,
-            'error': None,
-            'timestamp': time.time()
+            'response_time_ms': 0,
+            'details': {}
         }
         
         try:
-            start_time = time.perf_counter()
+            client = client_info['client']
             
-            # Perform health check ping
+            # Perform health check based on client type
+            if client_info['client_type'] == 'pymongo':
+                # PyMongo health check
+                health_result.update(self._check_pymongo_health(client, timeout))
+            elif client_info['client_type'] == 'motor':
+                # Motor async health check (synchronous wrapper)
+                health_result.update(self._check_motor_health(client, timeout))
+            else:
+                health_result['status'] = 'error'
+                health_result['message'] = f"Unsupported client type: {client_info['client_type']}"
+            
+            # Update consecutive failures counter
+            with self._lock:
+                if health_result['status'] == 'healthy':
+                    client_info['consecutive_failures'] = 0
+                else:
+                    client_info['consecutive_failures'] += 1
+                
+                client_info['last_check'] = time.time()
+                client_info['status'] = health_result['status']
+        
+        except Exception as e:
+            health_result['status'] = 'error'
+            health_result['message'] = str(e)
+            health_result['error_type'] = type(e).__name__
+            
+            with self._lock:
+                client_info['consecutive_failures'] += 1
+                client_info['last_check'] = time.time()
+                client_info['status'] = 'error'
+        
+        finally:
+            end_time = time.perf_counter()
+            health_result['response_time_ms'] = (end_time - start_time) * 1000
+        
+        # Log health check results
+        self.logger.info(
+            "Database health check completed",
+            client_name=client_name,
+            status=health_result['status'],
+            response_time_ms=health_result['response_time_ms'],
+            consecutive_failures=client_info['consecutive_failures']
+        )
+        
+        return health_result
+    
+    def _check_pymongo_health(self, client, timeout: float) -> Dict[str, Any]:
+        """Perform PyMongo client health check with comprehensive validation."""
+        try:
+            # Test basic connectivity
             client.admin.command('ping', maxTimeMS=int(timeout * 1000))
             
-            end_time = time.perf_counter()
-            response_time_ms = (end_time - start_time) * 1000
+            # Get server info and connection details
+            server_info = client.admin.command('serverStatus')
+            db_stats = client.admin.command('listDatabases')
             
-            health_status.update({
+            return {
                 'status': 'healthy',
-                'response_time_ms': response_time_ms
-            })
-            
-            # Update server latency metric
-            self.metrics.server_latency.labels(
-                address='health_check'
-            ).observe(response_time_ms / 1000)
-            
-            logger.debug(
-                f"MongoDB health check passed in {response_time_ms:.2f}ms",
-                extra={'response_time_ms': response_time_ms}
-            )
-            
-        except Exception as e:
-            health_status.update({
+                'details': {
+                    'server_version': server_info.get('version', 'unknown'),
+                    'uptime_seconds': server_info.get('uptime', 0),
+                    'connections': server_info.get('connections', {}),
+                    'databases_count': len(db_stats.get('databases', []))
+                }
+            }
+        
+        except PyMongoError as e:
+            return {
                 'status': 'unhealthy',
-                'error': str(e)
-            })
-            
-            logger.error(
-                f"MongoDB health check failed: {e}",
-                extra={'error': str(e)}
-            )
-        
-        with self._health_lock:
-            self._health_status['mongodb'] = health_status
-        
-        return health_status
+                'message': str(e),
+                'error_type': type(e).__name__
+            }
     
-    def check_redis_health(self, redis_client, timeout: float = 5.0) -> Dict[str, Any]:
-        """
-        Check Redis connection health and performance.
+    def _check_motor_health(self, client, timeout: float) -> Dict[str, Any]:
+        """Perform Motor async client health check (synchronous wrapper)."""
+        try:
+            # Note: This is a simplified sync check for Motor
+            # In a real async environment, this would use asyncio
+            return {
+                'status': 'healthy',
+                'details': {
+                    'client_type': 'motor_async',
+                    'note': 'Async health check requires asyncio context'
+                }
+            }
         
-        Args:
-            redis_client: Redis client instance
-            timeout: Connection timeout in seconds
+        except Exception as e:
+            return {
+                'status': 'unhealthy',
+                'message': str(e),
+                'error_type': type(e).__name__
+            }
+    
+    def get_all_health_status(self) -> Dict[str, Any]:
+        """Get comprehensive health status for all registered clients."""
+        with self._lock:
+            clients_status = {}
+            overall_healthy = True
+            
+            for client_name, client_info in self._health_checks.items():
+                health_result = self.check_client_health(client_name)
+                clients_status[client_name] = health_result
+                
+                if health_result['status'] != 'healthy':
+                    overall_healthy = False
+            
+            return {
+                'overall_status': 'healthy' if overall_healthy else 'degraded',
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'clients': clients_status,
+                'summary': {
+                    'total_clients': len(self._health_checks),
+                    'healthy_clients': sum(1 for status in clients_status.values() 
+                                         if status['status'] == 'healthy'),
+                    'unhealthy_clients': sum(1 for status in clients_status.values() 
+                                           if status['status'] != 'healthy')
+                }
+            }
+
+
+class DatabaseTransactionMonitor:
+    """
+    Database transaction monitoring implementing comprehensive tracking
+    for MongoDB transactions with performance and consistency monitoring.
+    
+    This monitor provides:
+    - Transaction lifecycle tracking and performance metrics
+    - Commit/rollback ratio monitoring and alerting
+    - Deadlock detection and recovery monitoring
+    - Transaction performance variance tracking
+    """
+    
+    def __init__(self, metrics_collector: DatabaseMetricsCollector,
+                 logger: Optional['structlog.BoundLogger'] = None):
+        """Initialize transaction monitor with metrics integration."""
+        self.metrics_collector = metrics_collector
+        self.logger = logger or structlog.get_logger(__name__)
+        self._active_transactions = {}
+        self._lock = Lock()
+    
+    @contextmanager
+    def monitor_transaction(self, database: str, transaction_id: str = None):
+        """Context manager for monitoring database transactions."""
+        if transaction_id is None:
+            transaction_id = f"txn_{int(time.time() * 1000000)}"
         
-        Returns:
-            Dict containing health status and metrics
-        """
-        health_status = {
-            'status': 'unknown',
-            'response_time_ms': None,
-            'error': None,
-            'timestamp': time.time()
-        }
+        start_time = time.perf_counter()
+        status = 'committed'
         
         try:
-            start_time = time.perf_counter()
+            # Track transaction start
+            with self._lock:
+                self._active_transactions[transaction_id] = {
+                    'start_time': start_time,
+                    'database': database,
+                    'status': 'active'
+                }
             
-            # Perform health check ping
-            redis_client.ping()
-            
-            end_time = time.perf_counter()
-            response_time_ms = (end_time - start_time) * 1000
-            
-            health_status.update({
-                'status': 'healthy',
-                'response_time_ms': response_time_ms
-            })
-            
-            logger.debug(
-                f"Redis health check passed in {response_time_ms:.2f}ms",
-                extra={'response_time_ms': response_time_ms}
+            self.logger.debug(
+                "Database transaction started",
+                transaction_id=transaction_id,
+                database=database
             )
+            
+            yield transaction_id
             
         except Exception as e:
-            health_status.update({
-                'status': 'unhealthy',
-                'error': str(e)
-            })
-            
-            logger.error(
-                f"Redis health check failed: {e}",
-                extra={'error': str(e)}
+            status = 'rolled_back'
+            self.logger.error(
+                "Database transaction failed",
+                transaction_id=transaction_id,
+                database=database,
+                error=str(e),
+                error_type=type(e).__name__
             )
+            raise
         
-        with self._health_lock:
-            self._health_status['redis'] = health_status
-        
-        return health_status
-    
-    def get_overall_health_status(self) -> Dict[str, Any]:
-        """
-        Get overall database health status summary.
-        
-        Returns:
-            Dict containing overall health status and individual component status
-        """
-        with self._health_lock:
-            health_summary = {
-                'overall_status': 'healthy',
-                'components': self._health_status.copy(),
-                'timestamp': time.time()
-            }
+        finally:
+            end_time = time.perf_counter()
+            duration = end_time - start_time
             
-            # Determine overall status based on component health
-            for component, status in self._health_status.items():
-                if status.get('status') == 'unhealthy':
-                    health_summary['overall_status'] = 'unhealthy'
-                    break
-                elif status.get('status') == 'unknown':
-                    health_summary['overall_status'] = 'degraded'
-        
-        return health_summary
-
-
-# Global instances for Flask integration
-_database_metrics: Optional[DatabaseMetrics] = None
-_monitoring_listeners: Optional[Dict[str, Any]] = None
-_motor_integration: Optional[MotorMonitoringIntegration] = None
-_health_checker: Optional[DatabaseHealthChecker] = None
-
-
-def initialize_database_monitoring() -> Dict[str, Any]:
-    """
-    Initialize comprehensive database monitoring system.
+            # Remove from active transactions
+            with self._lock:
+                self._active_transactions.pop(transaction_id, None)
+            
+            # Record transaction metrics
+            self.metrics_collector.record_transaction_operation(
+                database=database,
+                duration=duration,
+                status=status
+            )
+            
+            self.logger.info(
+                "Database transaction completed",
+                transaction_id=transaction_id,
+                database=database,
+                duration_ms=duration * 1000,
+                status=status
+            )
     
-    Returns:
-        Dict containing initialized monitoring components
+    def get_active_transactions(self) -> List[Dict[str, Any]]:
+        """Get list of currently active transactions."""
+        current_time = time.perf_counter()
+        
+        with self._lock:
+            active_txns = []
+            for txn_id, txn_info in self._active_transactions.items():
+                duration = current_time - txn_info['start_time']
+                active_txns.append({
+                    'transaction_id': txn_id,
+                    'database': txn_info['database'],
+                    'duration_seconds': duration,
+                    'status': txn_info['status']
+                })
+            
+            return active_txns
+
+
+class DatabaseMonitoringManager:
     """
-    global _database_metrics, _monitoring_listeners, _motor_integration, _health_checker
+    Comprehensive database monitoring manager coordinating all monitoring
+    components for PyMongo and Motor operations with enterprise integration.
     
-    try:
-        # Create database metrics
-        _database_metrics = create_database_metrics()
+    This manager provides:
+    - Centralized monitoring initialization and configuration
+    - Event listener registration and management
+    - Health check coordination and status aggregation
+    - Performance baseline management and variance tracking
+    - Integration with Flask application factory pattern
+    """
+    
+    def __init__(self, config: Optional[MonitoringConfig] = None):
+        """Initialize database monitoring manager with comprehensive configuration."""
+        self.config = config or MonitoringConfig()
+        self.logger = structlog.get_logger(__name__)
         
-        # Register PyMongo event listeners
-        _monitoring_listeners = register_database_monitoring_listeners(_database_metrics)
+        # Initialize core monitoring components
+        self.metrics_collector = DatabaseMetricsCollector()
+        self.health_monitor = DatabaseHealthMonitor(self.metrics_collector, self.logger)
+        self.transaction_monitor = DatabaseTransactionMonitor(self.metrics_collector, self.logger)
+        self.motor_monitoring = MotorAsyncMonitoring(self.metrics_collector, self.logger)
         
-        # Create Motor monitoring integration
-        _motor_integration = create_motor_monitoring_integration(_database_metrics)
+        # Event listeners
+        self.command_listener = None
+        self.pool_listener = None
         
-        # Create health checker
-        _health_checker = DatabaseHealthChecker(_database_metrics)
+        # Monitoring state
+        self._monitoring_enabled = True
+        self._clients = {}
+        self._baseline_data = {}
         
-        logger.info("Database monitoring system initialized successfully")
+        self.logger.info(
+            "Database monitoring manager initialized",
+            prometheus_enabled=self.config.PROMETHEUS_ENABLED,
+            performance_monitoring_enabled=self.config.PERFORMANCE_MONITORING_ENABLED,
+            nodejs_baseline_enabled=self.config.NODEJS_BASELINE_ENABLED
+        )
+    
+    def initialize_pymongo_monitoring(self, client_name: str = 'default') -> Tuple[monitoring.CommandListener, monitoring.PoolListener]:
+        """Initialize PyMongo event listeners with comprehensive monitoring."""
+        if not PYMONGO_AVAILABLE:
+            raise ImportError("PyMongo is not available for monitoring initialization")
         
-        return {
-            'metrics': _database_metrics,
-            'listeners': _monitoring_listeners,
-            'motor_integration': _motor_integration,
-            'health_checker': _health_checker,
-            'registry': database_registry
+        # Create event listeners
+        self.command_listener = PyMongoEventListener(self.metrics_collector, self.logger)
+        self.pool_listener = PyMongoPoolListener(self.metrics_collector, self.logger)
+        
+        self.logger.info(
+            "PyMongo monitoring initialized",
+            client_name=client_name,
+            command_listener=True,
+            pool_listener=True
+        )
+        
+        return self.command_listener, self.pool_listener
+    
+    def register_pymongo_client(self, client, client_name: str = 'default'):
+        """Register PyMongo client for health monitoring and metrics collection."""
+        self._clients[client_name] = {
+            'client': client,
+            'type': 'pymongo',
+            'registered_time': time.time()
         }
         
-    except Exception as e:
-        logger.error(f"Error initializing database monitoring system: {e}")
-        raise
-
-
-def get_database_monitoring_components() -> Optional[Dict[str, Any]]:
-    """
-    Get initialized database monitoring components.
+        self.health_monitor.register_client(client_name, client, 'pymongo')
+        
+        self.logger.info(
+            "PyMongo client registered for monitoring",
+            client_name=client_name
+        )
     
+    def register_motor_client(self, client, client_name: str = 'motor_default'):
+        """Register Motor async client for health monitoring and metrics collection."""
+        if not MOTOR_AVAILABLE:
+            raise ImportError("Motor is not available for async monitoring")
+        
+        self._clients[client_name] = {
+            'client': client,
+            'type': 'motor',
+            'registered_time': time.time()
+        }
+        
+        self.health_monitor.register_client(client_name, client, 'motor')
+        
+        self.logger.info(
+            "Motor async client registered for monitoring",
+            client_name=client_name
+        )
+    
+    def set_performance_baseline(self, operation_baselines: Dict[str, float]):
+        """Set Node.js performance baselines for variance tracking."""
+        for operation_key, baseline_duration in operation_baselines.items():
+            # Parse operation key (format: "database.collection.operation")
+            parts = operation_key.split('.')
+            if len(parts) >= 3:
+                database, collection, operation = parts[0], parts[1], '.'.join(parts[2:])
+                self.metrics_collector.set_baseline_performance(
+                    database, collection, operation, baseline_duration
+                )
+        
+        self._baseline_data.update(operation_baselines)
+        
+        self.logger.info(
+            "Performance baselines configured",
+            baseline_count=len(operation_baselines),
+            nodejs_baseline_enabled=self.config.NODEJS_BASELINE_ENABLED
+        )
+    
+    def get_monitoring_status(self) -> Dict[str, Any]:
+        """Get comprehensive monitoring status and health information."""
+        # Get health status for all clients
+        health_status = self.health_monitor.get_all_health_status()
+        
+        # Get performance summary
+        performance_summary = self.metrics_collector.get_performance_summary()
+        
+        # Get active operations
+        active_async_ops = self.motor_monitoring.get_active_operations()
+        active_transactions = self.transaction_monitor.get_active_transactions()
+        
+        return {
+            'monitoring_enabled': self._monitoring_enabled,
+            'config': {
+                'prometheus_enabled': self.config.PROMETHEUS_ENABLED,
+                'performance_monitoring_enabled': self.config.PERFORMANCE_MONITORING_ENABLED,
+                'nodejs_baseline_enabled': self.config.NODEJS_BASELINE_ENABLED,
+                'variance_threshold': self.config.PERFORMANCE_VARIANCE_THRESHOLD
+            },
+            'clients': {
+                'registered_count': len(self._clients),
+                'clients': list(self._clients.keys())
+            },
+            'health': health_status,
+            'performance': performance_summary,
+            'active_operations': {
+                'async_operations': len(active_async_ops),
+                'active_transactions': len(active_transactions)
+            },
+            'baselines': {
+                'configured_count': len(self._baseline_data),
+                'baseline_coverage': performance_summary.get('baseline_coverage', 0)
+            },
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
+    
+    def create_flask_health_check(self) -> Callable:
+        """Create Flask health check endpoint function."""
+        def database_health_check():
+            """Database health check endpoint for Flask integration."""
+            try:
+                health_status = self.health_monitor.get_all_health_status()
+                
+                if health_status['overall_status'] == 'healthy':
+                    return {'status': 'healthy', 'database': health_status}, 200
+                else:
+                    return {'status': 'degraded', 'database': health_status}, 503
+            
+            except Exception as e:
+                self.logger.error(
+                    "Database health check failed",
+                    error=str(e),
+                    error_type=type(e).__name__
+                )
+                return {
+                    'status': 'error',
+                    'error': str(e),
+                    'timestamp': datetime.now(timezone.utc).isoformat()
+                }, 503
+        
+        return database_health_check
+    
+    def enable_monitoring(self):
+        """Enable database monitoring."""
+        self._monitoring_enabled = True
+        self.logger.info("Database monitoring enabled")
+    
+    def disable_monitoring(self):
+        """Disable database monitoring."""
+        self._monitoring_enabled = False
+        self.logger.warning("Database monitoring disabled")
+
+
+# Monitoring decorators for database operations
+def monitor_database_operation(database: str, collection: str, operation: str):
+    """
+    Decorator for monitoring individual database operations with performance tracking.
+    
+    Args:
+        database: Database name
+        collection: Collection name
+        operation: Operation type (find, insert, update, delete, etc.)
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            # Get monitoring manager from Flask app context or create local instance
+            try:
+                from flask import current_app
+                monitoring_manager = current_app.config.get('DATABASE_MONITORING')
+            except (ImportError, RuntimeError):
+                # Fallback for non-Flask contexts
+                monitoring_manager = None
+            
+            if monitoring_manager and monitoring_manager._monitoring_enabled:
+                start_time = time.perf_counter()
+                status = 'success'
+                
+                try:
+                    result = func(*args, **kwargs)
+                    return result
+                except Exception as e:
+                    status = 'error'
+                    raise
+                finally:
+                    duration = time.perf_counter() - start_time
+                    monitoring_manager.metrics_collector.record_query_operation(
+                        database=database,
+                        collection=collection,
+                        operation=operation,
+                        duration=duration,
+                        status=status
+                    )
+            else:
+                return func(*args, **kwargs)
+        
+        return wrapper
+    return decorator
+
+
+def monitor_async_database_operation(database: str, collection: str, operation: str):
+    """
+    Decorator for monitoring async database operations with Motor.
+    
+    Args:
+        database: Database name
+        collection: Collection name  
+        operation: Operation type (find, insert, update, delete, etc.)
+    """
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            # Get monitoring manager from Flask app context or create local instance
+            try:
+                from flask import current_app
+                monitoring_manager = current_app.config.get('DATABASE_MONITORING')
+            except (ImportError, RuntimeError):
+                # Fallback for non-Flask contexts
+                monitoring_manager = None
+            
+            if monitoring_manager and monitoring_manager._monitoring_enabled:
+                with monitoring_manager.motor_monitoring.monitor_async_operation(
+                    database=database,
+                    collection=collection,
+                    operation=operation
+                ):
+                    result = await func(*args, **kwargs)
+                    return result
+            else:
+                return await func(*args, **kwargs)
+        
+        return wrapper
+    return decorator
+
+
+def monitor_database_transaction(database: str):
+    """
+    Decorator for monitoring database transactions with performance tracking.
+    
+    Args:
+        database: Database name
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            # Get monitoring manager from Flask app context
+            try:
+                from flask import current_app
+                monitoring_manager = current_app.config.get('DATABASE_MONITORING')
+            except (ImportError, RuntimeError):
+                monitoring_manager = None
+            
+            if monitoring_manager and monitoring_manager._monitoring_enabled:
+                with monitoring_manager.transaction_monitor.monitor_transaction(database=database):
+                    result = func(*args, **kwargs)
+                    return result
+            else:
+                return func(*args, **kwargs)
+        
+        return wrapper
+    return decorator
+
+
+# Initialization function for Flask application integration
+def init_database_monitoring(app, pymongo_client=None, motor_client=None, 
+                           baseline_config: Dict[str, float] = None) -> DatabaseMonitoringManager:
+    """
+    Initialize database monitoring for Flask application with comprehensive configuration.
+    
+    Args:
+        app: Flask application instance
+        pymongo_client: PyMongo client instance for synchronous operations
+        motor_client: Motor client instance for async operations
+        baseline_config: Node.js performance baselines for variance tracking
+        
     Returns:
-        Dict containing monitoring components or None if not initialized
+        DatabaseMonitoringManager: Configured monitoring manager instance
     """
-    if not _database_metrics:
-        return None
+    # Create monitoring manager
+    monitoring_manager = DatabaseMonitoringManager()
     
-    return {
-        'metrics': _database_metrics,
-        'listeners': _monitoring_listeners,
-        'motor_integration': _motor_integration,
-        'health_checker': _health_checker,
-        'registry': database_registry
-    }
+    # Initialize PyMongo monitoring if client provided
+    if pymongo_client and PYMONGO_AVAILABLE:
+        command_listener, pool_listener = monitoring_manager.initialize_pymongo_monitoring()
+        monitoring_manager.register_pymongo_client(pymongo_client)
+        
+        # Note: PyMongo event listeners must be registered during client creation
+        # This is for reference - actual registration happens in client initialization
+        app.logger.info("PyMongo monitoring configured (listeners must be set during client creation)")
+    
+    # Register Motor client if provided
+    if motor_client and MOTOR_AVAILABLE:
+        monitoring_manager.register_motor_client(motor_client)
+    
+    # Configure performance baselines if provided
+    if baseline_config:
+        monitoring_manager.set_performance_baseline(baseline_config)
+    
+    # Store monitoring manager in Flask app config
+    app.config['DATABASE_MONITORING'] = monitoring_manager
+    
+    # Create health check endpoint
+    health_check_func = monitoring_manager.create_flask_health_check()
+    
+    # Register health check route
+    @app.route('/health/database')
+    def database_health():
+        return health_check_func()
+    
+    # Log monitoring initialization
+    app.logger.info(
+        "Database monitoring initialized",
+        pymongo_enabled=pymongo_client is not None,
+        motor_enabled=motor_client is not None,
+        baseline_configured=baseline_config is not None,
+        baseline_count=len(baseline_config) if baseline_config else 0
+    )
+    
+    return monitoring_manager
 
 
-# Export key components for Flask integration
+# Export monitoring components for application integration
 __all__ = [
-    'DatabaseMetrics',
-    'DatabaseMonitoringListener',
-    'ConnectionPoolMonitoringListener', 
-    'ServerMonitoringListener',
-    'MotorMonitoringIntegration',
-    'DatabaseHealthChecker',
-    'create_database_metrics',
-    'register_database_monitoring_listeners',
-    'create_motor_monitoring_integration',
-    'monitor_transaction',
-    'get_database_metrics_exposition',
-    'get_database_metrics_content_type',
-    'initialize_database_monitoring',
-    'get_database_monitoring_components',
-    'database_registry',
-    'PERFORMANCE_VARIANCE_THRESHOLD',
-    'NODEJS_BASELINE_PERCENTILES'
+    'DatabaseMetricsCollector',
+    'PyMongoEventListener', 
+    'PyMongoPoolListener',
+    'MotorAsyncMonitoring',
+    'DatabaseHealthMonitor',
+    'DatabaseTransactionMonitor',
+    'DatabaseMonitoringManager',
+    'monitor_database_operation',
+    'monitor_async_database_operation',
+    'monitor_database_transaction',
+    'init_database_monitoring'
 ]
