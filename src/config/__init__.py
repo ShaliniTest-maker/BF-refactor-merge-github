@@ -1,516 +1,426 @@
 """
 Flask Configuration Package
 
-This package provides centralized Flask configuration management for the Node.js to Python
-migration project, implementing environment-specific settings and modular configuration
-organization according to Flask application factory patterns.
+This package provides centralized access to Flask configuration classes and environment-specific 
+settings for the Flask application factory pattern. Implements modular configuration organization 
+following Python packaging standards and supports dynamic environment configuration loading for 
+development, testing, staging, and production deployments.
 
-Package Architecture:
-- Environment-specific configuration classes (Development, Testing, Staging, Production)
-- Flask application factory pattern with centralized extension initialization
-- Comprehensive security, performance, and monitoring configuration
-- Feature flag management for gradual traffic migration (5% → 25% → 50% → 100%)
-- Performance monitoring integration ensuring ≤10% variance compliance
-
-Key Components:
-- settings.py: Core Flask configuration classes and factory implementation
-- database.py: MongoDB and Redis database configuration management
-- auth.py: Authentication and authorization configuration (JWT, Auth0, security headers)
-- monitoring.py: Application performance monitoring and observability configuration  
-- feature_flags.py: Feature flag and deployment strategy configuration
-
-Usage Examples:
-    # Basic configuration loading
-    from src.config import create_config_for_environment, ConfigFactory
-    
-    config = create_config_for_environment('production')
-    app.config.from_object(config)
-    
-    # Environment-specific configuration
-    from src.config import DevelopmentConfig, ProductionConfig
-    
-    if app.config['DEBUG']:
-        app.config.from_object(DevelopmentConfig)
-    else:
-        app.config.from_object(ProductionConfig)
-    
-    # Specialized configuration access
-    from src.config import get_database_config, get_auth_config
-    
-    db_config = get_database_config('production')
-    auth_config = get_auth_config()
+Package Structure:
+- settings.py: Main configuration classes with environment-specific implementations
+- database.py: Database connection and MongoDB/Redis configuration
+- auth.py: Authentication and JWT configuration settings
+- monitoring.py: Logging, metrics, and observability configuration
+- feature_flags.py: Migration phase and feature flag management
 
 Architecture Integration:
 - Section 0.2.5: Configuration file format migration from JSON to Python modules
-- Section 3.2.1: Flask application factory pattern with centralized extension initialization
-- Section 6.1.1: Flask configuration supporting enterprise-grade security and performance
-- Section 8.5.1: Environment-specific configuration for CI/CD pipeline integration
+- Section 0.2.3: Flask application factory pattern with centralized extension initialization
+- Section 6.1.1: Flask application factory pattern implementation
+- Section 3.2.1: Flask extensions configuration for CORS, rate limiting, and security headers
+
+Key Features:
+- Environment-specific configuration classes (Development, Testing, Staging, Production)
+- Flask application factory pattern compatibility with modular extension initialization
+- Centralized configuration validation and error handling
+- Enterprise-grade security and monitoring configuration
+- Redis and MongoDB connection management
+- Feature flag support for gradual migration deployment per Section 0.2.5
+
+Usage Examples:
+    Basic configuration loading:
+        >>> from src.config import get_config
+        >>> config_class = get_config('production')
+        >>> app.config.from_object(config_class)
+    
+    Application factory pattern:
+        >>> from src.config import create_app_config
+        >>> config_class = create_app_config()
+        >>> app = create_app(config_class)
+    
+    Environment-specific configuration:
+        >>> from src.config import DevelopmentConfig, ProductionConfig
+        >>> if app.debug:
+        ...     app.config.from_object(DevelopmentConfig)
 
 Author: Flask Migration Team
 Version: 1.0.0
-Dependencies: Flask 2.3+, python-dotenv 1.0+, comprehensive configuration dependencies
+License: Enterprise Internal Use
+Dependencies: Flask 2.3+, PyMongo 4.5+, redis-py 5.0+, python-dotenv 1.0+
 """
 
 import os
-from typing import Type, Optional, Dict, Any, List
+import logging
+from typing import Dict, Type, Optional, List, Any, Union
 
-# Core configuration classes and factory
+# Import environment configuration early to ensure proper initialization
+from dotenv import load_dotenv
+
+# Load environment variables at package import time
+load_dotenv()
+
+# Configure package logger
+logger = logging.getLogger(__name__)
+
+# Package metadata
+__version__ = "1.0.0"
+__author__ = "Flask Migration Team"
+__license__ = "Enterprise Internal Use"
+
+# Import core configuration classes from settings module
 from .settings import (
     BaseConfig,
     DevelopmentConfig,
     TestingConfig,
     StagingConfig,
     ProductionConfig,
-    ConfigFactory,
-    create_config_for_environment
+    get_config,
+    validate_configuration,
+    create_app_config,
+    config_map
 )
 
-# Configuration helper functions
-from .settings import (
-    get_database_config,
-    get_auth_config,
-    get_monitoring_config,
-    get_feature_flag_config
-)
-
-# Specialized configuration modules  
+# Import specialized configuration modules
 try:
-    from .database import DatabaseConfig
-except ImportError:
-    # Handle optional database configuration module
+    from .database import (
+        DatabaseConfig,
+        create_database_config
+    )
+except ImportError as e:
+    logger.warning(f"Database configuration module not available: {e}")
     DatabaseConfig = None
+    create_database_config = None
 
 try:
-    from .auth import AuthConfig
-except ImportError:
-    # Handle optional auth configuration module  
+    from .auth import (
+        AuthConfig,
+        create_auth_config
+    )
+except ImportError as e:
+    logger.warning(f"Authentication configuration module not available: {e}")
     AuthConfig = None
+    create_auth_config = None
 
 try:
-    from .monitoring import MonitoringConfig
-except ImportError:
-    # Handle optional monitoring configuration module
-    MonitoringConfig = None
+    from .monitoring import (
+        StructuredLoggingConfig,
+        PrometheusMetricsConfig,
+        HealthCheckConfig,
+        create_monitoring_config
+    )
+except ImportError as e:
+    logger.warning(f"Monitoring configuration module not available: {e}")
+    StructuredLoggingConfig = None
+    PrometheusMetricsConfig = None
+    HealthCheckConfig = None
+    create_monitoring_config = None
 
 try:
     from .feature_flags import (
         FeatureFlagConfig,
-        DeploymentStrategy,
         MigrationPhase,
-        PerformanceThresholds
+        create_feature_flag_config
     )
-except ImportError:
-    # Handle optional feature flags configuration module
+except ImportError as e:
+    logger.warning(f"Feature flags configuration module not available: {e}")
     FeatureFlagConfig = None
-    DeploymentStrategy = None
     MigrationPhase = None
-    PerformanceThresholds = None
+    create_feature_flag_config = None
 
 
-def get_config_for_flask_app(environment: Optional[str] = None) -> Type[BaseConfig]:
+def get_environment() -> str:
     """
-    Get configuration class optimized for Flask application factory pattern.
-    
-    This function provides the recommended approach for Flask application configuration
-    loading with comprehensive validation and environment-specific optimization.
-    
-    Args:
-        environment: Target environment name (defaults to FLASK_ENV)
-                    Supported: 'development', 'testing', 'staging', 'production'
+    Get the current application environment from environment variables.
     
     Returns:
-        Configuration class ready for Flask app.config.from_object()
+        str: Current environment name (development, testing, staging, production)
+        
+    Environment Variables:
+        FLASK_ENV: Primary environment setting
+        ENVIRONMENT: Alternative environment setting
+        ENV: Fallback environment setting
+    """
+    # Check multiple environment variable names for flexibility
+    environment = (
+        os.getenv('FLASK_ENV') or 
+        os.getenv('ENVIRONMENT') or 
+        os.getenv('ENV') or 
+        'development'
+    )
+    
+    # Normalize environment name
+    environment = environment.lower().strip()
+    
+    # Map common aliases to standard names
+    env_aliases = {
+        'dev': 'development',
+        'devel': 'development',
+        'develop': 'development',
+        'test': 'testing',
+        'tests': 'testing',
+        'stage': 'staging',
+        'staging': 'staging',
+        'prod': 'production',
+        'production': 'production'
+    }
+    
+    environment = env_aliases.get(environment, environment)
+    
+    logger.info(
+        "Environment detected",
+        extra={
+            'environment': environment,
+            'flask_env': os.getenv('FLASK_ENV'),
+            'environment_var': os.getenv('ENVIRONMENT'),
+            'env_var': os.getenv('ENV')
+        }
+    )
+    
+    return environment
+
+
+def get_current_config() -> Type[BaseConfig]:
+    """
+    Get the configuration class for the current environment.
+    
+    Returns:
+        Type[BaseConfig]: Configuration class appropriate for current environment
         
     Raises:
-        ValueError: If environment is unsupported or configuration is invalid
-        
-    Example:
-        >>> from flask import Flask
-        >>> from src.config import get_config_for_flask_app
-        >>> 
-        >>> app = Flask(__name__)
-        >>> config_class = get_config_for_flask_app('production')
-        >>> app.config.from_object(config_class)
+        ValueError: If the current environment is not supported
     """
-    return ConfigFactory.get_config(environment)
+    environment = get_environment()
+    return get_config(environment)
 
 
-def get_validated_config_instance(environment: Optional[str] = None) -> BaseConfig:
+def get_config_info() -> Dict[str, Any]:
     """
-    Get validated configuration instance with comprehensive validation.
+    Get comprehensive information about the current configuration.
     
-    Provides configuration instance with full validation including security settings,
-    performance thresholds, and environment-specific requirements compliance.
+    Returns:
+        Dict[str, Any]: Configuration metadata and status information
+    """
+    environment = get_environment()
+    config_class = get_config(environment)
+    
+    # Get configuration validation results
+    config_instance = config_class()
+    validation_issues = validate_configuration(config_instance)
+    
+    info = {
+        'environment': environment,
+        'config_class': config_class.__name__,
+        'debug_mode': getattr(config_instance, 'DEBUG', False),
+        'testing_mode': getattr(config_instance, 'TESTING', False),
+        'validation_issues': validation_issues,
+        'validation_passed': len(validation_issues) == 0,
+        'package_version': __version__,
+        'available_environments': list(config_map.keys()),
+        'modules_available': {
+            'database': DatabaseConfig is not None,
+            'auth': AuthConfig is not None,
+            'monitoring': StructuredLoggingConfig is not None,
+            'feature_flags': FeatureFlagConfig is not None
+        }
+    }
+    
+    # Add Flask-specific configuration details if available
+    if hasattr(config_instance, 'CORS_CONFIG'):
+        info['cors_enabled'] = bool(config_instance.CORS_CONFIG.get('origins'))
+    
+    if hasattr(config_instance, 'RATELIMIT_CONFIG'):
+        info['rate_limiting_enabled'] = bool(config_instance.RATELIMIT_CONFIG.get('default'))
+    
+    if hasattr(config_instance, 'TALISMAN_CONFIG'):
+        info['security_headers_enabled'] = bool(config_instance.TALISMAN_CONFIG)
+    
+    logger.info(
+        "Configuration information retrieved",
+        extra=info
+    )
+    
+    return info
+
+
+def initialize_configuration(environment: Optional[str] = None, validate: bool = True) -> Type[BaseConfig]:
+    """
+    Initialize and validate configuration for the specified environment.
     
     Args:
-        environment: Target environment name (defaults to FLASK_ENV)
+        environment: Target environment (defaults to current environment)
+        validate: Whether to perform configuration validation
         
     Returns:
-        Validated configuration instance
+        Type[BaseConfig]: Validated configuration class
         
     Raises:
-        ValueError: If configuration validation fails or environment is unsupported
-        
-    Example:
-        >>> config = get_validated_config_instance('staging')
-        >>> print(f"Environment: {config.get_environment_name()}")
-        >>> print(f"Performance threshold: {config.PERFORMANCE_VARIANCE_THRESHOLD}%")
+        ValueError: If configuration validation fails in non-debug mode
     """
-    return create_config_for_environment(environment)
-
-
-def get_environment_configs() -> Dict[str, Type[BaseConfig]]:
-    """
-    Get all available environment configuration classes.
+    if environment is None:
+        environment = get_environment()
     
-    Returns dictionary mapping environment names to their configuration classes
-    for programmatic configuration management and testing scenarios.
+    logger.info(
+        "Initializing configuration",
+        extra={
+            'environment': environment,
+            'validation_enabled': validate
+        }
+    )
     
-    Returns:
-        Dictionary of environment name to configuration class mappings
-        
-    Example:
-        >>> configs = get_environment_configs()
-        >>> dev_config = configs['development']
-        >>> prod_config = configs['production']
-    """
-    return {
-        'development': DevelopmentConfig,
-        'testing': TestingConfig,
-        'staging': StagingConfig,
-        'production': ProductionConfig
-    }
+    if validate:
+        config_class = create_app_config(environment)
+    else:
+        config_class = get_config(environment)
+    
+    logger.info(
+        "Configuration initialized successfully",
+        extra={
+            'environment': environment,
+            'config_class': config_class.__name__
+        }
+    )
+    
+    return config_class
 
 
-def get_current_environment() -> str:
+def list_available_environments() -> List[str]:
     """
-    Get the current environment name from environment variables.
-    
-    Returns the active environment configuration name with fallback
-    to development for safe default behavior.
+    Get list of all supported environment names.
     
     Returns:
-        Current environment name string
-        
-    Example:
-        >>> env = get_current_environment()
-        >>> print(f"Running in {env} environment")
+        List[str]: List of supported environment names
     """
-    return os.getenv('FLASK_ENV', 'development').lower()
+    return list(config_map.keys())
 
 
-def is_production_environment() -> bool:
+def is_environment_supported(environment: str) -> bool:
     """
-    Check if running in production environment.
-    
-    Utility function for environment-specific logic and security
-    enforcement in application code.
-    
-    Returns:
-        True if production environment, False otherwise
-        
-    Example:
-        >>> if is_production_environment():
-        ...     enable_strict_security()
-    """
-    return get_current_environment() == 'production'
-
-
-def is_development_environment() -> bool:
-    """
-    Check if running in development environment.
-    
-    Utility function for development-specific features and
-    debugging capabilities.
-    
-    Returns:
-        True if development environment, False otherwise
-        
-    Example:
-        >>> if is_development_environment():
-        ...     enable_debug_logging()
-    """
-    return get_current_environment() == 'development'
-
-
-def is_testing_environment() -> bool:
-    """
-    Check if running in testing environment.
-    
-    Utility function for test-specific configuration and
-    isolated testing capabilities.
-    
-    Returns:
-        True if testing environment, False otherwise
-        
-    Example:
-        >>> if is_testing_environment():
-        ...     use_test_database()
-    """
-    return get_current_environment() == 'testing'
-
-
-def get_security_config(environment: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Get comprehensive security configuration for specified environment.
-    
-    Provides security settings including Flask-Talisman configuration,
-    CORS policies, session security, and CSP policies.
+    Check if the specified environment is supported.
     
     Args:
-        environment: Target environment name (defaults to current environment)
+        environment: Environment name to check
         
     Returns:
-        Security configuration dictionary
-        
-    Example:
-        >>> security_config = get_security_config('production')
-        >>> csp_policy = security_config['csp']
-        >>> force_https = security_config['force_https']
+        bool: True if environment is supported, False otherwise
     """
-    config_class = ConfigFactory.get_config(environment)
-    return config_class.get_security_config()
+    return environment.lower() in config_map
 
 
-def get_performance_config(environment: Optional[str] = None) -> Dict[str, Any]:
+def export_config_for_flask(environment: Optional[str] = None) -> Dict[str, Any]:
     """
-    Get performance monitoring configuration for specified environment.
-    
-    Provides performance thresholds, monitoring settings, and baseline
-    comparison configuration for ≤10% variance compliance.
+    Export configuration dictionary suitable for Flask app.config.update().
     
     Args:
-        environment: Target environment name (defaults to current environment)
+        environment: Target environment (defaults to current environment)
         
     Returns:
-        Performance configuration dictionary
-        
-    Example:
-        >>> perf_config = get_performance_config('production')
-        >>> variance_threshold = perf_config['variance_threshold']
-        >>> monitoring_enabled = perf_config['monitoring_enabled']
+        Dict[str, Any]: Configuration dictionary for Flask application
     """
-    config_class = ConfigFactory.get_config(environment)
-    return {
-        'monitoring_enabled': config_class.PERFORMANCE_MONITORING_ENABLED,
-        'variance_threshold': config_class.PERFORMANCE_VARIANCE_THRESHOLD,
-        'nodejs_baseline': config_class.NODEJS_BASELINE_MONITORING,
-        'health_check_enabled': config_class.HEALTH_CHECK_ENABLED,
-        'health_check_timeout': config_class.HEALTH_CHECK_TIMEOUT
-    }
-
-
-def get_cors_config(environment: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Get CORS configuration for specified environment.
+    config_class = initialize_configuration(environment)
+    config_instance = config_class()
     
-    Provides environment-specific CORS origins, headers, and policies
-    for cross-origin request handling.
+    # Extract all uppercase attributes (Flask convention)
+    config_dict = {}
+    for attr_name in dir(config_instance):
+        if attr_name.isupper() and not attr_name.startswith('_'):
+            config_dict[attr_name] = getattr(config_instance, attr_name)
     
-    Args:
-        environment: Target environment name (defaults to current environment)
-        
-    Returns:
-        CORS configuration dictionary
-        
-    Example:
-        >>> cors_config = get_cors_config('development')
-        >>> allowed_origins = cors_config['origins']
-        >>> allowed_methods = cors_config['methods']
-    """
-    config_class = ConfigFactory.get_config(environment)
-    return {
-        'enabled': config_class.CORS_ENABLED,
-        'origins': config_class.CORS_ORIGINS,
-        'methods': config_class.CORS_METHODS,
-        'allow_headers': config_class.CORS_ALLOW_HEADERS,
-        'expose_headers': config_class.CORS_EXPOSE_HEADERS,
-        'supports_credentials': config_class.CORS_SUPPORTS_CREDENTIALS,
-        'max_age': config_class.CORS_MAX_AGE
-    }
+    logger.info(
+        "Configuration exported for Flask",
+        extra={
+            'environment': environment or get_environment(),
+            'config_keys': list(config_dict.keys()),
+            'total_settings': len(config_dict)
+        }
+    )
+    
+    return config_dict
 
 
-def get_rate_limiting_config(environment: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Get rate limiting configuration for specified environment.
-    
-    Provides rate limiting settings, endpoint-specific limits, and
-    storage configuration for request throttling.
-    
-    Args:
-        environment: Target environment name (defaults to current environment)
-        
-    Returns:
-        Rate limiting configuration dictionary
-        
-    Example:
-        >>> rate_config = get_rate_limiting_config('production')
-        >>> default_limit = rate_config['default_limit']
-        >>> endpoint_limits = rate_config['per_endpoint']
-    """
-    config_class = ConfigFactory.get_config(environment)
-    return {
-        'enabled': config_class.RATELIMIT_ENABLED,
-        'storage_url': config_class.RATELIMIT_STORAGE_URL,
-        'strategy': config_class.RATELIMIT_STRATEGY,
-        'default_limit': config_class.RATELIMIT_DEFAULT,
-        'per_endpoint': config_class.RATELIMIT_PER_ENDPOINT,
-        'headers_enabled': config_class.RATELIMIT_HEADERS_ENABLED
-    }
+# Configuration class registry for backward compatibility and debugging
+CONFIG_REGISTRY = {
+    'base': BaseConfig,
+    'development': DevelopmentConfig,
+    'testing': TestingConfig,
+    'staging': StagingConfig,
+    'production': ProductionConfig
+}
 
+# Convenience aliases for common configurations
+DevConfig = DevelopmentConfig
+TestConfig = TestingConfig
+StageConfig = StagingConfig
+ProdConfig = ProductionConfig
 
-def validate_configuration_completeness(environment: Optional[str] = None) -> bool:
-    """
-    Validate configuration completeness for specified environment.
-    
-    Performs comprehensive validation of configuration settings including
-    required parameters, security settings, and environment-specific requirements.
-    
-    Args:
-        environment: Target environment name (defaults to current environment)
-        
-    Returns:
-        True if configuration is complete and valid
-        
-    Raises:
-        ValueError: If configuration validation fails
-        
-    Example:
-        >>> try:
-        ...     validate_configuration_completeness('production')
-        ...     print("Configuration is valid")
-        ... except ValueError as e:
-        ...     print(f"Configuration error: {e}")
-    """
-    config_instance = create_config_for_environment(environment)
-    return ConfigFactory.validate_config(config_instance)
-
-
-def get_configuration_summary(environment: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Get comprehensive configuration summary for specified environment.
-    
-    Provides overview of all configuration settings for debugging,
-    documentation, and environment validation purposes.
-    
-    Args:
-        environment: Target environment name (defaults to current environment)
-        
-    Returns:
-        Configuration summary dictionary with non-sensitive settings
-        
-    Example:
-        >>> summary = get_configuration_summary('staging')
-        >>> print(f"Environment: {summary['environment']}")
-        >>> print(f"Debug mode: {summary['debug']}")
-        >>> print(f"Security enabled: {summary['security']['talisman_enabled']}")
-    """
-    config_class = ConfigFactory.get_config(environment)
-    
-    return {
-        'environment': config_class.get_environment_name(),
-        'debug': config_class.DEBUG,
-        'testing': config_class.TESTING,
-        'security': {
-            'talisman_enabled': config_class.TALISMAN_ENABLED,
-            'csrf_enabled': config_class.WTF_CSRF_ENABLED,
-            'session_secure': config_class.SESSION_COOKIE_SECURE
-        },
-        'performance': {
-            'monitoring_enabled': config_class.PERFORMANCE_MONITORING_ENABLED,
-            'variance_threshold': config_class.PERFORMANCE_VARIANCE_THRESHOLD,
-            'nodejs_baseline': config_class.NODEJS_BASELINE_MONITORING
-        },
-        'features': {
-            'cors_enabled': config_class.CORS_ENABLED,
-            'rate_limiting': config_class.RATELIMIT_ENABLED,
-            'feature_flags': config_class.FEATURE_FLAGS_ENABLED,
-            'migration_enabled': getattr(config_class, 'MIGRATION_ENABLED', False)
-        },
-        'cors_origins_count': len(config_class.CORS_ORIGINS),
-        'available_environments': ConfigFactory.get_available_environments()
-    }
-
-
-# Package-level exports for clean imports and modular organization
+# Package-level public API exports
 __all__ = [
+    # Version and metadata
+    '__version__',
+    '__author__',
+    '__license__',
+    
     # Core configuration classes
     'BaseConfig',
-    'DevelopmentConfig', 
-    'TestingConfig',
+    'DevelopmentConfig',
+    'TestingConfig', 
     'StagingConfig',
     'ProductionConfig',
     
-    # Configuration factory and creation
-    'ConfigFactory',
-    'create_config_for_environment',
-    'get_config_for_flask_app',
-    'get_validated_config_instance',
+    # Convenience aliases
+    'DevConfig',
+    'TestConfig',
+    'StageConfig',
+    'ProdConfig',
     
-    # Specialized configuration modules (when available)
-    'DatabaseConfig',
-    'AuthConfig', 
-    'MonitoringConfig',
-    'FeatureFlagConfig',
-    'DeploymentStrategy',
-    'MigrationPhase',
-    'PerformanceThresholds',
-    
-    # Configuration helper functions
-    'get_database_config',
-    'get_auth_config',
-    'get_monitoring_config',
-    'get_feature_flag_config',
+    # Configuration factory functions
+    'get_config',
+    'get_current_config',
+    'create_app_config',
+    'initialize_configuration',
     
     # Environment utilities
-    'get_environment_configs',
-    'get_current_environment',
-    'is_production_environment',
-    'is_development_environment', 
-    'is_testing_environment',
+    'get_environment',
+    'list_available_environments',
+    'is_environment_supported',
     
-    # Configuration access utilities
-    'get_security_config',
-    'get_performance_config',
-    'get_cors_config',
-    'get_rate_limiting_config',
+    # Configuration information and validation
+    'get_config_info',
+    'validate_configuration',
+    'export_config_for_flask',
     
-    # Validation and summary utilities
-    'validate_configuration_completeness',
-    'get_configuration_summary'
+    # Configuration registry
+    'config_map',
+    'CONFIG_REGISTRY',
+    
+    # Specialized configuration classes (if available)
+    'DatabaseConfig',
+    'AuthConfig',
+    'StructuredLoggingConfig',
+    'PrometheusMetricsConfig',
+    'HealthCheckConfig',
+    'FeatureFlagConfig',
+    'MigrationPhase',
+    
+    # Specialized configuration factories (if available)
+    'create_database_config',
+    'create_auth_config',
+    'create_monitoring_config',
+    'create_feature_flag_config'
 ]
 
-
-# Package-level configuration initialization and validation
-def _initialize_package():
-    """
-    Initialize configuration package with validation and environment detection.
-    
-    Performs package-level initialization including environment validation,
-    dependency checking, and configuration consistency verification.
-    """
-    current_env = get_current_environment()
-    
-    # Validate current environment is supported
-    available_envs = ConfigFactory.get_available_environments()
-    if current_env not in available_envs:
-        import warnings
-        warnings.warn(
-            f"Current environment '{current_env}' not in supported environments: {available_envs}. "
-            f"Falling back to 'development' environment.",
-            UserWarning
-        )
-    
-    # Validate configuration completeness for current environment
-    try:
-        validate_configuration_completeness(current_env)
-    except ValueError as e:
-        import warnings
-        warnings.warn(
-            f"Configuration validation failed for environment '{current_env}': {e}",
-            UserWarning
-        )
-
-
-# Initialize package when imported
-_initialize_package()
+# Log package initialization
+logger.info(
+    "Flask configuration package initialized",
+    extra={
+        'package_version': __version__,
+        'current_environment': get_environment(),
+        'available_environments': list_available_environments(),
+        'modules_loaded': {
+            'settings': True,
+            'database': DatabaseConfig is not None,
+            'auth': AuthConfig is not None,
+            'monitoring': StructuredLoggingConfig is not None,
+            'feature_flags': FeatureFlagConfig is not None
+        }
+    }
+)
