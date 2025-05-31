@@ -1,1133 +1,1902 @@
 """
-Monitoring and observability configuration module implementing Prometheus metrics collection,
-APM integration, performance monitoring, and health check endpoints.
+Monitoring and Observability Configuration Module
 
-This module supports the ≤10% performance variance monitoring requirement for the Node.js to Flask migration project.
-Provides enterprise-grade observability through comprehensive metrics collection, distributed tracing,
-and automated health monitoring capabilities.
+This module implements comprehensive monitoring and observability infrastructure for the
+Flask application migration from Node.js, supporting enterprise-grade performance monitoring,
+metrics collection, health checks, and APM integration as specified in Section 3.6.
 
-Features:
-- Prometheus metrics collection and export
-- APM integration (Datadog, New Relic)
-- Flask-Monitoring-Dashboard real-time monitoring
-- Kubernetes health check endpoints
-- WSGI server instrumentation
-- Container resource monitoring
-- Circuit breaker state tracking
-- Performance variance monitoring against Node.js baseline
+Key Features:
+- Prometheus metrics collection (prometheus-client 0.17+) per Section 3.6.2
+- Flask-Monitoring-Dashboard for real-time performance monitoring per Section 3.6.1
+- APM integration for enterprise tools (Datadog/New Relic) per Section 6.5.1.1
+- Health check endpoints for Kubernetes probes per Section 8.1.1
+- Performance variance monitoring (≤10% requirement) per Section 0.1.1
+- WSGI server instrumentation per Section 6.5.4.1
+- Container-level metrics integration per Section 6.5.4.2
+- Custom migration performance metrics per Section 6.5.4.5
+- Structured logging configuration per Section 6.5.1.2
+- Alert routing and escalation per Section 6.5.3.1
+
+Dependencies:
+- prometheus-client 0.17+ for Prometheus integration
+- Flask-Monitoring-Dashboard for performance measurement
+- structlog 23.1+ for structured logging
+- psutil 5.9+ for system metrics
+- APM clients (ddtrace/newrelic) for enterprise monitoring
+
+Author: Flask Migration Team
+Version: 1.0.0
+Migration Phase: Node.js to Python/Flask Migration (Section 0.1.1)
 """
 
 import os
+import gc
 import time
+import psutil
 import logging
 import threading
-from typing import Dict, Any, Optional, Callable, List
 from datetime import datetime, timedelta
-from functools import wraps
+from typing import Dict, Any, Optional, List, Callable, Union
+from dataclasses import dataclass, field
+from enum import Enum
+from pathlib import Path
 
-# Core monitoring libraries
+# Core monitoring imports
 from prometheus_client import (
-    Counter, Histogram, Gauge, Summary, Info, Enum,
+    Counter, Gauge, Histogram, Summary, Info, Enum as PrometheusEnum,
     CollectorRegistry, CONTENT_TYPE_LATEST, generate_latest,
     multiprocess, values
 )
-import psutil
-import gc
+import structlog
 
-# Flask monitoring extensions
-from flask import Flask, request, Response, jsonify, g
-from flask_monitoring import MonitoringDashboard
+# Flask and WSGI monitoring
+from flask import Flask, Response, request, g, jsonify
+from werkzeug.middleware.dispatcher import DispatcherMiddleware
+from werkzeug.serving import WSGIRequestHandler
 
-# APM integrations
-try:
-    import ddtrace
-    from ddtrace import tracer, patch_all
-    from ddtrace.contrib.flask import TraceMiddleware
-    DATADOG_AVAILABLE = True
-except ImportError:
-    DATADOG_AVAILABLE = False
+# Configuration management
+from config.settings import BaseConfig, ConfigurationError
 
-try:
-    import newrelic.agent
-    NEWRELIC_AVAILABLE = True
-except ImportError:
-    NEWRELIC_AVAILABLE = False
-
-# Circuit breaker integration
-try:
-    from pybreaker import CircuitBreaker
-    PYBREAKER_AVAILABLE = True
-except ImportError:
-    PYBREAKER_AVAILABLE = False
-
-# Configuration base
-from config.settings import BaseConfig
+# Initialize logger
+logger = structlog.get_logger(__name__)
 
 
-class MonitoringConfig:
+class HealthStatus(Enum):
+    """Health check status enumeration for consistent status reporting."""
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"
+    UNHEALTHY = "unhealthy"
+    CRITICAL = "critical"
+
+
+class AlertSeverity(Enum):
+    """Alert severity levels for enterprise alert routing."""
+    INFO = "info"
+    WARNING = "warning"
+    CRITICAL = "critical"
+    EMERGENCY = "emergency"
+
+
+@dataclass
+class PerformanceBaseline:
     """
-    Monitoring and observability configuration for Flask application.
+    Performance baseline tracking for Node.js comparison as specified in Section 0.1.1.
     
-    Implements comprehensive monitoring stack including:
-    - Prometheus metrics collection
-    - APM integration (Datadog/New Relic)
-    - Health check endpoints
-    - Performance monitoring
-    - Circuit breaker integration
+    This class maintains performance baselines to ensure ≤10% variance requirement
+    compliance during the migration from Node.js to Flask.
     """
+    endpoint: str
+    nodejs_avg_response_time: float
+    nodejs_throughput: float
+    acceptable_variance: float = 0.10  # 10% variance threshold
+    baseline_timestamp: datetime = field(default_factory=datetime.utcnow)
     
-    # Prometheus configuration
-    PROMETHEUS_ENABLED = True
-    PROMETHEUS_MULTIPROC_DIR = os.environ.get('PROMETHEUS_MULTIPROC_DIR', '/tmp/prometheus_multiproc')
-    PROMETHEUS_METRICS_PATH = '/metrics'
-    
-    # APM configuration
-    APM_ENABLED = True
-    APM_SERVICE_NAME = 'flask-migration-app'
-    APM_ENVIRONMENT = os.environ.get('FLASK_ENV', 'development')
-    APM_VERSION = os.environ.get('APP_VERSION', '1.0.0')
-    
-    # Datadog APM configuration
-    DATADOG_APM_ENABLED = DATADOG_AVAILABLE and os.environ.get('DATADOG_APM_ENABLED', 'false').lower() == 'true'
-    DATADOG_SERVICE_NAME = APM_SERVICE_NAME
-    DATADOG_ENV = APM_ENVIRONMENT
-    DATADOG_VERSION = APM_VERSION
-    DATADOG_SAMPLE_RATE = float(os.environ.get('DATADOG_SAMPLE_RATE', '0.1' if APM_ENVIRONMENT == 'production' else '1.0'))
-    
-    # New Relic APM configuration
-    NEWRELIC_APM_ENABLED = NEWRELIC_AVAILABLE and os.environ.get('NEW_RELIC_LICENSE_KEY') is not None
-    NEWRELIC_APP_NAME = APM_SERVICE_NAME
-    NEWRELIC_ENVIRONMENT = APM_ENVIRONMENT
-    NEWRELIC_SAMPLE_RATE = float(os.environ.get('NEWRELIC_SAMPLE_RATE', '0.1' if APM_ENVIRONMENT == 'production' else '1.0'))
-    
-    # Health check configuration
-    HEALTH_CHECK_ENABLED = True
-    HEALTH_CHECK_TIMEOUT = 5.0  # seconds
-    HEALTH_ENDPOINT_PREFIX = '/health'
-    
-    # Performance monitoring configuration
-    PERFORMANCE_MONITORING_ENABLED = True
-    PERFORMANCE_VARIANCE_THRESHOLD = 10.0  # ≤10% variance requirement
-    PERFORMANCE_BASELINE_TRACKING = True
-    NODEJS_BASELINE_METRICS_ENABLED = True
-    
-    # Flask monitoring dashboard configuration
-    FLASK_MONITORING_DASHBOARD_ENABLED = True
-    FLASK_MONITORING_CONFIG = {
-        'SECURITY_TOKEN': os.environ.get('MONITORING_DASHBOARD_TOKEN', 'dev-token-change-in-production'),
-        'MONITOR_LEVEL': 3,  # Detailed monitoring
-        'OUTLIER_DETECTION_CONSTANT': 2.5,
-        'SAMPLING_PERIOD': 20,  # seconds
-        'ENABLE_LOGGING': True
-    }
-    
-    # System resource monitoring configuration
-    SYSTEM_RESOURCE_MONITORING_ENABLED = True
-    CPU_MONITORING_INTERVAL = 15  # seconds
-    MEMORY_MONITORING_INTERVAL = 30  # seconds
-    GC_MONITORING_ENABLED = True
-    
-    # Container monitoring configuration (cAdvisor integration)
-    CONTAINER_MONITORING_ENABLED = os.environ.get('CONTAINER_MONITORING_ENABLED', 'true').lower() == 'true'
-    CADVISOR_ENDPOINT = os.environ.get('CADVISOR_ENDPOINT', 'http://cadvisor:8080')
-    
-    # WSGI server monitoring configuration
-    WSGI_MONITORING_ENABLED = True
-    GUNICORN_METRICS_ENABLED = True
-    WORKER_MONITORING_ENABLED = True
-    
-    # Alert thresholds
-    ALERT_THRESHOLDS = {
-        'response_time_variance_warning': 5.0,  # %
-        'response_time_variance_critical': 10.0,  # %
-        'cpu_utilization_warning': 70.0,  # %
-        'cpu_utilization_critical': 90.0,  # %
-        'memory_usage_warning': 80.0,  # %
-        'memory_usage_critical': 95.0,  # %
-        'gc_pause_warning': 100.0,  # ms
-        'gc_pause_critical': 300.0,  # ms
-        'worker_utilization_warning': 70.0,  # %
-        'worker_utilization_critical': 90.0,  # %
-        'request_queue_warning': 10,  # requests
-        'request_queue_critical': 20,  # requests
-    }
-    
-    # Circuit breaker configuration
-    CIRCUIT_BREAKER_ENABLED = PYBREAKER_AVAILABLE
-    CIRCUIT_BREAKER_FAILURE_THRESHOLD = 5
-    CIRCUIT_BREAKER_RECOVERY_TIMEOUT = 60
-    CIRCUIT_BREAKER_EXPECTED_EXCEPTION = Exception
-
-
-class PrometheusMetrics:
-    """
-    Prometheus metrics collection and management for Flask application.
-    
-    Implements comprehensive metrics including:
-    - Request/response metrics
-    - Performance variance tracking
-    - System resource utilization
-    - Business logic throughput
-    - Migration-specific metrics
-    """
-    
-    def __init__(self):
-        """Initialize Prometheus metrics collectors."""
-        self.registry = CollectorRegistry()
-        self._setup_metrics()
-        self._setup_system_metrics()
-        self._setup_migration_metrics()
+    def calculate_variance(self, flask_response_time: float) -> float:
+        """
+        Calculate performance variance percentage against Node.js baseline.
         
-    def _setup_metrics(self):
-        """Set up core application metrics."""
+        Args:
+            flask_response_time: Current Flask response time in milliseconds
+            
+        Returns:
+            Variance percentage (positive = slower, negative = faster)
+        """
+        if self.nodejs_avg_response_time == 0:
+            return 0.0
+        return ((flask_response_time - self.nodejs_avg_response_time) / 
+                self.nodejs_avg_response_time)
+    
+    def is_within_tolerance(self, flask_response_time: float) -> bool:
+        """
+        Check if Flask response time is within acceptable variance.
+        
+        Args:
+            flask_response_time: Current Flask response time in milliseconds
+            
+        Returns:
+            True if within ≤10% variance requirement
+        """
+        variance = abs(self.calculate_variance(flask_response_time))
+        return variance <= self.acceptable_variance
+
+
+class PrometheusMetricsRegistry:
+    """
+    Centralized Prometheus metrics registry implementing comprehensive metrics collection
+    as specified in Section 3.6.2 and Section 6.5.1.1.
+    
+    This class manages all Prometheus metrics for the Flask application including
+    custom migration metrics, WSGI server metrics, and container resource metrics.
+    """
+    
+    def __init__(self, config: BaseConfig, enable_multiprocess: bool = True):
+        """
+        Initialize Prometheus metrics registry with multiprocess support.
+        
+        Args:
+            config: Application configuration instance
+            enable_multiprocess: Enable multiprocess metrics collection for WSGI
+        """
+        self.config = config
+        self.enable_multiprocess = enable_multiprocess
+        
+        # Configure multiprocess directory for WSGI server metrics
+        if enable_multiprocess:
+            self.multiprocess_dir = os.environ.get(
+                'prometheus_multiproc_dir',
+                '/tmp/prometheus_multiproc_dir'
+            )
+            os.makedirs(self.multiprocess_dir, exist_ok=True)
+            self.registry = CollectorRegistry()
+            multiprocess.MultiProcessCollector(self.registry)
+        else:
+            self.registry = CollectorRegistry()
+        
+        # Initialize core metrics
+        self._init_application_metrics()
+        self._init_performance_comparison_metrics()
+        self._init_system_resource_metrics()
+        self._init_wsgi_server_metrics()
+        self._init_business_logic_metrics()
+        self._init_security_metrics()
+        
+        logger.info("Prometheus metrics registry initialized", 
+                   multiprocess=enable_multiprocess,
+                   metrics_count=len(self.registry._collector_to_names))
+    
+    def _init_application_metrics(self) -> None:
+        """Initialize core Flask application metrics."""
         # Request metrics
-        self.request_count = Counter(
-            'flask_requests_total',
-            'Total number of HTTP requests',
+        self.http_requests_total = Counter(
+            'flask_http_requests_total',
+            'Total number of HTTP requests processed',
             ['method', 'endpoint', 'status_code'],
             registry=self.registry
         )
         
-        self.request_duration = Histogram(
-            'flask_request_duration_seconds',
-            'HTTP request duration in seconds',
+        self.http_request_duration_seconds = Histogram(
+            'flask_http_request_duration_seconds',
+            'Time spent processing HTTP requests',
             ['method', 'endpoint'],
-            registry=self.registry,
-            buckets=[0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0]
-        )
-        
-        self.request_size = Histogram(
-            'flask_request_size_bytes',
-            'HTTP request size in bytes',
-            ['method', 'endpoint'],
+            buckets=(0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0),
             registry=self.registry
         )
         
-        self.response_size = Histogram(
-            'flask_response_size_bytes',
-            'HTTP response size in bytes',
+        self.http_request_size_bytes = Histogram(
+            'flask_http_request_size_bytes',
+            'Size of HTTP requests in bytes',
             ['method', 'endpoint'],
             registry=self.registry
         )
         
-        # Error metrics
-        self.error_count = Counter(
-            'flask_errors_total',
-            'Total number of application errors',
-            ['error_type', 'endpoint'],
+        self.http_response_size_bytes = Histogram(
+            'flask_http_response_size_bytes',
+            'Size of HTTP responses in bytes',
+            ['method', 'endpoint'],
             registry=self.registry
         )
         
-        self.exception_count = Counter(
-            'flask_exceptions_total',
-            'Total number of unhandled exceptions',
-            ['exception_type', 'endpoint'],
+        # Application info metric
+        self.app_info = Info(
+            'flask_app_info',
+            'Flask application information',
+            registry=self.registry
+        )
+        self.app_info.info({
+            'version': self.config.APP_VERSION,
+            'environment': self.config.FLASK_ENV,
+            'migration_phase': 'nodejs_to_flask'
+        })
+    
+    def _init_performance_comparison_metrics(self) -> None:
+        """
+        Initialize migration-specific performance comparison metrics per Section 6.5.4.5.
+        
+        These metrics enable direct comparison between Node.js baseline and Flask
+        implementation to ensure ≤10% variance compliance.
+        """
+        # Performance variance tracking
+        self.performance_variance_percentage = Gauge(
+            'flask_performance_variance_percentage',
+            'Real-time performance variance percentage against Node.js baseline',
+            ['endpoint'],
             registry=self.registry
         )
         
-    def _setup_system_metrics(self):
-        """Set up system resource monitoring metrics."""
-        # CPU metrics
-        self.cpu_usage = Gauge(
-            'system_cpu_usage_percent',
-            'System CPU usage percentage',
+        # Endpoint-specific performance distribution
+        self.endpoint_response_time_comparison = Histogram(
+            'flask_endpoint_response_time_comparison_milliseconds',
+            'Response time distribution comparison for Flask vs Node.js baseline',
+            ['endpoint', 'implementation'],  # implementation: 'nodejs_baseline' or 'flask_migration'
+            buckets=(1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000),
             registry=self.registry
         )
         
-        self.process_cpu_usage = Gauge(
-            'process_cpu_usage_percent',
-            'Process CPU usage percentage',
+        # Business logic throughput comparison
+        self.nodejs_baseline_requests_total = Counter(
+            'nodejs_baseline_requests_total',
+            'Total requests processed by Node.js baseline (historical)',
+            ['endpoint'],
+            registry=self.registry
+        )
+        
+        self.flask_migration_requests_total = Counter(
+            'flask_migration_requests_total',
+            'Total requests processed by Flask migration implementation',
+            ['endpoint'],
+            registry=self.registry
+        )
+        
+        # Performance compliance status
+        self.performance_compliance_status = PrometheusEnum(
+            'flask_performance_compliance_status',
+            'Current performance compliance status against ≤10% variance requirement',
+            states=['compliant', 'warning', 'violation'],
+            registry=self.registry
+        )
+        self.performance_compliance_status.state('compliant')  # Initialize as compliant
+        
+        # Migration quality metrics
+        self.migration_quality_score = Gauge(
+            'flask_migration_quality_score',
+            'Overall migration quality score (0-100) based on performance parity',
+            registry=self.registry
+        )
+        self.migration_quality_score.set(100)  # Initialize at perfect score
+    
+    def _init_system_resource_metrics(self) -> None:
+        """
+        Initialize system resource metrics per Section 6.5.1.1 and Section 6.5.4.2.
+        
+        These metrics provide comprehensive system-level monitoring including
+        CPU utilization, memory usage, and Python-specific metrics.
+        """
+        # CPU utilization metrics (updated per Section 6.5.1.1)
+        self.cpu_utilization_percentage = Gauge(
+            'system_cpu_utilization_percentage',
+            'Current CPU utilization percentage',
+            ['cpu_type'],  # 'total', 'per_core'
+            registry=self.registry
+        )
+        
+        # Python garbage collection metrics (updated per Section 6.5.2.2)
+        self.python_gc_pause_time_milliseconds = Histogram(
+            'python_gc_pause_time_milliseconds',
+            'Python garbage collection pause time distribution',
+            ['generation'],
+            buckets=(0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0),
+            registry=self.registry
+        )
+        
+        self.python_gc_collections_total = Counter(
+            'python_gc_collections_total',
+            'Total number of garbage collection cycles',
+            ['generation'],
+            registry=self.registry
+        )
+        
+        self.python_gc_objects_collected = Counter(
+            'python_gc_objects_collected_total',
+            'Total number of objects collected by garbage collector',
+            ['generation'],
             registry=self.registry
         )
         
         # Memory metrics
-        self.memory_usage = Gauge(
+        self.memory_usage_bytes = Gauge(
             'system_memory_usage_bytes',
-            'System memory usage in bytes',
+            'Current memory usage in bytes',
+            ['memory_type'],  # 'rss', 'vms', 'shared', 'heap'
             registry=self.registry
         )
         
-        self.process_memory_usage = Gauge(
-            'process_memory_usage_bytes',
-            'Process memory usage in bytes',
+        self.memory_usage_percentage = Gauge(
+            'system_memory_usage_percentage',
+            'Current memory usage percentage',
             registry=self.registry
         )
         
-        self.memory_usage_percent = Gauge(
-            'process_memory_usage_percent',
-            'Process memory usage percentage',
+        # Process-level metrics
+        self.process_cpu_seconds_total = Counter(
+            'process_cpu_seconds_total',
+            'Total CPU time consumed by the process',
+            ['mode'],  # 'user', 'system'
             registry=self.registry
         )
         
-        # Python GC metrics
-        self.gc_collections = Counter(
-            'python_gc_collections_total',
-            'Total number of garbage collections',
-            ['generation'],
+        self.process_open_file_descriptors = Gauge(
+            'process_open_file_descriptors',
+            'Number of open file descriptors',
             registry=self.registry
         )
         
-        self.gc_objects_collected = Counter(
-            'python_gc_objects_collected_total',
-            'Total number of objects collected by GC',
-            ['generation'],
+        self.process_threads_total = Gauge(
+            'process_threads_total',
+            'Current number of threads',
             registry=self.registry
         )
+    
+    def _init_wsgi_server_metrics(self) -> None:
+        """
+        Initialize WSGI server instrumentation metrics per Section 6.5.4.1.
         
-        self.gc_pause_time = Histogram(
-            'python_gc_pause_time_seconds',
-            'Time spent in garbage collection',
-            ['generation'],
-            registry=self.registry
-        )
-        
-        # WSGI worker metrics
-        self.active_workers = Gauge(
-            'wsgi_active_workers',
-            'Number of active WSGI workers',
-            registry=self.registry
-        )
-        
-        self.worker_utilization = Gauge(
-            'wsgi_worker_utilization_percent',
+        These metrics provide visibility into Gunicorn/uWSGI worker performance,
+        request queue management, and connection handling efficiency.
+        """
+        # Worker process metrics (updated per Section 6.5.4.1)
+        self.wsgi_worker_utilization_percentage = Gauge(
+            'wsgi_worker_utilization_percentage',
             'WSGI worker utilization percentage',
+            ['worker_id'],
             registry=self.registry
         )
         
-        self.request_queue_depth = Gauge(
+        self.wsgi_request_queue_depth = Gauge(
             'wsgi_request_queue_depth',
-            'WSGI request queue depth',
+            'Current depth of WSGI request queue',
             registry=self.registry
         )
         
-    def _setup_migration_metrics(self):
-        """Set up migration-specific performance metrics."""
-        # Performance variance tracking
-        self.performance_variance = Gauge(
-            'migration_performance_variance_percent',
-            'Performance variance percentage against Node.js baseline',
-            ['endpoint'],
+        self.wsgi_worker_response_time_seconds = Histogram(
+            'wsgi_worker_response_time_seconds',
+            'WSGI worker request processing time',
+            ['worker_id'],
+            buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0),
             registry=self.registry
         )
         
-        # Endpoint comparison metrics
-        self.nodejs_baseline_requests = Counter(
-            'nodejs_baseline_requests_total',
-            'Node.js baseline request count for comparison',
-            ['endpoint'],
+        self.wsgi_active_workers_total = Gauge(
+            'wsgi_active_workers_total',
+            'Number of active WSGI worker processes',
             registry=self.registry
         )
         
-        self.flask_migration_requests = Counter(
-            'flask_migration_requests_total',
-            'Flask migration request count for comparison',
-            ['endpoint'],
+        self.wsgi_active_threads_total = Gauge(
+            'wsgi_active_threads_total',
+            'Number of active threads across all workers',
             registry=self.registry
         )
         
-        # Business logic throughput
-        self.business_logic_throughput = Gauge(
-            'business_logic_throughput_operations_per_second',
-            'Business logic processing throughput',
+        # Connection pool metrics
+        self.connection_pool_active_connections = Gauge(
+            'connection_pool_active_connections',
+            'Number of active connections in pool',
+            ['pool_type'],  # 'database', 'redis', 'http'
+            registry=self.registry
+        )
+        
+        self.connection_pool_utilization_percentage = Gauge(
+            'connection_pool_utilization_percentage',
+            'Connection pool utilization percentage',
+            ['pool_type'],
+            registry=self.registry
+        )
+    
+    def _init_business_logic_metrics(self) -> None:
+        """Initialize business logic and application-specific metrics."""
+        # Business logic processing metrics
+        self.business_logic_processing_time_seconds = Histogram(
+            'business_logic_processing_time_seconds',
+            'Time spent in business logic processing',
             ['operation_type'],
             registry=self.registry
         )
         
-        # Database operation metrics
-        self.database_operation_duration = Histogram(
-            'database_operation_duration_seconds',
-            'Database operation duration in seconds',
-            ['operation_type', 'collection'],
+        self.business_logic_operations_total = Counter(
+            'business_logic_operations_total',
+            'Total number of business logic operations processed',
+            ['operation_type', 'status'],
             registry=self.registry
         )
         
-        self.database_connection_pool = Gauge(
-            'database_connection_pool_size',
-            'Database connection pool size',
-            ['pool_type'],
+        # Database operation metrics
+        self.database_operation_duration_seconds = Histogram(
+            'database_operation_duration_seconds',
+            'Time spent on database operations',
+            ['operation', 'collection'],
+            registry=self.registry
+        )
+        
+        self.database_connections_active = Gauge(
+            'database_connections_active',
+            'Number of active database connections',
+            registry=self.registry
+        )
+        
+        # Cache operation metrics
+        self.cache_operation_duration_seconds = Histogram(
+            'cache_operation_duration_seconds',
+            'Time spent on cache operations',
+            ['operation'],  # 'get', 'set', 'delete'
+            registry=self.registry
+        )
+        
+        self.cache_hit_ratio = Gauge(
+            'cache_hit_ratio',
+            'Cache hit ratio (0-1)',
+            registry=self.registry
+        )
+        
+        # External service integration metrics
+        self.external_service_request_duration_seconds = Histogram(
+            'external_service_request_duration_seconds',
+            'Time spent on external service requests',
+            ['service_name', 'operation'],
+            registry=self.registry
+        )
+        
+        self.external_service_requests_total = Counter(
+            'external_service_requests_total',
+            'Total external service requests',
+            ['service_name', 'status_code'],
             registry=self.registry
         )
         
         # Circuit breaker metrics
-        self.circuit_breaker_state = Enum(
+        self.circuit_breaker_state = PrometheusEnum(
             'circuit_breaker_state',
-            'Circuit breaker state',
-            ['service'],
+            'Current circuit breaker state',
+            ['service_name'],
             states=['closed', 'open', 'half_open'],
             registry=self.registry
         )
-        
-        self.circuit_breaker_failures = Counter(
-            'circuit_breaker_failures_total',
-            'Total circuit breaker failures',
-            ['service'],
+    
+    def _init_security_metrics(self) -> None:
+        """Initialize security and authentication metrics."""
+        # Authentication metrics
+        self.authentication_attempts_total = Counter(
+            'authentication_attempts_total',
+            'Total authentication attempts',
+            ['method', 'status'],  # method: 'jwt', 'oauth', status: 'success', 'failure'
             registry=self.registry
         )
         
-        self.circuit_breaker_successes = Counter(
-            'circuit_breaker_successes_total',
-            'Total circuit breaker successes',
-            ['service'],
+        self.jwt_token_validation_duration_seconds = Histogram(
+            'jwt_token_validation_duration_seconds',
+            'Time spent validating JWT tokens',
             registry=self.registry
         )
-
-
-class SystemResourceMonitor:
-    """
-    System resource monitoring for CPU, memory, and Python GC metrics.
-    
-    Provides real-time system resource utilization tracking with
-    integration into Prometheus metrics collection.
-    """
-    
-    def __init__(self, metrics: PrometheusMetrics):
-        self.metrics = metrics
-        self.process = psutil.Process()
-        self._monitoring_active = False
-        self._monitor_thread = None
         
-    def start_monitoring(self):
-        """Start system resource monitoring in background thread."""
-        if self._monitoring_active:
-            return
-            
-        self._monitoring_active = True
-        self._monitor_thread = threading.Thread(
-            target=self._monitor_loop,
-            daemon=True,
-            name='SystemResourceMonitor'
+        # Security event metrics
+        self.security_events_total = Counter(
+            'security_events_total',
+            'Total security events detected',
+            ['event_type'],  # 'suspicious_request', 'rate_limit_exceeded', 'invalid_token'
+            registry=self.registry
         )
-        self._monitor_thread.start()
         
-    def stop_monitoring(self):
-        """Stop system resource monitoring."""
-        self._monitoring_active = False
-        if self._monitor_thread and self._monitor_thread.is_alive():
-            self._monitor_thread.join(timeout=5.0)
-            
-    def _monitor_loop(self):
-        """Main monitoring loop for system resources."""
-        while self._monitoring_active:
-            try:
-                self._update_cpu_metrics()
-                self._update_memory_metrics()
-                self._update_gc_metrics()
-                
-                # Sleep for monitoring interval
-                time.sleep(MonitoringConfig.CPU_MONITORING_INTERVAL)
-                
-            except Exception as e:
-                logging.error(f"Error in system resource monitoring: {e}")
-                time.sleep(5.0)  # Brief pause before retry
-                
-    def _update_cpu_metrics(self):
-        """Update CPU utilization metrics."""
-        try:
-            # System CPU usage
-            system_cpu = psutil.cpu_percent(interval=1.0)
-            self.metrics.cpu_usage.set(system_cpu)
-            
-            # Process CPU usage
-            process_cpu = self.process.cpu_percent()
-            self.metrics.process_cpu_usage.set(process_cpu)
-            
-        except Exception as e:
-            logging.error(f"Error updating CPU metrics: {e}")
-            
-    def _update_memory_metrics(self):
-        """Update memory utilization metrics."""
-        try:
-            # System memory
-            system_memory = psutil.virtual_memory()
-            self.metrics.memory_usage.set(system_memory.used)
-            
-            # Process memory
-            process_memory = self.process.memory_info()
-            self.metrics.process_memory_usage.set(process_memory.rss)
-            
-            # Memory usage percentage
-            memory_percent = (process_memory.rss / system_memory.total) * 100
-            self.metrics.memory_usage_percent.set(memory_percent)
-            
-        except Exception as e:
-            logging.error(f"Error updating memory metrics: {e}")
-            
-    def _update_gc_metrics(self):
-        """Update Python garbage collection metrics."""
-        try:
-            if not MonitoringConfig.GC_MONITORING_ENABLED:
-                return
-                
-            # Get GC stats for each generation
-            gc_stats = gc.get_stats()
-            for generation, stats in enumerate(gc_stats):
-                self.metrics.gc_collections.labels(generation=str(generation)).inc(
-                    stats.get('collections', 0)
-                )
-                self.metrics.gc_objects_collected.labels(generation=str(generation)).inc(
-                    stats.get('collected', 0)
-                )
-                
-        except Exception as e:
-            logging.error(f"Error updating GC metrics: {e}")
+        # Rate limiting metrics
+        self.rate_limit_violations_total = Counter(
+            'rate_limit_violations_total',
+            'Total rate limit violations',
+            ['endpoint', 'client_type'],
+            registry=self.registry
+        )
 
 
 class HealthCheckManager:
     """
-    Health check management for Kubernetes probes and load balancer integration.
+    Comprehensive health check manager implementing Kubernetes-native probes
+    and enterprise monitoring integration per Section 8.1.1 and Section 6.5.2.1.
     
-    Implements comprehensive health checking including:
-    - Liveness probes for container restart decisions
-    - Readiness probes for traffic routing decisions
-    - Dependency health validation
-    - Circuit breaker state monitoring
+    This class provides health check endpoints for container orchestration,
+    load balancer integration, and automated failure detection.
     """
     
-    def __init__(self, app: Flask):
-        self.app = app
-        self.health_checks: Dict[str, Callable] = {}
+    def __init__(self, config: BaseConfig, metrics_registry: PrometheusMetricsRegistry):
+        """
+        Initialize health check manager with dependency monitoring.
+        
+        Args:
+            config: Application configuration instance
+            metrics_registry: Prometheus metrics registry for health metrics
+        """
+        self.config = config
+        self.metrics = metrics_registry
         self.dependency_checks: Dict[str, Callable] = {}
-        self._last_health_status = {}
+        self.health_history: List[Dict[str, Any]] = []
+        self.max_history_size = 100
         
-    def register_health_check(self, name: str, check_func: Callable) -> None:
-        """Register a health check function."""
-        self.health_checks[name] = check_func
+        # Health status metrics
+        self.health_status_gauge = Gauge(
+            'health_check_status',
+            'Current health check status (1=healthy, 0=unhealthy)',
+            ['check_type'],  # 'liveness', 'readiness', 'dependency'
+            registry=self.metrics.registry
+        )
         
-    def register_dependency_check(self, name: str, check_func: Callable) -> None:
-        """Register a dependency health check function."""
-        self.dependency_checks[name] = check_func
+        self.health_check_duration_seconds = Histogram(
+            'health_check_duration_seconds',
+            'Time spent performing health checks',
+            ['check_type'],
+            registry=self.metrics.registry
+        )
         
-    def setup_health_endpoints(self):
-        """Set up health check endpoints for Kubernetes probes."""
+        # Initialize default dependency checks
+        self._init_default_dependency_checks()
         
-        @self.app.route(f"{MonitoringConfig.HEALTH_ENDPOINT_PREFIX}/live")
-        def liveness_probe():
-            """
-            Kubernetes liveness probe endpoint.
-            
-            Returns HTTP 200 when Flask application is operational,
-            HTTP 503 when application is in fatal state requiring restart.
-            """
-            try:
-                # Basic application health check
-                app_status = self._check_application_health()
-                
-                if app_status['healthy']:
-                    return jsonify({
-                        'status': 'healthy',
-                        'timestamp': datetime.utcnow().isoformat(),
-                        'checks': app_status['checks']
-                    }), 200
-                else:
-                    return jsonify({
-                        'status': 'unhealthy',
-                        'timestamp': datetime.utcnow().isoformat(),
-                        'checks': app_status['checks']
-                    }), 503
-                    
-            except Exception as e:
-                logging.error(f"Liveness probe error: {e}")
-                return jsonify({
-                    'status': 'error',
-                    'timestamp': datetime.utcnow().isoformat(),
-                    'error': str(e)
-                }), 503
-                
-        @self.app.route(f"{MonitoringConfig.HEALTH_ENDPOINT_PREFIX}/ready")
-        def readiness_probe():
-            """
-            Kubernetes readiness probe endpoint.
-            
-            Returns HTTP 200 when all dependencies are healthy,
-            HTTP 503 when dependencies are unavailable or degraded.
-            """
-            try:
-                # Comprehensive dependency health check
-                dependency_status = self._check_dependencies_health()
-                
-                if dependency_status['ready']:
-                    return jsonify({
-                        'status': 'ready',
-                        'timestamp': datetime.utcnow().isoformat(),
-                        'dependencies': dependency_status['dependencies']
-                    }), 200
-                else:
-                    return jsonify({
-                        'status': 'not_ready',
-                        'timestamp': datetime.utcnow().isoformat(),
-                        'dependencies': dependency_status['dependencies']
-                    }), 503
-                    
-            except Exception as e:
-                logging.error(f"Readiness probe error: {e}")
-                return jsonify({
-                    'status': 'error',
-                    'timestamp': datetime.utcnow().isoformat(),
-                    'error': str(e)
-                }), 503
-                
-        @self.app.route(f"{MonitoringConfig.HEALTH_ENDPOINT_PREFIX}")
-        def health_summary():
-            """
-            Comprehensive health summary endpoint for load balancers.
-            
-            Provides detailed health information for enterprise monitoring.
-            """
-            try:
-                app_status = self._check_application_health()
-                dependency_status = self._check_dependencies_health()
-                
-                overall_healthy = app_status['healthy'] and dependency_status['ready']
-                
-                return jsonify({
-                    'status': 'healthy' if overall_healthy else 'degraded',
-                    'timestamp': datetime.utcnow().isoformat(),
-                    'application': app_status,
-                    'dependencies': dependency_status,
-                    'uptime': self._get_uptime(),
-                    'version': MonitoringConfig.APM_VERSION
-                }), 200 if overall_healthy else 503
-                
-            except Exception as e:
-                logging.error(f"Health summary error: {e}")
-                return jsonify({
-                    'status': 'error',
-                    'timestamp': datetime.utcnow().isoformat(),
-                    'error': str(e)
-                }), 503
-                
-    def _check_application_health(self) -> Dict[str, Any]:
-        """Check basic application health."""
-        checks = {}
-        healthy = True
+        logger.info("Health check manager initialized", 
+                   dependency_checks=len(self.dependency_checks))
+    
+    def _init_default_dependency_checks(self) -> None:
+        """Initialize default health checks for critical dependencies."""
+        # MongoDB health check
+        if hasattr(self.config, 'MONGODB_URI'):
+            self.dependency_checks['mongodb'] = self._check_mongodb_health
         
+        # Redis health check
+        if hasattr(self.config, 'REDIS_HOST'):
+            self.dependency_checks['redis'] = self._check_redis_health
+        
+        # Auth0 health check
+        if hasattr(self.config, 'AUTH0_DOMAIN') and self.config.AUTH0_DOMAIN:
+            self.dependency_checks['auth0'] = self._check_auth0_health
+    
+    async def _check_mongodb_health(self) -> Dict[str, Any]:
+        """
+        Check MongoDB connectivity and basic operation.
+        
+        Returns:
+            Health check result with status and details
+        """
         try:
-            # Run registered health checks
-            for name, check_func in self.health_checks.items():
-                try:
-                    start_time = time.time()
-                    result = check_func()
-                    duration = time.time() - start_time
-                    
-                    checks[name] = {
-                        'healthy': bool(result),
-                        'duration_ms': round(duration * 1000, 2),
-                        'timestamp': datetime.utcnow().isoformat()
-                    }
-                    
-                    if not result:
-                        healthy = False
-                        
-                except Exception as e:
-                    checks[name] = {
-                        'healthy': False,
-                        'error': str(e),
-                        'timestamp': datetime.utcnow().isoformat()
-                    }
-                    healthy = False
-                    
+            # Import MongoDB client (lazy import to avoid startup dependencies)
+            from pymongo import MongoClient
+            from pymongo.errors import ServerSelectionTimeoutError
+            
+            start_time = time.time()
+            client = MongoClient(
+                self.config.MONGODB_URI,
+                serverSelectionTimeoutMS=5000,
+                connectTimeoutMS=5000
+            )
+            
+            # Test basic operation
+            client.admin.command('ping')
+            duration = time.time() - start_time
+            
+            return {
+                'status': HealthStatus.HEALTHY,
+                'response_time_ms': duration * 1000,
+                'details': 'MongoDB connection successful'
+            }
+            
+        except ServerSelectionTimeoutError:
+            return {
+                'status': HealthStatus.UNHEALTHY,
+                'error': 'MongoDB connection timeout',
+                'details': 'Could not connect to MongoDB within timeout period'
+            }
         except Exception as e:
-            logging.error(f"Error in application health check: {e}")
-            healthy = False
-            
-        return {
-            'healthy': healthy,
-            'checks': checks
-        }
+            return {
+                'status': HealthStatus.UNHEALTHY,
+                'error': str(e),
+                'details': 'MongoDB health check failed'
+            }
+    
+    async def _check_redis_health(self) -> Dict[str, Any]:
+        """
+        Check Redis connectivity and basic operation.
         
-    def _check_dependencies_health(self) -> Dict[str, Any]:
-        """Check dependency health for readiness probe."""
-        dependencies = {}
-        ready = True
+        Returns:
+            Health check result with status and details
+        """
+        try:
+            # Import Redis client (lazy import)
+            import redis
+            
+            start_time = time.time()
+            redis_client = redis.Redis(
+                host=self.config.REDIS_HOST,
+                port=self.config.REDIS_PORT,
+                password=getattr(self.config, 'REDIS_PASSWORD', None),
+                db=self.config.REDIS_DB,
+                socket_timeout=5.0,
+                socket_connect_timeout=5.0
+            )
+            
+            # Test basic operation
+            redis_client.ping()
+            duration = time.time() - start_time
+            
+            return {
+                'status': HealthStatus.HEALTHY,
+                'response_time_ms': duration * 1000,
+                'details': 'Redis connection successful'
+            }
+            
+        except redis.ConnectionError:
+            return {
+                'status': HealthStatus.UNHEALTHY,
+                'error': 'Redis connection failed',
+                'details': 'Could not connect to Redis server'
+            }
+        except Exception as e:
+            return {
+                'status': HealthStatus.UNHEALTHY,
+                'error': str(e),
+                'details': 'Redis health check failed'
+            }
+    
+    async def _check_auth0_health(self) -> Dict[str, Any]:
+        """
+        Check Auth0 service availability.
+        
+        Returns:
+            Health check result with status and details
+        """
+        try:
+            # Import HTTP client (lazy import)
+            import requests
+            
+            start_time = time.time()
+            url = f"https://{self.config.AUTH0_DOMAIN}/.well-known/openid_configuration"
+            
+            response = requests.get(url, timeout=5.0)
+            duration = time.time() - start_time
+            
+            if response.status_code == 200:
+                return {
+                    'status': HealthStatus.HEALTHY,
+                    'response_time_ms': duration * 1000,
+                    'details': 'Auth0 service accessible'
+                }
+            else:
+                return {
+                    'status': HealthStatus.DEGRADED,
+                    'response_time_ms': duration * 1000,
+                    'error': f'Auth0 returned status {response.status_code}',
+                    'details': 'Auth0 service may be experiencing issues'
+                }
+                
+        except requests.RequestException as e:
+            return {
+                'status': HealthStatus.UNHEALTHY,
+                'error': str(e),
+                'details': 'Auth0 service unreachable'
+            }
+        except Exception as e:
+            return {
+                'status': HealthStatus.UNHEALTHY,
+                'error': str(e),
+                'details': 'Auth0 health check failed'
+            }
+    
+    async def perform_liveness_check(self) -> Dict[str, Any]:
+        """
+        Kubernetes liveness probe endpoint per Section 8.1.1.
+        
+        Returns HTTP 200 when Flask application is operational,
+        HTTP 503 when application is in fatal state requiring restart.
+        
+        Returns:
+            Liveness check result with status and details
+        """
+        start_time = time.time()
         
         try:
-            # Run registered dependency checks
+            # Basic application health checks
+            checks = {
+                'process_health': self._check_process_health(),
+                'memory_health': self._check_memory_health(),
+                'thread_health': self._check_thread_health()
+            }
+            
+            # Determine overall liveness status
+            failed_checks = [name for name, result in checks.items() 
+                           if result['status'] != HealthStatus.HEALTHY]
+            
+            duration = time.time() - start_time
+            self.health_check_duration_seconds.labels(check_type='liveness').observe(duration)
+            
+            if not failed_checks:
+                self.health_status_gauge.labels(check_type='liveness').set(1)
+                return {
+                    'status': 'healthy',
+                    'checks': checks,
+                    'duration_ms': duration * 1000,
+                    'timestamp': datetime.utcnow().isoformat()
+                }
+            else:
+                self.health_status_gauge.labels(check_type='liveness').set(0)
+                return {
+                    'status': 'unhealthy',
+                    'checks': checks,
+                    'failed_checks': failed_checks,
+                    'duration_ms': duration * 1000,
+                    'timestamp': datetime.utcnow().isoformat()
+                }
+                
+        except Exception as e:
+            duration = time.time() - start_time
+            self.health_check_duration_seconds.labels(check_type='liveness').observe(duration)
+            self.health_status_gauge.labels(check_type='liveness').set(0)
+            
+            logger.error("Liveness check failed", error=str(e), duration=duration)
+            return {
+                'status': 'unhealthy',
+                'error': str(e),
+                'duration_ms': duration * 1000,
+                'timestamp': datetime.utcnow().isoformat()
+            }
+    
+    async def perform_readiness_check(self) -> Dict[str, Any]:
+        """
+        Kubernetes readiness probe endpoint per Section 8.1.1.
+        
+        Returns HTTP 200 when all critical dependencies are accessible,
+        HTTP 503 when dependencies are unavailable or degraded.
+        
+        Returns:
+            Readiness check result with status and dependency details
+        """
+        start_time = time.time()
+        
+        try:
+            # Check all registered dependencies
+            dependency_results = {}
             for name, check_func in self.dependency_checks.items():
                 try:
-                    start_time = time.time()
-                    result = check_func()
-                    duration = time.time() - start_time
-                    
-                    dependencies[name] = {
-                        'healthy': bool(result),
-                        'duration_ms': round(duration * 1000, 2),
-                        'timestamp': datetime.utcnow().isoformat()
-                    }
-                    
-                    if not result:
-                        ready = False
-                        
+                    dependency_results[name] = await check_func()
                 except Exception as e:
-                    dependencies[name] = {
-                        'healthy': False,
+                    dependency_results[name] = {
+                        'status': HealthStatus.UNHEALTHY,
                         'error': str(e),
-                        'timestamp': datetime.utcnow().isoformat()
+                        'details': f'{name} health check failed'
                     }
-                    ready = False
-                    
-        except Exception as e:
-            logging.error(f"Error in dependency health check: {e}")
-            ready = False
             
-        return {
-            'ready': ready,
-            'dependencies': dependencies
-        }
-        
-    def _get_uptime(self) -> str:
-        """Get application uptime."""
+            # Determine overall readiness status
+            unhealthy_deps = [
+                name for name, result in dependency_results.items()
+                if result['status'] in [HealthStatus.UNHEALTHY, HealthStatus.CRITICAL]
+            ]
+            
+            degraded_deps = [
+                name for name, result in dependency_results.items()
+                if result['status'] == HealthStatus.DEGRADED
+            ]
+            
+            duration = time.time() - start_time
+            self.health_check_duration_seconds.labels(check_type='readiness').observe(duration)
+            
+            if not unhealthy_deps:
+                self.health_status_gauge.labels(check_type='readiness').set(1)
+                status = 'ready' if not degraded_deps else 'degraded'
+                return {
+                    'status': status,
+                    'dependencies': dependency_results,
+                    'degraded_dependencies': degraded_deps,
+                    'duration_ms': duration * 1000,
+                    'timestamp': datetime.utcnow().isoformat()
+                }
+            else:
+                self.health_status_gauge.labels(check_type='readiness').set(0)
+                return {
+                    'status': 'not_ready',
+                    'dependencies': dependency_results,
+                    'unhealthy_dependencies': unhealthy_deps,
+                    'degraded_dependencies': degraded_deps,
+                    'duration_ms': duration * 1000,
+                    'timestamp': datetime.utcnow().isoformat()
+                }
+                
+        except Exception as e:
+            duration = time.time() - start_time
+            self.health_check_duration_seconds.labels(check_type='readiness').observe(duration)
+            self.health_status_gauge.labels(check_type='readiness').set(0)
+            
+            logger.error("Readiness check failed", error=str(e), duration=duration)
+            return {
+                'status': 'not_ready',
+                'error': str(e),
+                'duration_ms': duration * 1000,
+                'timestamp': datetime.utcnow().isoformat()
+            }
+    
+    def _check_process_health(self) -> Dict[str, Any]:
+        """Check basic process health indicators."""
         try:
-            uptime_seconds = time.time() - self.app.config.get('START_TIME', time.time())
-            uptime_timedelta = timedelta(seconds=int(uptime_seconds))
-            return str(uptime_timedelta)
-        except Exception:
-            return "unknown"
+            process = psutil.Process()
+            cpu_percent = process.cpu_percent(interval=0.1)
+            memory_info = process.memory_info()
+            
+            # Check for critical resource constraints
+            if cpu_percent > 95:  # >95% CPU sustained
+                return {
+                    'status': HealthStatus.CRITICAL,
+                    'details': f'Critical CPU usage: {cpu_percent}%'
+                }
+            
+            # Check memory usage (basic threshold)
+            memory_mb = memory_info.rss / 1024 / 1024
+            if memory_mb > 2000:  # >2GB memory usage
+                return {
+                    'status': HealthStatus.DEGRADED,
+                    'details': f'High memory usage: {memory_mb:.1f}MB'
+                }
+            
+            return {
+                'status': HealthStatus.HEALTHY,
+                'details': f'CPU: {cpu_percent}%, Memory: {memory_mb:.1f}MB'
+            }
+            
+        except Exception as e:
+            return {
+                'status': HealthStatus.UNHEALTHY,
+                'error': str(e),
+                'details': 'Process health check failed'
+            }
+    
+    def _check_memory_health(self) -> Dict[str, Any]:
+        """Check memory health and garbage collection status."""
+        try:
+            # Get memory info
+            memory_info = psutil.virtual_memory()
+            
+            # Check GC statistics
+            gc_stats = gc.get_stats()
+            total_collections = sum(stat['collections'] for stat in gc_stats)
+            
+            if memory_info.percent > 90:
+                return {
+                    'status': HealthStatus.CRITICAL,
+                    'details': f'Critical memory usage: {memory_info.percent}%'
+                }
+            elif memory_info.percent > 80:
+                return {
+                    'status': HealthStatus.DEGRADED,
+                    'details': f'High memory usage: {memory_info.percent}%'
+                }
+            
+            return {
+                'status': HealthStatus.HEALTHY,
+                'details': f'Memory: {memory_info.percent}%, GC collections: {total_collections}'
+            }
+            
+        except Exception as e:
+            return {
+                'status': HealthStatus.UNHEALTHY,
+                'error': str(e),
+                'details': 'Memory health check failed'
+            }
+    
+    def _check_thread_health(self) -> Dict[str, Any]:
+        """Check thread health and detect deadlocks."""
+        try:
+            thread_count = threading.active_count()
+            
+            # Basic thread count thresholds
+            if thread_count > 200:
+                return {
+                    'status': HealthStatus.CRITICAL,
+                    'details': f'Critical thread count: {thread_count}'
+                }
+            elif thread_count > 100:
+                return {
+                    'status': HealthStatus.DEGRADED,
+                    'details': f'High thread count: {thread_count}'
+                }
+            
+            return {
+                'status': HealthStatus.HEALTHY,
+                'details': f'Active threads: {thread_count}'
+            }
+            
+        except Exception as e:
+            return {
+                'status': HealthStatus.UNHEALTHY,
+                'error': str(e),
+                'details': 'Thread health check failed'
+            }
 
 
 class PerformanceMonitor:
     """
-    Performance monitoring for ≤10% variance requirement compliance.
+    Performance monitoring class implementing ≤10% variance tracking per Section 0.1.1.
     
-    Tracks performance metrics against Node.js baseline and provides
-    real-time variance analysis for migration success validation.
+    This class continuously monitors Flask application performance against Node.js
+    baselines to ensure migration quality and compliance with performance requirements.
     """
     
-    def __init__(self, metrics: PrometheusMetrics):
-        self.metrics = metrics
-        self.baseline_metrics: Dict[str, Dict] = {}
-        self.current_metrics: Dict[str, Dict] = {}
-        self.variance_threshold = MonitoringConfig.PERFORMANCE_VARIANCE_THRESHOLD
+    def __init__(self, config: BaseConfig, metrics_registry: PrometheusMetricsRegistry):
+        """
+        Initialize performance monitor with baseline tracking.
         
-    def record_request_performance(self, endpoint: str, duration: float, method: str = 'GET'):
-        """Record request performance for variance analysis."""
-        try:
-            # Update current metrics
-            if endpoint not in self.current_metrics:
-                self.current_metrics[endpoint] = {
-                    'durations': [],
-                    'count': 0,
-                    'total_time': 0.0
-                }
-                
-            self.current_metrics[endpoint]['durations'].append(duration)
-            self.current_metrics[endpoint]['count'] += 1
-            self.current_metrics[endpoint]['total_time'] += duration
-            
-            # Keep only recent measurements (sliding window)
-            if len(self.current_metrics[endpoint]['durations']) > 100:
-                old_duration = self.current_metrics[endpoint]['durations'].pop(0)
-                self.current_metrics[endpoint]['total_time'] -= old_duration
-                self.current_metrics[endpoint]['count'] = len(self.current_metrics[endpoint]['durations'])
-                
-            # Calculate variance if baseline exists
-            if endpoint in self.baseline_metrics:
-                variance = self._calculate_variance(endpoint)
-                self.metrics.performance_variance.labels(endpoint=endpoint).set(variance)
-                
-                # Check for threshold violations
-                if abs(variance) > self.variance_threshold:
-                    logging.warning(
-                        f"Performance variance threshold exceeded for {endpoint}: "
-                        f"{variance:.2f}% (threshold: ±{self.variance_threshold}%)"
-                    )
-                    
-        except Exception as e:
-            logging.error(f"Error recording performance: {e}")
-            
-    def set_baseline_metrics(self, endpoint: str, baseline_data: Dict):
-        """Set Node.js baseline metrics for comparison."""
-        self.baseline_metrics[endpoint] = baseline_data
+        Args:
+            config: Application configuration instance
+            metrics_registry: Prometheus metrics registry for performance metrics
+        """
+        self.config = config
+        self.metrics = metrics_registry
+        self.baselines: Dict[str, PerformanceBaseline] = {}
+        self.performance_history: List[Dict[str, Any]] = []
+        self.alert_callbacks: List[Callable] = []
         
-    def _calculate_variance(self, endpoint: str) -> float:
-        """Calculate performance variance percentage against baseline."""
-        try:
-            current = self.current_metrics.get(endpoint, {})
-            baseline = self.baseline_metrics.get(endpoint, {})
-            
-            if not current.get('count') or not baseline.get('avg_duration'):
-                return 0.0
-                
-            current_avg = current['total_time'] / current['count']
-            baseline_avg = baseline['avg_duration']
-            
-            variance = ((current_avg - baseline_avg) / baseline_avg) * 100
-            return variance
-            
-        except Exception as e:
-            logging.error(f"Error calculating variance: {e}")
-            return 0.0
-            
-    def get_performance_summary(self) -> Dict[str, Any]:
-        """Get comprehensive performance summary."""
-        summary = {
-            'endpoints': {},
-            'overall_compliance': True,
-            'timestamp': datetime.utcnow().isoformat()
+        # Performance monitoring thread
+        self.monitoring_active = False
+        self.monitoring_thread: Optional[threading.Thread] = None
+        
+        # Load Node.js baselines from configuration or external source
+        self._load_nodejs_baselines()
+        
+        logger.info("Performance monitor initialized", 
+                   baseline_endpoints=len(self.baselines))
+    
+    def _load_nodejs_baselines(self) -> None:
+        """
+        Load Node.js performance baselines for comparison.
+        
+        In production, these would be loaded from a configuration file or database
+        containing historical Node.js performance metrics.
+        """
+        # Default baselines for common endpoints (these would be real data in production)
+        default_baselines = {
+            '/api/health': PerformanceBaseline('/api/health', 5.0, 1000.0),
+            '/api/auth/login': PerformanceBaseline('/api/auth/login', 150.0, 50.0),
+            '/api/users': PerformanceBaseline('/api/users', 75.0, 100.0),
+            '/api/data/process': PerformanceBaseline('/api/data/process', 250.0, 25.0),
         }
         
-        for endpoint in self.current_metrics:
-            if endpoint in self.baseline_metrics:
-                variance = self._calculate_variance(endpoint)
-                compliant = abs(variance) <= self.variance_threshold
+        # Load from configuration if available
+        baseline_config = getattr(self.config, 'NODEJS_PERFORMANCE_BASELINES', {})
+        
+        for endpoint, baseline_data in baseline_config.items():
+            self.baselines[endpoint] = PerformanceBaseline(
+                endpoint=endpoint,
+                nodejs_avg_response_time=baseline_data['avg_response_time'],
+                nodejs_throughput=baseline_data['throughput']
+            )
+        
+        # Use defaults for missing baselines
+        for endpoint, baseline in default_baselines.items():
+            if endpoint not in self.baselines:
+                self.baselines[endpoint] = baseline
+    
+    def track_request_performance(self, endpoint: str, response_time_ms: float, 
+                                status_code: int) -> Dict[str, Any]:
+        """
+        Track individual request performance against baseline.
+        
+        Args:
+            endpoint: API endpoint being tracked
+            response_time_ms: Response time in milliseconds
+            status_code: HTTP status code
+            
+        Returns:
+            Performance analysis result with variance and compliance status
+        """
+        # Record Flask migration request
+        self.metrics.flask_migration_requests_total.labels(endpoint=endpoint).inc()
+        self.metrics.endpoint_response_time_comparison.labels(
+            endpoint=endpoint,
+            implementation='flask_migration'
+        ).observe(response_time_ms)
+        
+        # Check against baseline if available
+        if endpoint in self.baselines:
+            baseline = self.baselines[endpoint]
+            variance = baseline.calculate_variance(response_time_ms)
+            is_compliant = baseline.is_within_tolerance(response_time_ms)
+            
+            # Update performance variance metric
+            self.metrics.performance_variance_percentage.labels(
+                endpoint=endpoint
+            ).set(variance * 100)
+            
+            # Update compliance status
+            if abs(variance) <= 0.05:  # Within 5%
+                self.metrics.performance_compliance_status.state('compliant')
+            elif abs(variance) <= 0.10:  # 5-10% variance
+                self.metrics.performance_compliance_status.state('warning')
+            else:  # >10% variance
+                self.metrics.performance_compliance_status.state('violation')
+            
+            # Calculate and update quality score
+            quality_score = max(0, 100 - (abs(variance) * 500))  # Scale variance to 0-100
+            self.metrics.migration_quality_score.set(quality_score)
+            
+            # Performance analysis result
+            performance_result = {
+                'endpoint': endpoint,
+                'response_time_ms': response_time_ms,
+                'baseline_response_time_ms': baseline.nodejs_avg_response_time,
+                'variance_percentage': variance * 100,
+                'is_compliant': is_compliant,
+                'quality_score': quality_score,
+                'timestamp': datetime.utcnow().isoformat()
+            }
+            
+            # Alert if variance exceeds threshold
+            if not is_compliant:
+                self._trigger_performance_alert(performance_result)
+            
+            # Store in performance history
+            self.performance_history.append(performance_result)
+            if len(self.performance_history) > 1000:  # Limit history size
+                self.performance_history = self.performance_history[-1000:]
+            
+            return performance_result
+        
+        else:
+            # No baseline available - record for future baseline creation
+            logger.warning("No baseline available for endpoint", endpoint=endpoint)
+            return {
+                'endpoint': endpoint,
+                'response_time_ms': response_time_ms,
+                'baseline_available': False,
+                'timestamp': datetime.utcnow().isoformat()
+            }
+    
+    def _trigger_performance_alert(self, performance_result: Dict[str, Any]) -> None:
+        """
+        Trigger performance alerts when variance exceeds threshold.
+        
+        Args:
+            performance_result: Performance analysis result triggering alert
+        """
+        alert_data = {
+            'type': 'performance_variance_violation',
+            'severity': AlertSeverity.CRITICAL if abs(performance_result['variance_percentage']) > 15 
+                       else AlertSeverity.WARNING,
+            'endpoint': performance_result['endpoint'],
+            'variance_percentage': performance_result['variance_percentage'],
+            'response_time_ms': performance_result['response_time_ms'],
+            'baseline_ms': performance_result['baseline_response_time_ms'],
+            'quality_score': performance_result['quality_score'],
+            'timestamp': performance_result['timestamp']
+        }
+        
+        # Call registered alert callbacks
+        for callback in self.alert_callbacks:
+            try:
+                callback(alert_data)
+            except Exception as e:
+                logger.error("Alert callback failed", error=str(e), alert_type=alert_data['type'])
+        
+        logger.warning("Performance variance alert triggered", **alert_data)
+    
+    def register_alert_callback(self, callback: Callable[[Dict[str, Any]], None]) -> None:
+        """
+        Register callback function for performance alerts.
+        
+        Args:
+            callback: Function to call when performance alerts are triggered
+        """
+        self.alert_callbacks.append(callback)
+        logger.info("Performance alert callback registered")
+    
+    def get_performance_summary(self) -> Dict[str, Any]:
+        """
+        Get comprehensive performance summary for monitoring dashboard.
+        
+        Returns:
+            Performance summary with compliance statistics and trends
+        """
+        if not self.performance_history:
+            return {
+                'status': 'no_data',
+                'message': 'No performance data available'
+            }
+        
+        # Calculate summary statistics
+        recent_history = self.performance_history[-100:]  # Last 100 requests
+        total_requests = len(self.performance_history)
+        compliant_requests = sum(1 for r in recent_history if r.get('is_compliant', False))
+        avg_quality_score = sum(r.get('quality_score', 0) for r in recent_history) / len(recent_history)
+        
+        # Variance statistics
+        variances = [abs(r.get('variance_percentage', 0)) for r in recent_history]
+        avg_variance = sum(variances) / len(variances) if variances else 0
+        max_variance = max(variances) if variances else 0
+        
+        # Endpoint-specific summary
+        endpoint_stats = {}
+        for result in recent_history:
+            endpoint = result['endpoint']
+            if endpoint not in endpoint_stats:
+                endpoint_stats[endpoint] = {
+                    'request_count': 0,
+                    'compliant_count': 0,
+                    'avg_variance': 0,
+                    'avg_response_time': 0
+                }
+            
+            stats = endpoint_stats[endpoint]
+            stats['request_count'] += 1
+            if result.get('is_compliant', False):
+                stats['compliant_count'] += 1
+            stats['avg_variance'] += abs(result.get('variance_percentage', 0))
+            stats['avg_response_time'] += result['response_time_ms']
+        
+        # Calculate averages for endpoints
+        for stats in endpoint_stats.values():
+            if stats['request_count'] > 0:
+                stats['compliance_rate'] = stats['compliant_count'] / stats['request_count']
+                stats['avg_variance'] /= stats['request_count']
+                stats['avg_response_time'] /= stats['request_count']
+        
+        return {
+            'status': 'active',
+            'summary': {
+                'total_requests_tracked': total_requests,
+                'recent_requests_analyzed': len(recent_history),
+                'compliance_rate': compliant_requests / len(recent_history),
+                'average_quality_score': avg_quality_score,
+                'average_variance_percentage': avg_variance,
+                'maximum_variance_percentage': max_variance,
+                'baselines_configured': len(self.baselines)
+            },
+            'endpoint_statistics': endpoint_stats,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+
+
+class SystemMetricsCollector:
+    """
+    System metrics collector implementing comprehensive resource monitoring
+    per Section 6.5.1.1 and Section 6.5.4.2.
+    
+    This class collects system-level metrics including CPU, memory, disk I/O,
+    network I/O, and Python-specific metrics for container and host monitoring.
+    """
+    
+    def __init__(self, config: BaseConfig, metrics_registry: PrometheusMetricsRegistry):
+        """
+        Initialize system metrics collector.
+        
+        Args:
+            config: Application configuration instance
+            metrics_registry: Prometheus metrics registry for system metrics
+        """
+        self.config = config
+        self.metrics = metrics_registry
+        self.collection_active = False
+        self.collection_thread: Optional[threading.Thread] = None
+        self.collection_interval = 15.0  # 15-second intervals per Section 6.5.1.1
+        
+        # GC monitoring setup
+        self._setup_gc_monitoring()
+        
+        logger.info("System metrics collector initialized")
+    
+    def _setup_gc_monitoring(self) -> None:
+        """Setup Python garbage collection monitoring per Section 6.5.2.2."""
+        # Store original GC callbacks for restoration
+        self.original_gc_callbacks = gc.callbacks.copy()
+        
+        # Add GC monitoring callback
+        gc.callbacks.append(self._gc_callback)
+        
+        # Enable GC debugging for detailed metrics
+        gc.set_debug(gc.DEBUG_STATS)
+    
+    def _gc_callback(self, phase: str, info: Dict[str, Any]) -> None:
+        """
+        Garbage collection callback for pause time monitoring.
+        
+        Args:
+            phase: GC phase identifier
+            info: GC information dictionary
+        """
+        try:
+            # Measure GC pause time (simplified implementation)
+            start_time = time.time()
+            
+            # Get GC generation from info or default to 0
+            generation = str(info.get('generation', 0))
+            
+            # Record GC metrics
+            self.metrics.python_gc_collections_total.labels(generation=generation).inc()
+            
+            # Note: Actual pause time measurement would require more sophisticated
+            # instrumentation. This is a simplified implementation.
+            pause_time_ms = 1.0  # Placeholder - would be measured properly
+            self.metrics.python_gc_pause_time_milliseconds.labels(
+                generation=generation
+            ).observe(pause_time_ms)
+            
+        except Exception as e:
+            logger.error("GC callback failed", error=str(e))
+    
+    def start_collection(self) -> None:
+        """Start continuous system metrics collection."""
+        if self.collection_active:
+            logger.warning("System metrics collection already active")
+            return
+        
+        self.collection_active = True
+        self.collection_thread = threading.Thread(
+            target=self._collection_loop,
+            name="SystemMetricsCollector",
+            daemon=True
+        )
+        self.collection_thread.start()
+        
+        logger.info("System metrics collection started", 
+                   interval=self.collection_interval)
+    
+    def stop_collection(self) -> None:
+        """Stop system metrics collection."""
+        self.collection_active = False
+        
+        if self.collection_thread and self.collection_thread.is_alive():
+            self.collection_thread.join(timeout=5.0)
+        
+        # Restore original GC callbacks
+        gc.callbacks.clear()
+        gc.callbacks.extend(self.original_gc_callbacks)
+        
+        logger.info("System metrics collection stopped")
+    
+    def _collection_loop(self) -> None:
+        """Main collection loop for system metrics."""
+        logger.info("System metrics collection loop started")
+        
+        while self.collection_active:
+            try:
+                self._collect_cpu_metrics()
+                self._collect_memory_metrics()
+                self._collect_process_metrics()
+                self._collect_gc_metrics()
                 
-                summary['endpoints'][endpoint] = {
-                    'variance_percent': variance,
-                    'compliant': compliant,
-                    'current_avg_ms': (
-                        self.current_metrics[endpoint]['total_time'] / 
-                        self.current_metrics[endpoint]['count'] * 1000
-                    ) if self.current_metrics[endpoint]['count'] > 0 else 0,
-                    'baseline_avg_ms': self.baseline_metrics[endpoint].get('avg_duration', 0) * 1000,
-                    'request_count': self.current_metrics[endpoint]['count']
+                # Sleep for collection interval
+                time.sleep(self.collection_interval)
+                
+            except Exception as e:
+                logger.error("System metrics collection error", error=str(e))
+                time.sleep(self.collection_interval)
+        
+        logger.info("System metrics collection loop ended")
+    
+    def _collect_cpu_metrics(self) -> None:
+        """Collect CPU utilization metrics per Section 6.5.1.1."""
+        try:
+            # Overall CPU utilization
+            cpu_percent = psutil.cpu_percent(interval=None)
+            self.metrics.cpu_utilization_percentage.labels(cpu_type='total').set(cpu_percent)
+            
+            # Per-core CPU utilization (average)
+            cpu_per_core = psutil.cpu_percent(interval=None, percpu=True)
+            avg_per_core = sum(cpu_per_core) / len(cpu_per_core) if cpu_per_core else 0
+            self.metrics.cpu_utilization_percentage.labels(cpu_type='per_core').set(avg_per_core)
+            
+        except Exception as e:
+            logger.error("CPU metrics collection failed", error=str(e))
+    
+    def _collect_memory_metrics(self) -> None:
+        """Collect memory utilization metrics."""
+        try:
+            # System memory
+            memory = psutil.virtual_memory()
+            self.metrics.memory_usage_percentage.set(memory.percent)
+            self.metrics.memory_usage_bytes.labels(memory_type='total').set(memory.total)
+            self.metrics.memory_usage_bytes.labels(memory_type='available').set(memory.available)
+            self.metrics.memory_usage_bytes.labels(memory_type='used').set(memory.used)
+            
+            # Process memory
+            process = psutil.Process()
+            memory_info = process.memory_info()
+            self.metrics.memory_usage_bytes.labels(memory_type='rss').set(memory_info.rss)
+            self.metrics.memory_usage_bytes.labels(memory_type='vms').set(memory_info.vms)
+            
+        except Exception as e:
+            logger.error("Memory metrics collection failed", error=str(e))
+    
+    def _collect_process_metrics(self) -> None:
+        """Collect process-level metrics."""
+        try:
+            process = psutil.Process()
+            
+            # CPU times
+            cpu_times = process.cpu_times()
+            self.metrics.process_cpu_seconds_total.labels(mode='user').inc(cpu_times.user)
+            self.metrics.process_cpu_seconds_total.labels(mode='system').inc(cpu_times.system)
+            
+            # File descriptors
+            try:
+                num_fds = process.num_fds()
+                self.metrics.process_open_file_descriptors.set(num_fds)
+            except (AttributeError, psutil.AccessDenied):
+                # Not available on all platforms
+                pass
+            
+            # Thread count
+            num_threads = process.num_threads()
+            self.metrics.process_threads_total.set(num_threads)
+            
+        except Exception as e:
+            logger.error("Process metrics collection failed", error=str(e))
+    
+    def _collect_gc_metrics(self) -> None:
+        """Collect Python garbage collection metrics."""
+        try:
+            # GC statistics
+            gc_stats = gc.get_stats()
+            
+            for i, stats in enumerate(gc_stats):
+                generation = str(i)
+                collections = stats.get('collections', 0)
+                collected = stats.get('collected', 0)
+                
+                # Update collection metrics (these are cumulative)
+                # Note: We only increment based on new collections since last check
+                # This would require state tracking in a production implementation
+                
+        except Exception as e:
+            logger.error("GC metrics collection failed", error=str(e))
+
+
+class APMIntegration:
+    """
+    Application Performance Monitoring integration supporting enterprise APM tools
+    per Section 6.5.1.1 and Section 6.5.4.3.
+    
+    This class provides unified APM integration for Datadog, New Relic, and other
+    enterprise monitoring solutions with environment-specific configuration.
+    """
+    
+    def __init__(self, config: BaseConfig):
+        """
+        Initialize APM integration based on configuration.
+        
+        Args:
+            config: Application configuration instance
+        """
+        self.config = config
+        self.apm_enabled = getattr(config, 'APM_ENABLED', False)
+        self.apm_client = None
+        self.tracer = None
+        
+        if self.apm_enabled:
+            self._initialize_apm_client()
+        
+        logger.info("APM integration initialized", enabled=self.apm_enabled)
+    
+    def _initialize_apm_client(self) -> None:
+        """Initialize APM client based on configuration."""
+        apm_provider = os.getenv('APM_PROVIDER', 'datadog').lower()
+        
+        try:
+            if apm_provider == 'datadog':
+                self._init_datadog_apm()
+            elif apm_provider == 'newrelic':
+                self._init_newrelic_apm()
+            else:
+                logger.warning("Unknown APM provider", provider=apm_provider)
+                
+        except Exception as e:
+            logger.error("APM initialization failed", provider=apm_provider, error=str(e))
+    
+    def _init_datadog_apm(self) -> None:
+        """Initialize Datadog APM integration per Section 6.5.4.3."""
+        try:
+            from ddtrace import patch_all, tracer
+            from ddtrace.contrib.flask import unpatch
+            
+            # Configure Datadog tracer
+            tracer.configure(
+                hostname=os.getenv('DD_AGENT_HOST', 'localhost'),
+                port=int(os.getenv('DD_TRACE_AGENT_PORT', 8126)),
+                
+                # Service configuration per Section 6.5.4.3
+                service_name=self.config.APM_SERVICE_NAME,
+                service_version=self.config.APP_VERSION,
+                environment=self.config.APM_ENVIRONMENT,
+                
+                # Sampling configuration
+                sampler=self._get_datadog_sampler(),
+                
+                # Performance settings
+                priority_sampling=True,
+                analytics_enabled=True,
+                collect_metrics=True
+            )
+            
+            # Auto-instrument Flask and dependencies
+            patch_all()
+            
+            self.tracer = tracer
+            self.apm_client = 'datadog'
+            
+            logger.info("Datadog APM initialized",
+                       service=self.config.APM_SERVICE_NAME,
+                       environment=self.config.APM_ENVIRONMENT)
+            
+        except ImportError:
+            logger.error("Datadog APM library not available (ddtrace)")
+        except Exception as e:
+            logger.error("Datadog APM initialization failed", error=str(e))
+    
+    def _get_datadog_sampler(self):
+        """Get environment-specific Datadog sampler configuration."""
+        try:
+            from ddtrace.sampling import PrioritySampler, RateSampler
+            
+            # Environment-specific sampling rates per Section 6.5.4.3
+            sampling_rates = {
+                'production': 0.1,
+                'staging': 0.5,
+                'development': 1.0
+            }
+            
+            sample_rate = sampling_rates.get(self.config.FLASK_ENV, 0.1)
+            return RateSampler(sample_rate)
+            
+        except ImportError:
+            logger.warning("Datadog sampling configuration failed")
+            return None
+    
+    def _init_newrelic_apm(self) -> None:
+        """Initialize New Relic APM integration per Section 6.5.4.3."""
+        try:
+            import newrelic.agent
+            
+            # Configure New Relic
+            config_file = os.getenv('NEW_RELIC_CONFIG_FILE', 'newrelic.ini')
+            environment = self.config.APM_ENVIRONMENT
+            
+            if os.path.exists(config_file):
+                newrelic.agent.initialize(config_file, environment)
+            else:
+                # Configure programmatically
+                newrelic_settings = {
+                    'app_name': self.config.APM_SERVICE_NAME,
+                    'license_key': os.getenv('NEW_RELIC_LICENSE_KEY'),
+                    'environment': environment,
+                    'capture_params': True,
+                    'transaction_tracer.enabled': True,
+                    'transaction_tracer.transaction_threshold': 'apdex_f',
+                    'transaction_tracer.record_sql': 'obfuscated',
+                    'error_collector.enabled': True,
+                    'browser_monitoring.auto_instrument': False,
+                    'thread_profiler.enabled': True
                 }
                 
-                if not compliant:
-                    summary['overall_compliance'] = False
-                    
-        return summary
-
-
-class MonitoringMiddleware:
-    """
-    Flask middleware for comprehensive request monitoring and metrics collection.
+                newrelic.agent.initialize(
+                    config_file=None,
+                    environment=environment,
+                    **newrelic_settings
+                )
+            
+            self.apm_client = 'newrelic'
+            
+            logger.info("New Relic APM initialized",
+                       service=self.config.APM_SERVICE_NAME,
+                       environment=environment)
+            
+        except ImportError:
+            logger.error("New Relic APM library not available (newrelic)")
+        except Exception as e:
+            logger.error("New Relic APM initialization failed", error=str(e))
     
-    Integrates with Prometheus metrics, APM tracing, and performance monitoring
-    to provide end-to-end observability for the Flask application.
-    """
-    
-    def __init__(self, app: Flask, metrics: PrometheusMetrics, performance_monitor: PerformanceMonitor):
-        self.app = app
-        self.metrics = metrics
-        self.performance_monitor = performance_monitor
-        self._setup_middleware()
+    def trace_function(self, operation_name: str):
+        """
+        Decorator for tracing function execution.
         
-    def _setup_middleware(self):
-        """Set up Flask request/response middleware."""
+        Args:
+            operation_name: Name of the operation being traced
+            
+        Returns:
+            Decorator function
+        """
+        def decorator(func):
+            def wrapper(*args, **kwargs):
+                if not self.apm_enabled or not self.tracer:
+                    return func(*args, **kwargs)
+                
+                with self.tracer.trace(operation_name) as span:
+                    try:
+                        span.set_tag('function', func.__name__)
+                        span.set_tag('module', func.__module__)
+                        result = func(*args, **kwargs)
+                        span.set_tag('success', True)
+                        return result
+                    except Exception as e:
+                        span.set_tag('success', False)
+                        span.set_tag('error', str(e))
+                        raise
+            return wrapper
+        return decorator
+    
+    def add_custom_attribute(self, key: str, value: Any) -> None:
+        """
+        Add custom attribute to current trace.
+        
+        Args:
+            key: Attribute key
+            value: Attribute value
+        """
+        if not self.apm_enabled:
+            return
+        
+        try:
+            if self.apm_client == 'datadog' and self.tracer:
+                current_span = self.tracer.current_span()
+                if current_span:
+                    current_span.set_tag(key, value)
+            elif self.apm_client == 'newrelic':
+                import newrelic.agent
+                newrelic.agent.add_custom_attribute(key, value)
+                
+        except Exception as e:
+            logger.debug("Failed to add custom attribute", key=key, error=str(e))
+
+
+class MonitoringConfiguration:
+    """
+    Main monitoring configuration class that orchestrates all monitoring components
+    and provides unified configuration management per Section 3.6 and Section 6.5.
+    
+    This class serves as the central configuration point for all monitoring and
+    observability features in the Flask application migration.
+    """
+    
+    def __init__(self, app: Optional[Flask] = None, config: Optional[BaseConfig] = None):
+        """
+        Initialize comprehensive monitoring configuration.
+        
+        Args:
+            app: Flask application instance (optional for factory pattern)
+            config: Application configuration instance
+        """
+        self.app = app
+        self.config = config or BaseConfig()
+        
+        # Initialize monitoring components
+        self.metrics_registry: Optional[PrometheusMetricsRegistry] = None
+        self.health_manager: Optional[HealthCheckManager] = None
+        self.performance_monitor: Optional[PerformanceMonitor] = None
+        self.system_collector: Optional[SystemMetricsCollector] = None
+        self.apm_integration: Optional[APMIntegration] = None
+        
+        # Monitoring state
+        self.monitoring_active = False
+        
+        if app is not None:
+            self.init_app(app)
+        
+        logger.info("Monitoring configuration initialized")
+    
+    def init_app(self, app: Flask) -> None:
+        """
+        Initialize monitoring for Flask application (factory pattern support).
+        
+        Args:
+            app: Flask application instance
+        """
+        self.app = app
+        
+        # Store monitoring configuration in app
+        app.monitoring = self
+        
+        # Initialize all monitoring components
+        self._init_metrics_registry()
+        self._init_health_manager()
+        self._init_performance_monitor()
+        self._init_system_collector()
+        self._init_apm_integration()
+        
+        # Register Flask routes and middleware
+        self._register_health_endpoints()
+        self._register_metrics_endpoint()
+        self._register_monitoring_middleware()
+        
+        # Start monitoring services
+        self.start_monitoring()
+        
+        logger.info("Flask monitoring configuration completed",
+                   app_name=app.name,
+                   environment=self.config.FLASK_ENV)
+    
+    def _init_metrics_registry(self) -> None:
+        """Initialize Prometheus metrics registry."""
+        self.metrics_registry = PrometheusMetricsRegistry(
+            config=self.config,
+            enable_multiprocess=True  # Enable for WSGI servers
+        )
+    
+    def _init_health_manager(self) -> None:
+        """Initialize health check manager."""
+        self.health_manager = HealthCheckManager(
+            config=self.config,
+            metrics_registry=self.metrics_registry
+        )
+    
+    def _init_performance_monitor(self) -> None:
+        """Initialize performance monitoring."""
+        self.performance_monitor = PerformanceMonitor(
+            config=self.config,
+            metrics_registry=self.metrics_registry
+        )
+    
+    def _init_system_collector(self) -> None:
+        """Initialize system metrics collector."""
+        self.system_collector = SystemMetricsCollector(
+            config=self.config,
+            metrics_registry=self.metrics_registry
+        )
+    
+    def _init_apm_integration(self) -> None:
+        """Initialize APM integration."""
+        self.apm_integration = APMIntegration(config=self.config)
+    
+    def _register_health_endpoints(self) -> None:
+        """Register Kubernetes health check endpoints per Section 8.1.1."""
+        
+        @self.app.route('/health/live')
+        async def liveness_probe():
+            """Kubernetes liveness probe endpoint."""
+            try:
+                result = await self.health_manager.perform_liveness_check()
+                status_code = 200 if result['status'] == 'healthy' else 503
+                return jsonify(result), status_code
+            except Exception as e:
+                logger.error("Liveness probe failed", error=str(e))
+                return jsonify({
+                    'status': 'unhealthy',
+                    'error': str(e),
+                    'timestamp': datetime.utcnow().isoformat()
+                }), 503
+        
+        @self.app.route('/health/ready')
+        async def readiness_probe():
+            """Kubernetes readiness probe endpoint."""
+            try:
+                result = await self.health_manager.perform_readiness_check()
+                status_code = 200 if result['status'] in ['ready', 'degraded'] else 503
+                return jsonify(result), status_code
+            except Exception as e:
+                logger.error("Readiness probe failed", error=str(e))
+                return jsonify({
+                    'status': 'not_ready',
+                    'error': str(e),
+                    'timestamp': datetime.utcnow().isoformat()
+                }), 503
+        
+        @self.app.route('/health')
+        def basic_health():
+            """Basic health endpoint for load balancer integration."""
+            return jsonify({
+                'status': 'healthy',
+                'service': self.config.APP_NAME,
+                'version': self.config.APP_VERSION,
+                'timestamp': datetime.utcnow().isoformat()
+            })
+    
+    def _register_metrics_endpoint(self) -> None:
+        """Register Prometheus metrics endpoint."""
+        
+        @self.app.route('/metrics')
+        def prometheus_metrics():
+            """Prometheus metrics endpoint."""
+            try:
+                if self.metrics_registry.enable_multiprocess:
+                    # Multiprocess metrics collection
+                    registry = CollectorRegistry()
+                    multiprocess.MultiProcessCollector(registry)
+                    metrics_data = generate_latest(registry)
+                else:
+                    metrics_data = generate_latest(self.metrics_registry.registry)
+                
+                return Response(
+                    metrics_data,
+                    mimetype=CONTENT_TYPE_LATEST,
+                    headers={'Cache-Control': 'no-cache, no-store, must-revalidate'}
+                )
+            except Exception as e:
+                logger.error("Metrics collection failed", error=str(e))
+                return Response("# Metrics collection failed\n", 
+                              mimetype=CONTENT_TYPE_LATEST), 500
+    
+    def _register_monitoring_middleware(self) -> None:
+        """Register monitoring middleware for request tracking."""
         
         @self.app.before_request
-        def before_request():
-            """Before request processing - start timing and set up context."""
-            g.start_time = time.time()
-            g.request_size = request.content_length or 0
+        def before_request_monitoring():
+            """Pre-request monitoring setup."""
+            g.request_start_time = time.time()
+            g.request_id = os.urandom(16).hex()
             
-            # Record request metrics
-            endpoint = request.endpoint or 'unknown'
-            method = request.method
-            
-            self.metrics.request_size.labels(
-                method=method,
-                endpoint=endpoint
-            ).observe(g.request_size)
-            
-        @self.app.after_request
-        def after_request(response):
-            """After request processing - record metrics and performance data."""
-            try:
-                # Calculate request duration
-                duration = time.time() - getattr(g, 'start_time', time.time())
+            # Track request metrics
+            if self.metrics_registry:
+                endpoint = request.endpoint or 'unknown'
+                method = request.method
                 
-                # Get request context
+                # Record request size
+                content_length = request.content_length or 0
+                self.metrics_registry.http_request_size_bytes.labels(
+                    method=method,
+                    endpoint=endpoint
+                ).observe(content_length)
+        
+        @self.app.after_request
+        def after_request_monitoring(response):
+            """Post-request monitoring and metrics collection."""
+            try:
+                if not hasattr(g, 'request_start_time'):
+                    return response
+                
+                # Calculate request duration
+                duration = time.time() - g.request_start_time
                 endpoint = request.endpoint or 'unknown'
                 method = request.method
                 status_code = str(response.status_code)
                 
-                # Record Prometheus metrics
-                self.metrics.request_count.labels(
-                    method=method,
-                    endpoint=endpoint,
-                    status_code=status_code
-                ).inc()
-                
-                self.metrics.request_duration.labels(
-                    method=method,
-                    endpoint=endpoint
-                ).observe(duration)
-                
-                # Record response size
-                response_size = len(response.get_data())
-                self.metrics.response_size.labels(
-                    method=method,
-                    endpoint=endpoint
-                ).observe(response_size)
-                
-                # Record performance data for variance analysis
-                if MonitoringConfig.PERFORMANCE_BASELINE_TRACKING:
-                    self.performance_monitor.record_request_performance(
+                if self.metrics_registry:
+                    # Record request metrics
+                    self.metrics_registry.http_requests_total.labels(
+                        method=method,
                         endpoint=endpoint,
-                        duration=duration,
-                        method=method
-                    )
+                        status_code=status_code
+                    ).inc()
                     
-                # Update migration-specific metrics
-                self.metrics.flask_migration_requests.labels(endpoint=endpoint).inc()
+                    self.metrics_registry.http_request_duration_seconds.labels(
+                        method=method,
+                        endpoint=endpoint
+                    ).observe(duration)
+                    
+                    # Record response size
+                    response_size = len(response.get_data()) if response.direct_passthrough else 0
+                    self.metrics_registry.http_response_size_bytes.labels(
+                        method=method,
+                        endpoint=endpoint
+                    ).observe(response_size)
+                
+                # Performance monitoring
+                if self.performance_monitor and request.endpoint:
+                    self.performance_monitor.track_request_performance(
+                        endpoint=request.endpoint,
+                        response_time_ms=duration * 1000,
+                        status_code=response.status_code
+                    )
+                
+                # APM integration
+                if self.apm_integration and self.apm_integration.apm_enabled:
+                    self.apm_integration.add_custom_attribute('request_id', g.request_id)
+                    self.apm_integration.add_custom_attribute('response_time_ms', duration * 1000)
+                
+                return response
                 
             except Exception as e:
-                logging.error(f"Error in after_request middleware: {e}")
-                
-            return response
-            
-        @self.app.errorhandler(Exception)
-        def handle_exception(e):
-            """Handle unhandled exceptions and record error metrics."""
-            try:
-                endpoint = request.endpoint or 'unknown'
-                exception_type = type(e).__name__
-                
-                self.metrics.exception_count.labels(
-                    exception_type=exception_type,
-                    endpoint=endpoint
-                ).inc()
-                
-                logging.error(f"Unhandled exception in {endpoint}: {e}")
-                
-            except Exception as log_error:
-                logging.error(f"Error in exception handler: {log_error}")
-                
-            # Re-raise the original exception
-            raise e
-
-
-def setup_prometheus_metrics(app: Flask) -> PrometheusMetrics:
-    """
-    Set up Prometheus metrics collection for Flask application.
+                logger.error("Request monitoring failed", error=str(e))
+                return response
     
-    Args:
-        app: Flask application instance
+    def start_monitoring(self) -> None:
+        """Start all monitoring services."""
+        if self.monitoring_active:
+            logger.warning("Monitoring already active")
+            return
         
-    Returns:
-        PrometheusMetrics: Configured metrics collector
-    """
-    if not MonitoringConfig.PROMETHEUS_ENABLED:
-        return None
-        
-    try:
-        # Initialize metrics collector
-        metrics = PrometheusMetrics()
-        
-        # Set up metrics endpoint
-        @app.route(MonitoringConfig.PROMETHEUS_METRICS_PATH)
-        def metrics_endpoint():
-            """Prometheus metrics export endpoint."""
-            try:
-                # Handle multiprocess mode
-                if MonitoringConfig.PROMETHEUS_MULTIPROC_DIR:
-                    registry = CollectorRegistry()
-                    multiprocess.MultiProcessCollector(registry)
-                    return Response(
-                        generate_latest(registry),
-                        mimetype=CONTENT_TYPE_LATEST
-                    )
-                else:
-                    return Response(
-                        generate_latest(metrics.registry),
-                        mimetype=CONTENT_TYPE_LATEST
-                    )
-            except Exception as e:
-                logging.error(f"Error generating metrics: {e}")
-                return Response("Error generating metrics", status=500)
-                
-        logging.info("Prometheus metrics collection initialized")
-        return metrics
-        
-    except Exception as e:
-        logging.error(f"Error setting up Prometheus metrics: {e}")
-        return None
-
-
-def setup_apm_integration(app: Flask) -> bool:
-    """
-    Set up APM integration for distributed tracing and performance monitoring.
-    
-    Args:
-        app: Flask application instance
-        
-    Returns:
-        bool: True if APM integration was successful
-    """
-    if not MonitoringConfig.APM_ENABLED:
-        return False
-        
-    apm_initialized = False
-    
-    # Datadog APM integration
-    if MonitoringConfig.DATADOG_APM_ENABLED and DATADOG_AVAILABLE:
         try:
-            # Configure Datadog tracer
-            ddtrace.config.flask['service_name'] = MonitoringConfig.DATADOG_SERVICE_NAME
-            ddtrace.config.flask['analytics_enabled'] = True
-            ddtrace.config.flask['analytics_sample_rate'] = MonitoringConfig.DATADOG_SAMPLE_RATE
+            # Start system metrics collection
+            if self.system_collector:
+                self.system_collector.start_collection()
             
-            # Patch Flask and other libraries
-            patch_all()
-            
-            # Initialize trace middleware
-            TraceMiddleware(app, tracer, service=MonitoringConfig.DATADOG_SERVICE_NAME)
-            
-            # Set global tags
-            tracer.set_tags({
-                'service': MonitoringConfig.DATADOG_SERVICE_NAME,
-                'env': MonitoringConfig.DATADOG_ENV,
-                'version': MonitoringConfig.DATADOG_VERSION
-            })
-            
-            logging.info("Datadog APM integration initialized")
-            apm_initialized = True
+            self.monitoring_active = True
+            logger.info("Monitoring services started successfully")
             
         except Exception as e:
-            logging.error(f"Error setting up Datadog APM: {e}")
-            
-    # New Relic APM integration
-    if MonitoringConfig.NEWRELIC_APM_ENABLED and NEWRELIC_AVAILABLE:
+            logger.error("Failed to start monitoring services", error=str(e))
+            raise ConfigurationError(f"Monitoring startup failed: {str(e)}")
+    
+    def stop_monitoring(self) -> None:
+        """Stop all monitoring services."""
+        if not self.monitoring_active:
+            return
+        
         try:
-            # Initialize New Relic agent
-            newrelic.agent.initialize()
+            # Stop system metrics collection
+            if self.system_collector:
+                self.system_collector.stop_collection()
             
-            # Set application info
-            newrelic.agent.set_application_name(
-                MonitoringConfig.NEWRELIC_APP_NAME,
-                MonitoringConfig.NEWRELIC_ENVIRONMENT
-            )
-            
-            logging.info("New Relic APM integration initialized")
-            apm_initialized = True
+            self.monitoring_active = False
+            logger.info("Monitoring services stopped successfully")
             
         except Exception as e:
-            logging.error(f"Error setting up New Relic APM: {e}")
-            
-    return apm_initialized
-
-
-def setup_flask_monitoring_dashboard(app: Flask) -> bool:
-    """
-    Set up Flask monitoring dashboard for real-time performance monitoring.
+            logger.error("Failed to stop monitoring services", error=str(e))
     
-    Args:
-        app: Flask application instance
+    def get_monitoring_status(self) -> Dict[str, Any]:
+        """
+        Get comprehensive monitoring status for operational dashboards.
         
-    Returns:
-        bool: True if dashboard setup was successful
-    """
-    if not MonitoringConfig.FLASK_MONITORING_DASHBOARD_ENABLED:
-        return False
+        Returns:
+            Monitoring status summary with component health and metrics
+        """
+        status = {
+            'monitoring_active': self.monitoring_active,
+            'timestamp': datetime.utcnow().isoformat(),
+            'components': {}
+        }
         
-    try:
-        # Configure monitoring dashboard
-        for key, value in MonitoringConfig.FLASK_MONITORING_CONFIG.items():
-            app.config[key] = value
-            
-        # Initialize monitoring dashboard
-        MonitoringDashboard(app)
-        
-        logging.info("Flask monitoring dashboard initialized")
-        return True
-        
-    except Exception as e:
-        logging.error(f"Error setting up Flask monitoring dashboard: {e}")
-        return False
-
-
-def configure_monitoring(app: Flask) -> Dict[str, Any]:
-    """
-    Configure comprehensive monitoring and observability for Flask application.
-    
-    This is the main entry point for setting up all monitoring components
-    including Prometheus metrics, APM integration, health checks, and
-    performance monitoring.
-    
-    Args:
-        app: Flask application instance
-        
-    Returns:
-        Dict[str, Any]: Configuration summary and monitoring component references
-    """
-    monitoring_components = {}
-    
-    try:
-        # Record application start time for uptime calculation
-        app.config['START_TIME'] = time.time()
-        
-        # Set up Prometheus metrics
-        metrics = setup_prometheus_metrics(app)
-        if metrics:
-            monitoring_components['metrics'] = metrics
-            
-        # Set up APM integration
-        apm_configured = setup_apm_integration(app)
-        monitoring_components['apm_enabled'] = apm_configured
-        
-        # Set up Flask monitoring dashboard
-        dashboard_configured = setup_flask_monitoring_dashboard(app)
-        monitoring_components['dashboard_enabled'] = dashboard_configured
-        
-        # Set up performance monitoring
-        if metrics and MonitoringConfig.PERFORMANCE_MONITORING_ENABLED:
-            performance_monitor = PerformanceMonitor(metrics)
-            monitoring_components['performance_monitor'] = performance_monitor
-            
-            # Set up monitoring middleware
-            middleware = MonitoringMiddleware(app, metrics, performance_monitor)
-            monitoring_components['middleware'] = middleware
-            
-        # Set up health check manager
-        if MonitoringConfig.HEALTH_CHECK_ENABLED:
-            health_manager = HealthCheckManager(app)
-            health_manager.setup_health_endpoints()
-            monitoring_components['health_manager'] = health_manager
-            
-        # Set up system resource monitoring
-        if metrics and MonitoringConfig.SYSTEM_RESOURCE_MONITORING_ENABLED:
-            resource_monitor = SystemResourceMonitor(metrics)
-            resource_monitor.start_monitoring()
-            monitoring_components['resource_monitor'] = resource_monitor
-            
-        # Configure cleanup on app teardown
-        @app.teardown_appcontext
-        def cleanup_monitoring(exception):
-            """Clean up monitoring resources on app teardown."""
-            try:
-                if 'resource_monitor' in monitoring_components:
-                    monitoring_components['resource_monitor'].stop_monitoring()
-            except Exception as e:
-                logging.error(f"Error cleaning up monitoring: {e}")
-                
-        logging.info("Monitoring configuration completed successfully")
-        
-        return {
-            'status': 'configured',
-            'components': list(monitoring_components.keys()),
-            'prometheus_enabled': 'metrics' in monitoring_components,
-            'apm_enabled': apm_configured,
-            'dashboard_enabled': dashboard_configured,
-            'health_checks_enabled': 'health_manager' in monitoring_components,
-            'performance_monitoring_enabled': 'performance_monitor' in monitoring_components,
-            'system_monitoring_enabled': 'resource_monitor' in monitoring_components,
-            'config': {
-                'variance_threshold': MonitoringConfig.PERFORMANCE_VARIANCE_THRESHOLD,
-                'apm_service_name': MonitoringConfig.APM_SERVICE_NAME,
-                'apm_environment': MonitoringConfig.APM_ENVIRONMENT,
-                'health_endpoint_prefix': MonitoringConfig.HEALTH_ENDPOINT_PREFIX
+        # Metrics registry status
+        if self.metrics_registry:
+            status['components']['metrics_registry'] = {
+                'enabled': True,
+                'multiprocess': self.metrics_registry.enable_multiprocess,
+                'metrics_count': len(self.metrics_registry.registry._collector_to_names)
             }
-        }
         
-    except Exception as e:
-        logging.error(f"Error configuring monitoring: {e}")
-        return {
-            'status': 'error',
-            'error': str(e),
-            'components': list(monitoring_components.keys())
-        }
+        # Health manager status
+        if self.health_manager:
+            status['components']['health_manager'] = {
+                'enabled': True,
+                'dependency_checks': len(self.health_manager.dependency_checks)
+            }
+        
+        # Performance monitor status
+        if self.performance_monitor:
+            perf_status = self.performance_monitor.get_performance_summary()
+            status['components']['performance_monitor'] = {
+                'enabled': True,
+                'baselines_configured': len(self.performance_monitor.baselines),
+                'performance_summary': perf_status
+            }
+        
+        # System collector status
+        if self.system_collector:
+            status['components']['system_collector'] = {
+                'enabled': True,
+                'collection_active': self.system_collector.collection_active,
+                'collection_interval': self.system_collector.collection_interval
+            }
+        
+        # APM integration status
+        if self.apm_integration:
+            status['components']['apm_integration'] = {
+                'enabled': self.apm_integration.apm_enabled,
+                'provider': self.apm_integration.apm_client,
+                'service_name': self.config.APM_SERVICE_NAME
+            }
+        
+        return status
 
 
-# Export main configuration function and classes
+# Export monitoring configuration factory
+def create_monitoring_config(app: Optional[Flask] = None, 
+                           config: Optional[BaseConfig] = None) -> MonitoringConfiguration:
+    """
+    Factory function to create monitoring configuration instance.
+    
+    Args:
+        app: Flask application instance (optional)
+        config: Application configuration instance (optional)
+        
+    Returns:
+        Configured monitoring instance
+    """
+    return MonitoringConfiguration(app=app, config=config)
+
+
+# Module exports
 __all__ = [
-    'MonitoringConfig',
-    'PrometheusMetrics',
-    'SystemResourceMonitor',
+    'MonitoringConfiguration',
+    'PrometheusMetricsRegistry',
     'HealthCheckManager',
     'PerformanceMonitor',
-    'MonitoringMiddleware',
-    'configure_monitoring',
-    'setup_prometheus_metrics',
-    'setup_apm_integration',
-    'setup_flask_monitoring_dashboard'
+    'SystemMetricsCollector',
+    'APMIntegration',
+    'HealthStatus',
+    'AlertSeverity',
+    'PerformanceBaseline',
+    'create_monitoring_config'
 ]
