@@ -1,600 +1,750 @@
 {
-  "metadata": {
+  "meta": {
     "version": "1.0.0",
-    "created_date": "2024-12-19",
-    "description": "Load testing user behavior profiles and workflow patterns for Locust load testing",
-    "framework": "Locust ≥2.x",
-    "compliance": {
-      "performance_variance_threshold": "≤10%",
-      "baseline_framework": "Node.js",
-      "test_duration_minimum": "30 minutes",
-      "concurrent_user_range": "10-1000 users"
-    }
+    "description": "Locust load testing user behavior profiles for Flask application migration",
+    "framework": "locust>=2.0",
+    "created_for": "Node.js to Python/Flask migration performance validation",
+    "performance_target": "≤10% variance from Node.js baseline",
+    "test_duration_minimum": "30 minutes",
+    "concurrent_user_range": "10-1000 users",
+    "last_updated": "2024-01-15T00:00:00Z"
   },
-
-  "user_profiles": {
-    "api_explorer_user": {
-      "name": "API Explorer User",
-      "description": "User exploring API endpoints with typical browsing patterns",
-      "weight": 25,
-      "behavior_patterns": {
-        "session_duration": {
-          "min_seconds": 300,
-          "max_seconds": 1800,
-          "average_seconds": 900
-        },
-        "think_time": {
-          "min_seconds": 2,
-          "max_seconds": 15,
-          "average_seconds": 5
-        },
-        "requests_per_session": {
-          "min": 5,
-          "max": 30,
-          "average": 15
-        }
-      },
-      "api_workflows": [
-        {
-          "name": "user_authentication_flow",
-          "sequence": [
-            {
-              "endpoint": "/api/auth/login",
-              "method": "POST",
-              "weight": 100,
-              "think_time_after": 3
-            },
-            {
-              "endpoint": "/api/user/profile",
-              "method": "GET",
-              "weight": 90,
-              "think_time_after": 2
-            },
-            {
-              "endpoint": "/api/user/preferences",
-              "method": "GET",
-              "weight": 70,
-              "think_time_after": 5
-            }
-          ]
-        },
-        {
-          "name": "content_browsing_flow",
-          "sequence": [
-            {
-              "endpoint": "/api/content/list",
-              "method": "GET",
-              "weight": 100,
-              "think_time_after": 8
-            },
-            {
-              "endpoint": "/api/content/{id}",
-              "method": "GET",
-              "weight": 80,
-              "think_time_after": 15
-            },
-            {
-              "endpoint": "/api/content/{id}/related",
-              "method": "GET",
-              "weight": 60,
-              "think_time_after": 10
-            }
-          ]
-        }
-      ]
-    },
-
-    "authenticated_business_user": {
-      "name": "Authenticated Business User",
-      "description": "Power user performing complex business operations",
-      "weight": 40,
-      "behavior_patterns": {
-        "session_duration": {
-          "min_seconds": 600,
-          "max_seconds": 3600,
-          "average_seconds": 1800
-        },
-        "think_time": {
-          "min_seconds": 1,
-          "max_seconds": 8,
-          "average_seconds": 3
-        },
-        "requests_per_session": {
-          "min": 20,
-          "max": 100,
-          "average": 50
-        }
-      },
-      "api_workflows": [
-        {
-          "name": "business_data_management",
-          "sequence": [
-            {
-              "endpoint": "/api/auth/login",
-              "method": "POST",
-              "weight": 100,
-              "think_time_after": 2
-            },
-            {
-              "endpoint": "/api/business/dashboard",
-              "method": "GET",
-              "weight": 100,
-              "think_time_after": 5
-            },
-            {
-              "endpoint": "/api/business/data",
-              "method": "GET",
-              "weight": 90,
-              "think_time_after": 3
-            },
-            {
-              "endpoint": "/api/business/data",
-              "method": "POST",
-              "weight": 70,
-              "think_time_after": 10
-            },
-            {
-              "endpoint": "/api/business/data/{id}",
-              "method": "PUT",
-              "weight": 50,
-              "think_time_after": 8
-            },
-            {
-              "endpoint": "/api/business/reports",
-              "method": "GET",
-              "weight": 60,
-              "think_time_after": 12
-            }
-          ]
-        },
-        {
-          "name": "file_upload_workflow",
-          "sequence": [
-            {
-              "endpoint": "/api/files/upload",
-              "method": "POST",
-              "weight": 100,
-              "think_time_after": 15
-            },
-            {
-              "endpoint": "/api/files/{id}/process",
-              "method": "POST",
-              "weight": 90,
-              "think_time_after": 20
-            },
-            {
-              "endpoint": "/api/files/{id}/status",
-              "method": "GET",
-              "weight": 100,
-              "think_time_after": 5
-            }
-          ]
-        }
-      ]
-    },
-
-    "high_frequency_api_client": {
-      "name": "High-Frequency API Client",
-      "description": "Automated system making frequent API calls",
-      "weight": 20,
-      "behavior_patterns": {
-        "session_duration": {
-          "min_seconds": 1800,
-          "max_seconds": 7200,
-          "average_seconds": 3600
-        },
-        "think_time": {
-          "min_seconds": 0.1,
-          "max_seconds": 2,
-          "average_seconds": 0.5
-        },
-        "requests_per_session": {
-          "min": 100,
-          "max": 500,
-          "average": 300
-        }
-      },
-      "api_workflows": [
-        {
-          "name": "api_monitoring_workflow",
-          "sequence": [
-            {
-              "endpoint": "/api/auth/token",
-              "method": "POST",
-              "weight": 100,
-              "think_time_after": 0.5
-            },
-            {
-              "endpoint": "/api/system/health",
-              "method": "GET",
-              "weight": 100,
-              "think_time_after": 1
-            },
-            {
-              "endpoint": "/api/system/metrics",
-              "method": "GET",
-              "weight": 90,
-              "think_time_after": 2
-            }
-          ]
-        },
-        {
-          "name": "batch_data_processing",
-          "sequence": [
-            {
-              "endpoint": "/api/batch/jobs",
-              "method": "POST",
-              "weight": 100,
-              "think_time_after": 1
-            },
-            {
-              "endpoint": "/api/batch/jobs/{id}/status",
-              "method": "GET",
-              "weight": 100,
-              "think_time_after": 3
-            },
-            {
-              "endpoint": "/api/batch/jobs/{id}/results",
-              "method": "GET",
-              "weight": 80,
-              "think_time_after": 2
-            }
-          ]
-        }
-      ]
-    },
-
-    "mobile_app_user": {
-      "name": "Mobile Application User",
-      "description": "Mobile app user with intermittent connectivity patterns",
-      "weight": 15,
-      "behavior_patterns": {
-        "session_duration": {
-          "min_seconds": 120,
-          "max_seconds": 900,
-          "average_seconds": 400
-        },
-        "think_time": {
-          "min_seconds": 3,
-          "max_seconds": 30,
-          "average_seconds": 10
-        },
-        "requests_per_session": {
-          "min": 3,
-          "max": 20,
-          "average": 10
-        }
-      },
-      "api_workflows": [
-        {
-          "name": "mobile_sync_workflow",
-          "sequence": [
-            {
-              "endpoint": "/api/mobile/sync",
-              "method": "POST",
-              "weight": 100,
-              "think_time_after": 5
-            },
-            {
-              "endpoint": "/api/mobile/notifications",
-              "method": "GET",
-              "weight": 90,
-              "think_time_after": 8
-            },
-            {
-              "endpoint": "/api/mobile/offline-data",
-              "method": "GET",
-              "weight": 70,
-              "think_time_after": 12
-            }
-          ]
-        }
-      ]
-    }
-  },
-
-  "load_scaling_patterns": {
+  
+  "load_patterns": {
     "progressive_scaling": {
-      "name": "Progressive Load Scaling",
-      "description": "Gradual user increase from 10 to 1000 concurrent users",
+      "description": "Progressive user load scaling pattern from 10 to 1000 concurrent users",
       "phases": [
         {
-          "phase": "warmup",
-          "duration_minutes": 5,
-          "target_users": 10,
-          "spawn_rate": 1
+          "name": "warmup",
+          "duration_seconds": 300,
+          "start_users": 10,
+          "end_users": 25,
+          "spawn_rate": 1,
+          "description": "Initial warmup phase with gradual user ramp-up"
         },
         {
-          "phase": "ramp_up_1",
-          "duration_minutes": 10,
-          "target_users": 50,
-          "spawn_rate": 4
+          "name": "light_load",
+          "duration_seconds": 600,
+          "start_users": 25,
+          "end_users": 50,
+          "spawn_rate": 2,
+          "description": "Light load testing with basic concurrency"
         },
         {
-          "phase": "ramp_up_2",
-          "duration_minutes": 10,
-          "target_users": 150,
-          "spawn_rate": 10
+          "name": "medium_load",
+          "duration_seconds": 600,
+          "start_users": 50,
+          "end_users": 100,
+          "spawn_rate": 3,
+          "description": "Medium load testing for normal traffic patterns"
         },
         {
-          "phase": "ramp_up_3",
-          "duration_minutes": 10,
-          "target_users": 300,
-          "spawn_rate": 15
+          "name": "heavy_load",
+          "duration_seconds": 600,
+          "start_users": 100,
+          "end_users": 250,
+          "spawn_rate": 5,
+          "description": "Heavy load testing for peak traffic simulation"
         },
         {
-          "phase": "ramp_up_4",
-          "duration_minutes": 10,
-          "target_users": 500,
-          "spawn_rate": 20
+          "name": "stress_load",
+          "duration_seconds": 600,
+          "start_users": 250,
+          "end_users": 500,
+          "spawn_rate": 8,
+          "description": "Stress testing for maximum capacity validation"
         },
         {
-          "phase": "peak_load",
-          "duration_minutes": 30,
-          "target_users": 1000,
-          "spawn_rate": 25
+          "name": "peak_load",
+          "duration_seconds": 1200,
+          "start_users": 500,
+          "end_users": 1000,
+          "spawn_rate": 10,
+          "description": "Peak load testing for maximum concurrent users"
         },
         {
-          "phase": "sustained_load",
-          "duration_minutes": 30,
-          "target_users": 1000,
-          "spawn_rate": 0
-        },
-        {
-          "phase": "ramp_down",
-          "duration_minutes": 10,
-          "target_users": 100,
-          "spawn_rate": -30
+          "name": "endurance_sustained",
+          "duration_seconds": 1800,
+          "start_users": 1000,
+          "end_users": 1000,
+          "spawn_rate": 0,
+          "description": "30-minute sustained load at maximum capacity"
         }
-      ]
+      ],
+      "total_test_duration_seconds": 5400,
+      "total_test_duration_minutes": 90
     },
-
+    
     "spike_testing": {
-      "name": "Spike Load Testing",
-      "description": "Sudden traffic spikes to test system resilience",
+      "description": "Spike testing pattern for sudden traffic increases",
       "phases": [
         {
-          "phase": "baseline",
-          "duration_minutes": 10,
-          "target_users": 100,
-          "spawn_rate": 10
+          "name": "baseline",
+          "duration_seconds": 300,
+          "start_users": 50,
+          "end_users": 50,
+          "spawn_rate": 0,
+          "description": "Stable baseline load"
         },
         {
-          "phase": "spike_1",
-          "duration_minutes": 5,
-          "target_users": 800,
-          "spawn_rate": 140
+          "name": "spike_up",
+          "duration_seconds": 60,
+          "start_users": 50,
+          "end_users": 500,
+          "spawn_rate": 20,
+          "description": "Rapid traffic spike simulation"
         },
         {
-          "phase": "recovery_1",
-          "duration_minutes": 10,
-          "target_users": 100,
-          "spawn_rate": -70
+          "name": "spike_sustained",
+          "duration_seconds": 300,
+          "start_users": 500,
+          "end_users": 500,
+          "spawn_rate": 0,
+          "description": "Sustained spike load"
         },
         {
-          "phase": "spike_2",
-          "duration_minutes": 3,
-          "target_users": 1000,
-          "spawn_rate": 300
-        },
-        {
-          "phase": "recovery_2",
-          "duration_minutes": 10,
-          "target_users": 100,
-          "spawn_rate": -90
-        }
-      ]
-    },
-
-    "endurance_testing": {
-      "name": "Endurance Load Testing",
-      "description": "Sustained load for 30+ minutes to test system stability",
-      "phases": [
-        {
-          "phase": "warmup",
-          "duration_minutes": 5,
-          "target_users": 50,
-          "spawn_rate": 10
-        },
-        {
-          "phase": "sustained_moderate",
-          "duration_minutes": 30,
-          "target_users": 200,
-          "spawn_rate": 15
-        },
-        {
-          "phase": "sustained_high",
-          "duration_minutes": 30,
-          "target_users": 500,
-          "spawn_rate": 10
-        },
-        {
-          "phase": "sustained_peak",
-          "duration_minutes": 30,
-          "target_users": 750,
-          "spawn_rate": 8
-        },
-        {
-          "phase": "cooldown",
-          "duration_minutes": 10,
-          "target_users": 50,
-          "spawn_rate": -35
+          "name": "spike_down",
+          "duration_seconds": 120,
+          "start_users": 500,
+          "end_users": 50,
+          "spawn_rate": -15,
+          "description": "Traffic spike recovery"
         }
       ]
     }
   },
-
-  "geographic_distribution": {
-    "regions": [
-      {
-        "region": "us-east-1",
-        "name": "US East (Virginia)",
-        "user_percentage": 35,
-        "latency_simulation": {
-          "min_ms": 10,
-          "max_ms": 50,
-          "average_ms": 25
-        },
-        "timezone": "America/New_York"
+  
+  "user_profiles": {
+    "authenticated_api_user": {
+      "description": "Standard authenticated user performing typical API operations",
+      "weight": 40,
+      "geographic_distribution": {
+        "north_america": 0.4,
+        "europe": 0.3,
+        "asia_pacific": 0.2,
+        "other": 0.1
       },
-      {
-        "region": "us-west-2",
-        "name": "US West (Oregon)",
-        "user_percentage": 20,
-        "latency_simulation": {
-          "min_ms": 15,
-          "max_ms": 60,
-          "average_ms": 35
+      "workflow_sequence": [
+        {
+          "action": "login",
+          "endpoint": "/api/v1/auth/login",
+          "method": "POST",
+          "weight": 1.0,
+          "think_time_min": 2,
+          "think_time_max": 5,
+          "success_rate_target": 0.99,
+          "payload_template": {
+            "email": "user_{user_id}@example.com",
+            "password": "test_password"
+          }
         },
-        "timezone": "America/Los_Angeles"
+        {
+          "action": "get_user_profile",
+          "endpoint": "/api/v1/users/profile",
+          "method": "GET",
+          "weight": 0.8,
+          "think_time_min": 1,
+          "think_time_max": 3,
+          "success_rate_target": 0.99,
+          "requires_auth": true
+        },
+        {
+          "action": "list_resources",
+          "endpoint": "/api/v1/resources",
+          "method": "GET",
+          "weight": 0.9,
+          "think_time_min": 2,
+          "think_time_max": 6,
+          "success_rate_target": 0.98,
+          "requires_auth": true,
+          "query_params": {
+            "page": "{random_int:1-10}",
+            "limit": 20
+          }
+        },
+        {
+          "action": "create_resource",
+          "endpoint": "/api/v1/resources",
+          "method": "POST",
+          "weight": 0.3,
+          "think_time_min": 5,
+          "think_time_max": 15,
+          "success_rate_target": 0.95,
+          "requires_auth": true,
+          "payload_template": {
+            "title": "Test Resource {timestamp}",
+            "description": "Load test generated resource",
+            "type": "test_data"
+          }
+        },
+        {
+          "action": "update_resource",
+          "endpoint": "/api/v1/resources/{resource_id}",
+          "method": "PUT",
+          "weight": 0.2,
+          "think_time_min": 3,
+          "think_time_max": 8,
+          "success_rate_target": 0.94,
+          "requires_auth": true,
+          "payload_template": {
+            "title": "Updated Resource {timestamp}",
+            "description": "Modified during load test"
+          }
+        },
+        {
+          "action": "search_resources",
+          "endpoint": "/api/v1/resources/search",
+          "method": "GET",
+          "weight": 0.6,
+          "think_time_min": 1,
+          "think_time_max": 4,
+          "success_rate_target": 0.97,
+          "requires_auth": true,
+          "query_params": {
+            "q": "{random_word}",
+            "limit": 10
+          }
+        },
+        {
+          "action": "logout",
+          "endpoint": "/api/v1/auth/logout",
+          "method": "POST",
+          "weight": 0.1,
+          "think_time_min": 1,
+          "think_time_max": 2,
+          "success_rate_target": 0.99,
+          "requires_auth": true
+        }
+      ],
+      "session_duration_min": 300,
+      "session_duration_max": 1800,
+      "requests_per_session_min": 10,
+      "requests_per_session_max": 50
+    },
+    
+    "heavy_api_user": {
+      "description": "Power user with high API usage and complex workflows",
+      "weight": 20,
+      "geographic_distribution": {
+        "north_america": 0.5,
+        "europe": 0.3,
+        "asia_pacific": 0.15,
+        "other": 0.05
       },
-      {
-        "region": "eu-west-1",
-        "name": "Europe (Ireland)",
-        "user_percentage": 25,
-        "latency_simulation": {
-          "min_ms": 80,
-          "max_ms": 150,
-          "average_ms": 110
+      "workflow_sequence": [
+        {
+          "action": "login",
+          "endpoint": "/api/v1/auth/login",
+          "method": "POST",
+          "weight": 1.0,
+          "think_time_min": 1,
+          "think_time_max": 3,
+          "success_rate_target": 0.99
         },
-        "timezone": "Europe/Dublin"
+        {
+          "action": "bulk_resource_operation",
+          "endpoint": "/api/v1/resources/bulk",
+          "method": "POST",
+          "weight": 0.4,
+          "think_time_min": 2,
+          "think_time_max": 5,
+          "success_rate_target": 0.93,
+          "requires_auth": true,
+          "payload_template": {
+            "operation": "batch_create",
+            "resources": "{bulk_resource_list:10-50}"
+          }
+        },
+        {
+          "action": "export_data",
+          "endpoint": "/api/v1/resources/export",
+          "method": "GET",
+          "weight": 0.3,
+          "think_time_min": 5,
+          "think_time_max": 15,
+          "success_rate_target": 0.91,
+          "requires_auth": true,
+          "query_params": {
+            "format": "json",
+            "range": "last_30_days"
+          }
+        },
+        {
+          "action": "advanced_search",
+          "endpoint": "/api/v1/resources/advanced-search",
+          "method": "POST",
+          "weight": 0.7,
+          "think_time_min": 2,
+          "think_time_max": 8,
+          "success_rate_target": 0.95,
+          "requires_auth": true,
+          "payload_template": {
+            "filters": {
+              "date_range": "{date_range}",
+              "categories": ["{random_category}"],
+              "tags": ["{random_tag:3}"]
+            }
+          }
+        },
+        {
+          "action": "analytics_query",
+          "endpoint": "/api/v1/analytics/dashboard",
+          "method": "GET",
+          "weight": 0.5,
+          "think_time_min": 3,
+          "think_time_max": 10,
+          "success_rate_target": 0.92,
+          "requires_auth": true,
+          "query_params": {
+            "period": "last_7_days",
+            "metrics": "all"
+          }
+        }
+      ],
+      "session_duration_min": 900,
+      "session_duration_max": 3600,
+      "requests_per_session_min": 50,
+      "requests_per_session_max": 200
+    },
+    
+    "file_upload_user": {
+      "description": "User focused on file upload and download operations",
+      "weight": 15,
+      "geographic_distribution": {
+        "north_america": 0.3,
+        "europe": 0.4,
+        "asia_pacific": 0.25,
+        "other": 0.05
       },
-      {
-        "region": "ap-southeast-1",
-        "name": "Asia Pacific (Singapore)",
-        "user_percentage": 15,
-        "latency_simulation": {
-          "min_ms": 120,
-          "max_ms": 200,
-          "average_ms": 160
+      "workflow_sequence": [
+        {
+          "action": "login",
+          "endpoint": "/api/v1/auth/login",
+          "method": "POST",
+          "weight": 1.0,
+          "think_time_min": 2,
+          "think_time_max": 5,
+          "success_rate_target": 0.99
         },
-        "timezone": "Asia/Singapore"
+        {
+          "action": "upload_file",
+          "endpoint": "/api/v1/files/upload",
+          "method": "POST",
+          "weight": 0.8,
+          "think_time_min": 10,
+          "think_time_max": 30,
+          "success_rate_target": 0.89,
+          "requires_auth": true,
+          "content_type": "multipart/form-data",
+          "file_sizes": {
+            "small": "100KB-1MB",
+            "medium": "1MB-10MB",
+            "large": "10MB-50MB"
+          },
+          "file_distribution": {
+            "small": 0.6,
+            "medium": 0.3,
+            "large": 0.1
+          }
+        },
+        {
+          "action": "list_files",
+          "endpoint": "/api/v1/files",
+          "method": "GET",
+          "weight": 0.9,
+          "think_time_min": 1,
+          "think_time_max": 4,
+          "success_rate_target": 0.98,
+          "requires_auth": true
+        },
+        {
+          "action": "download_file",
+          "endpoint": "/api/v1/files/{file_id}/download",
+          "method": "GET",
+          "weight": 0.6,
+          "think_time_min": 5,
+          "think_time_max": 20,
+          "success_rate_target": 0.96,
+          "requires_auth": true
+        },
+        {
+          "action": "delete_file",
+          "endpoint": "/api/v1/files/{file_id}",
+          "method": "DELETE",
+          "weight": 0.2,
+          "think_time_min": 2,
+          "think_time_max": 5,
+          "success_rate_target": 0.97,
+          "requires_auth": true
+        },
+        {
+          "action": "get_file_metadata",
+          "endpoint": "/api/v1/files/{file_id}/metadata",
+          "method": "GET",
+          "weight": 0.4,
+          "think_time_min": 1,
+          "think_time_max": 3,
+          "success_rate_target": 0.98,
+          "requires_auth": true
+        }
+      ],
+      "session_duration_min": 600,
+      "session_duration_max": 2400,
+      "requests_per_session_min": 5,
+      "requests_per_session_max": 25
+    },
+    
+    "browser_user": {
+      "description": "Traditional browser-based user with mixed read/write operations",
+      "weight": 20,
+      "geographic_distribution": {
+        "north_america": 0.35,
+        "europe": 0.35,
+        "asia_pacific": 0.25,
+        "other": 0.05
       },
-      {
-        "region": "ap-northeast-1",
-        "name": "Asia Pacific (Tokyo)",
-        "user_percentage": 5,
-        "latency_simulation": {
-          "min_ms": 100,
-          "max_ms": 180,
-          "average_ms": 140
+      "workflow_sequence": [
+        {
+          "action": "home_page",
+          "endpoint": "/",
+          "method": "GET",
+          "weight": 1.0,
+          "think_time_min": 3,
+          "think_time_max": 8,
+          "success_rate_target": 0.99
         },
-        "timezone": "Asia/Tokyo"
-      }
-    ]
+        {
+          "action": "login_form",
+          "endpoint": "/login",
+          "method": "GET",
+          "weight": 0.8,
+          "think_time_min": 2,
+          "think_time_max": 5,
+          "success_rate_target": 0.99
+        },
+        {
+          "action": "authenticate",
+          "endpoint": "/api/v1/auth/login",
+          "method": "POST",
+          "weight": 0.7,
+          "think_time_min": 5,
+          "think_time_max": 15,
+          "success_rate_target": 0.95,
+          "payload_template": {
+            "email": "browser_user_{user_id}@example.com",
+            "password": "browser_password"
+          }
+        },
+        {
+          "action": "dashboard",
+          "endpoint": "/dashboard",
+          "method": "GET",
+          "weight": 0.6,
+          "think_time_min": 3,
+          "think_time_max": 10,
+          "success_rate_target": 0.97,
+          "requires_auth": true
+        },
+        {
+          "action": "browse_content",
+          "endpoint": "/api/v1/content",
+          "method": "GET",
+          "weight": 0.9,
+          "think_time_min": 5,
+          "think_time_max": 20,
+          "success_rate_target": 0.98,
+          "query_params": {
+            "page": "{random_int:1-5}",
+            "category": "{random_category}"
+          }
+        },
+        {
+          "action": "view_details",
+          "endpoint": "/api/v1/content/{content_id}",
+          "method": "GET",
+          "weight": 0.7,
+          "think_time_min": 10,
+          "think_time_max": 45,
+          "success_rate_target": 0.97
+        },
+        {
+          "action": "update_preferences",
+          "endpoint": "/api/v1/users/preferences",
+          "method": "PUT",
+          "weight": 0.1,
+          "think_time_min": 15,
+          "think_time_max": 60,
+          "success_rate_target": 0.94,
+          "requires_auth": true,
+          "payload_template": {
+            "theme": "{random_theme}",
+            "language": "en",
+            "notifications": true
+          }
+        }
+      ],
+      "session_duration_min": 180,
+      "session_duration_max": 900,
+      "requests_per_session_min": 5,
+      "requests_per_session_max": 30
+    },
+    
+    "monitoring_user": {
+      "description": "System monitoring and health check user",
+      "weight": 5,
+      "geographic_distribution": {
+        "north_america": 0.4,
+        "europe": 0.4,
+        "asia_pacific": 0.15,
+        "other": 0.05
+      },
+      "workflow_sequence": [
+        {
+          "action": "health_check",
+          "endpoint": "/health",
+          "method": "GET",
+          "weight": 1.0,
+          "think_time_min": 5,
+          "think_time_max": 10,
+          "success_rate_target": 0.99
+        },
+        {
+          "action": "system_status",
+          "endpoint": "/api/v1/system/status",
+          "method": "GET",
+          "weight": 0.8,
+          "think_time_min": 2,
+          "think_time_max": 5,
+          "success_rate_target": 0.98
+        },
+        {
+          "action": "metrics_endpoint",
+          "endpoint": "/metrics",
+          "method": "GET",
+          "weight": 0.6,
+          "think_time_min": 1,
+          "think_time_max": 3,
+          "success_rate_target": 0.99
+        },
+        {
+          "action": "database_health",
+          "endpoint": "/api/v1/system/database/health",
+          "method": "GET",
+          "weight": 0.4,
+          "think_time_min": 1,
+          "think_time_max": 2,
+          "success_rate_target": 0.97
+        },
+        {
+          "action": "cache_status",
+          "endpoint": "/api/v1/system/cache/status",
+          "method": "GET",
+          "weight": 0.3,
+          "think_time_min": 1,
+          "think_time_max": 2,
+          "success_rate_target": 0.98
+        }
+      ],
+      "session_duration_min": 60,
+      "session_duration_max": 300,
+      "requests_per_session_min": 3,
+      "requests_per_session_max": 15
+    }
   },
-
+  
+  "geographic_regions": {
+    "north_america": {
+      "description": "North American users (US, Canada)",
+      "latency_simulation": {
+        "min_ms": 20,
+        "max_ms": 150,
+        "average_ms": 85
+      },
+      "peak_hours_utc": ["14:00-17:00", "19:00-22:00"],
+      "timezone_offset": "-05:00"
+    },
+    "europe": {
+      "description": "European users (EU, UK)",
+      "latency_simulation": {
+        "min_ms": 30,
+        "max_ms": 200,
+        "average_ms": 115
+      },
+      "peak_hours_utc": ["08:00-11:00", "13:00-16:00"],
+      "timezone_offset": "+01:00"
+    },
+    "asia_pacific": {
+      "description": "Asia Pacific users (Japan, Australia, Singapore)",
+      "latency_simulation": {
+        "min_ms": 50,
+        "max_ms": 300,
+        "average_ms": 175
+      },
+      "peak_hours_utc": ["02:00-05:00", "09:00-12:00"],
+      "timezone_offset": "+09:00"
+    },
+    "other": {
+      "description": "Other global regions",
+      "latency_simulation": {
+        "min_ms": 100,
+        "max_ms": 500,
+        "average_ms": 300
+      },
+      "peak_hours_utc": ["06:00-09:00", "20:00-23:00"],
+      "timezone_offset": "+00:00"
+    }
+  },
+  
   "performance_targets": {
     "response_time": {
-      "95th_percentile_ms": 500,
-      "99th_percentile_ms": 1000,
-      "average_ms": 200,
-      "timeout_ms": 30000
+      "p50_ms": 250,
+      "p95_ms": 500,
+      "p99_ms": 1000,
+      "max_acceptable_ms": 2000
     },
     "throughput": {
       "min_requests_per_second": 100,
-      "target_requests_per_second": 500,
-      "peak_requests_per_second": 1000
+      "target_requests_per_second": 300,
+      "max_requests_per_second": 500
     },
     "error_rates": {
-      "max_error_rate_percent": 0.1,
-      "max_timeout_rate_percent": 0.05,
-      "max_connection_error_rate_percent": 0.01
+      "max_error_rate": 0.01,
+      "acceptable_4xx_rate": 0.05,
+      "max_5xx_rate": 0.001
     },
     "resource_utilization": {
       "max_cpu_percent": 70,
       "max_memory_percent": 80,
       "max_disk_io_percent": 60
+    },
+    "baseline_comparison": {
+      "max_response_time_variance_percent": 10,
+      "max_throughput_decrease_percent": 5,
+      "max_error_rate_increase_percent": 50
     }
   },
-
+  
   "test_scenarios": {
-    "baseline_performance_test": {
-      "name": "Baseline Performance Validation",
-      "description": "Compare Python Flask implementation against Node.js baseline",
-      "duration_minutes": 45,
-      "scaling_pattern": "progressive_scaling",
-      "user_profiles_enabled": ["api_explorer_user", "authenticated_business_user"],
-      "performance_validation": {
-        "variance_threshold_percent": 10,
-        "baseline_comparison": true,
-        "metrics_collection": ["response_time", "throughput", "error_rate", "resource_usage"]
+    "endurance_test": {
+      "description": "30-minute sustained load testing at peak capacity",
+      "duration_minutes": 30,
+      "user_count": 1000,
+      "ramp_up_time_seconds": 300,
+      "steady_state_time_seconds": 1500,
+      "ramp_down_time_seconds": 300,
+      "success_criteria": {
+        "max_error_rate": 0.01,
+        "response_time_p95_ms": 500,
+        "memory_leak_tolerance_mb": 100
       }
     },
-
-    "high_load_stress_test": {
-      "name": "High Load Stress Testing",
-      "description": "Validate system behavior under peak concurrent load",
-      "duration_minutes": 60,
-      "scaling_pattern": "spike_testing",
-      "user_profiles_enabled": ["authenticated_business_user", "high_frequency_api_client"],
-      "geographic_distribution_enabled": true
+    "spike_test": {
+      "description": "Sudden traffic spike simulation",
+      "baseline_users": 50,
+      "spike_users": 500,
+      "spike_duration_seconds": 300,
+      "recovery_time_seconds": 600,
+      "success_criteria": {
+        "recovery_time_ms": 5000,
+        "max_error_rate_during_spike": 0.05
+      }
     },
-
-    "endurance_stability_test": {
-      "name": "Endurance Stability Testing",
-      "description": "30-minute sustained load to validate system stability",
-      "duration_minutes": 105,
-      "scaling_pattern": "endurance_testing",
-      "user_profiles_enabled": ["api_explorer_user", "authenticated_business_user", "mobile_app_user"],
-      "memory_leak_detection": true,
-      "resource_monitoring": true
-    },
-
-    "multi_region_load_test": {
-      "name": "Multi-Region Load Testing",
-      "description": "Distributed load testing across multiple geographic regions",
-      "duration_minutes": 60,
-      "scaling_pattern": "progressive_scaling",
-      "user_profiles_enabled": ["api_explorer_user", "authenticated_business_user", "high_frequency_api_client", "mobile_app_user"],
-      "geographic_distribution_enabled": true,
-      "region_specific_metrics": true
+    "breakpoint_test": {
+      "description": "Find system breaking point",
+      "start_users": 100,
+      "max_users": 2000,
+      "increment_users": 100,
+      "increment_duration_seconds": 180,
+      "failure_criteria": {
+        "error_rate_threshold": 0.1,
+        "response_time_threshold_ms": 3000
+      }
     }
   },
-
+  
   "locust_configuration": {
-    "host": "${LOAD_TEST_HOST}",
-    "web_ui_port": 8089,
-    "csv_results": true,
-    "html_report": true,
-    "stats_history_enabled": true,
-    "failure_threshold": {
-      "error_rate_percent": 1.0,
-      "response_time_ms": 5000
+    "host": "http://localhost:5000",
+    "users": 1000,
+    "spawn_rate": 10,
+    "run_time": "30m",
+    "headless": true,
+    "csv_output": "load_test_results",
+    "html_output": "load_test_report.html",
+    "log_level": "INFO",
+    "stop_timeout": 30,
+    "reset_stats": true,
+    "tags": ["api", "performance", "migration"],
+    "exclude_tags": ["debug"],
+    "web_host": "0.0.0.0",
+    "web_port": 8089,
+    "worker_processes": 4,
+    "expect_workers": 4,
+    "master_bind_host": "*",
+    "master_bind_port": 5557
+  },
+  
+  "data_generation": {
+    "user_pools": {
+      "total_users": 10000,
+      "active_users_percent": 0.3,
+      "premium_users_percent": 0.15,
+      "admin_users_percent": 0.02
     },
-    "stop_conditions": {
-      "max_failures": 100,
-      "max_runtime_minutes": 120
+    "content_generation": {
+      "resources_per_user": {
+        "min": 5,
+        "max": 100,
+        "average": 25
+      },
+      "file_sizes": {
+        "small_kb": [100, 1024],
+        "medium_mb": [1, 10],
+        "large_mb": [10, 50]
+      },
+      "content_types": [
+        "document",
+        "image",
+        "video",
+        "audio",
+        "archive",
+        "spreadsheet",
+        "presentation"
+      ]
     },
-    "logging": {
-      "level": "INFO",
-      "file": "load_test.log",
-      "format": "%(asctime)s [%(levelname)s] %(message)s"
+    "realistic_delays": {
+      "database_query_ms": [10, 100],
+      "external_api_call_ms": [100, 500],
+      "file_processing_ms": [500, 2000],
+      "cache_hit_ms": [1, 5],
+      "cache_miss_ms": [50, 200]
     }
   },
-
-  "data_collection": {
-    "metrics_collection_interval_seconds": 10,
-    "detailed_response_logging": false,
-    "request_response_sampling_percent": 1.0,
-    "custom_metrics": [
-      "database_query_time",
-      "external_service_call_time",
-      "authentication_time",
-      "business_logic_processing_time"
-    ]
-  },
-
-  "validation_rules": {
-    "performance_regression": {
-      "max_response_time_increase_percent": 10,
-      "max_throughput_decrease_percent": 10,
-      "max_error_rate_increase_percent": 5
+  
+  "monitoring_integration": {
+    "metrics_collection": {
+      "response_times": true,
+      "request_rates": true,
+      "error_rates": true,
+      "resource_utilization": true,
+      "custom_metrics": [
+        "database_connection_pool_usage",
+        "redis_cache_hit_rate",
+        "jwt_token_validation_time",
+        "file_upload_success_rate"
+      ]
     },
-    "stability_requirements": {
-      "memory_leak_tolerance_mb": 100,
-      "cpu_spike_tolerance_percent": 20,
-      "connection_stability_threshold": 0.99
+    "alerting": {
+      "error_rate_threshold": 0.05,
+      "response_time_threshold_ms": 1000,
+      "cpu_usage_threshold": 0.8,
+      "memory_usage_threshold": 0.85
+    },
+    "reporting": {
+      "real_time_dashboard": true,
+      "csv_export": true,
+      "json_export": true,
+      "html_report": true,
+      "prometheus_metrics": true
     }
   }
 }
