@@ -1,1540 +1,1744 @@
 #!/bin/bash
 
 # =============================================================================
-# Security Scanning and Compliance Validation Script
+# Flask Application Security Scanning and Compliance Validation Script
 # =============================================================================
-# This script implements comprehensive security scanning and compliance 
-# validation for Flask application security compliance including container 
-# vulnerability scanning, dependency security assessment, and comprehensive 
-# security policy enforcement.
 #
-# Features:
-# - Container Security Framework with automated security scanning
-# - Security Scanning using bandit static analysis, safety vulnerability scanning
-# - Dependency Security Validation with safety 3.0+ and pip-audit 2.7+
-# - Container Vulnerability Scanning using Trivy 0.48+ with automated policy enforcement
-# - Comprehensive compliance validation with enterprise requirements
+# This script implements comprehensive security scanning and compliance validation
+# for the Flask application migration project, including container vulnerability
+# scanning, dependency security assessment, and comprehensive security policy
+# enforcement per Sections 8.5.1, 8.5.2, and 6.4 of the technical specification.
+#
+# Dependencies:
+# - Trivy 0.48+ for container vulnerability scanning
+# - safety 3.0+ for dependency vulnerability scanning  
+# - bandit 1.7+ for Python security analysis
+# - flake8 6.1+ for code style compliance
+# - mypy 1.8+ for type safety validation
+# - pytest for security test validation
+#
+# Integration:
+# - GitHub Actions CI/CD pipeline
+# - AWS Security Hub and CloudWatch
+# - Prometheus metrics collection
+# - Enterprise monitoring systems
+#
+# Usage:
+#   ./scripts/security.sh [OPTIONS]
+#
+# Options:
+#   --container-scan        Run container vulnerability scanning with Trivy
+#   --dependency-scan       Run dependency vulnerability scanning with safety/pip-audit
+#   --static-analysis       Run static code analysis with bandit/flake8/mypy
+#   --security-tests        Run security test suite validation
+#   --compliance-check      Run comprehensive compliance validation
+#   --all                   Run all security scans (default)
+#   --output-format FORMAT  Output format: json, sarif, table (default: table)
+#   --report-dir DIR        Directory for security reports (default: security-reports)
+#   --fail-on-critical      Fail on critical vulnerabilities (default: true)
+#   --metrics-endpoint URL  Prometheus metrics endpoint for reporting
+#   --aws-integration       Enable AWS Security Hub integration
+#   --verbose               Enable verbose logging
+#   --help                  Show this help message
+#
+# Exit Codes:
+#   0 - Success, no critical security issues found
+#   1 - Critical security vulnerabilities found, deployment blocked
+#   2 - Configuration or tool errors
+#   3 - Compliance violations detected
+#
 # =============================================================================
 
 set -euo pipefail
 
-# Script metadata and configuration
+# Script configuration and constants
 readonly SCRIPT_NAME="security.sh"
 readonly SCRIPT_VERSION="1.0.0"
-readonly TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+readonly TIMESTAMP="$(date -u +%Y%m%d_%H%M%S)"
 
-# Color codes for output formatting
+# Security tool versions per technical specification requirements
+readonly TRIVY_MIN_VERSION="0.48.0"
+readonly SAFETY_MIN_VERSION="3.0.0"
+readonly BANDIT_MIN_VERSION="1.7.0"
+readonly FLAKE8_MIN_VERSION="6.1.0"
+readonly MYPY_MIN_VERSION="1.8.0"
+
+# Default configuration
+CONTAINER_SCAN=false
+DEPENDENCY_SCAN=false
+STATIC_ANALYSIS=false
+SECURITY_TESTS=false
+COMPLIANCE_CHECK=false
+RUN_ALL=true
+OUTPUT_FORMAT="table"
+REPORT_DIR="${PROJECT_ROOT}/security-reports"
+FAIL_ON_CRITICAL=true
+METRICS_ENDPOINT=""
+AWS_INTEGRATION=false
+VERBOSE=false
+
+# Exit codes
+readonly EXIT_SUCCESS=0
+readonly EXIT_CRITICAL_VULNERABILITIES=1
+readonly EXIT_CONFIGURATION_ERROR=2
+readonly EXIT_COMPLIANCE_VIOLATION=3
+
+# Colors for output formatting
 readonly RED='\033[0;31m'
 readonly GREEN='\033[0;32m'
 readonly YELLOW='\033[1;33m'
 readonly BLUE='\033[0;34m'
-readonly PURPLE='\033[0;35m'
-readonly CYAN='\033[0;36m'
 readonly NC='\033[0m' # No Color
-
-# Security tool versions and configuration
-readonly TRIVY_VERSION="0.48.3"
-readonly SAFETY_VERSION="3.0.1"
-readonly BANDIT_VERSION="1.7.5"
-readonly PIP_AUDIT_VERSION="2.7.3"
-readonly FLAKE8_VERSION="6.1.0"
-readonly MYPY_VERSION="1.8.0"
-
-# Default configuration values
-DEFAULT_PROJECT_ROOT="$(pwd)"
-DEFAULT_OUTPUT_DIR="./security-reports"
-DEFAULT_CONFIG_DIR="./config"
-DEFAULT_SEVERITY_THRESHOLD="HIGH"
-DEFAULT_FAIL_ON_CRITICAL="true"
-DEFAULT_GENERATE_REPORTS="true"
-DEFAULT_UPLOAD_RESULTS="false"
-DEFAULT_CONTAINER_IMAGE=""
-DEFAULT_REQUIREMENTS_FILE="requirements.txt"
-
-# Configuration variables with defaults
-PROJECT_ROOT="${PROJECT_ROOT:-$DEFAULT_PROJECT_ROOT}"
-OUTPUT_DIR="${OUTPUT_DIR:-$DEFAULT_OUTPUT_DIR}"
-CONFIG_DIR="${CONFIG_DIR:-$DEFAULT_CONFIG_DIR}"
-SEVERITY_THRESHOLD="${SEVERITY_THRESHOLD:-$DEFAULT_SEVERITY_THRESHOLD}"
-FAIL_ON_CRITICAL="${FAIL_ON_CRITICAL:-$DEFAULT_FAIL_ON_CRITICAL}"
-GENERATE_REPORTS="${GENERATE_REPORTS:-$DEFAULT_GENERATE_REPORTS}"
-UPLOAD_RESULTS="${UPLOAD_RESULTS:-$DEFAULT_UPLOAD_RESULTS}"
-CONTAINER_IMAGE="${CONTAINER_IMAGE:-$DEFAULT_CONTAINER_IMAGE}"
-REQUIREMENTS_FILE="${REQUIREMENTS_FILE:-$DEFAULT_REQUIREMENTS_FILE}"
-
-# CI/CD environment detection
-CI_ENVIRONMENT="${CI:-false}"
-GITHUB_ACTIONS="${GITHUB_ACTIONS:-false}"
-
-# Security scanning results tracking
-declare -g CRITICAL_VULNERABILITIES=0
-declare -g HIGH_VULNERABILITIES=0
-declare -g MEDIUM_VULNERABILITIES=0
-declare -g LOW_VULNERABILITIES=0
-declare -g SECURITY_SCAN_FAILED=false
-declare -g TOTAL_SCANS=0
-declare -g FAILED_SCANS=0
 
 # =============================================================================
 # Utility Functions
 # =============================================================================
 
-# Print formatted log messages
-log() {
-    local level="$1"
-    shift
-    local message="$*"
+# Logging functions with structured output
+log_info() {
+    local message="$1"
+    local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")
+    echo -e "${GREEN}[INFO]${NC} ${timestamp} - ${message}" >&2
     
-    case "$level" in
-        "INFO")
-            echo -e "${BLUE}[INFO]${NC} ${TIMESTAMP} - $message" >&1
-            ;;
-        "WARN")
-            echo -e "${YELLOW}[WARN]${NC} ${TIMESTAMP} - $message" >&2
-            ;;
-        "ERROR")
-            echo -e "${RED}[ERROR]${NC} ${TIMESTAMP} - $message" >&2
-            ;;
-        "SUCCESS")
-            echo -e "${GREEN}[SUCCESS]${NC} ${TIMESTAMP} - $message" >&1
-            ;;
-        "DEBUG")
-            if [[ "${DEBUG:-false}" == "true" ]]; then
-                echo -e "${PURPLE}[DEBUG]${NC} ${TIMESTAMP} - $message" >&1
-            fi
-            ;;
-        *)
-            echo -e "${CYAN}[${level}]${NC} ${TIMESTAMP} - $message" >&1
-            ;;
-    esac
+    if [[ "$VERBOSE" == "true" ]]; then
+        echo "{\"level\":\"info\",\"timestamp\":\"${timestamp}\",\"message\":\"${message}\",\"component\":\"security-scanner\"}" >> "${REPORT_DIR}/security.log"
+    fi
 }
 
-# Display script usage information
-show_usage() {
+log_warn() {
+    local message="$1"
+    local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")
+    echo -e "${YELLOW}[WARN]${NC} ${timestamp} - ${message}" >&2
+    
+    if [[ "$VERBOSE" == "true" ]]; then
+        echo "{\"level\":\"warning\",\"timestamp\":\"${timestamp}\",\"message\":\"${message}\",\"component\":\"security-scanner\"}" >> "${REPORT_DIR}/security.log"
+    fi
+}
+
+log_error() {
+    local message="$1"
+    local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")
+    echo -e "${RED}[ERROR]${NC} ${timestamp} - ${message}" >&2
+    
+    echo "{\"level\":\"error\",\"timestamp\":\"${timestamp}\",\"message\":\"${message}\",\"component\":\"security-scanner\"}" >> "${REPORT_DIR}/security.log"
+}
+
+log_debug() {
+    if [[ "$VERBOSE" == "true" ]]; then
+        local message="$1"
+        local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")
+        echo -e "${BLUE}[DEBUG]${NC} ${timestamp} - ${message}" >&2
+        
+        echo "{\"level\":\"debug\",\"timestamp\":\"${timestamp}\",\"message\":\"${message}\",\"component\":\"security-scanner\"}" >> "${REPORT_DIR}/security.log"
+    fi
+}
+
+# Display help information
+show_help() {
     cat << EOF
-Usage: $SCRIPT_NAME [OPTIONS]
+Flask Application Security Scanner v${SCRIPT_VERSION}
 
-Security Scanning and Compliance Validation Script for Flask Applications
+This script implements comprehensive security scanning and compliance validation
+for the Flask application migration project per technical specification
+requirements (Sections 8.5.1, 8.5.2, and 6.4).
 
-This script performs comprehensive security scanning including:
-- Container vulnerability scanning with Trivy 0.48+
-- Python dependency vulnerability scanning with safety 3.0+ and pip-audit 2.7+
-- Static code analysis with bandit 1.7+ for Python security patterns
-- Code quality validation with flake8 6.1+ and mypy 1.8+
-- Enterprise compliance validation and reporting
+USAGE:
+    ${SCRIPT_NAME} [OPTIONS]
 
 OPTIONS:
-  -h, --help                 Show this help message and exit
-  -v, --version             Show script version
-  -d, --debug               Enable debug output
-  
-  Security Scanning Options:
-  --project-root PATH       Project root directory (default: current directory)
-  --output-dir PATH         Output directory for reports (default: ./security-reports)
-  --config-dir PATH         Configuration directory (default: ./config)
-  --requirements FILE       Requirements file to scan (default: requirements.txt)
-  --container-image IMAGE   Container image to scan for vulnerabilities
-  
-  Scanning Control Options:
-  --severity-threshold LEVEL    Minimum severity threshold [LOW|MEDIUM|HIGH|CRITICAL] (default: HIGH)
-  --fail-on-critical BOOL      Fail on critical vulnerabilities [true|false] (default: true)
-  --generate-reports BOOL      Generate detailed reports [true|false] (default: true)
-  --upload-results BOOL        Upload results to security platform [true|false] (default: false)
-  
-  Scanning Modes:
-  --scan-dependencies       Run dependency vulnerability scanning only
-  --scan-container         Run container vulnerability scanning only
-  --scan-code              Run static code analysis only
-  --scan-all               Run all security scans (default)
+    --container-scan        Run container vulnerability scanning with Trivy 0.48+
+    --dependency-scan       Run dependency vulnerability scanning with safety 3.0+
+    --static-analysis       Run static code analysis with bandit/flake8/mypy
+    --security-tests        Run security test suite validation
+    --compliance-check      Run comprehensive compliance validation
+    --all                   Run all security scans (default)
+    --output-format FORMAT  Output format: json, sarif, table (default: table)
+    --report-dir DIR        Directory for security reports (default: security-reports)
+    --fail-on-critical      Fail on critical vulnerabilities (default: true)
+    --metrics-endpoint URL  Prometheus metrics endpoint for reporting
+    --aws-integration       Enable AWS Security Hub integration
+    --verbose               Enable verbose logging
+    --help                  Show this help message
 
 EXAMPLES:
-  # Run complete security scanning suite
-  $SCRIPT_NAME --scan-all
-
-  # Scan specific container image with high severity threshold
-  $SCRIPT_NAME --container-image flask-app:latest --severity-threshold HIGH
-
-  # Run dependency scanning only with custom requirements file
-  $SCRIPT_NAME --scan-dependencies --requirements requirements-prod.txt
-
-  # Generate reports in custom directory with debug output
-  $SCRIPT_NAME --output-dir ./reports --debug
-
-  # CI/CD integration with critical vulnerability blocking
-  $SCRIPT_NAME --fail-on-critical true --upload-results true
-
-ENVIRONMENT VARIABLES:
-  PROJECT_ROOT              Project root directory path
-  OUTPUT_DIR                Security reports output directory
-  CONFIG_DIR                Security configuration directory
-  SEVERITY_THRESHOLD        Minimum vulnerability severity threshold
-  FAIL_ON_CRITICAL          Fail build on critical vulnerabilities
-  GENERATE_REPORTS          Generate detailed security reports
-  UPLOAD_RESULTS            Upload results to security platform
-  CONTAINER_IMAGE           Container image name for scanning
-  REQUIREMENTS_FILE         Python requirements file path
-  DEBUG                     Enable debug logging
+    # Run comprehensive security scan (default)
+    ./${SCRIPT_NAME}
+    
+    # Run only container vulnerability scanning
+    ./${SCRIPT_NAME} --container-scan
+    
+    # Run dependency scanning with JSON output
+    ./${SCRIPT_NAME} --dependency-scan --output-format json
+    
+    # Run all scans with AWS integration and metrics
+    ./${SCRIPT_NAME} --all --aws-integration --metrics-endpoint http://prometheus:9090
+    
+    # Run compliance validation only
+    ./${SCRIPT_NAME} --compliance-check --verbose
 
 EXIT CODES:
-  0    Success - No critical security issues found
-  1    Critical vulnerabilities found (when --fail-on-critical=true)
-  2    Security scanning tool failure
-  3    Configuration or setup error
-  4    Invalid command line arguments
+    0 - Success, no critical security issues found
+    1 - Critical security vulnerabilities found, deployment blocked
+    2 - Configuration or tool errors  
+    3 - Compliance violations detected
 
-For more information, see the technical specification Section 6.4 Security Architecture.
+SECURITY TOOLS INTEGRATED:
+    - Trivy ${TRIVY_MIN_VERSION}+ (Container vulnerability scanning)
+    - safety ${SAFETY_MIN_VERSION}+ (Dependency vulnerability scanning)
+    - bandit ${BANDIT_MIN_VERSION}+ (Python security analysis)
+    - flake8 ${FLAKE8_MIN_VERSION}+ (Code style compliance)
+    - mypy ${MYPY_MIN_VERSION}+ (Type safety validation)
+    - pip-audit 2.7+ (Additional dependency scanning)
+
+For more information, see the technical specification Section 8.5 (CI/CD Pipeline)
+and Section 6.4 (Security Architecture).
 EOF
 }
 
-# Display script version information
-show_version() {
-    cat << EOF
-$SCRIPT_NAME version $SCRIPT_VERSION
-
-Security Tools Versions:
-- Trivy: $TRIVY_VERSION
-- Safety: $SAFETY_VERSION  
-- Bandit: $BANDIT_VERSION
-- pip-audit: $PIP_AUDIT_VERSION
-- flake8: $FLAKE8_VERSION
-- mypy: $MYPY_VERSION
-
-Copyright (c) 2024 Flask Security Framework
-License: Enterprise License
-EOF
-}
-
-# Validate and create output directories
-setup_directories() {
-    log "INFO" "Setting up security scanning directories..."
-    
-    # Validate project root exists
-    if [[ ! -d "$PROJECT_ROOT" ]]; then
-        log "ERROR" "Project root directory does not exist: $PROJECT_ROOT"
-        exit 3
-    fi
-    
-    # Create output directory structure
-    local dirs=(
-        "$OUTPUT_DIR"
-        "$OUTPUT_DIR/trivy"
-        "$OUTPUT_DIR/safety"
-        "$OUTPUT_DIR/bandit"
-        "$OUTPUT_DIR/pip-audit"
-        "$OUTPUT_DIR/flake8"
-        "$OUTPUT_DIR/mypy"
-        "$OUTPUT_DIR/compliance"
-        "$OUTPUT_DIR/summary"
-    )
-    
-    for dir in "${dirs[@]}"; do
-        if ! mkdir -p "$dir"; then
-            log "ERROR" "Failed to create directory: $dir"
-            exit 3
-        fi
-        log "DEBUG" "Created directory: $dir"
+# Parse command line arguments
+parse_arguments() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --container-scan)
+                CONTAINER_SCAN=true
+                RUN_ALL=false
+                shift
+                ;;
+            --dependency-scan)
+                DEPENDENCY_SCAN=true
+                RUN_ALL=false
+                shift
+                ;;
+            --static-analysis)
+                STATIC_ANALYSIS=true
+                RUN_ALL=false
+                shift
+                ;;
+            --security-tests)
+                SECURITY_TESTS=true
+                RUN_ALL=false
+                shift
+                ;;
+            --compliance-check)
+                COMPLIANCE_CHECK=true
+                RUN_ALL=false
+                shift
+                ;;
+            --all)
+                RUN_ALL=true
+                shift
+                ;;
+            --output-format)
+                OUTPUT_FORMAT="$2"
+                if [[ ! "$OUTPUT_FORMAT" =~ ^(json|sarif|table)$ ]]; then
+                    log_error "Invalid output format: $OUTPUT_FORMAT. Must be one of: json, sarif, table"
+                    exit $EXIT_CONFIGURATION_ERROR
+                fi
+                shift 2
+                ;;
+            --report-dir)
+                REPORT_DIR="$2"
+                shift 2
+                ;;
+            --fail-on-critical)
+                FAIL_ON_CRITICAL=true
+                shift
+                ;;
+            --no-fail-on-critical)
+                FAIL_ON_CRITICAL=false
+                shift
+                ;;
+            --metrics-endpoint)
+                METRICS_ENDPOINT="$2"
+                shift 2
+                ;;
+            --aws-integration)
+                AWS_INTEGRATION=true
+                shift
+                ;;
+            --verbose)
+                VERBOSE=true
+                shift
+                ;;
+            --help)
+                show_help
+                exit $EXIT_SUCCESS
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                echo "Use --help for usage information."
+                exit $EXIT_CONFIGURATION_ERROR
+                ;;
+        esac
     done
     
-    log "SUCCESS" "Security scanning directories setup completed"
+    # Set all scan types if running all
+    if [[ "$RUN_ALL" == "true" ]]; then
+        CONTAINER_SCAN=true
+        DEPENDENCY_SCAN=true
+        STATIC_ANALYSIS=true
+        SECURITY_TESTS=true
+        COMPLIANCE_CHECK=true
+    fi
 }
 
-# Check if required security tools are installed
-check_tool_dependencies() {
-    log "INFO" "Checking security tool dependencies..."
+# Validate environment and tool availability
+validate_environment() {
+    log_info "Validating security scanning environment..."
     
-    local tools=(
-        "python3:Python 3.8+ runtime"
-        "pip:Python package manager"
-        "docker:Container runtime for Trivy scanning"
-        "curl:HTTP client for tool downloads"
-        "jq:JSON processor for result parsing"
-    )
+    # Create report directory
+    mkdir -p "$REPORT_DIR"
+    touch "${REPORT_DIR}/security.log"
     
-    local missing_tools=()
+    # Validate project structure
+    if [[ ! -f "${PROJECT_ROOT}/requirements.txt" ]]; then
+        log_error "requirements.txt not found in project root"
+        exit $EXIT_CONFIGURATION_ERROR
+    fi
     
-    for tool_info in "${tools[@]}"; do
-        local tool_name="${tool_info%%:*}"
-        local tool_desc="${tool_info##*:}"
+    if [[ ! -d "${PROJECT_ROOT}/src" ]]; then
+        log_error "Source directory 'src' not found in project root"
+        exit $EXIT_CONFIGURATION_ERROR
+    fi
+    
+    # Check Docker availability for container scanning
+    if [[ "$CONTAINER_SCAN" == "true" ]]; then
+        if ! command -v docker &> /dev/null; then
+            log_error "Docker is required for container scanning but not found"
+            exit $EXIT_CONFIGURATION_ERROR
+        fi
         
-        if ! command -v "$tool_name" &> /dev/null; then
-            missing_tools+=("$tool_name ($tool_desc)")
-            log "ERROR" "Missing required tool: $tool_name - $tool_desc"
-        else
-            local version=""
-            case "$tool_name" in
-                "python3")
-                    version=$(python3 --version 2>&1 | cut -d' ' -f2)
-                    ;;
-                "docker")
-                    version=$(docker --version 2>&1 | cut -d' ' -f3 | tr -d ',')
-                    ;;
-                *)
-                    version="installed"
-                    ;;
-            esac
-            log "DEBUG" "Found $tool_name: $version"
+        if ! docker info &> /dev/null; then
+            log_error "Docker daemon is not running"
+            exit $EXIT_CONFIGURATION_ERROR
         fi
-    done
-    
-    if [[ ${#missing_tools[@]} -gt 0 ]]; then
-        log "ERROR" "Missing required dependencies:"
-        printf '%s\n' "${missing_tools[@]}" | sed 's/^/  - /'
-        log "ERROR" "Please install missing tools and retry"
-        exit 3
     fi
     
-    log "SUCCESS" "All required tool dependencies are available"
+    # Validate AWS CLI for AWS integration
+    if [[ "$AWS_INTEGRATION" == "true" ]]; then
+        if ! command -v aws &> /dev/null; then
+            log_error "AWS CLI is required for AWS integration but not found"
+            exit $EXIT_CONFIGURATION_ERROR
+        fi
+        
+        # Verify AWS credentials
+        if ! aws sts get-caller-identity &> /dev/null; then
+            log_error "AWS credentials not configured or invalid"
+            exit $EXIT_CONFIGURATION_ERROR
+        fi
+    fi
+    
+    log_info "Environment validation completed successfully"
 }
 
-# Install or upgrade security scanning tools
+# Check and install security tools
 install_security_tools() {
-    log "INFO" "Installing/upgrading security scanning tools..."
+    log_info "Checking and installing security tools..."
     
-    # Create virtual environment for security tools if needed
-    local venv_dir="$OUTPUT_DIR/.security-venv"
-    if [[ ! -d "$venv_dir" ]]; then
-        log "INFO" "Creating virtual environment for security tools..."
-        python3 -m venv "$venv_dir"
+    # Check Python and pip availability
+    if ! command -v python3 &> /dev/null; then
+        log_error "Python 3 is required but not found"
+        exit $EXIT_CONFIGURATION_ERROR
     fi
     
-    # Activate virtual environment
-    # shellcheck source=/dev/null
-    source "$venv_dir/bin/activate"
+    if ! command -v pip3 &> /dev/null; then
+        log_error "pip3 is required but not found"
+        exit $EXIT_CONFIGURATION_ERROR
+    fi
     
-    # Upgrade pip to latest version
-    log "INFO" "Upgrading pip to latest version..."
-    pip install --upgrade pip setuptools wheel
-    
-    # Install Python security tools with specific versions
-    log "INFO" "Installing Python security scanning tools..."
+    # Install/update Python security tools
     local python_tools=(
-        "safety==$SAFETY_VERSION"
-        "bandit==$BANDIT_VERSION"
-        "pip-audit==$PIP_AUDIT_VERSION"
-        "flake8==$FLAKE8_VERSION"
-        "mypy==$MYPY_VERSION"
+        "safety>=${SAFETY_MIN_VERSION}"
+        "bandit>=${BANDIT_MIN_VERSION}"
+        "flake8>=${FLAKE8_MIN_VERSION}"
+        "mypy>=${MYPY_MIN_VERSION}"
+        "pip-audit>=2.7.0"
         "pytest>=7.4.0"
         "pytest-cov>=4.1.0"
     )
     
     for tool in "${python_tools[@]}"; do
-        log "INFO" "Installing $tool..."
-        if ! pip install "$tool"; then
-            log "ERROR" "Failed to install $tool"
-            exit 3
+        log_debug "Installing/updating: $tool"
+        if ! pip3 install --quiet --upgrade "$tool"; then
+            log_error "Failed to install $tool"
+            exit $EXIT_CONFIGURATION_ERROR
         fi
     done
     
-    # Install Trivy container scanner
-    install_trivy
-    
-    log "SUCCESS" "Security scanning tools installation completed"
-}
-
-# Install Trivy container vulnerability scanner
-install_trivy() {
-    log "INFO" "Installing Trivy $TRIVY_VERSION container scanner..."
-    
-    local trivy_binary="/usr/local/bin/trivy"
-    local trivy_version_output=""
-    
-    # Check if Trivy is already installed with correct version
-    if command -v trivy &> /dev/null; then
-        trivy_version_output=$(trivy --version 2>&1 | head -n1)
-        if [[ "$trivy_version_output" == *"$TRIVY_VERSION"* ]]; then
-            log "INFO" "Trivy $TRIVY_VERSION already installed"
-            return 0
+    # Install Trivy for container scanning
+    if [[ "$CONTAINER_SCAN" == "true" ]]; then
+        if ! command -v trivy &> /dev/null; then
+            log_info "Installing Trivy container scanner..."
+            
+            # Detect OS and install Trivy accordingly
+            if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+                # Linux installation
+                curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+            elif [[ "$OSTYPE" == "darwin"* ]]; then
+                # macOS installation
+                if command -v brew &> /dev/null; then
+                    brew install trivy
+                else
+                    log_error "Homebrew required for Trivy installation on macOS"
+                    exit $EXIT_CONFIGURATION_ERROR
+                fi
+            else
+                log_error "Unsupported OS for automatic Trivy installation: $OSTYPE"
+                exit $EXIT_CONFIGURATION_ERROR
+            fi
         fi
+        
+        # Verify Trivy version
+        local trivy_version=$(trivy --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+        if ! version_compare "$trivy_version" "$TRIVY_MIN_VERSION"; then
+            log_error "Trivy version $trivy_version is below minimum required version $TRIVY_MIN_VERSION"
+            exit $EXIT_CONFIGURATION_ERROR
+        fi
+        
+        log_info "Trivy $trivy_version installed successfully"
     fi
     
-    # Determine system architecture
-    local arch
-    arch=$(uname -m)
-    case "$arch" in
-        "x86_64") arch="64bit" ;;
-        "arm64"|"aarch64") arch="ARM64" ;;
-        *) 
-            log "ERROR" "Unsupported architecture: $arch"
-            exit 3
-            ;;
-    esac
+    log_info "Security tools installation completed"
+}
+
+# Version comparison utility
+version_compare() {
+    local version1="$1"
+    local version2="$2"
     
-    # Download and install Trivy
-    local trivy_url="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-${arch}.tar.gz"
-    local temp_dir
-    temp_dir=$(mktemp -d)
+    # Convert versions to comparable format
+    local v1=$(echo "$version1" | sed 's/[^0-9.]//g')
+    local v2=$(echo "$version2" | sed 's/[^0-9.]//g')
     
-    log "INFO" "Downloading Trivy from: $trivy_url"
-    
-    if ! curl -sSL "$trivy_url" | tar -xz -C "$temp_dir"; then
-        log "ERROR" "Failed to download and extract Trivy"
-        rm -rf "$temp_dir"
-        exit 3
-    fi
-    
-    # Install Trivy binary
-    if ! sudo mv "$temp_dir/trivy" "$trivy_binary"; then
-        log "ERROR" "Failed to install Trivy binary (sudo required)"
-        rm -rf "$temp_dir"
-        exit 3
-    fi
-    
-    # Set executable permissions
-    sudo chmod +x "$trivy_binary"
-    
-    # Cleanup
-    rm -rf "$temp_dir"
-    
-    # Verify installation
-    if trivy_version_output=$(trivy --version 2>&1); then
-        log "SUCCESS" "Trivy installed successfully: $trivy_version_output"
+    # Use sort -V for version comparison
+    if [[ "$(printf '%s\n' "$v1" "$v2" | sort -V | head -1)" == "$v2" ]]; then
+        return 0  # version1 >= version2
     else
-        log "ERROR" "Trivy installation verification failed"
-        exit 3
+        return 1  # version1 < version2
     fi
 }
 
 # =============================================================================
-# Security Scanning Functions
+# Container Security Scanning (Trivy 0.48+)
 # =============================================================================
 
-# Run comprehensive dependency vulnerability scanning
-scan_dependencies() {
-    log "INFO" "Starting dependency vulnerability scanning..."
-    ((TOTAL_SCANS++))
+run_container_vulnerability_scan() {
+    log_info "Starting container vulnerability scanning with Trivy..."
     
-    local scan_success=true
-    
-    # Validate requirements file exists
-    local req_file="$PROJECT_ROOT/$REQUIREMENTS_FILE"
-    if [[ ! -f "$req_file" ]]; then
-        log "ERROR" "Requirements file not found: $req_file"
-        ((FAILED_SCANS++))
-        return 1
-    fi
-    
-    log "INFO" "Scanning dependencies from: $req_file"
-    
-    # Run Safety vulnerability scanning
-    log "INFO" "Running Safety dependency vulnerability scan..."
-    if ! run_safety_scan "$req_file"; then
-        scan_success=false
-    fi
-    
-    # Run pip-audit vulnerability scanning  
-    log "INFO" "Running pip-audit dependency security assessment..."
-    if ! run_pip_audit_scan "$req_file"; then
-        scan_success=false
-    fi
-    
-    # Generate dependency scan summary
-    generate_dependency_summary
-    
-    if [[ "$scan_success" == "true" ]]; then
-        log "SUCCESS" "Dependency vulnerability scanning completed successfully"
-        return 0
-    else
-        log "ERROR" "Dependency vulnerability scanning failed"
-        ((FAILED_SCANS++))
-        SECURITY_SCAN_FAILED=true
-        return 1
-    fi
-}
-
-# Run Safety vulnerability scanning with comprehensive reporting
-run_safety_scan() {
-    local requirements_file="$1"
-    local output_file="$OUTPUT_DIR/safety/safety-report.json"
-    local summary_file="$OUTPUT_DIR/safety/safety-summary.txt"
-    
-    log "INFO" "Executing Safety $SAFETY_VERSION vulnerability scan..."
-    
-    # Run Safety scan with JSON output
-    local safety_cmd=(
-        safety check
-        --requirements "$requirements_file"
-        --json
-        --output "$output_file"
-    )
-    
-    # Add CI-specific options
-    if [[ "$CI_ENVIRONMENT" == "true" ]]; then
-        safety_cmd+=(--continue-on-error)
-    fi
-    
-    local exit_code=0
-    if ! "${safety_cmd[@]}" 2>&1 | tee "$OUTPUT_DIR/safety/safety-output.log"; then
-        exit_code=$?
-        log "WARN" "Safety scan completed with warnings (exit code: $exit_code)"
-    fi
-    
-    # Parse Safety results if JSON output exists
-    if [[ -f "$output_file" ]]; then
-        parse_safety_results "$output_file" "$summary_file"
-    else
-        log "WARN" "Safety JSON output not generated, creating basic summary"
-        echo "Safety scan completed at $TIMESTAMP" > "$summary_file"
-        echo "No vulnerabilities detected or scan failed" >> "$summary_file"
-    fi
-    
-    # Check for critical vulnerabilities
+    local scan_results="${REPORT_DIR}/trivy-container-scan-${TIMESTAMP}.json"
+    local sarif_output="${REPORT_DIR}/trivy-container-scan-${TIMESTAMP}.sarif"
     local critical_count=0
-    if [[ -f "$output_file" ]] && command -v jq &> /dev/null; then
-        critical_count=$(jq -r '. | length' "$output_file" 2>/dev/null || echo "0")
+    local high_count=0
+    local medium_count=0
+    local low_count=0
+    
+    # Build Flask application Docker image for scanning
+    log_info "Building Docker image for security scanning..."
+    if ! docker build -t flask-security-scan:latest "${PROJECT_ROOT}" -f "${PROJECT_ROOT}/Dockerfile" &> "${REPORT_DIR}/docker-build.log"; then
+        log_error "Failed to build Docker image for scanning"
+        return $EXIT_CONFIGURATION_ERROR
     fi
     
-    if [[ "$critical_count" -gt 0 ]]; then
-        log "WARN" "Safety found $critical_count vulnerable dependencies"
-        ((HIGH_VULNERABILITIES += critical_count))
-        
-        if [[ "$FAIL_ON_CRITICAL" == "true" ]]; then
-            log "ERROR" "Critical dependencies vulnerabilities found - failing build"
-            return 1
-        fi
-    else
-        log "SUCCESS" "Safety scan: No vulnerable dependencies detected"
-    fi
+    # Run Trivy vulnerability scan with comprehensive configuration
+    log_info "Running Trivy container vulnerability scan..."
     
-    return 0
-}
-
-# Parse and analyze Safety scan results
-parse_safety_results() {
-    local json_file="$1"
-    local summary_file="$2"
-    
-    log "DEBUG" "Parsing Safety results from: $json_file"
-    
-    if ! command -v jq &> /dev/null; then
-        log "WARN" "jq not available - skipping detailed Safety result parsing"
-        return 0
-    fi
-    
-    # Generate comprehensive summary
-    cat > "$summary_file" << EOF
-Safety Dependency Vulnerability Scan Report
-Generated: $TIMESTAMP
-Requirements File: $REQUIREMENTS_FILE
-
-EOF
-    
-    # Parse vulnerabilities if any exist
-    local vuln_count
-    vuln_count=$(jq -r '. | length' "$json_file" 2>/dev/null || echo "0")
-    
-    if [[ "$vuln_count" -gt 0 ]]; then
-        echo "VULNERABILITIES FOUND: $vuln_count" >> "$summary_file"
-        echo "----------------------------------------" >> "$summary_file"
-        
-        # Extract vulnerability details
-        jq -r '.[] | "Package: \(.package_name) \(.installed_version)\nVulnerability: \(.vulnerability_id)\nSeverity: \(.advisory)\nAffected Versions: \(.affected_versions)\nSafe Versions: \(.safe_versions)\n"' "$json_file" >> "$summary_file" 2>/dev/null || true
-    else
-        echo "STATUS: No vulnerabilities detected" >> "$summary_file"
-    fi
-    
-    echo "" >> "$summary_file"
-    echo "Scan completed at: $TIMESTAMP" >> "$summary_file"
-    
-    log "DEBUG" "Safety results summary generated: $summary_file"
-}
-
-# Run pip-audit comprehensive dependency scanning
-run_pip_audit_scan() {
-    local requirements_file="$1"
-    local output_file="$OUTPUT_DIR/pip-audit/pip-audit-report.json"
-    local summary_file="$OUTPUT_DIR/pip-audit/pip-audit-summary.txt"
-    
-    log "INFO" "Executing pip-audit $PIP_AUDIT_VERSION security assessment..."
-    
-    # Run pip-audit with comprehensive options
-    local pip_audit_cmd=(
-        pip-audit
-        --requirement "$requirements_file"
-        --format json
-        --output "$output_file"
-        --progress-spinner off
-    )
-    
-    # Add vulnerability database options
-    pip_audit_cmd+=(--vulnerability-service pypi)
-    
-    local exit_code=0
-    if ! "${pip_audit_cmd[@]}" 2>&1 | tee "$OUTPUT_DIR/pip-audit/pip-audit-output.log"; then
-        exit_code=$?
-        log "WARN" "pip-audit scan completed with issues (exit code: $exit_code)"
-    fi
-    
-    # Parse pip-audit results
-    if [[ -f "$output_file" ]]; then
-        parse_pip_audit_results "$output_file" "$summary_file"
-    else
-        log "WARN" "pip-audit JSON output not generated"
-        echo "pip-audit scan completed at $TIMESTAMP" > "$summary_file"
-        echo "No output file generated" >> "$summary_file"
-    fi
-    
-    # Check for vulnerabilities
-    local vuln_count=0
-    if [[ -f "$output_file" ]] && command -v jq &> /dev/null; then
-        vuln_count=$(jq -r '.vulnerabilities | length' "$output_file" 2>/dev/null || echo "0")
-    fi
-    
-    if [[ "$vuln_count" -gt 0 ]]; then
-        log "WARN" "pip-audit found $vuln_count package vulnerabilities"
-        ((MEDIUM_VULNERABILITIES += vuln_count))
-    else
-        log "SUCCESS" "pip-audit scan: No package vulnerabilities detected"
-    fi
-    
-    return 0
-}
-
-# Parse and analyze pip-audit scan results
-parse_pip_audit_results() {
-    local json_file="$1"
-    local summary_file="$2"
-    
-    log "DEBUG" "Parsing pip-audit results from: $json_file"
-    
-    if ! command -v jq &> /dev/null; then
-        log "WARN" "jq not available - skipping detailed pip-audit result parsing"
-        return 0
-    fi
-    
-    # Generate comprehensive summary
-    cat > "$summary_file" << EOF
-pip-audit Dependency Security Assessment Report
-Generated: $TIMESTAMP
-Requirements File: $REQUIREMENTS_FILE
-
-EOF
-    
-    # Parse vulnerability information
-    local vuln_count
-    vuln_count=$(jq -r '.vulnerabilities | length' "$json_file" 2>/dev/null || echo "0")
-    
-    if [[ "$vuln_count" -gt 0 ]]; then
-        echo "VULNERABILITIES FOUND: $vuln_count" >> "$summary_file"
-        echo "----------------------------------------" >> "$summary_file"
-        
-        # Extract detailed vulnerability information
-        jq -r '.vulnerabilities[] | "Package: \(.package.name) \(.package.version)\nID: \(.id)\nDescription: \(.description // "No description")\nAliases: \(.aliases[]? // "None")\nFixed Versions: \(.fix_versions[]? // "None available")\n"' "$json_file" >> "$summary_file" 2>/dev/null || true
-    else
-        echo "STATUS: No vulnerabilities detected" >> "$summary_file"
-    fi
-    
-    echo "" >> "$summary_file"
-    echo "Scan completed at: $TIMESTAMP" >> "$summary_file"
-    
-    log "DEBUG" "pip-audit results summary generated: $summary_file"
-}
-
-# Generate comprehensive dependency scanning summary
-generate_dependency_summary() {
-    local summary_file="$OUTPUT_DIR/summary/dependency-scan-summary.json"
-    
-    log "INFO" "Generating dependency scanning summary report..."
-    
-    # Create structured summary report
-    cat > "$summary_file" << EOF
-{
-  "scan_info": {
-    "timestamp": "$TIMESTAMP",
-    "requirements_file": "$REQUIREMENTS_FILE",
-    "scan_tools": ["safety", "pip-audit"]
-  },
-  "vulnerability_counts": {
-    "critical": $CRITICAL_VULNERABILITIES,
-    "high": $HIGH_VULNERABILITIES,
-    "medium": $MEDIUM_VULNERABILITIES,
-    "low": $LOW_VULNERABILITIES
-  },
-  "scan_status": {
-    "total_scans": $TOTAL_SCANS,
-    "failed_scans": $FAILED_SCANS,
-    "overall_status": "$([ "$SECURITY_SCAN_FAILED" == "true" ] && echo "FAILED" || echo "PASSED")"
-  },
-  "tool_reports": {
-    "safety": "$OUTPUT_DIR/safety/safety-report.json",
-    "pip_audit": "$OUTPUT_DIR/pip-audit/pip-audit-report.json"
-  }
-}
-EOF
-    
-    log "SUCCESS" "Dependency scanning summary generated: $summary_file"
-}
-
-# Run container vulnerability scanning with Trivy
-scan_container() {
-    log "INFO" "Starting container vulnerability scanning..."
-    ((TOTAL_SCANS++))
-    
-    # Validate container image is specified
-    if [[ -z "$CONTAINER_IMAGE" ]]; then
-        log "ERROR" "Container image not specified for scanning"
-        log "INFO" "Use --container-image flag or set CONTAINER_IMAGE environment variable"
-        ((FAILED_SCANS++))
-        return 1
-    fi
-    
-    log "INFO" "Scanning container image: $CONTAINER_IMAGE"
-    
-    # Run Trivy container vulnerability scan
-    if run_trivy_scan "$CONTAINER_IMAGE"; then
-        log "SUCCESS" "Container vulnerability scanning completed successfully"
-        return 0
-    else
-        log "ERROR" "Container vulnerability scanning failed"
-        ((FAILED_SCANS++))
-        SECURITY_SCAN_FAILED=true
-        return 1
-    fi
-}
-
-# Execute Trivy container vulnerability scanning
-run_trivy_scan() {
-    local image="$1"
-    local output_file="$OUTPUT_DIR/trivy/trivy-report.json"
-    local summary_file="$OUTPUT_DIR/trivy/trivy-summary.txt"
-    
-    log "INFO" "Executing Trivy $TRIVY_VERSION container scan..."
-    
-    # Update Trivy vulnerability database
-    log "INFO" "Updating Trivy vulnerability database..."
-    if ! trivy image --download-db-only 2>&1 | tee "$OUTPUT_DIR/trivy/trivy-db-update.log"; then
-        log "WARN" "Trivy database update failed - continuing with existing database"
-    fi
-    
-    # Configure Trivy scan parameters
     local trivy_cmd=(
         trivy image
         --format json
-        --output "$output_file"
-        --severity "$SEVERITY_THRESHOLD,CRITICAL"
-        --no-progress
+        --output "$scan_results"
+        --severity "CRITICAL,HIGH,MEDIUM,LOW"
+        --vuln-type "os,library"
+        --scanners "vuln,secret,config"
         --timeout 15m
+        --cache-dir "${REPORT_DIR}/.trivy-cache"
+        --db-repository "ghcr.io/aquasecurity/trivy-db"
+        --java-db-repository "ghcr.io/aquasecurity/trivy-java-db"
+        flask-security-scan:latest
     )
     
-    # Add CI-specific options
-    if [[ "$CI_ENVIRONMENT" == "true" ]]; then
-        trivy_cmd+=(--quiet)
+    if ! "${trivy_cmd[@]}" 2> "${REPORT_DIR}/trivy-error.log"; then
+        log_error "Trivy container scan failed. Check ${REPORT_DIR}/trivy-error.log for details"
+        return $EXIT_CONFIGURATION_ERROR
     fi
     
-    # Add the image to scan
-    trivy_cmd+=("$image")
+    # Generate SARIF format for GitHub Actions integration
+    trivy image --format sarif --output "$sarif_output" flask-security-scan:latest 2>/dev/null || true
     
-    # Execute Trivy scan
-    local exit_code=0
-    if ! "${trivy_cmd[@]}" 2>&1 | tee "$OUTPUT_DIR/trivy/trivy-output.log"; then
-        exit_code=$?
-        log "ERROR" "Trivy scan failed with exit code: $exit_code"
-        return 1
+    # Parse scan results and count vulnerabilities by severity
+    if [[ -f "$scan_results" ]]; then
+        # Extract vulnerability counts using jq
+        if command -v jq &> /dev/null; then
+            critical_count=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' "$scan_results" 2>/dev/null || echo 0)
+            high_count=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' "$scan_results" 2>/dev/null || echo 0)
+            medium_count=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "MEDIUM")] | length' "$scan_results" 2>/dev/null || echo 0)
+            low_count=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "LOW")] | length' "$scan_results" 2>/dev/null || echo 0)
+        else
+            # Fallback parsing without jq
+            critical_count=$(grep -c '"Severity": "CRITICAL"' "$scan_results" 2>/dev/null || echo 0)
+            high_count=$(grep -c '"Severity": "HIGH"' "$scan_results" 2>/dev/null || echo 0)
+            medium_count=$(grep -c '"Severity": "MEDIUM"' "$scan_results" 2>/dev/null || echo 0)
+            low_count=$(grep -c '"Severity": "LOW"' "$scan_results" 2>/dev/null || echo 0)
+        fi
     fi
     
-    # Parse Trivy results
-    if [[ -f "$output_file" ]]; then
-        parse_trivy_results "$output_file" "$summary_file"
-    else
-        log "ERROR" "Trivy output file not generated"
-        return 1
+    # Generate human-readable report
+    generate_container_scan_report "$scan_results" "$critical_count" "$high_count" "$medium_count" "$low_count"
+    
+    # Send metrics to Prometheus if endpoint configured
+    if [[ -n "$METRICS_ENDPOINT" ]]; then
+        send_container_scan_metrics "$critical_count" "$high_count" "$medium_count" "$low_count"
     fi
     
-    # Check vulnerability threshold compliance
-    check_trivy_compliance "$output_file"
+    # Upload to AWS Security Hub if integration enabled
+    if [[ "$AWS_INTEGRATION" == "true" ]]; then
+        upload_container_scan_to_aws_security_hub "$scan_results"
+    fi
+    
+    # Apply security policy enforcement per Section 8.5.2
+    if [[ $critical_count -gt 0 ]] && [[ "$FAIL_ON_CRITICAL" == "true" ]]; then
+        log_error "Container scan found $critical_count critical vulnerabilities - Build terminated per security policy"
+        return $EXIT_CRITICAL_VULNERABILITIES
+    elif [[ $high_count -gt 10 ]] && [[ "$FAIL_ON_CRITICAL" == "true" ]]; then
+        log_warn "Container scan found $high_count high-severity vulnerabilities - Security review required"
+        return $EXIT_CRITICAL_VULNERABILITIES
+    fi
+    
+    log_info "Container vulnerability scan completed successfully"
+    return $EXIT_SUCCESS
 }
 
-# Parse and analyze Trivy scan results
-parse_trivy_results() {
-    local json_file="$1"
-    local summary_file="$2"
+generate_container_scan_report() {
+    local scan_results="$1"
+    local critical_count="$2"
+    local high_count="$3"
+    local medium_count="$4"
+    local low_count="$5"
     
-    log "DEBUG" "Parsing Trivy results from: $json_file"
+    local report_file="${REPORT_DIR}/container-security-report-${TIMESTAMP}.txt"
     
-    if ! command -v jq &> /dev/null; then
-        log "WARN" "jq not available - skipping detailed Trivy result parsing"
-        return 0
-    fi
-    
-    # Extract vulnerability counts by severity
-    local critical_count high_count medium_count low_count
-    critical_count=$(jq -r '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' "$json_file" 2>/dev/null || echo "0")
-    high_count=$(jq -r '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' "$json_file" 2>/dev/null || echo "0")
-    medium_count=$(jq -r '[.Results[]?.Vulnerabilities[]? | select(.Severity == "MEDIUM")] | length' "$json_file" 2>/dev/null || echo "0")
-    low_count=$(jq -r '[.Results[]?.Vulnerabilities[]? | select(.Severity == "LOW")] | length' "$json_file" 2>/dev/null || echo "0")
-    
-    # Update global counters
-    ((CRITICAL_VULNERABILITIES += critical_count))
-    ((HIGH_VULNERABILITIES += high_count))
-    ((MEDIUM_VULNERABILITIES += medium_count))
-    ((LOW_VULNERABILITIES += low_count))
-    
-    # Generate comprehensive summary
-    cat > "$summary_file" << EOF
-Trivy Container Vulnerability Scan Report
-Generated: $TIMESTAMP
-Image: $CONTAINER_IMAGE
-Trivy Version: $TRIVY_VERSION
+    cat > "$report_file" << EOF
+Flask Application Container Security Scan Report
+================================================
+Scan Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+Scanner: Trivy ${TRIVY_MIN_VERSION}+
+Image: flask-security-scan:latest
 
-VULNERABILITY SUMMARY:
-- Critical: $critical_count
-- High: $high_count  
-- Medium: $medium_count
-- Low: $low_count
-- Total: $((critical_count + high_count + medium_count + low_count))
+VULNERABILITY SUMMARY
+=====================
+Critical: ${critical_count}
+High:     ${high_count}
+Medium:   ${medium_count}
+Low:      ${low_count}
 
+SECURITY POLICY COMPLIANCE
+==========================
+$(if [[ $critical_count -eq 0 ]]; then
+    echo "✅ PASSED - No critical vulnerabilities found"
+else
+    echo "❌ FAILED - Critical vulnerabilities detected (Policy: Block deployment)"
+fi)
+
+$(if [[ $high_count -le 10 ]]; then
+    echo "✅ PASSED - High-severity vulnerabilities within acceptable threshold"
+else
+    echo "⚠️  WARNING - High-severity vulnerabilities exceed threshold (${high_count} > 10)"
+fi)
+
+REMEDIATION RECOMMENDATIONS
+===========================
 EOF
     
-    # Add detailed vulnerability information if vulnerabilities exist
-    local total_vulns=$((critical_count + high_count + medium_count + low_count))
-    if [[ "$total_vulns" -gt 0 ]]; then
-        echo "DETAILED VULNERABILITIES:" >> "$summary_file"
-        echo "=========================" >> "$summary_file"
+    # Add specific remediation recommendations if jq is available
+    if command -v jq &> /dev/null && [[ -f "$scan_results" ]]; then
+        echo "" >> "$report_file"
+        echo "TOP CRITICAL VULNERABILITIES:" >> "$report_file"
+        echo "==============================" >> "$report_file"
         
-        # Extract top critical and high vulnerabilities
-        jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL" or .Severity == "HIGH") | "Severity: \(.Severity)\nCVE: \(.VulnerabilityID)\nPackage: \(.PkgName) \(.InstalledVersion)\nDescription: \(.Description // "No description")\nFixed Version: \(.FixedVersion // "Not available")\n"' "$json_file" >> "$summary_file" 2>/dev/null || true
-    else
-        echo "STATUS: No vulnerabilities detected" >> "$summary_file"
-    fi
-    
-    echo "" >> "$summary_file"
-    echo "Scan completed at: $TIMESTAMP" >> "$summary_file"
-    
-    log "INFO" "Container vulnerabilities found - Critical: $critical_count, High: $high_count, Medium: $medium_count, Low: $low_count"
-    log "DEBUG" "Trivy results summary generated: $summary_file"
-}
-
-# Check Trivy scan compliance against security policies
-check_trivy_compliance() {
-    local json_file="$1"
-    
-    if ! command -v jq &> /dev/null; then
-        log "WARN" "jq not available - skipping compliance check"
-        return 0
-    fi
-    
-    # Extract critical vulnerability count
-    local critical_count
-    critical_count=$(jq -r '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' "$json_file" 2>/dev/null || echo "0")
-    
-    # Security policy enforcement
-    if [[ "$critical_count" -gt 0 ]] && [[ "$FAIL_ON_CRITICAL" == "true" ]]; then
-        log "ERROR" "Security policy violation: $critical_count critical vulnerabilities found"
-        log "ERROR" "Critical vulnerabilities must be remediated before deployment"
+        jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL") | "• \(.VulnerabilityID): \(.Title // "No title") - \(.InstalledVersion) -> \(.FixedVersion // "No fix available")"' "$scan_results" 2>/dev/null | head -5 >> "$report_file" || true
         
-        # Display critical CVEs for immediate attention
-        if critical_cves=$(jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL") | .VulnerabilityID' "$json_file" 2>/dev/null); then
-            log "ERROR" "Critical CVEs requiring immediate attention:"
-            echo "$critical_cves" | head -10 | sed 's/^/  - /'
-        fi
+        echo "" >> "$report_file"
+        echo "For complete details, see: $scan_results" >> "$report_file"
+    fi
+    
+    log_info "Container security report generated: $report_file"
+}
+
+send_container_scan_metrics() {
+    local critical_count="$1"
+    local high_count="$2"
+    local medium_count="$3"
+    local low_count="$4"
+    
+    log_debug "Sending container scan metrics to Prometheus endpoint: $METRICS_ENDPOINT"
+    
+    # Send metrics using curl (Prometheus pushgateway format)
+    local metrics_data="
+# TYPE container_vulnerabilities_critical gauge
+container_vulnerabilities_critical{scanner=\"trivy\",image=\"flask-security-scan\"} ${critical_count}
+# TYPE container_vulnerabilities_high gauge
+container_vulnerabilities_high{scanner=\"trivy\",image=\"flask-security-scan\"} ${high_count}
+# TYPE container_vulnerabilities_medium gauge
+container_vulnerabilities_medium{scanner=\"trivy\",image=\"flask-security-scan\"} ${medium_count}
+# TYPE container_vulnerabilities_low gauge
+container_vulnerabilities_low{scanner=\"trivy\",image=\"flask-security-scan\"} ${low_count}
+# TYPE container_scan_timestamp gauge
+container_scan_timestamp{scanner=\"trivy\",image=\"flask-security-scan\"} $(date +%s)
+"
+    
+    if curl -X POST --data-binary "$metrics_data" "${METRICS_ENDPOINT}/metrics/job/security-scanner/instance/container-scan" &>/dev/null; then
+        log_debug "Container scan metrics sent successfully"
+    else
+        log_warn "Failed to send container scan metrics to Prometheus"
+    fi
+}
+
+upload_container_scan_to_aws_security_hub() {
+    local scan_results="$1"
+    
+    log_debug "Uploading container scan results to AWS Security Hub..."
+    
+    # Convert Trivy JSON to AWS Security Hub format
+    # This would require a more complex transformation - placeholder for enterprise integration
+    if command -v aws &> /dev/null; then
+        local finding_data="{
+            \"SchemaVersion\": \"2018-10-08\",
+            \"Id\": \"trivy-container-scan-$(date +%s)\",
+            \"ProductArn\": \"arn:aws:securityhub:::product/aquasecurity/trivy\",
+            \"GeneratorId\": \"trivy-container-scanner\",
+            \"AwsAccountId\": \"$(aws sts get-caller-identity --query Account --output text)\",
+            \"CreatedAt\": \"$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)\",
+            \"UpdatedAt\": \"$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)\",
+            \"Severity\": {
+                \"Label\": \"HIGH\"
+            },
+            \"Title\": \"Container Vulnerability Scan\",
+            \"Description\": \"Trivy container vulnerability scan results for Flask application\"
+        }"
         
-        return 1
+        # Note: This is a simplified example. Production implementation would
+        # require proper transformation of Trivy JSON to Security Hub format
+        log_debug "AWS Security Hub integration placeholder - implement full transformation in production"
     fi
-    
-    return 0
-}
-
-# Run comprehensive static code security analysis
-scan_code() {
-    log "INFO" "Starting static code security analysis..."
-    ((TOTAL_SCANS++))
-    
-    local scan_success=true
-    
-    # Run Bandit security analysis
-    log "INFO" "Running Bandit static security analysis..."
-    if ! run_bandit_scan; then
-        scan_success=false
-    fi
-    
-    # Run flake8 code quality analysis
-    log "INFO" "Running flake8 code quality analysis..."
-    if ! run_flake8_scan; then
-        scan_success=false
-    fi
-    
-    # Run mypy type safety analysis
-    log "INFO" "Running mypy type safety analysis..."
-    if ! run_mypy_scan; then
-        scan_success=false
-    fi
-    
-    # Generate code scanning summary
-    generate_code_scan_summary
-    
-    if [[ "$scan_success" == "true" ]]; then
-        log "SUCCESS" "Static code security analysis completed successfully"
-        return 0
-    else
-        log "ERROR" "Static code security analysis failed"
-        ((FAILED_SCANS++))
-        SECURITY_SCAN_FAILED=true
-        return 1
-    fi
-}
-
-# Run Bandit static security analysis
-run_bandit_scan() {
-    local output_file="$OUTPUT_DIR/bandit/bandit-report.json"
-    local summary_file="$OUTPUT_DIR/bandit/bandit-summary.txt"
-    
-    log "INFO" "Executing Bandit $BANDIT_VERSION static security analysis..."
-    
-    # Configure Bandit scan parameters
-    local bandit_cmd=(
-        bandit
-        --recursive "$PROJECT_ROOT"
-        --format json
-        --output "$output_file"
-        --confidence-level medium
-        --severity-level medium
-    )
-    
-    # Add exclusions for common non-security directories
-    bandit_cmd+=(
-        --exclude "$PROJECT_ROOT/tests,$PROJECT_ROOT/.git,$PROJECT_ROOT/venv,$PROJECT_ROOT/.venv,$PROJECT_ROOT/build,$PROJECT_ROOT/dist"
-    )
-    
-    # Execute Bandit scan
-    local exit_code=0
-    if ! "${bandit_cmd[@]}" 2>&1 | tee "$OUTPUT_DIR/bandit/bandit-output.log"; then
-        exit_code=$?
-        log "WARN" "Bandit scan completed with findings (exit code: $exit_code)"
-    fi
-    
-    # Parse Bandit results
-    if [[ -f "$output_file" ]]; then
-        parse_bandit_results "$output_file" "$summary_file"
-    else
-        log "WARN" "Bandit output file not generated"
-        echo "Bandit scan completed at $TIMESTAMP" > "$summary_file"
-        echo "No output file generated" >> "$summary_file"
-    fi
-    
-    # Check for high/critical security issues
-    local high_issues=0
-    if [[ -f "$output_file" ]] && command -v jq &> /dev/null; then
-        high_issues=$(jq -r '.results[] | select(.issue_severity == "HIGH" or .issue_severity == "CRITICAL") | length' "$output_file" 2>/dev/null | wc -l)
-    fi
-    
-    if [[ "$high_issues" -gt 0 ]]; then
-        log "WARN" "Bandit found $high_issues high/critical security issues"
-        ((HIGH_VULNERABILITIES += high_issues))
-        
-        if [[ "$FAIL_ON_CRITICAL" == "true" ]]; then
-            log "ERROR" "Critical security issues found - failing build"
-            return 1
-        fi
-    else
-        log "SUCCESS" "Bandit scan: No critical security issues detected"
-    fi
-    
-    return 0
-}
-
-# Parse and analyze Bandit scan results
-parse_bandit_results() {
-    local json_file="$1"
-    local summary_file="$2"
-    
-    log "DEBUG" "Parsing Bandit results from: $json_file"
-    
-    if ! command -v jq &> /dev/null; then
-        log "WARN" "jq not available - skipping detailed Bandit result parsing"
-        return 0
-    fi
-    
-    # Extract issue counts by severity
-    local high_count medium_count low_count
-    high_count=$(jq -r '[.results[] | select(.issue_severity == "HIGH")] | length' "$json_file" 2>/dev/null || echo "0")
-    medium_count=$(jq -r '[.results[] | select(.issue_severity == "MEDIUM")] | length' "$json_file" 2>/dev/null || echo "0")
-    low_count=$(jq -r '[.results[] | select(.issue_severity == "LOW")] | length' "$json_file" 2>/dev/null || echo "0")
-    
-    # Generate comprehensive summary
-    cat > "$summary_file" << EOF
-Bandit Static Security Analysis Report
-Generated: $TIMESTAMP
-Project: $PROJECT_ROOT
-Bandit Version: $BANDIT_VERSION
-
-SECURITY ISSUE SUMMARY:
-- High: $high_count
-- Medium: $medium_count
-- Low: $low_count
-- Total: $((high_count + medium_count + low_count))
-
-EOF
-    
-    # Add detailed issue information if issues exist
-    local total_issues=$((high_count + medium_count + low_count))
-    if [[ "$total_issues" -gt 0 ]]; then
-        echo "DETAILED SECURITY ISSUES:" >> "$summary_file"
-        echo "=========================" >> "$summary_file"
-        
-        # Extract high severity issues
-        jq -r '.results[] | select(.issue_severity == "HIGH") | "Severity: \(.issue_severity)\nTest: \(.test_name)\nFile: \(.filename):\(.line_number)\nIssue: \(.issue_text)\nConfidence: \(.issue_confidence)\n"' "$json_file" >> "$summary_file" 2>/dev/null || true
-    else
-        echo "STATUS: No security issues detected" >> "$summary_file"
-    fi
-    
-    echo "" >> "$summary_file"
-    echo "Scan completed at: $TIMESTAMP" >> "$summary_file"
-    
-    log "DEBUG" "Bandit results summary generated: $summary_file"
-}
-
-# Run flake8 code quality analysis
-run_flake8_scan() {
-    local output_file="$OUTPUT_DIR/flake8/flake8-report.txt"
-    local summary_file="$OUTPUT_DIR/flake8/flake8-summary.txt"
-    
-    log "INFO" "Executing flake8 $FLAKE8_VERSION code quality analysis..."
-    
-    # Configure flake8 scan parameters
-    local flake8_cmd=(
-        flake8
-        "$PROJECT_ROOT"
-        --output-file "$output_file"
-        --statistics
-        --count
-    )
-    
-    # Add configuration file if exists
-    local config_files=("$PROJECT_ROOT/.flake8" "$PROJECT_ROOT/setup.cfg" "$PROJECT_ROOT/tox.ini")
-    for config in "${config_files[@]}"; do
-        if [[ -f "$config" ]]; then
-            flake8_cmd+=(--config "$config")
-            break
-        fi
-    done
-    
-    # Execute flake8 scan
-    local exit_code=0
-    if ! "${flake8_cmd[@]}" 2>&1 | tee "$OUTPUT_DIR/flake8/flake8-output.log"; then
-        exit_code=$?
-        log "WARN" "flake8 scan found code quality issues (exit code: $exit_code)"
-    fi
-    
-    # Generate summary
-    cat > "$summary_file" << EOF
-flake8 Code Quality Analysis Report
-Generated: $TIMESTAMP
-Project: $PROJECT_ROOT
-flake8 Version: $FLAKE8_VERSION
-
-EOF
-    
-    # Add issue count if output file exists
-    if [[ -f "$output_file" ]]; then
-        local issue_count
-        issue_count=$(wc -l < "$output_file")
-        echo "TOTAL ISSUES FOUND: $issue_count" >> "$summary_file"
-        
-        if [[ "$issue_count" -gt 0 ]]; then
-            echo "" >> "$summary_file"
-            echo "TOP ISSUES:" >> "$summary_file"
-            head -20 "$output_file" >> "$summary_file"
-        fi
-    else
-        echo "STATUS: No issues detected" >> "$summary_file"
-    fi
-    
-    echo "" >> "$summary_file"
-    echo "Scan completed at: $TIMESTAMP" >> "$summary_file"
-    
-    # flake8 issues are warnings, not failures
-    log "SUCCESS" "flake8 code quality analysis completed"
-    return 0
-}
-
-# Run mypy type safety analysis
-run_mypy_scan() {
-    local output_file="$OUTPUT_DIR/mypy/mypy-report.txt"
-    local summary_file="$OUTPUT_DIR/mypy/mypy-summary.txt"
-    
-    log "INFO" "Executing mypy $MYPY_VERSION type safety analysis..."
-    
-    # Configure mypy scan parameters
-    local mypy_cmd=(
-        mypy
-        "$PROJECT_ROOT"
-        --txt-report "$OUTPUT_DIR/mypy"
-        --no-error-summary
-    )
-    
-    # Add configuration file if exists
-    local config_files=("$PROJECT_ROOT/mypy.ini" "$PROJECT_ROOT/.mypy.ini" "$PROJECT_ROOT/setup.cfg")
-    for config in "${config_files[@]}"; do
-        if [[ -f "$config" ]]; then
-            mypy_cmd+=(--config-file "$config")
-            break
-        fi
-    done
-    
-    # Execute mypy scan
-    local exit_code=0
-    if ! "${mypy_cmd[@]}" 2>&1 | tee "$output_file"; then
-        exit_code=$?
-        log "WARN" "mypy scan found type safety issues (exit code: $exit_code)"
-    fi
-    
-    # Generate summary
-    cat > "$summary_file" << EOF
-mypy Type Safety Analysis Report
-Generated: $TIMESTAMP
-Project: $PROJECT_ROOT
-mypy Version: $MYPY_VERSION
-
-EOF
-    
-    # Add issue analysis
-    if [[ -f "$output_file" ]]; then
-        local error_count
-        error_count=$(grep -c "error:" "$output_file" 2>/dev/null || echo "0")
-        echo "TYPE ERRORS FOUND: $error_count" >> "$summary_file"
-        
-        if [[ "$error_count" -gt 0 ]]; then
-            echo "" >> "$summary_file"
-            echo "TOP TYPE ERRORS:" >> "$summary_file"
-            grep "error:" "$output_file" | head -20 >> "$summary_file"
-        fi
-    else
-        echo "STATUS: No type errors detected" >> "$summary_file"
-    fi
-    
-    echo "" >> "$summary_file"
-    echo "Scan completed at: $TIMESTAMP" >> "$summary_file"
-    
-    # mypy issues are warnings, not failures
-    log "SUCCESS" "mypy type safety analysis completed"
-    return 0
-}
-
-# Generate comprehensive code scanning summary
-generate_code_scan_summary() {
-    local summary_file="$OUTPUT_DIR/summary/code-scan-summary.json"
-    
-    log "INFO" "Generating code scanning summary report..."
-    
-    # Create structured summary report
-    cat > "$summary_file" << EOF
-{
-  "scan_info": {
-    "timestamp": "$TIMESTAMP",
-    "project_root": "$PROJECT_ROOT",
-    "scan_tools": ["bandit", "flake8", "mypy"]
-  },
-  "security_issues": {
-    "critical": $CRITICAL_VULNERABILITIES,
-    "high": $HIGH_VULNERABILITIES,
-    "medium": $MEDIUM_VULNERABILITIES,
-    "low": $LOW_VULNERABILITIES
-  },
-  "scan_status": {
-    "total_scans": $TOTAL_SCANS,
-    "failed_scans": $FAILED_SCANS,
-    "overall_status": "$([ "$SECURITY_SCAN_FAILED" == "true" ] && echo "FAILED" || echo "PASSED")"
-  },
-  "tool_reports": {
-    "bandit": "$OUTPUT_DIR/bandit/bandit-report.json",
-    "flake8": "$OUTPUT_DIR/flake8/flake8-report.txt",
-    "mypy": "$OUTPUT_DIR/mypy/mypy-report.txt"
-  }
-}
-EOF
-    
-    log "SUCCESS" "Code scanning summary generated: $summary_file"
 }
 
 # =============================================================================
-# Report Generation and Upload Functions
+# Dependency Vulnerability Scanning (safety 3.0+ & pip-audit)
 # =============================================================================
 
-# Generate comprehensive security compliance report
+run_dependency_vulnerability_scan() {
+    log_info "Starting dependency vulnerability scanning with safety and pip-audit..."
+    
+    local safety_results="${REPORT_DIR}/safety-scan-${TIMESTAMP}.json"
+    local pip_audit_results="${REPORT_DIR}/pip-audit-scan-${TIMESTAMP}.json"
+    local combined_report="${REPORT_DIR}/dependency-security-report-${TIMESTAMP}.txt"
+    local total_vulnerabilities=0
+    local critical_vulnerabilities=0
+    
+    # Run safety vulnerability scan
+    log_info "Running safety dependency vulnerability scan..."
+    
+    if ! safety check --json --output "$safety_results" 2>"${REPORT_DIR}/safety-error.log"; then
+        log_warn "Safety scan completed with findings. Analyzing results..."
+    fi
+    
+    # Run pip-audit for additional vulnerability detection
+    log_info "Running pip-audit dependency vulnerability scan..."
+    
+    if ! pip-audit --format=json --output="$pip_audit_results" --require="${PROJECT_ROOT}/requirements.txt" 2>"${REPORT_DIR}/pip-audit-error.log"; then
+        log_warn "pip-audit scan completed with findings. Analyzing results..."
+    fi
+    
+    # Analyze safety results
+    if [[ -f "$safety_results" ]] && command -v jq &> /dev/null; then
+        # Count vulnerabilities from safety results
+        local safety_vuln_count=$(jq 'length' "$safety_results" 2>/dev/null || echo 0)
+        total_vulnerabilities=$((total_vulnerabilities + safety_vuln_count))
+        
+        # Count critical vulnerabilities (CVE score >= 9.0)
+        local safety_critical=$(jq '[.[] | select(.vulnerability.specs[0] >= "9.0")] | length' "$safety_results" 2>/dev/null || echo 0)
+        critical_vulnerabilities=$((critical_vulnerabilities + safety_critical))
+    fi
+    
+    # Analyze pip-audit results
+    if [[ -f "$pip_audit_results" ]] && command -v jq &> /dev/null; then
+        # Count vulnerabilities from pip-audit results
+        local pip_audit_vuln_count=$(jq '[.vulnerabilities] | flatten | length' "$pip_audit_results" 2>/dev/null || echo 0)
+        total_vulnerabilities=$((total_vulnerabilities + pip_audit_vuln_count))
+        
+        # Count critical vulnerabilities (CVSS >= 9.0)
+        local pip_audit_critical=$(jq '[.vulnerabilities | flatten[] | select(.advisory.summary | test("CVSS:9|CVSS:10"))] | length' "$pip_audit_results" 2>/dev/null || echo 0)
+        critical_vulnerabilities=$((critical_vulnerabilities + pip_audit_critical))
+    fi
+    
+    # Generate comprehensive dependency security report
+    generate_dependency_scan_report "$safety_results" "$pip_audit_results" "$total_vulnerabilities" "$critical_vulnerabilities"
+    
+    # Send metrics to Prometheus if endpoint configured
+    if [[ -n "$METRICS_ENDPOINT" ]]; then
+        send_dependency_scan_metrics "$total_vulnerabilities" "$critical_vulnerabilities"
+    fi
+    
+    # Apply security policy enforcement per Section 8.5.1
+    if [[ $critical_vulnerabilities -gt 0 ]] && [[ "$FAIL_ON_CRITICAL" == "true" ]]; then
+        log_error "Dependency scan found $critical_vulnerabilities critical vulnerabilities - Deployment blocked per security policy"
+        return $EXIT_CRITICAL_VULNERABILITIES
+    elif [[ $total_vulnerabilities -gt 20 ]]; then
+        log_warn "Dependency scan found $total_vulnerabilities total vulnerabilities - Security review recommended"
+    fi
+    
+    log_info "Dependency vulnerability scan completed successfully"
+    return $EXIT_SUCCESS
+}
+
+generate_dependency_scan_report() {
+    local safety_results="$1"
+    local pip_audit_results="$2"
+    local total_vulnerabilities="$3"
+    local critical_vulnerabilities="$4"
+    
+    local report_file="${REPORT_DIR}/dependency-security-report-${TIMESTAMP}.txt"
+    
+    cat > "$report_file" << EOF
+Flask Application Dependency Security Scan Report
+=================================================
+Scan Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+Scanners: safety ${SAFETY_MIN_VERSION}+, pip-audit 2.7+
+Requirements File: ${PROJECT_ROOT}/requirements.txt
+
+VULNERABILITY SUMMARY
+=====================
+Total Vulnerabilities: ${total_vulnerabilities}
+Critical Vulnerabilities: ${critical_vulnerabilities}
+
+SECURITY POLICY COMPLIANCE
+==========================
+$(if [[ $critical_vulnerabilities -eq 0 ]]; then
+    echo "✅ PASSED - No critical vulnerabilities found"
+else
+    echo "❌ FAILED - Critical vulnerabilities detected (Policy: Block deployment)"
+fi)
+
+$(if [[ $total_vulnerabilities -le 20 ]]; then
+    echo "✅ PASSED - Total vulnerabilities within acceptable threshold"
+else
+    echo "⚠️  WARNING - Total vulnerabilities exceed recommended threshold (${total_vulnerabilities} > 20)"
+fi)
+
+REMEDIATION RECOMMENDATIONS
+===========================
+EOF
+    
+    # Add specific remediation recommendations from safety results
+    if command -v jq &> /dev/null && [[ -f "$safety_results" ]]; then
+        echo "" >> "$report_file"
+        echo "SAFETY SCAN FINDINGS:" >> "$report_file"
+        echo "=====================" >> "$report_file"
+        
+        jq -r '.[] | "• \(.package_name) \(.version): \(.advisory) (ID: \(.vulnerability.id))"' "$safety_results" 2>/dev/null >> "$report_file" || echo "No safety vulnerabilities found" >> "$report_file"
+    fi
+    
+    # Add specific remediation recommendations from pip-audit results
+    if command -v jq &> /dev/null && [[ -f "$pip_audit_results" ]]; then
+        echo "" >> "$report_file"
+        echo "PIP-AUDIT SCAN FINDINGS:" >> "$report_file"
+        echo "========================" >> "$report_file"
+        
+        jq -r '.vulnerabilities | flatten[] | "• \(.package) \(.installed_version): \(.advisory.summary) (Fix: \(.fix_versions[]? // "No fix available"))"' "$pip_audit_results" 2>/dev/null >> "$report_file" || echo "No pip-audit vulnerabilities found" >> "$report_file"
+    fi
+    
+    echo "" >> "$report_file"
+    echo "AUTOMATED REMEDIATION COMMANDS:" >> "$report_file"
+    echo "===============================" >> "$report_file"
+    echo "# Update all packages to latest versions:" >> "$report_file"
+    echo "pip install --upgrade -r requirements.txt" >> "$report_file"
+    echo "" >> "$report_file"
+    echo "# Generate updated requirements with security fixes:" >> "$report_file"
+    echo "pip-audit --fix --require requirements.txt --output requirements-fixed.txt" >> "$report_file"
+    echo "" >> "$report_file"
+    echo "For complete details, see:" >> "$report_file"
+    echo "- Safety results: $safety_results" >> "$report_file"
+    echo "- pip-audit results: $pip_audit_results" >> "$report_file"
+    
+    log_info "Dependency security report generated: $report_file"
+}
+
+send_dependency_scan_metrics() {
+    local total_vulnerabilities="$1"
+    local critical_vulnerabilities="$2"
+    
+    log_debug "Sending dependency scan metrics to Prometheus endpoint: $METRICS_ENDPOINT"
+    
+    local metrics_data="
+# TYPE dependency_vulnerabilities_total gauge
+dependency_vulnerabilities_total{scanner=\"safety+pip-audit\",project=\"flask-app\"} ${total_vulnerabilities}
+# TYPE dependency_vulnerabilities_critical gauge
+dependency_vulnerabilities_critical{scanner=\"safety+pip-audit\",project=\"flask-app\"} ${critical_vulnerabilities}
+# TYPE dependency_scan_timestamp gauge
+dependency_scan_timestamp{scanner=\"safety+pip-audit\",project=\"flask-app\"} $(date +%s)
+"
+    
+    if curl -X POST --data-binary "$metrics_data" "${METRICS_ENDPOINT}/metrics/job/security-scanner/instance/dependency-scan" &>/dev/null; then
+        log_debug "Dependency scan metrics sent successfully"
+    else
+        log_warn "Failed to send dependency scan metrics to Prometheus"
+    fi
+}
+
+# =============================================================================
+# Static Code Analysis (bandit, flake8, mypy)
+# =============================================================================
+
+run_static_code_analysis() {
+    log_info "Starting static code analysis with bandit, flake8, and mypy..."
+    
+    local bandit_results="${REPORT_DIR}/bandit-scan-${TIMESTAMP}.json"
+    local flake8_results="${REPORT_DIR}/flake8-scan-${TIMESTAMP}.txt"
+    local mypy_results="${REPORT_DIR}/mypy-scan-${TIMESTAMP}.txt"
+    local analysis_report="${REPORT_DIR}/static-analysis-report-${TIMESTAMP}.txt"
+    
+    local bandit_issues=0
+    local flake8_issues=0
+    local mypy_issues=0
+    local critical_security_issues=0
+    
+    # Run bandit security analysis
+    log_info "Running bandit Python security analysis..."
+    
+    if ! bandit -r "${PROJECT_ROOT}/src" -f json -o "$bandit_results" -ll -x "${PROJECT_ROOT}/src/tests" 2>"${REPORT_DIR}/bandit-error.log"; then
+        log_warn "Bandit analysis completed with findings. Analyzing results..."
+    fi
+    
+    # Count bandit issues
+    if [[ -f "$bandit_results" ]] && command -v jq &> /dev/null; then
+        bandit_issues=$(jq '.results | length' "$bandit_results" 2>/dev/null || echo 0)
+        critical_security_issues=$(jq '[.results[] | select(.issue_severity == "HIGH" or .issue_severity == "CRITICAL")] | length' "$bandit_results" 2>/dev/null || echo 0)
+    fi
+    
+    # Run flake8 code style analysis
+    log_info "Running flake8 code style analysis..."
+    
+    if ! flake8 "${PROJECT_ROOT}/src" --config="${PROJECT_ROOT}/.flake8" --output-file="$flake8_results" --statistics --count 2>/dev/null; then
+        log_warn "flake8 analysis completed with findings. Analyzing results..."
+    fi
+    
+    # Count flake8 issues
+    if [[ -f "$flake8_results" ]]; then
+        flake8_issues=$(wc -l < "$flake8_results" 2>/dev/null || echo 0)
+    fi
+    
+    # Run mypy type checking
+    log_info "Running mypy type safety validation..."
+    
+    if ! mypy "${PROJECT_ROOT}/src" --config-file="${PROJECT_ROOT}/mypy.ini" > "$mypy_results" 2>&1; then
+        log_warn "mypy analysis completed with findings. Analyzing results..."
+    fi
+    
+    # Count mypy issues
+    if [[ -f "$mypy_results" ]]; then
+        mypy_issues=$(grep -c "error:" "$mypy_results" 2>/dev/null || echo 0)
+    fi
+    
+    # Generate static analysis report
+    generate_static_analysis_report "$bandit_results" "$flake8_results" "$mypy_results" "$bandit_issues" "$flake8_issues" "$mypy_issues" "$critical_security_issues"
+    
+    # Send metrics to Prometheus if endpoint configured
+    if [[ -n "$METRICS_ENDPOINT" ]]; then
+        send_static_analysis_metrics "$bandit_issues" "$flake8_issues" "$mypy_issues" "$critical_security_issues"
+    fi
+    
+    # Apply quality gate enforcement per Section 8.5.1
+    local exit_code=$EXIT_SUCCESS
+    
+    if [[ $critical_security_issues -gt 0 ]] && [[ "$FAIL_ON_CRITICAL" == "true" ]]; then
+        log_error "Static analysis found $critical_security_issues critical security issues - Build terminated per security policy"
+        exit_code=$EXIT_CRITICAL_VULNERABILITIES
+    fi
+    
+    if [[ $flake8_issues -gt 0 ]] && [[ "$FAIL_ON_CRITICAL" == "true" ]]; then
+        log_error "flake8 found $flake8_issues code style violations - Zero errors required per quality gate"
+        exit_code=$EXIT_CRITICAL_VULNERABILITIES
+    fi
+    
+    if [[ $mypy_issues -gt 0 ]] && [[ "$FAIL_ON_CRITICAL" == "true" ]]; then
+        log_error "mypy found $mypy_issues type checking issues - 100% type check success required per quality gate"
+        exit_code=$EXIT_CRITICAL_VULNERABILITIES
+    fi
+    
+    if [[ $exit_code -eq $EXIT_SUCCESS ]]; then
+        log_info "Static code analysis completed successfully - All quality gates passed"
+    fi
+    
+    return $exit_code
+}
+
+generate_static_analysis_report() {
+    local bandit_results="$1"
+    local flake8_results="$2"
+    local mypy_results="$3"
+    local bandit_issues="$4"
+    local flake8_issues="$5"
+    local mypy_issues="$6"
+    local critical_security_issues="$7"
+    
+    local report_file="${REPORT_DIR}/static-analysis-report-${TIMESTAMP}.txt"
+    
+    cat > "$report_file" << EOF
+Flask Application Static Code Analysis Report
+=============================================
+Analysis Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+Analyzers: bandit ${BANDIT_MIN_VERSION}+, flake8 ${FLAKE8_MIN_VERSION}+, mypy ${MYPY_MIN_VERSION}+
+Source Directory: ${PROJECT_ROOT}/src
+
+ANALYSIS SUMMARY
+================
+Bandit Security Issues: ${bandit_issues} (Critical/High: ${critical_security_issues})
+flake8 Style Issues: ${flake8_issues}
+mypy Type Issues: ${mypy_issues}
+
+QUALITY GATE COMPLIANCE
+========================
+$(if [[ $critical_security_issues -eq 0 ]]; then
+    echo "✅ PASSED - No critical security issues found (bandit)"
+else
+    echo "❌ FAILED - Critical security issues detected (Policy: Block deployment)"
+fi)
+
+$(if [[ $flake8_issues -eq 0 ]]; then
+    echo "✅ PASSED - Zero code style violations (flake8)"
+else
+    echo "❌ FAILED - Code style violations detected (Policy: Zero errors required)"
+fi)
+
+$(if [[ $mypy_issues -eq 0 ]]; then
+    echo "✅ PASSED - 100% type check success (mypy)"
+else
+    echo "❌ FAILED - Type checking issues detected (Policy: 100% success required)"
+fi)
+
+REMEDIATION RECOMMENDATIONS
+===========================
+EOF
+    
+    # Add bandit findings if available
+    if command -v jq &> /dev/null && [[ -f "$bandit_results" ]]; then
+        echo "" >> "$report_file"
+        echo "TOP SECURITY ISSUES (bandit):" >> "$report_file"
+        echo "==============================" >> "$report_file"
+        
+        jq -r '.results[] | "• \(.filename):\(.line_number): \(.test_id) - \(.issue_text) (\(.issue_severity))"' "$bandit_results" 2>/dev/null | head -10 >> "$report_file" || echo "No bandit issues found" >> "$report_file"
+    fi
+    
+    # Add flake8 findings
+    if [[ -f "$flake8_results" && -s "$flake8_results" ]]; then
+        echo "" >> "$report_file"
+        echo "CODE STYLE ISSUES (flake8):" >> "$report_file"
+        echo "============================" >> "$report_file"
+        head -10 "$flake8_results" >> "$report_file"
+        if [[ $(wc -l < "$flake8_results") -gt 10 ]]; then
+            echo "... and $((flake8_issues - 10)) more issues" >> "$report_file"
+        fi
+    fi
+    
+    # Add mypy findings
+    if [[ -f "$mypy_results" && -s "$mypy_results" ]]; then
+        echo "" >> "$report_file"
+        echo "TYPE CHECKING ISSUES (mypy):" >> "$report_file"
+        echo "=============================" >> "$report_file"
+        grep "error:" "$mypy_results" | head -10 >> "$report_file" || echo "No mypy issues found" >> "$report_file"
+        if [[ $mypy_issues -gt 10 ]]; then
+            echo "... and $((mypy_issues - 10)) more issues" >> "$report_file"
+        fi
+    fi
+    
+    echo "" >> "$report_file"
+    echo "AUTOMATED REMEDIATION COMMANDS:" >> "$report_file"
+    echo "===============================" >> "$report_file"
+    echo "# Fix code style issues automatically:" >> "$report_file"
+    echo "autopep8 --in-place --recursive src/" >> "$report_file"
+    echo "black src/" >> "$report_file"
+    echo "" >> "$report_file"
+    echo "# Check specific bandit findings:" >> "$report_file"
+    echo "bandit -r src/ -ll" >> "$report_file"
+    echo "" >> "$report_file"
+    echo "# Run type checking with detailed output:" >> "$report_file"
+    echo "mypy src/ --show-error-codes --show-error-context" >> "$report_file"
+    echo "" >> "$report_file"
+    echo "For complete details, see:" >> "$report_file"
+    echo "- Bandit results: $bandit_results" >> "$report_file"
+    echo "- flake8 results: $flake8_results" >> "$report_file"
+    echo "- mypy results: $mypy_results" >> "$report_file"
+    
+    log_info "Static analysis report generated: $report_file"
+}
+
+send_static_analysis_metrics() {
+    local bandit_issues="$1"
+    local flake8_issues="$2"
+    local mypy_issues="$3"
+    local critical_security_issues="$4"
+    
+    log_debug "Sending static analysis metrics to Prometheus endpoint: $METRICS_ENDPOINT"
+    
+    local metrics_data="
+# TYPE static_analysis_security_issues gauge
+static_analysis_security_issues{analyzer=\"bandit\",project=\"flask-app\"} ${bandit_issues}
+# TYPE static_analysis_security_critical gauge
+static_analysis_security_critical{analyzer=\"bandit\",project=\"flask-app\"} ${critical_security_issues}
+# TYPE static_analysis_style_issues gauge
+static_analysis_style_issues{analyzer=\"flake8\",project=\"flask-app\"} ${flake8_issues}
+# TYPE static_analysis_type_issues gauge
+static_analysis_type_issues{analyzer=\"mypy\",project=\"flask-app\"} ${mypy_issues}
+# TYPE static_analysis_timestamp gauge
+static_analysis_timestamp{project=\"flask-app\"} $(date +%s)
+"
+    
+    if curl -X POST --data-binary "$metrics_data" "${METRICS_ENDPOINT}/metrics/job/security-scanner/instance/static-analysis" &>/dev/null; then
+        log_debug "Static analysis metrics sent successfully"
+    else
+        log_warn "Failed to send static analysis metrics to Prometheus"
+    fi
+}
+
+# =============================================================================
+# Security Test Suite Validation
+# =============================================================================
+
+run_security_test_validation() {
+    log_info "Starting security test suite validation..."
+    
+    local test_results="${REPORT_DIR}/security-tests-${TIMESTAMP}.xml"
+    local coverage_results="${REPORT_DIR}/security-coverage-${TIMESTAMP}.xml"
+    local test_report="${REPORT_DIR}/security-test-report-${TIMESTAMP}.txt"
+    
+    local test_exit_code=0
+    local coverage_percentage=0
+    local security_tests_passed=0
+    local security_tests_failed=0
+    
+    # Run security-focused test suite with coverage
+    log_info "Running security test suite with pytest..."
+    
+    local pytest_cmd=(
+        pytest
+        "${PROJECT_ROOT}/tests/security"
+        "${PROJECT_ROOT}/tests/integration"
+        --cov="${PROJECT_ROOT}/src"
+        --cov-config="${PROJECT_ROOT}/.coveragerc"
+        --cov-report=xml:"$coverage_results"
+        --cov-report=term-missing
+        --junit-xml="$test_results"
+        --verbose
+        --tb=short
+        -k "security or auth or validation"
+    )
+    
+    if ! "${pytest_cmd[@]}" > "${REPORT_DIR}/pytest-output.log" 2>&1; then
+        test_exit_code=1
+        log_warn "Security test suite completed with failures. Analyzing results..."
+    fi
+    
+    # Parse test results
+    if [[ -f "$test_results" ]] && command -v xml2 &> /dev/null; then
+        # Count passed and failed tests from JUnit XML
+        security_tests_passed=$(xml2 < "$test_results" | grep -c "/testcase=" 2>/dev/null || echo 0)
+        security_tests_failed=$(xml2 < "$test_results" | grep -c "failure=" 2>/dev/null || echo 0)
+    elif [[ -f "${REPORT_DIR}/pytest-output.log" ]]; then
+        # Fallback parsing from pytest output
+        security_tests_passed=$(grep -c "PASSED" "${REPORT_DIR}/pytest-output.log" 2>/dev/null || echo 0)
+        security_tests_failed=$(grep -c "FAILED" "${REPORT_DIR}/pytest-output.log" 2>/dev/null || echo 0)
+    fi
+    
+    # Parse coverage percentage
+    if [[ -f "$coverage_results" ]]; then
+        coverage_percentage=$(grep -o 'line-rate="[0-9.]*"' "$coverage_results" | head -1 | cut -d'"' -f2 | awk '{print int($1*100)}' || echo 0)
+    fi
+    
+    # Generate security test report
+    generate_security_test_report "$test_results" "$coverage_results" "$security_tests_passed" "$security_tests_failed" "$coverage_percentage"
+    
+    # Send metrics to Prometheus if endpoint configured
+    if [[ -n "$METRICS_ENDPOINT" ]]; then
+        send_security_test_metrics "$security_tests_passed" "$security_tests_failed" "$coverage_percentage"
+    fi
+    
+    # Apply test coverage quality gate per Section 8.5.1
+    local required_coverage=90
+    if [[ $coverage_percentage -lt $required_coverage ]] && [[ "$FAIL_ON_CRITICAL" == "true" ]]; then
+        log_error "Security test coverage is ${coverage_percentage}% - Below required ${required_coverage}% threshold"
+        return $EXIT_CRITICAL_VULNERABILITIES
+    fi
+    
+    if [[ $security_tests_failed -gt 0 ]] && [[ "$FAIL_ON_CRITICAL" == "true" ]]; then
+        log_error "Security test suite has $security_tests_failed failing tests - All security tests must pass"
+        return $EXIT_CRITICAL_VULNERABILITIES
+    fi
+    
+    log_info "Security test validation completed successfully"
+    return $EXIT_SUCCESS
+}
+
+generate_security_test_report() {
+    local test_results="$1"
+    local coverage_results="$2"
+    local tests_passed="$3"
+    local tests_failed="$4"
+    local coverage_percentage="$5"
+    
+    local report_file="${REPORT_DIR}/security-test-report-${TIMESTAMP}.txt"
+    
+    cat > "$report_file" << EOF
+Flask Application Security Test Validation Report
+=================================================
+Test Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+Test Framework: pytest with coverage
+Test Scope: Security, Authentication, Validation
+
+TEST SUMMARY
+============
+Tests Passed: ${tests_passed}
+Tests Failed: ${tests_failed}
+Security Coverage: ${coverage_percentage}%
+
+QUALITY GATE COMPLIANCE
+========================
+$(if [[ $tests_failed -eq 0 ]]; then
+    echo "✅ PASSED - All security tests passing"
+else
+    echo "❌ FAILED - Security test failures detected (Policy: All tests must pass)"
+fi)
+
+$(if [[ $coverage_percentage -ge 90 ]]; then
+    echo "✅ PASSED - Security test coverage ≥90% requirement met"
+else
+    echo "❌ FAILED - Security test coverage below 90% threshold (${coverage_percentage}%)"
+fi)
+
+SECURITY TEST CATEGORIES
+========================
+EOF
+    
+    # Add test category breakdown if available
+    if [[ -f "${REPORT_DIR}/pytest-output.log" ]]; then
+        echo "" >> "$report_file"
+        echo "TEST EXECUTION DETAILS:" >> "$report_file"
+        echo "=======================" >> "$report_file"
+        
+        # Extract test categories from pytest output
+        grep -E "(test_.*security|test_.*auth|test_.*validation)" "${REPORT_DIR}/pytest-output.log" | head -20 >> "$report_file" 2>/dev/null || echo "Detailed test information not available" >> "$report_file"
+    fi
+    
+    echo "" >> "$report_file"
+    echo "REMEDIATION RECOMMENDATIONS:" >> "$report_file"
+    echo "============================" >> "$report_file"
+    echo "# Run specific security test categories:" >> "$report_file"
+    echo "pytest tests/security/ -v" >> "$report_file"
+    echo "pytest tests/integration/ -k 'auth' -v" >> "$report_file"
+    echo "" >> "$report_file"
+    echo "# Generate detailed coverage report:" >> "$report_file"
+    echo "pytest --cov=src --cov-report=html --cov-report=term-missing" >> "$report_file"
+    echo "" >> "$report_file"
+    echo "# Run security tests with specific markers:" >> "$report_file"
+    echo "pytest -m 'security or authentication' -v" >> "$report_file"
+    echo "" >> "$report_file"
+    echo "For complete details, see:" >> "$report_file"
+    echo "- Test results: $test_results" >> "$report_file"
+    echo "- Coverage results: $coverage_results" >> "$report_file"
+    echo "- Test output: ${REPORT_DIR}/pytest-output.log" >> "$report_file"
+    
+    log_info "Security test report generated: $report_file"
+}
+
+send_security_test_metrics() {
+    local tests_passed="$1"
+    local tests_failed="$2"
+    local coverage_percentage="$3"
+    
+    log_debug "Sending security test metrics to Prometheus endpoint: $METRICS_ENDPOINT"
+    
+    local metrics_data="
+# TYPE security_tests_passed gauge
+security_tests_passed{project=\"flask-app\",suite=\"security\"} ${tests_passed}
+# TYPE security_tests_failed gauge
+security_tests_failed{project=\"flask-app\",suite=\"security\"} ${tests_failed}
+# TYPE security_test_coverage_percentage gauge
+security_test_coverage_percentage{project=\"flask-app\",suite=\"security\"} ${coverage_percentage}
+# TYPE security_test_timestamp gauge
+security_test_timestamp{project=\"flask-app\",suite=\"security\"} $(date +%s)
+"
+    
+    if curl -X POST --data-binary "$metrics_data" "${METRICS_ENDPOINT}/metrics/job/security-scanner/instance/security-tests" &>/dev/null; then
+        log_debug "Security test metrics sent successfully"
+    else
+        log_warn "Failed to send security test metrics to Prometheus"
+    fi
+}
+
+# =============================================================================
+# Compliance Validation
+# =============================================================================
+
+run_compliance_validation() {
+    log_info "Starting comprehensive compliance validation..."
+    
+    local compliance_report="${REPORT_DIR}/compliance-validation-${TIMESTAMP}.txt"
+    local compliance_score=0
+    local total_checks=0
+    local compliance_violations=()
+    
+    # Initialize compliance report
+    cat > "$compliance_report" << EOF
+Flask Application Compliance Validation Report
+==============================================
+Validation Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+Compliance Frameworks: SOC 2, ISO 27001, OWASP Top 10, NIST Framework
+Project: Flask Application Security Migration
+
+COMPLIANCE VALIDATION SUMMARY
+==============================
+EOF
+    
+    # Security Configuration Compliance
+    log_info "Validating security configuration compliance..."
+    
+    local config_checks=0
+    local config_passed=0
+    
+    # Check Flask-Talisman security headers configuration
+    if [[ -f "${PROJECT_ROOT}/src/config/security.py" ]]; then
+        ((config_checks++))
+        if grep -q "Flask-Talisman" "${PROJECT_ROOT}/src/config/security.py"; then
+            ((config_passed++))
+            log_debug "✅ Flask-Talisman security headers configured"
+        else
+            compliance_violations+=("Flask-Talisman security headers not configured")
+            log_warn "❌ Flask-Talisman security headers not configured"
+        fi
+        
+        # Check HTTPS enforcement
+        ((config_checks++))
+        if grep -q "force_https.*True" "${PROJECT_ROOT}/src/config/security.py"; then
+            ((config_passed++))
+            log_debug "✅ HTTPS enforcement configured"
+        else
+            compliance_violations+=("HTTPS enforcement not configured")
+            log_warn "❌ HTTPS enforcement not configured"
+        fi
+        
+        # Check Content Security Policy
+        ((config_checks++))
+        if grep -q "content_security_policy" "${PROJECT_ROOT}/src/config/security.py"; then
+            ((config_passed++))
+            log_debug "✅ Content Security Policy configured"
+        else
+            compliance_violations+=("Content Security Policy not configured")
+            log_warn "❌ Content Security Policy not configured"
+        fi
+        
+        # Check session security configuration
+        ((config_checks++))
+        if grep -q "session_cookie_secure.*True" "${PROJECT_ROOT}/src/config/security.py"; then
+            ((config_passed++))
+            log_debug "✅ Secure session cookies configured"
+        else
+            compliance_violations+=("Secure session cookies not configured")
+            log_warn "❌ Secure session cookies not configured"
+        fi
+    else
+        compliance_violations+=("Security configuration file not found")
+        log_warn "❌ Security configuration file not found"
+    fi
+    
+    total_checks=$((total_checks + config_checks))
+    compliance_score=$((compliance_score + config_passed))
+    
+    # Authentication and Authorization Compliance
+    log_info "Validating authentication and authorization compliance..."
+    
+    local auth_checks=0
+    local auth_passed=0
+    
+    # Check Auth0 integration
+    if [[ -f "${PROJECT_ROOT}/src/config/auth.py" ]]; then
+        ((auth_checks++))
+        if grep -q "Auth0" "${PROJECT_ROOT}/src/config/auth.py"; then
+            ((auth_passed++))
+            log_debug "✅ Auth0 integration configured"
+        else
+            compliance_violations+=("Auth0 integration not configured")
+            log_warn "❌ Auth0 integration not configured"
+        fi
+        
+        # Check JWT validation
+        ((auth_checks++))
+        if grep -q "PyJWT" "${PROJECT_ROOT}/src/config/auth.py"; then
+            ((auth_passed++))
+            log_debug "✅ JWT validation configured"
+        else
+            compliance_violations+=("JWT validation not configured")
+            log_warn "❌ JWT validation not configured"
+        fi
+        
+        # Check Flask-Login integration
+        ((auth_checks++))
+        if grep -q "Flask-Login" "${PROJECT_ROOT}/src/config/auth.py"; then
+            ((auth_passed++))
+            log_debug "✅ Flask-Login session management configured"
+        else
+            compliance_violations+=("Flask-Login session management not configured")
+            log_warn "❌ Flask-Login session management not configured"
+        fi
+    else
+        compliance_violations+=("Authentication configuration file not found")
+        log_warn "❌ Authentication configuration file not found"
+    fi
+    
+    total_checks=$((total_checks + auth_checks))
+    compliance_score=$((compliance_score + auth_passed))
+    
+    # Encryption and Data Protection Compliance
+    log_info "Validating encryption and data protection compliance..."
+    
+    local encryption_checks=0
+    local encryption_passed=0
+    
+    # Check requirements.txt for security dependencies
+    if [[ -f "${PROJECT_ROOT}/requirements.txt" ]]; then
+        ((encryption_checks++))
+        if grep -q "cryptography" "${PROJECT_ROOT}/requirements.txt"; then
+            ((encryption_passed++))
+            log_debug "✅ Cryptography library included"
+        else
+            compliance_violations+=("Cryptography library not included in requirements")
+            log_warn "❌ Cryptography library not included in requirements"
+        fi
+        
+        # Check for secure Redis configuration
+        ((encryption_checks++))
+        if grep -q "redis" "${PROJECT_ROOT}/requirements.txt"; then
+            ((encryption_passed++))
+            log_debug "✅ Redis client library included"
+        else
+            compliance_violations+=("Redis client library not included in requirements")
+            log_warn "❌ Redis client library not included in requirements"
+        fi
+        
+        # Check for input validation libraries
+        ((encryption_checks++))
+        if grep -qE "(marshmallow|pydantic)" "${PROJECT_ROOT}/requirements.txt"; then
+            ((encryption_passed++))
+            log_debug "✅ Input validation libraries included"
+        else
+            compliance_violations+=("Input validation libraries not included in requirements")
+            log_warn "❌ Input validation libraries not included in requirements"
+        fi
+    fi
+    
+    total_checks=$((total_checks + encryption_checks))
+    compliance_score=$((compliance_score + encryption_passed))
+    
+    # CI/CD Security Integration Compliance
+    log_info "Validating CI/CD security integration compliance..."
+    
+    local cicd_checks=0
+    local cicd_passed=0
+    
+    # Check for GitHub Actions security workflow
+    if [[ -f "${PROJECT_ROOT}/.github/workflows/security.yml" ]] || [[ -f "${PROJECT_ROOT}/.github/workflows/ci.yml" ]]; then
+        ((cicd_checks++))
+        ((cicd_passed++))
+        log_debug "✅ GitHub Actions security workflow configured"
+    else
+        compliance_violations+=("GitHub Actions security workflow not configured")
+        log_warn "❌ GitHub Actions security workflow not configured"
+    fi
+    
+    # Check for Docker security configuration
+    if [[ -f "${PROJECT_ROOT}/Dockerfile" ]]; then
+        ((cicd_checks++))
+        if grep -q "python:.*slim" "${PROJECT_ROOT}/Dockerfile"; then
+            ((cicd_passed++))
+            log_debug "✅ Secure Docker base image configured"
+        else
+            compliance_violations+=("Secure Docker base image not configured")
+            log_warn "❌ Secure Docker base image not configured"
+        fi
+    fi
+    
+    total_checks=$((total_checks + cicd_checks))
+    compliance_score=$((compliance_score + cicd_passed))
+    
+    # Calculate compliance percentage
+    local compliance_percentage=0
+    if [[ $total_checks -gt 0 ]]; then
+        compliance_percentage=$((compliance_score * 100 / total_checks))
+    fi
+    
+    # Generate detailed compliance report
+    generate_compliance_report "$compliance_report" "$compliance_score" "$total_checks" "$compliance_percentage" "${compliance_violations[@]}"
+    
+    # Send metrics to Prometheus if endpoint configured
+    if [[ -n "$METRICS_ENDPOINT" ]]; then
+        send_compliance_metrics "$compliance_score" "$total_checks" "$compliance_percentage"
+    fi
+    
+    # Apply compliance enforcement policy
+    local required_compliance=85
+    if [[ $compliance_percentage -lt $required_compliance ]]; then
+        log_error "Compliance validation failed: ${compliance_percentage}% (Required: ${required_compliance}%)"
+        return $EXIT_COMPLIANCE_VIOLATION
+    fi
+    
+    log_info "Compliance validation completed successfully: ${compliance_percentage}%"
+    return $EXIT_SUCCESS
+}
+
 generate_compliance_report() {
-    log "INFO" "Generating comprehensive security compliance report..."
+    local report_file="$1"
+    local compliance_score="$2"
+    local total_checks="$3"
+    local compliance_percentage="$4"
+    shift 4
+    local violations=("$@")
     
-    local compliance_file="$OUTPUT_DIR/compliance/security-compliance-report.json"
-    local executive_summary="$OUTPUT_DIR/compliance/executive-summary.txt"
-    
-    # Create comprehensive compliance report
-    cat > "$compliance_file" << EOF
-{
-  "report_metadata": {
-    "generated_at": "$TIMESTAMP",
-    "script_version": "$SCRIPT_VERSION",
-    "project_root": "$PROJECT_ROOT",
-    "report_type": "comprehensive_security_assessment"
-  },
-  "scan_configuration": {
-    "severity_threshold": "$SEVERITY_THRESHOLD",
-    "fail_on_critical": "$FAIL_ON_CRITICAL",
-    "container_image": "$CONTAINER_IMAGE",
-    "requirements_file": "$REQUIREMENTS_FILE"
-  },
-  "vulnerability_summary": {
-    "total_vulnerabilities": $((CRITICAL_VULNERABILITIES + HIGH_VULNERABILITIES + MEDIUM_VULNERABILITIES + LOW_VULNERABILITIES)),
-    "critical_vulnerabilities": $CRITICAL_VULNERABILITIES,
-    "high_vulnerabilities": $HIGH_VULNERABILITIES,
-    "medium_vulnerabilities": $MEDIUM_VULNERABILITIES,
-    "low_vulnerabilities": $LOW_VULNERABILITIES
-  },
-  "scan_execution": {
-    "total_scans_executed": $TOTAL_SCANS,
-    "failed_scans": $FAILED_SCANS,
-    "overall_status": "$([ "$SECURITY_SCAN_FAILED" == "true" ] && echo "FAILED" || echo "PASSED")",
-    "compliance_status": "$([ "$CRITICAL_VULNERABILITIES" -eq 0 ] && echo "COMPLIANT" || echo "NON_COMPLIANT")"
-  },
-  "tool_versions": {
-    "trivy": "$TRIVY_VERSION",
-    "safety": "$SAFETY_VERSION",
-    "bandit": "$BANDIT_VERSION",
-    "pip_audit": "$PIP_AUDIT_VERSION",
-    "flake8": "$FLAKE8_VERSION",
-    "mypy": "$MYPY_VERSION"
-  },
-  "report_files": {
-    "dependency_scan": "$OUTPUT_DIR/summary/dependency-scan-summary.json",
-    "container_scan": "$OUTPUT_DIR/trivy/trivy-report.json",
-    "code_scan": "$OUTPUT_DIR/summary/code-scan-summary.json"
-  }
-}
+    cat >> "$report_file" << EOF
+Compliance Score: ${compliance_score}/${total_checks} (${compliance_percentage}%)
+
+COMPLIANCE STATUS
+=================
+$(if [[ $compliance_percentage -ge 85 ]]; then
+    echo "✅ PASSED - Compliance requirements met (≥85%)"
+else
+    echo "❌ FAILED - Compliance requirements not met (<85%)"
+fi)
+
+FRAMEWORK COMPLIANCE BREAKDOWN
+==============================
+• SOC 2 Type II: Security controls and audit trails
+• ISO 27001: Information security management
+• OWASP Top 10: Web application security vulnerabilities
+• NIST Cybersecurity Framework: Security controls implementation
+
+COMPLIANCE VIOLATIONS
+======================
 EOF
     
-    # Generate executive summary
-    cat > "$executive_summary" << EOF
-SECURITY COMPLIANCE EXECUTIVE SUMMARY
-=====================================
-Generated: $TIMESTAMP
-Project: $PROJECT_ROOT
-
-OVERALL STATUS: $([ "$SECURITY_SCAN_FAILED" == "true" ] && echo "FAILED ❌" || echo "PASSED ✅")
-COMPLIANCE STATUS: $([ "$CRITICAL_VULNERABILITIES" -eq 0 ] && echo "COMPLIANT ✅" || echo "NON-COMPLIANT ❌")
-
-VULNERABILITY SUMMARY:
-- Critical: $CRITICAL_VULNERABILITIES $([ "$CRITICAL_VULNERABILITIES" -eq 0 ] && echo "✅" || echo "❌")
-- High: $HIGH_VULNERABILITIES $([ "$HIGH_VULNERABILITIES" -eq 0 ] && echo "✅" || echo "⚠️")
-- Medium: $MEDIUM_VULNERABILITIES
-- Low: $LOW_VULNERABILITIES
-
-SCAN EXECUTION:
-- Total Scans: $TOTAL_SCANS
-- Failed Scans: $FAILED_SCANS
-- Success Rate: $(( (TOTAL_SCANS - FAILED_SCANS) * 100 / TOTAL_SCANS ))%
-
-RECOMMENDATIONS:
-$([ "$CRITICAL_VULNERABILITIES" -gt 0 ] && echo "❌ IMMEDIATE ACTION REQUIRED: Critical vulnerabilities must be remediated before deployment")
-$([ "$HIGH_VULNERABILITIES" -gt 0 ] && echo "⚠️  HIGH PRIORITY: Schedule remediation for high severity vulnerabilities")
-$([ "$MEDIUM_VULNERABILITIES" -gt 0 ] && echo "📋 MEDIUM PRIORITY: Plan remediation for medium severity vulnerabilities")
-$([ "$CRITICAL_VULNERABILITIES" -eq 0 ] && [ "$HIGH_VULNERABILITIES" -eq 0 ] && echo "✅ EXCELLENT: No critical or high severity vulnerabilities found")
-
-For detailed findings, review individual scan reports in: $OUTPUT_DIR
-EOF
-    
-    log "SUCCESS" "Security compliance report generated: $compliance_file"
-    log "INFO" "Executive summary available: $executive_summary"
-}
-
-# Upload security scan results to centralized security platform
-upload_security_results() {
-    if [[ "$UPLOAD_RESULTS" != "true" ]]; then
-        log "INFO" "Result upload disabled - skipping upload to security platform"
-        return 0
-    fi
-    
-    log "INFO" "Uploading security scan results to centralized security platform..."
-    
-    # Implementation would depend on specific security platform
-    # This is a placeholder for enterprise security platform integration
-    
-    local upload_endpoint="${SECURITY_PLATFORM_ENDPOINT:-https://security.company.com/api/upload}"
-    local api_key="${SECURITY_PLATFORM_API_KEY:-}"
-    
-    if [[ -z "$api_key" ]]; then
-        log "WARN" "Security platform API key not configured - skipping upload"
-        return 0
-    fi
-    
-    # Create upload payload
-    local upload_payload="$OUTPUT_DIR/compliance/upload-payload.json"
-    jq -n \
-        --arg project "$PROJECT_ROOT" \
-        --arg timestamp "$TIMESTAMP" \
-        --arg status "$([ "$SECURITY_SCAN_FAILED" == "true" ] && echo "FAILED" || echo "PASSED")" \
-        --argjson critical "$CRITICAL_VULNERABILITIES" \
-        --argjson high "$HIGH_VULNERABILITIES" \
-        --argjson medium "$MEDIUM_VULNERABILITIES" \
-        --argjson low "$LOW_VULNERABILITIES" \
-        '{
-            project: $project,
-            timestamp: $timestamp,
-            scan_status: $status,
-            vulnerabilities: {
-                critical: $critical,
-                high: $high,
-                medium: $medium,
-                low: $low
-            }
-        }' > "$upload_payload"
-    
-    # Upload results (placeholder implementation)
-    if curl -X POST \
-        -H "Authorization: Bearer $api_key" \
-        -H "Content-Type: application/json" \
-        -d "@$upload_payload" \
-        "$upload_endpoint" \
-        --max-time 30 \
-        --retry 3; then
-        log "SUCCESS" "Security scan results uploaded successfully"
+    if [[ ${#violations[@]} -eq 0 ]]; then
+        echo "No compliance violations detected." >> "$report_file"
     else
-        log "WARN" "Failed to upload security scan results - continuing execution"
+        for violation in "${violations[@]}"; do
+            echo "❌ $violation" >> "$report_file"
+        done
+    fi
+    
+    cat >> "$report_file" << EOF
+
+REMEDIATION RECOMMENDATIONS
+===========================
+• Implement missing security configurations per Section 6.4 requirements
+• Enable comprehensive security headers with Flask-Talisman
+• Configure proper authentication and authorization controls
+• Implement encryption for data in transit and at rest
+• Set up automated security scanning in CI/CD pipeline
+• Establish comprehensive audit logging with structlog
+• Configure monitoring and alerting for security events
+
+COMPLIANCE FRAMEWORKS REFERENCE
+===============================
+• SOC 2: System and Organization Controls for service organizations
+• ISO 27001: International standard for information security management
+• OWASP Top 10: Most critical web application security risks
+• NIST Framework: Framework for improving critical infrastructure cybersecurity
+• PCI DSS: Payment card industry data security standards
+• GDPR: General data protection regulation compliance
+
+For detailed remediation guidance, refer to:
+- Technical Specification Section 6.4 (Security Architecture)
+- Technical Specification Section 8.5 (CI/CD Pipeline)
+- OWASP Security Verification Standard
+- NIST Cybersecurity Framework Guidelines
+EOF
+    
+    log_info "Compliance validation report generated: $report_file"
+}
+
+send_compliance_metrics() {
+    local compliance_score="$1"
+    local total_checks="$2"
+    local compliance_percentage="$3"
+    
+    log_debug "Sending compliance metrics to Prometheus endpoint: $METRICS_ENDPOINT"
+    
+    local metrics_data="
+# TYPE compliance_score gauge
+compliance_score{project=\"flask-app\",framework=\"comprehensive\"} ${compliance_score}
+# TYPE compliance_total_checks gauge
+compliance_total_checks{project=\"flask-app\",framework=\"comprehensive\"} ${total_checks}
+# TYPE compliance_percentage gauge
+compliance_percentage{project=\"flask-app\",framework=\"comprehensive\"} ${compliance_percentage}
+# TYPE compliance_validation_timestamp gauge
+compliance_validation_timestamp{project=\"flask-app\",framework=\"comprehensive\"} $(date +%s)
+"
+    
+    if curl -X POST --data-binary "$metrics_data" "${METRICS_ENDPOINT}/metrics/job/security-scanner/instance/compliance-validation" &>/dev/null; then
+        log_debug "Compliance metrics sent successfully"
+    else
+        log_warn "Failed to send compliance metrics to Prometheus"
     fi
 }
 
 # =============================================================================
-# Main Execution Functions
+# Main Execution Flow
 # =============================================================================
 
-# Parse command line arguments
-parse_arguments() {
-    local scan_mode="all"
+# Comprehensive security scan execution with proper error handling
+run_comprehensive_security_scan() {
+    log_info "Starting comprehensive Flask application security scan..."
     
-    while [[ $# -gt 0 ]]; do
-        case $1 in
-            -h|--help)
-                show_usage
-                exit 0
-                ;;
-            -v|--version)
-                show_version
-                exit 0
-                ;;
-            -d|--debug)
-                export DEBUG="true"
-                ;;
-            --project-root)
-                PROJECT_ROOT="$2"
-                shift 2
-                ;;
-            --output-dir)
-                OUTPUT_DIR="$2"
-                shift 2
-                ;;
-            --config-dir)
-                CONFIG_DIR="$2"
-                shift 2
-                ;;
-            --requirements)
-                REQUIREMENTS_FILE="$2"
-                shift 2
-                ;;
-            --container-image)
-                CONTAINER_IMAGE="$2"
-                shift 2
-                ;;
-            --severity-threshold)
-                SEVERITY_THRESHOLD="$2"
-                shift 2
-                ;;
-            --fail-on-critical)
-                FAIL_ON_CRITICAL="$2"
-                shift 2
-                ;;
-            --generate-reports)
-                GENERATE_REPORTS="$2"
-                shift 2
-                ;;
-            --upload-results)
-                UPLOAD_RESULTS="$2"
-                shift 2
-                ;;
-            --scan-dependencies)
-                scan_mode="dependencies"
-                shift
-                ;;
-            --scan-container)
-                scan_mode="container"
-                shift
-                ;;
-            --scan-code)
-                scan_mode="code"
-                shift
-                ;;
-            --scan-all)
-                scan_mode="all"
-                shift
-                ;;
-            *)
-                log "ERROR" "Unknown argument: $1"
-                log "INFO" "Use --help for usage information"
-                exit 4
-                ;;
-        esac
+    local overall_exit_code=$EXIT_SUCCESS
+    local scan_summary=()
+    
+    # Container vulnerability scanning
+    if [[ "$CONTAINER_SCAN" == "true" ]]; then
+        log_info "Executing container vulnerability scanning phase..."
+        if ! run_container_vulnerability_scan; then
+            local container_exit_code=$?
+            overall_exit_code=$container_exit_code
+            scan_summary+=("Container scan: FAILED (exit code: $container_exit_code)")
+        else
+            scan_summary+=("Container scan: PASSED")
+        fi
+    fi
+    
+    # Dependency vulnerability scanning
+    if [[ "$DEPENDENCY_SCAN" == "true" ]]; then
+        log_info "Executing dependency vulnerability scanning phase..."
+        if ! run_dependency_vulnerability_scan; then
+            local dependency_exit_code=$?
+            if [[ $overall_exit_code -eq $EXIT_SUCCESS ]]; then
+                overall_exit_code=$dependency_exit_code
+            fi
+            scan_summary+=("Dependency scan: FAILED (exit code: $dependency_exit_code)")
+        else
+            scan_summary+=("Dependency scan: PASSED")
+        fi
+    fi
+    
+    # Static code analysis
+    if [[ "$STATIC_ANALYSIS" == "true" ]]; then
+        log_info "Executing static code analysis phase..."
+        if ! run_static_code_analysis; then
+            local static_exit_code=$?
+            if [[ $overall_exit_code -eq $EXIT_SUCCESS ]]; then
+                overall_exit_code=$static_exit_code
+            fi
+            scan_summary+=("Static analysis: FAILED (exit code: $static_exit_code)")
+        else
+            scan_summary+=("Static analysis: PASSED")
+        fi
+    fi
+    
+    # Security test validation
+    if [[ "$SECURITY_TESTS" == "true" ]]; then
+        log_info "Executing security test validation phase..."
+        if ! run_security_test_validation; then
+            local test_exit_code=$?
+            if [[ $overall_exit_code -eq $EXIT_SUCCESS ]]; then
+                overall_exit_code=$test_exit_code
+            fi
+            scan_summary+=("Security tests: FAILED (exit code: $test_exit_code)")
+        else
+            scan_summary+=("Security tests: PASSED")
+        fi
+    fi
+    
+    # Compliance validation
+    if [[ "$COMPLIANCE_CHECK" == "true" ]]; then
+        log_info "Executing compliance validation phase..."
+        if ! run_compliance_validation; then
+            local compliance_exit_code=$?
+            if [[ $overall_exit_code -eq $EXIT_SUCCESS ]]; then
+                overall_exit_code=$compliance_exit_code
+            fi
+            scan_summary+=("Compliance check: FAILED (exit code: $compliance_exit_code)")
+        else
+            scan_summary+=("Compliance check: PASSED")
+        fi
+    fi
+    
+    # Generate final security scan summary
+    generate_final_scan_summary "${scan_summary[@]}"
+    
+    return $overall_exit_code
+}
+
+# Generate comprehensive final scan summary
+generate_final_scan_summary() {
+    local scan_results=("$@")
+    local summary_report="${REPORT_DIR}/security-scan-summary-${TIMESTAMP}.txt"
+    
+    cat > "$summary_report" << EOF
+Flask Application Security Scan Summary
+========================================
+Scan Completed: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+Scanner Version: ${SCRIPT_VERSION}
+Project: Flask Application Security Migration
+Report Directory: ${REPORT_DIR}
+
+SECURITY SCAN RESULTS
+=====================
+EOF
+    
+    for result in "${scan_results[@]}"; do
+        echo "• $result" >> "$summary_report"
     done
     
-    # Validate severity threshold
-    case "$SEVERITY_THRESHOLD" in
-        LOW|MEDIUM|HIGH|CRITICAL) ;;
-        *)
-            log "ERROR" "Invalid severity threshold: $SEVERITY_THRESHOLD"
-            log "INFO" "Valid options: LOW, MEDIUM, HIGH, CRITICAL"
-            exit 4
-            ;;
-    esac
-    
-    # Store scan mode for main execution
-    export SCAN_MODE="$scan_mode"
-}
+    cat >> "$summary_report" << EOF
 
-# Execute security scanning based on selected mode
-execute_security_scans() {
-    local scan_mode="$SCAN_MODE"
-    local overall_success=true
-    
-    log "INFO" "Executing security scans in mode: $scan_mode"
-    
-    case "$scan_mode" in
-        "dependencies")
-            if ! scan_dependencies; then
-                overall_success=false
-            fi
-            ;;
-        "container")
-            if ! scan_container; then
-                overall_success=false
-            fi
-            ;;
-        "code")
-            if ! scan_code; then
-                overall_success=false
-            fi
-            ;;
-        "all")
-            # Run all security scans
-            if ! scan_dependencies; then
-                overall_success=false
-            fi
-            
-            if [[ -n "$CONTAINER_IMAGE" ]] && ! scan_container; then
-                overall_success=false
-            fi
-            
-            if ! scan_code; then
-                overall_success=false
-            fi
-            ;;
-        *)
-            log "ERROR" "Invalid scan mode: $scan_mode"
-            exit 4
-            ;;
-    esac
-    
-    # Generate comprehensive reports if enabled
-    if [[ "$GENERATE_REPORTS" == "true" ]]; then
-        generate_compliance_report
-    fi
-    
-    # Upload results if enabled
-    if [[ "$UPLOAD_RESULTS" == "true" ]]; then
-        upload_security_results
-    fi
-    
-    return $([ "$overall_success" == "true" ] && echo 0 || echo 1)
-}
+REPORT FILES GENERATED
+======================
+• Security scan summary: ${summary_report}
+• Container scan results: ${REPORT_DIR}/trivy-container-scan-${TIMESTAMP}.json
+• Dependency scan results: ${REPORT_DIR}/safety-scan-${TIMESTAMP}.json
+• Static analysis results: ${REPORT_DIR}/bandit-scan-${TIMESTAMP}.json
+• Security test results: ${REPORT_DIR}/security-tests-${TIMESTAMP}.xml
+• Compliance validation: ${REPORT_DIR}/compliance-validation-${TIMESTAMP}.txt
+• Security logs: ${REPORT_DIR}/security.log
 
-# Display final security scan results
-display_final_results() {
-    local exit_code="$1"
+NEXT STEPS
+==========
+$(if [[ $overall_exit_code -eq $EXIT_SUCCESS ]]; then
+cat << 'EOF_SUCCESS'
+✅ All security scans completed successfully
+• Deployment can proceed per security policy
+• Continue with blue-green deployment process
+• Monitor security metrics in production
+• Schedule next security assessment
+EOF_SUCCESS
+else
+cat << 'EOF_FAILURE'
+❌ Security scan failures detected
+• Review detailed scan reports above
+• Address critical vulnerabilities before deployment
+• Re-run security scans after remediation
+• Consult security team for risk assessment
+EOF_FAILURE
+fi)
+
+TECHNICAL SPECIFICATION REFERENCES
+===================================
+• Section 8.5.1: Build Pipeline Security Requirements
+• Section 8.5.2: Deployment Pipeline Security Controls
+• Section 6.4: Security Architecture Implementation
+• Section 3.6: Monitoring & Observability Integration
+
+For support and escalation:
+• Security Team: Review critical vulnerabilities
+• DevOps Team: CI/CD pipeline integration
+• Development Team: Code remediation guidance
+EOF
     
-    echo ""
-    log "INFO" "=========================================="
-    log "INFO" "SECURITY SCANNING RESULTS SUMMARY"
-    log "INFO" "=========================================="
+    # Display summary to console
+    log_info "Security scan completed. Summary report: $summary_report"
     
-    log "INFO" "Scan Configuration:"
-    log "INFO" "  - Project Root: $PROJECT_ROOT"
-    log "INFO" "  - Scan Mode: $SCAN_MODE"
-    log "INFO" "  - Severity Threshold: $SEVERITY_THRESHOLD"
-    log "INFO" "  - Fail on Critical: $FAIL_ON_CRITICAL"
-    log "INFO" "  - Container Image: ${CONTAINER_IMAGE:-"Not specified"}"
-    
-    echo ""
-    log "INFO" "Vulnerability Summary:"
-    log "INFO" "  - Critical: $CRITICAL_VULNERABILITIES $([ "$CRITICAL_VULNERABILITIES" -eq 0 ] && echo "✅" || echo "❌")"
-    log "INFO" "  - High: $HIGH_VULNERABILITIES $([ "$HIGH_VULNERABILITIES" -eq 0 ] && echo "✅" || echo "⚠️")"
-    log "INFO" "  - Medium: $MEDIUM_VULNERABILITIES"
-    log "INFO" "  - Low: $LOW_VULNERABILITIES"
-    log "INFO" "  - Total: $((CRITICAL_VULNERABILITIES + HIGH_VULNERABILITIES + MEDIUM_VULNERABILITIES + LOW_VULNERABILITIES))"
-    
-    echo ""
-    log "INFO" "Scan Execution Summary:"
-    log "INFO" "  - Total Scans: $TOTAL_SCANS"
-    log "INFO" "  - Failed Scans: $FAILED_SCANS"
-    log "INFO" "  - Success Rate: $([ "$TOTAL_SCANS" -gt 0 ] && echo "$(( (TOTAL_SCANS - FAILED_SCANS) * 100 / TOTAL_SCANS ))%" || echo "N/A")"
-    
-    echo ""
-    if [[ "$exit_code" -eq 0 ]]; then
-        log "SUCCESS" "🎉 All security scans completed successfully!"
-        log "SUCCESS" "✅ No critical security issues found"
-        log "INFO" "System is ready for deployment"
+    if [[ $overall_exit_code -eq $EXIT_SUCCESS ]]; then
+        echo -e "${GREEN}"
+        echo "=============================================="
+        echo "  ✅ SECURITY SCAN COMPLETED SUCCESSFULLY"
+        echo "=============================================="
+        echo -e "${NC}"
     else
-        log "ERROR" "💥 Security scanning failed!"
-        if [[ "$CRITICAL_VULNERABILITIES" -gt 0 ]]; then
-            log "ERROR" "❌ Critical vulnerabilities found - deployment blocked"
-        fi
-        if [[ "$FAILED_SCANS" -gt 0 ]]; then
-            log "ERROR" "❌ $FAILED_SCANS scan(s) failed to execute properly"
-        fi
-        log "ERROR" "🔒 Security issues must be resolved before deployment"
+        echo -e "${RED}"
+        echo "=============================================="
+        echo "  ❌ SECURITY SCAN FAILED - REVIEW REQUIRED"
+        echo "=============================================="
+        echo -e "${NC}"
     fi
     
-    echo ""
-    log "INFO" "📊 Detailed reports available in: $OUTPUT_DIR"
-    if [[ "$GENERATE_REPORTS" == "true" ]]; then
-        log "INFO" "📋 Executive summary: $OUTPUT_DIR/compliance/executive-summary.txt"
-        log "INFO" "📈 Compliance report: $OUTPUT_DIR/compliance/security-compliance-report.json"
-    fi
+    echo "📋 Report Summary: $summary_report"
+    echo "📁 All Reports: $REPORT_DIR"
     
-    echo ""
-    log "INFO" "=========================================="
+    if [[ -n "$METRICS_ENDPOINT" ]]; then
+        echo "📊 Metrics: $METRICS_ENDPOINT"
+    fi
 }
 
-# Main function - orchestrates the entire security scanning process
+# Script cleanup function
+cleanup() {
+    log_debug "Performing security scan cleanup..."
+    
+    # Clean up temporary Docker images
+    if [[ "$CONTAINER_SCAN" == "true" ]]; then
+        docker rmi flask-security-scan:latest &>/dev/null || true
+    fi
+    
+    # Clean up temporary files older than 7 days
+    find "$REPORT_DIR" -name "*.tmp" -mtime +7 -delete 2>/dev/null || true
+    
+    log_debug "Security scan cleanup completed"
+}
+
+# Signal handler for graceful shutdown
+signal_handler() {
+    log_warn "Security scan interrupted by signal. Performing cleanup..."
+    cleanup
+    exit $EXIT_CONFIGURATION_ERROR
+}
+
+# =============================================================================
+# Script Entry Point
+# =============================================================================
+
 main() {
-    # Script initialization
-    log "INFO" "Starting Flask Application Security Scanning and Compliance Validation"
-    log "INFO" "Script: $SCRIPT_NAME v$SCRIPT_VERSION"
-    log "INFO" "Timestamp: $TIMESTAMP"
+    # Set up signal handlers
+    trap signal_handler SIGINT SIGTERM
     
     # Parse command line arguments
     parse_arguments "$@"
     
-    # Environment validation and setup
-    check_tool_dependencies
-    setup_directories
+    # Display script header
+    echo -e "${BLUE}"
+    echo "=============================================="
+    echo "  Flask Application Security Scanner v${SCRIPT_VERSION}"
+    echo "=============================================="
+    echo -e "${NC}"
+    log_info "Starting security scanning process..."
+    
+    # Validate environment and install tools
+    validate_environment
     install_security_tools
     
-    # Execute security scanning
-    local exit_code=0
-    if ! execute_security_scans; then
-        exit_code=1
+    # Run comprehensive security scan
+    local exit_code=$EXIT_SUCCESS
+    if ! run_comprehensive_security_scan; then
+        exit_code=$?
     fi
     
-    # Final security policy enforcement
-    if [[ "$CRITICAL_VULNERABILITIES" -gt 0 ]] && [[ "$FAIL_ON_CRITICAL" == "true" ]]; then
-        log "ERROR" "Security policy enforcement: Critical vulnerabilities found"
-        exit_code=1
-    fi
+    # Perform cleanup
+    cleanup
     
-    # Display final results
-    display_final_results "$exit_code"
+    # Final status message
+    case $exit_code in
+        $EXIT_SUCCESS)
+            log_info "Security scan completed successfully - No critical issues found"
+            ;;
+        $EXIT_CRITICAL_VULNERABILITIES)
+            log_error "Security scan failed - Critical vulnerabilities detected"
+            ;;
+        $EXIT_CONFIGURATION_ERROR)
+            log_error "Security scan failed - Configuration or tool errors"
+            ;;
+        $EXIT_COMPLIANCE_VIOLATION)
+            log_error "Security scan failed - Compliance violations detected"
+            ;;
+        *)
+            log_error "Security scan failed - Unknown error (exit code: $exit_code)"
+            ;;
+    esac
     
-    # Exit with appropriate code
-    exit "$exit_code"
+    exit $exit_code
 }
 
-# =============================================================================
-# Script Execution Entry Point
-# =============================================================================
-
-# Execute main function with all provided arguments
+# Execute main function with all command line arguments
 main "$@"
