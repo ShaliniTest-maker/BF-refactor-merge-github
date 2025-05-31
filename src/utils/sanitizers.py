@@ -1,1045 +1,1198 @@
 """
-HTML sanitization and input sanitization utilities using bleach 6.0+ for XSS prevention
-and secure input processing.
+HTML Sanitization and Input Sanitization Utilities
 
-This module provides comprehensive sanitization functions with configurable security policies
-and enterprise-grade input protection patterns as specified in Section 0.2.4 dependency decisions,
-Section 3.2.2 input validation & sanitization, and Section 5.4.3 authentication and authorization framework.
+This module provides comprehensive HTML sanitization and input sanitization utilities using 
+bleach 6.0+ for XSS prevention and secure input processing. Implements enterprise-grade 
+input protection patterns with configurable security policies and comprehensive audit logging.
 
-Key Features:
-- HTML sanitization with bleach 6.0+ for XSS prevention
-- Configurable sanitization policies for different input contexts
-- Email and URL sanitization with validation integration
-- Date/time sanitization with python-dateutil integration
-- File content sanitization for upload security
-- SQL injection prevention patterns
+Features:
+- HTML sanitization with configurable security policies
+- Input sanitization equivalent to Node.js security patterns
+- XSS prevention with context-aware sanitization
 - Enterprise security compliance with audit logging
-- Prometheus metrics for sanitization monitoring
-- Circuit breaker patterns for external sanitization services
+- Date/time sanitization with ISO 8601 validation
+- Email sanitization and validation
+- URL and filename sanitization
+- JSON sanitization with nested object support
+- Performance optimization with intelligent caching
+- Integration with Flask-Talisman security framework
+
+Security Standards:
+- OWASP Top 10 compliance for XSS prevention
+- SANS Top 25 software weakness coverage
+- Enterprise security pattern alignment
+- Comprehensive audit trail generation
+- Input validation with detailed error reporting
+
+Author: Flask Migration System
+Version: 1.0.0
+License: Enterprise
 """
 
-import base64
-import html
 import re
-import urllib.parse
-from enum import Enum
-from typing import Any, Dict, List, Optional, Set, Union
-from uuid import uuid4
+import json
+import logging
+import hashlib
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Union, Set, Tuple
+from urllib.parse import urlparse, quote, unquote
+import unicodedata
+from functools import lru_cache
 
 import bleach
-import structlog
+from email_validator import validate_email, EmailNotValidError
 from dateutil import parser as dateutil_parser
 from dateutil.relativedelta import relativedelta
-from prometheus_client import Counter, Histogram
 
-# Import fallbacks for optional dependencies
+# Import Flask-related modules for enterprise integration
 try:
-    from email_validator import EmailNotValidError, validate_email
-    EMAIL_VALIDATOR_AVAILABLE = True
+    from flask import current_app, g
+    FLASK_AVAILABLE = True
 except ImportError:
-    EMAIL_VALIDATOR_AVAILABLE = False
-    # Fallback for environments without email-validator
-    class EmailNotValidError(Exception):
-        pass
+    FLASK_AVAILABLE = False
 
+# Import structlog for enterprise audit logging
 try:
-    from urllib3.util import parse_url
-    URLLIB3_AVAILABLE = True
+    import structlog
+    STRUCTLOG_AVAILABLE = True
 except ImportError:
-    URLLIB3_AVAILABLE = False
-
-# Prometheus metrics for sanitization monitoring
-sanitization_counter = Counter(
-    'sanitization_operations_total',
-    'Total number of sanitization operations by type',
-    ['sanitization_type', 'policy_name', 'result']
-)
-
-sanitization_time = Histogram(
-    'sanitization_duration_seconds',
-    'Time spent on sanitization operations',
-    ['sanitization_type', 'policy_name']
-)
-
-security_violation_counter = Counter(
-    'security_violations_detected_total',
-    'Total number of security violations detected during sanitization',
-    ['violation_type', 'sanitization_context']
-)
-
-# Get structured logger
-logger = structlog.get_logger(__name__)
+    STRUCTLOG_AVAILABLE = False
+    import logging as structlog
 
 
-class SanitizationContext(Enum):
+class SanitizationError(Exception):
+    """Base exception for sanitization operations."""
+    pass
+
+
+class InvalidInputError(SanitizationError):
+    """Exception raised when input fails validation."""
+    pass
+
+
+class SecurityPolicyViolationError(SanitizationError):
+    """Exception raised when input violates security policy."""
+    pass
+
+
+class ConfigurationError(SanitizationError):
+    """Exception raised when sanitizer configuration is invalid."""
+    pass
+
+
+class SecurityPolicyManager:
     """
-    Sanitization context types for policy selection per Section 5.4.3.
+    Manages configurable security policies for different sanitization contexts.
     
-    Different contexts require different sanitization policies to balance
-    security and functionality requirements.
-    """
-    
-    USER_INPUT = "user_input"          # General user input (forms, search)
-    RICH_CONTENT = "rich_content"      # Rich text editor content
-    COMMENTS = "comments"              # User comments and reviews
-    DESCRIPTIONS = "descriptions"      # Product/service descriptions
-    ADMIN_CONTENT = "admin_content"    # Administrative content
-    EMAIL_CONTENT = "email_content"    # Email content sanitization
-    API_INPUT = "api_input"           # API request input
-    FILE_CONTENT = "file_content"     # File content sanitization
-    SEARCH_QUERY = "search_query"     # Search query sanitization
-    URL_INPUT = "url_input"           # URL and link sanitization
-
-
-class SecurityViolationType(Enum):
-    """Security violation types for monitoring and alerting."""
-    
-    XSS_ATTEMPT = "xss_attempt"
-    SQL_INJECTION = "sql_injection"
-    SCRIPT_INJECTION = "script_injection"
-    HTML_INJECTION = "html_injection"
-    URL_MANIPULATION = "url_manipulation"
-    FILE_INCLUSION = "file_inclusion"
-    COMMAND_INJECTION = "command_injection"
-    LDAP_INJECTION = "ldap_injection"
-    XPATH_INJECTION = "xpath_injection"
-    MALICIOUS_UPLOAD = "malicious_upload"
-
-
-class SanitizationResult:
-    """
-    Sanitization operation result with security analysis and metrics.
-    
-    Provides comprehensive information about sanitization operations including
-    security violations detected, content modifications, and audit trail data.
+    Provides enterprise-grade security policy configuration with context-aware
+    sanitization rules, threat detection capabilities, and comprehensive audit
+    logging for security compliance and regulatory requirements.
     """
     
-    def __init__(
-        self,
-        original: str,
-        sanitized: str,
-        context: SanitizationContext,
-        policy_name: str,
-        violations_detected: Optional[List[SecurityViolationType]] = None,
-        modifications_made: bool = False,
-        correlation_id: Optional[str] = None
-    ):
-        self.original = original
-        self.sanitized = sanitized
-        self.context = context
-        self.policy_name = policy_name
-        self.violations_detected = violations_detected or []
-        self.modifications_made = modifications_made
-        self.correlation_id = correlation_id or str(uuid4())
-        self.original_length = len(original) if original else 0
-        self.sanitized_length = len(sanitized) if sanitized else 0
-        self.reduction_ratio = (
-            (self.original_length - self.sanitized_length) / self.original_length
-            if self.original_length > 0 else 0.0
-        )
+    def __init__(self):
+        self.logger = self._get_logger()
+        self._policies = self._initialize_default_policies()
+        self._threat_patterns = self._initialize_threat_patterns()
         
-        # Log sanitization operation
-        self._log_operation()
-        
-        # Update metrics
-        self._update_metrics()
-    
-    def _log_operation(self) -> None:
-        """Log sanitization operation with structured logging."""
-        log_data = {
-            'context': self.context.value,
-            'policy_name': self.policy_name,
-            'correlation_id': self.correlation_id,
-            'original_length': self.original_length,
-            'sanitized_length': self.sanitized_length,
-            'reduction_ratio': self.reduction_ratio,
-            'modifications_made': self.modifications_made,
-            'violations_count': len(self.violations_detected),
-            'violations': [v.value for v in self.violations_detected]
-        }
-        
-        if self.violations_detected:
-            logger.warning("Security violations detected during sanitization", **log_data)
-        elif self.modifications_made:
-            logger.info("Content modified during sanitization", **log_data)
+    def _get_logger(self):
+        """Get appropriate logger based on available libraries."""
+        if STRUCTLOG_AVAILABLE:
+            return structlog.get_logger("security.sanitization")
         else:
-            logger.debug("Content sanitization completed", **log_data)
+            logger = logging.getLogger("security.sanitization")
+            if not logger.handlers:
+                handler = logging.StreamHandler()
+                formatter = logging.Formatter(
+                    '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+                )
+                handler.setFormatter(formatter)
+                logger.addHandler(handler)
+                logger.setLevel(logging.INFO)
+            return logger
     
-    def _update_metrics(self) -> None:
-        """Update Prometheus metrics for sanitization operations."""
-        result = "violations_detected" if self.violations_detected else "clean"
-        
-        sanitization_counter.labels(
-            sanitization_type=self.context.value,
-            policy_name=self.policy_name,
-            result=result
-        ).inc()
-        
-        # Update security violation metrics
-        for violation in self.violations_detected:
-            security_violation_counter.labels(
-                violation_type=violation.value,
-                sanitization_context=self.context.value
-            ).inc()
-    
-    def is_safe(self) -> bool:
-        """Check if content is considered safe after sanitization."""
-        return len(self.violations_detected) == 0
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert result to dictionary for logging and debugging."""
+    def _initialize_default_policies(self) -> Dict[str, Dict[str, Any]]:
+        """Initialize comprehensive default security policies."""
         return {
-            'correlation_id': self.correlation_id,
-            'context': self.context.value,
-            'policy_name': self.policy_name,
-            'original_length': self.original_length,
-            'sanitized_length': self.sanitized_length,
-            'reduction_ratio': self.reduction_ratio,
-            'modifications_made': self.modifications_made,
-            'violations_detected': [v.value for v in self.violations_detected],
-            'is_safe': self.is_safe()
+            'strict': {
+                'html_tags': [],  # No HTML tags allowed
+                'html_attributes': {},
+                'protocols': ['https'],
+                'max_length': 1000,
+                'allow_unicode': False,
+                'strip_comments': True,
+                'strip_cdata': True,
+                'description': 'Maximum security policy with minimal allowlist'
+            },
+            'basic': {
+                'html_tags': ['p', 'br', 'strong', 'em', 'u'],
+                'html_attributes': {
+                    'p': ['class'],
+                    'strong': ['class'],
+                    'em': ['class'],
+                    'u': ['class']
+                },
+                'protocols': ['https', 'http'],
+                'max_length': 5000,
+                'allow_unicode': True,
+                'strip_comments': True,
+                'strip_cdata': True,
+                'description': 'Basic formatting with limited HTML tags'
+            },
+            'content': {
+                'html_tags': [
+                    'p', 'br', 'strong', 'em', 'u', 'ul', 'ol', 'li', 
+                    'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote',
+                    'a', 'img'
+                ],
+                'html_attributes': {
+                    'a': ['href', 'title', 'rel'],
+                    'img': ['src', 'alt', 'title', 'width', 'height'],
+                    'p': ['class'],
+                    'h1': ['class'], 'h2': ['class'], 'h3': ['class'],
+                    'h4': ['class'], 'h5': ['class'], 'h6': ['class'],
+                    'blockquote': ['class'],
+                    'ul': ['class'], 'ol': ['class'], 'li': ['class']
+                },
+                'protocols': ['https', 'http', 'mailto'],
+                'max_length': 50000,
+                'allow_unicode': True,
+                'strip_comments': True,
+                'strip_cdata': True,
+                'description': 'Rich content with safe HTML formatting and links'
+            },
+            'form': {
+                'html_tags': [],
+                'html_attributes': {},
+                'protocols': ['https'],
+                'max_length': 2000,
+                'allow_unicode': True,
+                'strip_comments': True,
+                'strip_cdata': True,
+                'normalize_whitespace': True,
+                'description': 'Form input sanitization with no HTML allowed'
+            },
+            'json': {
+                'max_depth': 10,
+                'max_keys': 100,
+                'max_string_length': 10000,
+                'allow_null': True,
+                'allowed_types': ['str', 'int', 'float', 'bool', 'list', 'dict'],
+                'description': 'JSON object sanitization with structural validation'
+            },
+            'url': {
+                'allowed_schemes': ['https', 'http', 'ftp'],
+                'max_length': 2000,
+                'validate_domain': True,
+                'block_private_networks': True,
+                'description': 'URL sanitization with domain validation'
+            }
         }
+    
+    def _initialize_threat_patterns(self) -> Dict[str, List[str]]:
+        """Initialize threat detection patterns for security monitoring."""
+        return {
+            'xss_patterns': [
+                r'<script[\s\S]*?>[\s\S]*?</script>',
+                r'javascript:',
+                r'vbscript:',
+                r'data:text/html',
+                r'on\w+\s*=',  # Event handlers
+                r'expression\s*\(',  # CSS expressions
+                r'<iframe[\s\S]*?>',
+                r'<object[\s\S]*?>',
+                r'<embed[\s\S]*?>',
+                r'<link[\s\S]*?>',
+                r'<meta[\s\S]*?>'
+            ],
+            'sql_injection_patterns': [
+                r"('|(\\'))+.*(-|#|--|;)",
+                r"w*((%27)|')+.*((%6F)|(%6F)|(%4F)|o)+.*((%72)|(%72)|(%52)|r)",
+                r"((\%3D)|(=))[^\n]*((\%27)|(\')|(--)|(\%3B)|(:))",
+                r"\w*(((\%27)|(\'))+(\w|\s)*)((\%6F)|(\%6F)|(\%4F)|o)+",
+                r"((\%3C)|<)((\%2F)|/)*((\%73)|s)+((\%63)|c)+",
+                r"((\%3C)|<)((\%69)|i)+((\%6D)|m)+((\%67)|g)",
+                r"((\%3C)|<)[^\n]+((\%3E)|>)"
+            ],
+            'path_traversal_patterns': [
+                r'\.\.[/\\]',
+                r'\.\.\\',
+                r'\.\.\/',
+                r'%2e%2e%2f',
+                r'%2e%2e%5c',
+                r'\.\.%2f',
+                r'\.\.%5c'
+            ],
+            'command_injection_patterns': [
+                r'[;&|`\$\(\)]',
+                r'nc\s+-',
+                r'telnet\s+',
+                r'wget\s+',
+                r'curl\s+',
+                r'ping\s+-',
+                r'nslookup\s+'
+            ]
+        }
+    
+    def get_policy(self, policy_name: str) -> Dict[str, Any]:
+        """
+        Retrieve security policy configuration by name.
+        
+        Args:
+            policy_name: Name of the security policy to retrieve
+            
+        Returns:
+            Dictionary containing policy configuration
+            
+        Raises:
+            ConfigurationError: When policy does not exist
+        """
+        if policy_name not in self._policies:
+            available_policies = list(self._policies.keys())
+            raise ConfigurationError(
+                f"Unknown security policy '{policy_name}'. "
+                f"Available policies: {available_policies}"
+            )
+        
+        return self._policies[policy_name].copy()
+    
+    def register_policy(
+        self, 
+        name: str, 
+        policy: Dict[str, Any], 
+        override: bool = False
+    ) -> None:
+        """
+        Register a custom security policy.
+        
+        Args:
+            name: Unique name for the security policy
+            policy: Policy configuration dictionary
+            override: Whether to override existing policy
+            
+        Raises:
+            ConfigurationError: When policy name exists and override is False
+        """
+        if name in self._policies and not override:
+            raise ConfigurationError(
+                f"Security policy '{name}' already exists. "
+                "Set override=True to replace existing policy."
+            )
+        
+        # Validate policy structure
+        self._validate_policy_structure(policy)
+        
+        self._policies[name] = policy.copy()
+        
+        self.logger.info(
+            "Security policy registered",
+            policy_name=name,
+            override=override,
+            policy_type=policy.get('description', 'Custom policy')
+        )
+    
+    def _validate_policy_structure(self, policy: Dict[str, Any]) -> None:
+        """Validate security policy structure for consistency."""
+        required_fields = ['description']
+        
+        for field in required_fields:
+            if field not in policy:
+                raise ConfigurationError(
+                    f"Security policy missing required field: {field}"
+                )
+    
+    def detect_threats(self, input_data: str) -> List[Dict[str, Any]]:
+        """
+        Detect security threats in input data using pattern matching.
+        
+        Args:
+            input_data: Input string to analyze for threats
+            
+        Returns:
+            List of detected threats with details
+        """
+        detected_threats = []
+        
+        for threat_type, patterns in self._threat_patterns.items():
+            for pattern in patterns:
+                matches = re.finditer(pattern, input_data, re.IGNORECASE)
+                for match in matches:
+                    threat = {
+                        'type': threat_type,
+                        'pattern': pattern,
+                        'match': match.group(),
+                        'position': match.span(),
+                        'severity': self._get_threat_severity(threat_type),
+                        'timestamp': datetime.utcnow().isoformat()
+                    }
+                    detected_threats.append(threat)
+        
+        if detected_threats:
+            self.logger.warning(
+                "Security threats detected in input",
+                threat_count=len(detected_threats),
+                threat_types=[t['type'] for t in detected_threats]
+            )
+        
+        return detected_threats
+    
+    def _get_threat_severity(self, threat_type: str) -> str:
+        """Get severity level for threat type."""
+        severity_mapping = {
+            'xss_patterns': 'high',
+            'sql_injection_patterns': 'critical',
+            'path_traversal_patterns': 'high',
+            'command_injection_patterns': 'critical'
+        }
+        return severity_mapping.get(threat_type, 'medium')
 
 
-class HTMLSanitizationPolicy:
+class HTMLSanitizer:
     """
-    HTML sanitization policy configuration using bleach for XSS prevention.
+    Enterprise-grade HTML sanitization using bleach 6.0+ with configurable policies.
     
-    Implements configurable HTML sanitization policies as specified in Section 5.4.3
-    for enterprise security compliance and Section 0.2.4 bleach 6.0+ integration.
+    Provides comprehensive XSS prevention, context-aware sanitization, and enterprise
+    security compliance with detailed audit logging and threat detection capabilities.
     """
     
-    def __init__(
-        self,
-        name: str,
-        allowed_tags: Set[str],
-        allowed_attributes: Dict[str, List[str]],
-        allowed_protocols: Set[str] = None,
-        strip_comments: bool = True,
-        strip_unknown_tags: bool = True,
-        escape_unescaped_quotes: bool = True
-    ):
-        self.name = name
-        self.allowed_tags = allowed_tags
-        self.allowed_attributes = allowed_attributes
-        self.allowed_protocols = allowed_protocols or {'http', 'https', 'mailto'}
-        self.strip_comments = strip_comments
-        self.strip_unknown_tags = strip_unknown_tags
-        self.escape_unescaped_quotes = escape_unescaped_quotes
-
-
-# Predefined sanitization policies for different contexts
-SANITIZATION_POLICIES = {
-    'strict': HTMLSanitizationPolicy(
-        name='strict',
-        allowed_tags=set(),
-        allowed_attributes={},
-        strip_comments=True,
-        strip_unknown_tags=True
-    ),
+    def __init__(self, policy_manager: Optional[SecurityPolicyManager] = None):
+        self.policy_manager = policy_manager or SecurityPolicyManager()
+        self.logger = self.policy_manager.logger
+        self._cache = {}  # Simple cache for sanitized content
+        
+    @lru_cache(maxsize=1000)
+    def _get_cached_policy_config(self, policy_name: str) -> str:
+        """Get cached policy configuration for performance optimization."""
+        policy = self.policy_manager.get_policy(policy_name)
+        # Convert to string for caching
+        return json.dumps(policy, sort_keys=True)
     
-    'basic': HTMLSanitizationPolicy(
-        name='basic',
-        allowed_tags={'p', 'br', 'strong', 'em', 'u', 'ol', 'ul', 'li'},
-        allowed_attributes={
-            '*': ['class'],
-        },
-        strip_comments=True,
-        strip_unknown_tags=True
-    ),
+    def sanitize_html(
+        self, 
+        html_content: str, 
+        policy: str = 'basic',
+        context: Optional[str] = None,
+        strict_validation: bool = True
+    ) -> str:
+        """
+        Sanitize HTML content using specified security policy.
+        
+        Args:
+            html_content: HTML content to sanitize
+            policy: Security policy name to apply
+            context: Additional context for logging and validation
+            strict_validation: Whether to apply strict validation rules
+            
+        Returns:
+            Sanitized HTML content safe for rendering
+            
+        Raises:
+            InvalidInputError: When input fails validation
+            SecurityPolicyViolationError: When input violates security policy
+        """
+        if not isinstance(html_content, str):
+            raise InvalidInputError(
+                f"HTML content must be string, got {type(html_content)}"
+            )
+        
+        # Generate cache key
+        cache_key = self._generate_cache_key(html_content, policy, strict_validation)
+        
+        # Check cache first
+        if cache_key in self._cache:
+            self.logger.debug("Returning cached sanitized content", cache_key=cache_key)
+            return self._cache[cache_key]
+        
+        # Get policy configuration
+        try:
+            policy_config = self.policy_manager.get_policy(policy)
+        except ConfigurationError as e:
+            raise SecurityPolicyViolationError(f"Invalid security policy: {str(e)}")
+        
+        # Detect threats before sanitization
+        threats = self.policy_manager.detect_threats(html_content)
+        if threats and strict_validation:
+            threat_types = [t['type'] for t in threats]
+            raise SecurityPolicyViolationError(
+                f"Security threats detected: {threat_types}"
+            )
+        
+        # Validate content length
+        max_length = policy_config.get('max_length', 50000)
+        if len(html_content) > max_length:
+            raise InvalidInputError(
+                f"Content length {len(html_content)} exceeds policy limit {max_length}"
+            )
+        
+        try:
+            # Apply bleach sanitization
+            sanitized_content = bleach.clean(
+                html_content,
+                tags=policy_config.get('html_tags', []),
+                attributes=policy_config.get('html_attributes', {}),
+                protocols=policy_config.get('protocols', ['https']),
+                strip=True,
+                strip_comments=policy_config.get('strip_comments', True)
+            )
+            
+            # Apply additional policy-specific transformations
+            if policy_config.get('normalize_whitespace', False):
+                sanitized_content = self._normalize_whitespace(sanitized_content)
+            
+            if not policy_config.get('allow_unicode', True):
+                sanitized_content = self._remove_unicode_characters(sanitized_content)
+            
+            # Cache the result
+            self._cache[cache_key] = sanitized_content
+            
+            # Log sanitization event
+            self.logger.info(
+                "HTML content sanitized successfully",
+                policy=policy,
+                context=context,
+                input_length=len(html_content),
+                output_length=len(sanitized_content),
+                threats_detected=len(threats) if threats else 0
+            )
+            
+            return sanitized_content
+            
+        except Exception as e:
+            self.logger.error(
+                "HTML sanitization failed",
+                error=str(e),
+                policy=policy,
+                context=context,
+                input_length=len(html_content)
+            )
+            raise SanitizationError(f"HTML sanitization failed: {str(e)}")
     
-    'rich_content': HTMLSanitizationPolicy(
-        name='rich_content',
-        allowed_tags={
-            'p', 'br', 'strong', 'em', 'u', 'ol', 'ul', 'li', 'blockquote',
-            'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'a', 'img', 'table', 'thead',
-            'tbody', 'tr', 'th', 'td', 'div', 'span', 'code', 'pre'
-        },
-        allowed_attributes={
-            '*': ['class', 'id'],
-            'a': ['href', 'title', 'target', 'rel'],
-            'img': ['src', 'alt', 'width', 'height', 'title'],
-            'table': ['cellpadding', 'cellspacing', 'border'],
-            'th': ['colspan', 'rowspan'],
-            'td': ['colspan', 'rowspan'],
-        },
-        allowed_protocols={'http', 'https', 'mailto'},
-        strip_comments=True,
-        strip_unknown_tags=True
-    ),
+    def sanitize_text_content(
+        self, 
+        text_content: str, 
+        policy: str = 'form',
+        max_length: Optional[int] = None
+    ) -> str:
+        """
+        Sanitize plain text content removing all HTML.
+        
+        Args:
+            text_content: Text content to sanitize
+            policy: Security policy for validation rules
+            max_length: Override maximum length from policy
+            
+        Returns:
+            Clean text content with all HTML removed
+        """
+        if not isinstance(text_content, str):
+            raise InvalidInputError(
+                f"Text content must be string, got {type(text_content)}"
+            )
+        
+        # Get policy for validation rules
+        policy_config = self.policy_manager.get_policy(policy)
+        effective_max_length = max_length or policy_config.get('max_length', 10000)
+        
+        if len(text_content) > effective_max_length:
+            raise InvalidInputError(
+                f"Content length {len(text_content)} exceeds limit {effective_max_length}"
+            )
+        
+        # Remove all HTML tags and decode HTML entities
+        clean_text = bleach.clean(text_content, tags=[], strip=True)
+        
+        # Normalize whitespace if specified in policy
+        if policy_config.get('normalize_whitespace', False):
+            clean_text = self._normalize_whitespace(clean_text)
+        
+        # Remove unicode if not allowed
+        if not policy_config.get('allow_unicode', True):
+            clean_text = self._remove_unicode_characters(clean_text)
+        
+        return clean_text.strip()
     
-    'admin_content': HTMLSanitizationPolicy(
-        name='admin_content',
-        allowed_tags={
-            'p', 'br', 'strong', 'em', 'u', 'ol', 'ul', 'li', 'blockquote',
-            'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'a', 'img', 'table', 'thead',
-            'tbody', 'tr', 'th', 'td', 'div', 'span', 'code', 'pre', 'hr',
-            'small', 'sub', 'sup', 'del', 'ins', 'mark'
-        },
-        allowed_attributes={
-            '*': ['class', 'id', 'data-*'],
-            'a': ['href', 'title', 'target', 'rel'],
-            'img': ['src', 'alt', 'width', 'height', 'title', 'style'],
-            'table': ['cellpadding', 'cellspacing', 'border', 'style'],
-            'th': ['colspan', 'rowspan', 'style'],
-            'td': ['colspan', 'rowspan', 'style'],
-            'div': ['style'],
-            'span': ['style'],
-            'p': ['style'],
-        },
-        allowed_protocols={'http', 'https', 'mailto', 'data'},
-        strip_comments=False,
-        strip_unknown_tags=True
-    )
-}
+    def _generate_cache_key(
+        self, 
+        content: str, 
+        policy: str, 
+        strict_validation: bool
+    ) -> str:
+        """Generate cache key for sanitized content."""
+        content_hash = hashlib.sha256(content.encode('utf-8')).hexdigest()[:16]
+        return f"{policy}:{strict_validation}:{content_hash}"
+    
+    def _normalize_whitespace(self, text: str) -> str:
+        """Normalize whitespace characters in text."""
+        # Replace multiple whitespace with single space
+        normalized = re.sub(r'\s+', ' ', text)
+        # Remove leading/trailing whitespace
+        return normalized.strip()
+    
+    def _remove_unicode_characters(self, text: str) -> str:
+        """Remove or replace Unicode characters with ASCII equivalents."""
+        # Normalize unicode characters
+        normalized = unicodedata.normalize('NFKD', text)
+        # Encode to ASCII, ignoring non-ASCII characters
+        ascii_text = normalized.encode('ascii', 'ignore').decode('ascii')
+        return ascii_text
+    
+    def clear_cache(self) -> None:
+        """Clear sanitization cache."""
+        self._cache.clear()
+        self.logger.info("HTML sanitization cache cleared")
 
 
 class InputSanitizer:
     """
-    Comprehensive input sanitization utility with configurable policies.
+    Comprehensive input sanitization utilities for various data types.
     
-    Implements enterprise-grade input sanitization as specified in Section 3.2.2
-    input validation & sanitization and Section 5.4.3 security framework.
+    Provides enterprise-grade input sanitization equivalent to Node.js security
+    patterns with comprehensive validation, threat detection, and audit logging.
     """
     
-    def __init__(self, default_policy: str = 'basic'):
-        self.default_policy = default_policy
-        self.xss_patterns = self._compile_xss_patterns()
-        self.sql_injection_patterns = self._compile_sql_injection_patterns()
-        self.script_injection_patterns = self._compile_script_injection_patterns()
-    
-    def _compile_xss_patterns(self) -> List[re.Pattern]:
-        """Compile regular expressions for XSS detection."""
-        patterns = [
-            re.compile(r'<script[^>]*>.*?</script>', re.IGNORECASE | re.DOTALL),
-            re.compile(r'javascript:', re.IGNORECASE),
-            re.compile(r'vbscript:', re.IGNORECASE),
-            re.compile(r'onload\s*=', re.IGNORECASE),
-            re.compile(r'onerror\s*=', re.IGNORECASE),
-            re.compile(r'onclick\s*=', re.IGNORECASE),
-            re.compile(r'onmouseover\s*=', re.IGNORECASE),
-            re.compile(r'onfocus\s*=', re.IGNORECASE),
-            re.compile(r'onblur\s*=', re.IGNORECASE),
-            re.compile(r'onchange\s*=', re.IGNORECASE),
-            re.compile(r'onsubmit\s*=', re.IGNORECASE),
-            re.compile(r'<iframe[^>]*>', re.IGNORECASE),
-            re.compile(r'<object[^>]*>', re.IGNORECASE),
-            re.compile(r'<embed[^>]*>', re.IGNORECASE),
-            re.compile(r'<applet[^>]*>', re.IGNORECASE),
-            re.compile(r'<meta[^>]*>', re.IGNORECASE),
-            re.compile(r'<base[^>]*>', re.IGNORECASE),
-            re.compile(r'<link[^>]*>', re.IGNORECASE),
-            re.compile(r'expression\s*\(', re.IGNORECASE),
-            re.compile(r'url\s*\(', re.IGNORECASE),
-            re.compile(r'@import', re.IGNORECASE),
-        ]
-        return patterns
-    
-    def _compile_sql_injection_patterns(self) -> List[re.Pattern]:
-        """Compile regular expressions for SQL injection detection."""
-        patterns = [
-            re.compile(r"'(\s*)(\|\||\||or)\s+", re.IGNORECASE),
-            re.compile(r"'(\s*)(\&\&|\&|and)\s+", re.IGNORECASE),
-            re.compile(r"'(\s*)(=|!=|<>|<|>)\s*", re.IGNORECASE),
-            re.compile(r"\bunion\s+select\b", re.IGNORECASE),
-            re.compile(r"\bselect\s+.*\s+from\b", re.IGNORECASE),
-            re.compile(r"\binsert\s+into\b", re.IGNORECASE),
-            re.compile(r"\bupdate\s+.*\s+set\b", re.IGNORECASE),
-            re.compile(r"\bdelete\s+from\b", re.IGNORECASE),
-            re.compile(r"\bdrop\s+table\b", re.IGNORECASE),
-            re.compile(r"\btruncate\s+table\b", re.IGNORECASE),
-            re.compile(r"\bexec\s*\(", re.IGNORECASE),
-            re.compile(r"\bexecute\s*\(", re.IGNORECASE),
-            re.compile(r"--", re.IGNORECASE),
-            re.compile(r"/\*.*?\*/", re.IGNORECASE | re.DOTALL),
-            re.compile(r"\bxp_cmdshell\b", re.IGNORECASE),
-            re.compile(r"\bsp_executesql\b", re.IGNORECASE),
-        ]
-        return patterns
-    
-    def _compile_script_injection_patterns(self) -> List[re.Pattern]:
-        """Compile regular expressions for script injection detection."""
-        patterns = [
-            re.compile(r'<%.*?%>', re.IGNORECASE | re.DOTALL),
-            re.compile(r'<\?.*?\?>', re.IGNORECASE | re.DOTALL),
-            re.compile(r'\$\{.*?\}', re.IGNORECASE | re.DOTALL),
-            re.compile(r'#\{.*?\}', re.IGNORECASE | re.DOTALL),
-            re.compile(r'{{.*?}}', re.IGNORECASE | re.DOTALL),
-            re.compile(r'\[\[.*?\]\]', re.IGNORECASE | re.DOTALL),
-            re.compile(r'eval\s*\(', re.IGNORECASE),
-            re.compile(r'function\s*\(', re.IGNORECASE),
-            re.compile(r'new\s+Function', re.IGNORECASE),
-            re.compile(r'setTimeout\s*\(', re.IGNORECASE),
-            re.compile(r'setInterval\s*\(', re.IGNORECASE),
-        ]
-        return patterns
-    
-    def _detect_security_violations(
-        self, 
-        content: str, 
-        context: SanitizationContext
-    ) -> List[SecurityViolationType]:
-        """
-        Detect security violations in content based on pattern matching.
+    def __init__(self, policy_manager: Optional[SecurityPolicyManager] = None):
+        self.policy_manager = policy_manager or SecurityPolicyManager()
+        self.logger = self.policy_manager.logger
+        self.html_sanitizer = HTMLSanitizer(self.policy_manager)
         
-        Args:
-            content: Content to analyze for security violations
-            context: Sanitization context for appropriate checks
-            
-        Returns:
-            List of detected security violation types
-        """
-        violations = []
-        
-        if not content:
-            return violations
-        
-        # XSS detection
-        for pattern in self.xss_patterns:
-            if pattern.search(content):
-                violations.append(SecurityViolationType.XSS_ATTEMPT)
-                break
-        
-        # SQL injection detection (for database-bound content)
-        if context in [SanitizationContext.API_INPUT, SanitizationContext.SEARCH_QUERY]:
-            for pattern in self.sql_injection_patterns:
-                if pattern.search(content):
-                    violations.append(SecurityViolationType.SQL_INJECTION)
-                    break
-        
-        # Script injection detection
-        for pattern in self.script_injection_patterns:
-            if pattern.search(content):
-                violations.append(SecurityViolationType.SCRIPT_INJECTION)
-                break
-        
-        # Additional context-specific checks
-        if context == SanitizationContext.URL_INPUT:
-            if self._is_suspicious_url(content):
-                violations.append(SecurityViolationType.URL_MANIPULATION)
-        
-        return violations
-    
-    def _is_suspicious_url(self, url: str) -> bool:
-        """Check if URL contains suspicious patterns."""
-        suspicious_patterns = [
-            r'javascript:', r'data:', r'vbscript:', r'file:', r'ftp:',
-            r'\.\./', r'%2e%2e%2f', r'%252e%252e%252f',
-            r'<script', r'</script>', r'<iframe', r'</iframe>'
-        ]
-        
-        url_lower = url.lower()
-        for pattern in suspicious_patterns:
-            if re.search(pattern, url_lower):
-                return True
-        
-        return False
-    
-    @sanitization_time.labels(sanitization_type='html', policy_name='').time()
-    def sanitize_html(
-        self,
-        content: str,
-        context: SanitizationContext = SanitizationContext.USER_INPUT,
-        policy_name: Optional[str] = None,
-        correlation_id: Optional[str] = None
-    ) -> SanitizationResult:
-        """
-        Sanitize HTML content using bleach with configurable policies.
-        
-        Implements HTML sanitization using bleach 6.0+ as specified in Section 0.2.4
-        dependency decisions and Section 3.2.2 input validation & sanitization.
-        
-        Args:
-            content: HTML content to sanitize
-            context: Sanitization context for policy selection
-            policy_name: Specific policy name to use (overrides context-based selection)
-            correlation_id: Optional correlation ID for audit trail
-            
-        Returns:
-            SanitizationResult with sanitized content and security analysis
-        """
-        if not content:
-            return SanitizationResult(
-                original=content,
-                sanitized=content or '',
-                context=context,
-                policy_name=policy_name or 'empty',
-                correlation_id=correlation_id
-            )
-        
-        # Select appropriate policy
-        if policy_name and policy_name in SANITIZATION_POLICIES:
-            policy = SANITIZATION_POLICIES[policy_name]
-        else:
-            # Context-based policy selection
-            policy_mapping = {
-                SanitizationContext.USER_INPUT: 'basic',
-                SanitizationContext.RICH_CONTENT: 'rich_content',
-                SanitizationContext.COMMENTS: 'basic',
-                SanitizationContext.DESCRIPTIONS: 'rich_content',
-                SanitizationContext.ADMIN_CONTENT: 'admin_content',
-                SanitizationContext.EMAIL_CONTENT: 'basic',
-                SanitizationContext.API_INPUT: 'strict',
-                SanitizationContext.FILE_CONTENT: 'strict',
-                SanitizationContext.SEARCH_QUERY: 'strict',
-                SanitizationContext.URL_INPUT: 'strict',
-            }
-            policy_name = policy_mapping.get(context, self.default_policy)
-            policy = SANITIZATION_POLICIES[policy_name]
-        
-        # Detect security violations before sanitization
-        violations = self._detect_security_violations(content, context)
-        
-        # Perform HTML sanitization with bleach
-        try:
-            sanitized = bleach.clean(
-                content,
-                tags=policy.allowed_tags,
-                attributes=policy.allowed_attributes,
-                protocols=policy.allowed_protocols,
-                strip=policy.strip_unknown_tags,
-                strip_comments=policy.strip_comments
-            )
-            
-            # Additional processing based on policy
-            if policy.escape_unescaped_quotes:
-                sanitized = html.escape(sanitized, quote=True)
-                # Unescape allowed HTML tags
-                for tag in policy.allowed_tags:
-                    sanitized = sanitized.replace(f'&lt;{tag}&gt;', f'<{tag}>')
-                    sanitized = sanitized.replace(f'&lt;/{tag}&gt;', f'</{tag}>')
-            
-            modifications_made = content != sanitized
-            
-        except Exception as e:
-            logger.error(
-                "HTML sanitization failed",
-                context=context.value,
-                policy_name=policy.name,
-                error=str(e),
-                correlation_id=correlation_id
-            )
-            # Fallback to strict sanitization
-            sanitized = bleach.clean(content, tags=set(), attributes={})
-            modifications_made = True
-            violations.append(SecurityViolationType.HTML_INJECTION)
-        
-        return SanitizationResult(
-            original=content,
-            sanitized=sanitized,
-            context=context,
-            policy_name=policy.name,
-            violations_detected=violations,
-            modifications_made=modifications_made,
-            correlation_id=correlation_id
-        )
-    
-    @sanitization_time.labels(sanitization_type='text', policy_name='general').time()
-    def sanitize_text(
-        self,
-        content: str,
-        context: SanitizationContext = SanitizationContext.USER_INPUT,
-        max_length: Optional[int] = None,
-        allow_unicode: bool = True,
-        correlation_id: Optional[str] = None
-    ) -> SanitizationResult:
-        """
-        Sanitize plain text content for safe processing.
-        
-        Args:
-            content: Text content to sanitize
-            context: Sanitization context
-            max_length: Maximum allowed length
-            allow_unicode: Whether to allow Unicode characters
-            correlation_id: Optional correlation ID for audit trail
-            
-        Returns:
-            SanitizationResult with sanitized text and security analysis
-        """
-        if not content:
-            return SanitizationResult(
-                original=content,
-                sanitized=content or '',
-                context=context,
-                policy_name='text',
-                correlation_id=correlation_id
-            )
-        
-        original_content = content
-        violations = []
-        
-        # Detect security violations
-        violations.extend(self._detect_security_violations(content, context))
-        
-        # Remove HTML tags
-        content = bleach.clean(content, tags=set(), attributes={}, strip=True)
-        
-        # Handle Unicode
-        if not allow_unicode:
-            content = content.encode('ascii', 'ignore').decode('ascii')
-        
-        # Apply length restrictions
-        if max_length and len(content) > max_length:
-            content = content[:max_length]
-        
-        # Remove or replace dangerous characters
-        dangerous_chars = ['<', '>', '"', "'", '&', '\x00', '\r', '\n\n\n']
-        for char in dangerous_chars:
-            if char in content:
-                content = content.replace(char, '')
-        
-        # Normalize whitespace
-        content = ' '.join(content.split())
-        
-        modifications_made = original_content != content
-        
-        return SanitizationResult(
-            original=original_content,
-            sanitized=content,
-            context=context,
-            policy_name='text',
-            violations_detected=violations,
-            modifications_made=modifications_made,
-            correlation_id=correlation_id
-        )
-    
-    @sanitization_time.labels(sanitization_type='email', policy_name='email').time()
     def sanitize_email(
-        self,
-        email: str,
-        validate: bool = True,
-        correlation_id: Optional[str] = None
-    ) -> SanitizationResult:
+        self, 
+        email: str, 
+        check_deliverability: bool = False,
+        normalize: bool = True
+    ) -> str:
         """
-        Sanitize and validate email addresses using email-validator.
-        
-        Implements email sanitization as specified in Section 3.2.2 input validation
-        and Section 0.2.4 email-validator 2.0+ dependency.
+        Sanitize and validate email addresses.
         
         Args:
             email: Email address to sanitize and validate
-            validate: Whether to perform validation using email-validator
-            correlation_id: Optional correlation ID for audit trail
+            check_deliverability: Whether to check email deliverability
+            normalize: Whether to normalize email format
             
         Returns:
-            SanitizationResult with sanitized email and validation status
+            Validated and sanitized email address
+            
+        Raises:
+            InvalidInputError: When email is invalid
         """
-        if not email:
-            return SanitizationResult(
-                original=email,
-                sanitized='',
-                context=SanitizationContext.EMAIL_CONTENT,
-                policy_name='email',
-                correlation_id=correlation_id
+        if not isinstance(email, str):
+            raise InvalidInputError(f"Email must be string, got {type(email)}")
+        
+        # Basic length validation
+        if len(email) > 254:  # RFC 5321 limit
+            raise InvalidInputError("Email address too long (max 254 characters)")
+        
+        # Detect threats in email
+        threats = self.policy_manager.detect_threats(email)
+        if threats:
+            threat_types = [t['type'] for t in threats]
+            raise SecurityPolicyViolationError(
+                f"Security threats detected in email: {threat_types}"
             )
         
-        original_email = email
-        violations = []
-        
-        # Basic sanitization
-        email = email.strip().lower()
-        
-        # Remove dangerous characters
-        dangerous_chars = ['<', '>', '"', "'", '&', '\x00', '\r', '\n', '\t']
-        for char in dangerous_chars:
-            email = email.replace(char, '')
-        
-        # Validate email format if email-validator is available
-        valid_email = True
-        if validate and EMAIL_VALIDATOR_AVAILABLE:
-            try:
-                validation_result = validate_email(email)
-                email = validation_result.email  # Get normalized email
-            except EmailNotValidError:
-                valid_email = False
-                violations.append(SecurityViolationType.XSS_ATTEMPT)
-        
-        # Basic regex validation as fallback
-        if not EMAIL_VALIDATOR_AVAILABLE or not valid_email:
-            email_pattern = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
-            if not email_pattern.match(email):
-                violations.append(SecurityViolationType.XSS_ATTEMPT)
-                email = ''  # Clear invalid email
-        
-        modifications_made = original_email != email
-        
-        return SanitizationResult(
-            original=original_email,
-            sanitized=email,
-            context=SanitizationContext.EMAIL_CONTENT,
-            policy_name='email',
-            violations_detected=violations,
-            modifications_made=modifications_made,
-            correlation_id=correlation_id
-        )
+        try:
+            # Validate using email-validator
+            validated_email = validate_email(
+                email,
+                check_deliverability=check_deliverability
+            )
+            
+            sanitized_email = validated_email.email
+            
+            if normalize:
+                # Apply additional normalization
+                sanitized_email = sanitized_email.lower().strip()
+            
+            self.logger.info(
+                "Email sanitized and validated",
+                original_email=email[:20] + "..." if len(email) > 20 else email,
+                sanitized_length=len(sanitized_email),
+                check_deliverability=check_deliverability
+            )
+            
+            return sanitized_email
+            
+        except EmailNotValidError as e:
+            self.logger.warning(
+                "Email validation failed",
+                email=email[:20] + "..." if len(email) > 20 else email,
+                error=str(e)
+            )
+            raise InvalidInputError(f"Invalid email address: {str(e)}")
     
-    @sanitization_time.labels(sanitization_type='url', policy_name='url').time()
     def sanitize_url(
-        self,
-        url: str,
-        allowed_schemes: Optional[Set[str]] = None,
-        correlation_id: Optional[str] = None
-    ) -> SanitizationResult:
+        self, 
+        url: str, 
+        policy: str = 'url',
+        validate_accessibility: bool = False
+    ) -> str:
         """
-        Sanitize URL inputs for safe processing and redirection.
+        Sanitize and validate URLs with security checks.
         
         Args:
-            url: URL to sanitize
-            allowed_schemes: Set of allowed URL schemes (defaults to http, https)
-            correlation_id: Optional correlation ID for audit trail
+            url: URL to sanitize and validate
+            policy: Security policy for URL validation
+            validate_accessibility: Whether to check URL accessibility
             
         Returns:
-            SanitizationResult with sanitized URL and security analysis
+            Sanitized and validated URL
+            
+        Raises:
+            InvalidInputError: When URL is invalid
+            SecurityPolicyViolationError: When URL violates security policy
         """
-        if not url:
-            return SanitizationResult(
-                original=url,
-                sanitized='',
-                context=SanitizationContext.URL_INPUT,
-                policy_name='url',
-                correlation_id=correlation_id
+        if not isinstance(url, str):
+            raise InvalidInputError(f"URL must be string, got {type(url)}")
+        
+        # Get URL policy configuration
+        policy_config = self.policy_manager.get_policy(policy)
+        
+        # Validate URL length
+        max_length = policy_config.get('max_length', 2000)
+        if len(url) > max_length:
+            raise InvalidInputError(f"URL length exceeds limit: {len(url)} > {max_length}")
+        
+        # Detect threats
+        threats = self.policy_manager.detect_threats(url)
+        if threats:
+            threat_types = [t['type'] for t in threats]
+            raise SecurityPolicyViolationError(
+                f"Security threats detected in URL: {threat_types}"
             )
         
-        original_url = url
-        violations = []
-        allowed_schemes = allowed_schemes or {'http', 'https'}
-        
-        # Detect URL-specific security violations
-        if self._is_suspicious_url(url):
-            violations.append(SecurityViolationType.URL_MANIPULATION)
-        
-        # Basic URL sanitization
-        url = url.strip()
-        
-        # Parse and validate URL
         try:
-            if URLLIB3_AVAILABLE:
-                parsed = parse_url(url)
-                
-                # Check scheme
-                if parsed.scheme and parsed.scheme.lower() not in allowed_schemes:
-                    violations.append(SecurityViolationType.URL_MANIPULATION)
-                    url = ''
-                else:
-                    # Reconstruct URL with safe components
-                    url = f"{parsed.scheme}://{parsed.host}"
-                    if parsed.port:
-                        url += f":{parsed.port}"
-                    if parsed.path:
-                        url += urllib.parse.quote(parsed.path)
-                    if parsed.query:
-                        url += f"?{urllib.parse.quote_plus(parsed.query)}"
-            else:
-                # Fallback URL validation
-                parsed = urllib.parse.urlparse(url)
-                if parsed.scheme not in allowed_schemes:
-                    violations.append(SecurityViolationType.URL_MANIPULATION)
-                    url = ''
-                
-        except Exception:
-            violations.append(SecurityViolationType.URL_MANIPULATION)
-            url = ''
-        
-        modifications_made = original_url != url
-        
-        return SanitizationResult(
-            original=original_url,
-            sanitized=url,
-            context=SanitizationContext.URL_INPUT,
-            policy_name='url',
-            violations_detected=violations,
-            modifications_made=modifications_made,
-            correlation_id=correlation_id
-        )
+            # Parse URL
+            parsed_url = urlparse(url)
+            
+            # Validate scheme
+            allowed_schemes = policy_config.get('allowed_schemes', ['https', 'http'])
+            if parsed_url.scheme.lower() not in allowed_schemes:
+                raise InvalidInputError(
+                    f"URL scheme '{parsed_url.scheme}' not allowed. "
+                    f"Allowed schemes: {allowed_schemes}"
+                )
+            
+            # Check for private networks if configured
+            if policy_config.get('block_private_networks', False):
+                self._validate_public_domain(parsed_url.hostname)
+            
+            # Reconstruct URL with proper encoding
+            sanitized_url = self._reconstruct_safe_url(parsed_url)
+            
+            self.logger.info(
+                "URL sanitized successfully",
+                original_length=len(url),
+                sanitized_length=len(sanitized_url),
+                scheme=parsed_url.scheme,
+                domain=parsed_url.hostname
+            )
+            
+            return sanitized_url
+            
+        except Exception as e:
+            self.logger.error(
+                "URL sanitization failed",
+                url=url[:50] + "..." if len(url) > 50 else url,
+                error=str(e)
+            )
+            raise InvalidInputError(f"Invalid URL: {str(e)}")
     
-    @sanitization_time.labels(sanitization_type='filename', policy_name='filename').time()
     def sanitize_filename(
-        self,
-        filename: str,
+        self, 
+        filename: str, 
         max_length: int = 255,
-        allow_unicode: bool = False,
-        correlation_id: Optional[str] = None
-    ) -> SanitizationResult:
+        preserve_extension: bool = True
+    ) -> str:
         """
-        Sanitize filenames for safe file system operations.
+        Sanitize filenames for safe file system usage.
         
         Args:
-            filename: Filename to sanitize
+            filename: Original filename to sanitize
             max_length: Maximum allowed filename length
-            allow_unicode: Whether to allow Unicode characters
-            correlation_id: Optional correlation ID for audit trail
+            preserve_extension: Whether to preserve file extension
             
         Returns:
-            SanitizationResult with sanitized filename and security analysis
+            Sanitized filename safe for file system usage
         """
-        if not filename:
-            return SanitizationResult(
-                original=filename,
-                sanitized='',
-                context=SanitizationContext.FILE_CONTENT,
-                policy_name='filename',
-                correlation_id=correlation_id
-            )
+        if not isinstance(filename, str):
+            raise InvalidInputError(f"Filename must be string, got {type(filename)}")
         
-        original_filename = filename
-        violations = []
+        if not filename.strip():
+            raise InvalidInputError("Filename cannot be empty")
         
-        # Remove path traversal attempts
-        dangerous_patterns = ['../', '.\\', '..\\', '/..', '\\..']
-        for pattern in dangerous_patterns:
-            if pattern in filename:
-                violations.append(SecurityViolationType.FILE_INCLUSION)
-                filename = filename.replace(pattern, '')
+        # Detect path traversal attempts
+        threats = self.policy_manager.detect_threats(filename)
+        path_traversal_threats = [t for t in threats if t['type'] == 'path_traversal_patterns']
+        if path_traversal_threats:
+            raise SecurityPolicyViolationError("Path traversal attempt detected in filename")
         
-        # Remove dangerous characters
-        dangerous_chars = ['<', '>', ':', '"', '|', '?', '*', '\x00', '\r', '\n']
+        # Remove directory separators and other dangerous characters
+        dangerous_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|', '\0']
+        sanitized = filename
+        
         for char in dangerous_chars:
-            filename = filename.replace(char, '_')
+            sanitized = sanitized.replace(char, '_')
         
-        # Handle Unicode
-        if not allow_unicode:
-            filename = filename.encode('ascii', 'ignore').decode('ascii')
+        # Remove leading/trailing dots and spaces
+        sanitized = sanitized.strip('. ')
         
-        # Remove leading/trailing spaces and dots
-        filename = filename.strip(' .')
+        # Handle reserved names on Windows
+        reserved_names = [
+            'CON', 'PRN', 'AUX', 'NUL', 'COM1', 'COM2', 'COM3', 'COM4',
+            'COM5', 'COM6', 'COM7', 'COM8', 'COM9', 'LPT1', 'LPT2', 
+            'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9'
+        ]
         
-        # Apply length restrictions
-        if len(filename) > max_length:
-            name, ext = filename.rsplit('.', 1) if '.' in filename else (filename, '')
-            available_length = max_length - len(ext) - 1 if ext else max_length
-            filename = name[:available_length] + ('.' + ext if ext else '')
+        name_part = sanitized.split('.')[0].upper()
+        if name_part in reserved_names:
+            sanitized = f"file_{sanitized}"
         
-        # Ensure filename is not empty
-        if not filename:
-            filename = 'sanitized_file'
+        # Truncate if too long while preserving extension
+        if len(sanitized) > max_length:
+            if preserve_extension and '.' in sanitized:
+                name, ext = sanitized.rsplit('.', 1)
+                name = name[:max_length - len(ext) - 1]
+                sanitized = f"{name}.{ext}"
+            else:
+                sanitized = sanitized[:max_length]
         
-        modifications_made = original_filename != filename
+        # Ensure not empty after sanitization
+        if not sanitized:
+            sanitized = "sanitized_file"
         
-        return SanitizationResult(
-            original=original_filename,
-            sanitized=filename,
-            context=SanitizationContext.FILE_CONTENT,
-            policy_name='filename',
-            violations_detected=violations,
-            modifications_made=modifications_made,
-            correlation_id=correlation_id
+        self.logger.info(
+            "Filename sanitized",
+            original=filename,
+            sanitized=sanitized,
+            length_change=len(filename) - len(sanitized)
         )
+        
+        return sanitized
     
-    @sanitization_time.labels(sanitization_type='datetime', policy_name='datetime').time()
+    def sanitize_json_data(
+        self, 
+        json_data: Union[str, Dict, List], 
+        policy: str = 'json'
+    ) -> Union[Dict, List]:
+        """
+        Sanitize JSON data with structural validation.
+        
+        Args:
+            json_data: JSON data to sanitize (string, dict, or list)
+            policy: Security policy for JSON validation
+            
+        Returns:
+            Sanitized JSON data structure
+        """
+        # Parse JSON string if needed
+        if isinstance(json_data, str):
+            try:
+                parsed_data = json.loads(json_data)
+            except json.JSONDecodeError as e:
+                raise InvalidInputError(f"Invalid JSON: {str(e)}")
+        else:
+            parsed_data = json_data
+        
+        # Get policy configuration
+        policy_config = self.policy_manager.get_policy(policy)
+        
+        # Validate and sanitize recursively
+        sanitized_data = self._sanitize_json_recursive(
+            parsed_data, 
+            policy_config, 
+            depth=0
+        )
+        
+        self.logger.info(
+            "JSON data sanitized",
+            input_type=type(json_data).__name__,
+            output_type=type(sanitized_data).__name__
+        )
+        
+        return sanitized_data
+    
     def sanitize_datetime_string(
-        self,
-        datetime_str: str,
-        mask_level: str = 'none',
-        correlation_id: Optional[str] = None
-    ) -> SanitizationResult:
+        self, 
+        datetime_string: str,
+        output_format: str = 'iso8601',
+        timezone_aware: bool = True
+    ) -> str:
         """
-        Sanitize and optionally mask datetime strings using python-dateutil.
-        
-        Implements secure datetime processing as specified in Section 6.4.3 data protection
-        with python-dateutil integration for ISO 8601 parsing and temporal data anonymization.
+        Sanitize and validate datetime strings using python-dateutil.
         
         Args:
-            datetime_str: Datetime string to sanitize
-            mask_level: Masking level (none, day, week, month, quarter, year)
-            correlation_id: Optional correlation ID for audit trail
+            datetime_string: DateTime string to sanitize
+            output_format: Output format ('iso8601', 'timestamp')
+            timezone_aware: Whether to ensure timezone awareness
             
         Returns:
-            SanitizationResult with sanitized datetime and security analysis
+            Sanitized datetime string in specified format
         """
-        if not datetime_str:
-            return SanitizationResult(
-                original=datetime_str,
-                sanitized='',
-                context=SanitizationContext.API_INPUT,
-                policy_name='datetime',
-                correlation_id=correlation_id
+        if not isinstance(datetime_string, str):
+            raise InvalidInputError(
+                f"DateTime string must be string, got {type(datetime_string)}"
             )
-        
-        original_datetime = datetime_str
-        violations = []
         
         try:
-            # Parse datetime with python-dateutil
-            parsed_date = dateutil_parser.isoparse(datetime_str)
+            # Parse using python-dateutil
+            parsed_date = dateutil_parser.isoparse(datetime_string)
             
-            # Apply masking if requested
-            if mask_level == 'day':
-                masked_date = parsed_date.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-            elif mask_level == 'week':
-                days_since_monday = parsed_date.weekday()
-                masked_date = parsed_date - relativedelta(days=days_since_monday)
-                masked_date = masked_date.replace(hour=0, minute=0, second=0, microsecond=0)
-            elif mask_level == 'month':
-                masked_date = parsed_date.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-            elif mask_level == 'quarter':
-                quarter_start_month = ((parsed_date.month - 1) // 3) * 3 + 1
-                masked_date = parsed_date.replace(
-                    month=quarter_start_month, day=1,
-                    hour=0, minute=0, second=0, microsecond=0
+            # Ensure timezone awareness if required
+            if timezone_aware and parsed_date.tzinfo is None:
+                parsed_date = parsed_date.replace(tzinfo=timezone.utc)
+            
+            # Validate reasonable date range
+            min_date = datetime(1900, 1, 1, tzinfo=timezone.utc)
+            max_date = datetime(2100, 1, 1, tzinfo=timezone.utc)
+            
+            if not (min_date <= parsed_date <= max_date):
+                raise InvalidInputError(
+                    f"DateTime {parsed_date} outside valid range "
+                    f"({min_date} to {max_date})"
                 )
-            elif mask_level == 'year':
-                masked_date = parsed_date.replace(
-                    month=1, day=1,
-                    hour=0, minute=0, second=0, microsecond=0
-                )
+            
+            # Format output
+            if output_format == 'iso8601':
+                sanitized_datetime = parsed_date.isoformat()
+            elif output_format == 'timestamp':
+                sanitized_datetime = str(int(parsed_date.timestamp()))
             else:
-                masked_date = parsed_date
+                raise InvalidInputError(f"Unknown output format: {output_format}")
             
-            # Convert back to ISO format
-            sanitized_datetime = masked_date.isoformat()
-            
-        except (ValueError, OverflowError) as e:
-            logger.warning(
-                "Invalid datetime format detected",
-                datetime_str=datetime_str,
-                error=str(e),
-                correlation_id=correlation_id
+            self.logger.info(
+                "DateTime string sanitized",
+                original=datetime_string,
+                sanitized=sanitized_datetime,
+                format=output_format,
+                timezone_aware=timezone_aware
             )
-            violations.append(SecurityViolationType.XSS_ATTEMPT)
-            sanitized_datetime = ''
+            
+            return sanitized_datetime
+            
+        except (ValueError, OverflowError, TypeError) as e:
+            self.logger.warning(
+                "DateTime sanitization failed",
+                datetime_string=datetime_string,
+                error=str(e)
+            )
+            raise InvalidInputError(f"Invalid datetime string: {str(e)}")
+    
+    def _validate_public_domain(self, hostname: Optional[str]) -> None:
+        """Validate that hostname is not a private network address."""
+        if not hostname:
+            return
         
-        modifications_made = original_datetime != sanitized_datetime
+        # Simple check for private IP ranges and localhost
+        private_patterns = [
+            r'^127\.',  # Localhost
+            r'^10\.',   # Private Class A
+            r'^172\.(1[6-9]|2[0-9]|3[01])\.',  # Private Class B
+            r'^192\.168\.',  # Private Class C
+            r'^169\.254\.',  # Link-local
+            r'^::1$',   # IPv6 localhost
+            r'^fe80:',  # IPv6 link-local
+            r'^localhost$',
+            r'^0\.0\.0\.0$'
+        ]
         
-        return SanitizationResult(
-            original=original_datetime,
-            sanitized=sanitized_datetime,
-            context=SanitizationContext.API_INPUT,
-            policy_name='datetime',
-            violations_detected=violations,
-            modifications_made=modifications_made,
-            correlation_id=correlation_id
+        for pattern in private_patterns:
+            if re.match(pattern, hostname, re.IGNORECASE):
+                raise SecurityPolicyViolationError(
+                    f"Private network address not allowed: {hostname}"
+                )
+    
+    def _reconstruct_safe_url(self, parsed_url) -> str:
+        """Reconstruct URL with proper encoding and safety checks."""
+        # Encode URL components safely
+        scheme = parsed_url.scheme.lower()
+        hostname = parsed_url.hostname.lower() if parsed_url.hostname else ''
+        port = f":{parsed_url.port}" if parsed_url.port else ''
+        path = quote(parsed_url.path.encode('utf-8'), safe='/')
+        query = quote(parsed_url.query.encode('utf-8'), safe='&=')
+        fragment = quote(parsed_url.fragment.encode('utf-8'), safe='')
+        
+        # Reconstruct URL
+        url_parts = [f"{scheme}://{hostname}{port}"]
+        
+        if path:
+            url_parts.append(path)
+        if query:
+            url_parts.append(f"?{query}")
+        if fragment:
+            url_parts.append(f"#{fragment}")
+        
+        return ''.join(url_parts)
+    
+    def _sanitize_json_recursive(
+        self, 
+        data: Any, 
+        policy_config: Dict[str, Any], 
+        depth: int
+    ) -> Any:
+        """Recursively sanitize JSON data structure."""
+        max_depth = policy_config.get('max_depth', 10)
+        if depth > max_depth:
+            raise InvalidInputError(f"JSON depth exceeds limit: {depth} > {max_depth}")
+        
+        allowed_types = policy_config.get('allowed_types', [
+            'str', 'int', 'float', 'bool', 'list', 'dict', 'NoneType'
+        ])
+        
+        data_type = type(data).__name__
+        if data_type not in allowed_types:
+            raise InvalidInputError(f"Data type '{data_type}' not allowed in JSON")
+        
+        if isinstance(data, dict):
+            max_keys = policy_config.get('max_keys', 100)
+            if len(data) > max_keys:
+                raise InvalidInputError(f"Dictionary has too many keys: {len(data)} > {max_keys}")
+            
+            return {
+                str(key): self._sanitize_json_recursive(value, policy_config, depth + 1)
+                for key, value in data.items()
+            }
+        
+        elif isinstance(data, list):
+            max_items = policy_config.get('max_items', 1000)
+            if len(data) > max_items:
+                raise InvalidInputError(f"List has too many items: {len(data)} > {max_items}")
+            
+            return [
+                self._sanitize_json_recursive(item, policy_config, depth + 1)
+                for item in data
+            ]
+        
+        elif isinstance(data, str):
+            max_string_length = policy_config.get('max_string_length', 10000)
+            if len(data) > max_string_length:
+                raise InvalidInputError(
+                    f"String too long: {len(data)} > {max_string_length}"
+                )
+            
+            # Sanitize string content for XSS
+            return self.html_sanitizer.sanitize_text_content(data, policy='strict')
+        
+        elif data is None:
+            if not policy_config.get('allow_null', True):
+                raise InvalidInputError("Null values not allowed")
+            return data
+        
+        else:
+            # For primitive types (int, float, bool), return as-is
+            return data
+
+
+class EnterpriseSanitizationManager:
+    """
+    Enterprise-grade sanitization manager with comprehensive security policies.
+    
+    Provides centralized sanitization management, audit logging, performance
+    monitoring, and integration with Flask-Talisman security framework.
+    """
+    
+    def __init__(
+        self, 
+        enable_caching: bool = True,
+        enable_audit_logging: bool = True,
+        custom_policies: Optional[Dict[str, Dict[str, Any]]] = None
+    ):
+        self.policy_manager = SecurityPolicyManager()
+        self.html_sanitizer = HTMLSanitizer(self.policy_manager)
+        self.input_sanitizer = InputSanitizer(self.policy_manager)
+        self.logger = self.policy_manager.logger
+        
+        self.enable_caching = enable_caching
+        self.enable_audit_logging = enable_audit_logging
+        
+        # Register custom policies if provided
+        if custom_policies:
+            for name, policy in custom_policies.items():
+                self.policy_manager.register_policy(name, policy, override=True)
+        
+        # Performance metrics
+        self._sanitization_stats = {
+            'total_requests': 0,
+            'successful_sanitizations': 0,
+            'failed_sanitizations': 0,
+            'threats_detected': 0,
+            'cache_hits': 0
+        }
+        
+        self.logger.info(
+            "Enterprise sanitization manager initialized",
+            caching_enabled=enable_caching,
+            audit_logging_enabled=enable_audit_logging,
+            custom_policies_count=len(custom_policies) if custom_policies else 0
         )
     
-    def sanitize_base64(
-        self,
-        content: str,
-        max_decoded_size: int = 10 * 1024 * 1024,  # 10MB default
-        correlation_id: Optional[str] = None
-    ) -> SanitizationResult:
+    def sanitize_user_input(
+        self, 
+        input_data: Any, 
+        input_type: str,
+        policy: str = 'basic',
+        context: Optional[str] = None,
+        strict_validation: bool = True
+    ) -> Any:
         """
-        Sanitize base64 encoded content for security.
+        Universal sanitization method for various input types.
         
         Args:
-            content: Base64 content to sanitize
-            max_decoded_size: Maximum allowed decoded content size
-            correlation_id: Optional correlation ID for audit trail
+            input_data: Data to sanitize
+            input_type: Type of input ('html', 'text', 'email', 'url', 'json', 'datetime', 'filename')
+            policy: Security policy to apply
+            context: Additional context for logging
+            strict_validation: Whether to apply strict validation
             
         Returns:
-            SanitizationResult with sanitized base64 content
+            Sanitized data appropriate for the input type
         """
-        if not content:
-            return SanitizationResult(
-                original=content,
-                sanitized='',
-                context=SanitizationContext.FILE_CONTENT,
-                policy_name='base64',
-                correlation_id=correlation_id
-            )
-        
-        original_content = content
-        violations = []
+        self._sanitization_stats['total_requests'] += 1
         
         try:
-            # Validate base64 format
-            decoded = base64.b64decode(content, validate=True)
-            
-            # Check size limits
-            if len(decoded) > max_decoded_size:
-                violations.append(SecurityViolationType.MALICIOUS_UPLOAD)
-                content = ''
+            if input_type == 'html':
+                result = self.html_sanitizer.sanitize_html(
+                    input_data, policy, context, strict_validation
+                )
+            elif input_type == 'text':
+                result = self.html_sanitizer.sanitize_text_content(
+                    input_data, policy
+                )
+            elif input_type == 'email':
+                result = self.input_sanitizer.sanitize_email(input_data)
+            elif input_type == 'url':
+                result = self.input_sanitizer.sanitize_url(input_data, policy)
+            elif input_type == 'json':
+                result = self.input_sanitizer.sanitize_json_data(input_data, policy)
+            elif input_type == 'datetime':
+                result = self.input_sanitizer.sanitize_datetime_string(input_data)
+            elif input_type == 'filename':
+                result = self.input_sanitizer.sanitize_filename(input_data)
             else:
-                # Re-encode to ensure clean format
-                content = base64.b64encode(decoded).decode('ascii')
-                
-        except Exception:
-            violations.append(SecurityViolationType.MALICIOUS_UPLOAD)
-            content = ''
+                raise InvalidInputError(f"Unknown input type: {input_type}")
+            
+            self._sanitization_stats['successful_sanitizations'] += 1
+            
+            if self.enable_audit_logging:
+                self.logger.info(
+                    "Input sanitization completed successfully",
+                    input_type=input_type,
+                    policy=policy,
+                    context=context,
+                    strict_validation=strict_validation
+                )
+            
+            return result
+            
+        except Exception as e:
+            self._sanitization_stats['failed_sanitizations'] += 1
+            
+            if self.enable_audit_logging:
+                self.logger.error(
+                    "Input sanitization failed",
+                    input_type=input_type,
+                    policy=policy,
+                    context=context,
+                    error=str(e)
+                )
+            
+            raise
+    
+    def get_sanitization_stats(self) -> Dict[str, Any]:
+        """Get sanitization performance statistics."""
+        return self._sanitization_stats.copy()
+    
+    def clear_caches(self) -> None:
+        """Clear all sanitization caches."""
+        if self.enable_caching:
+            self.html_sanitizer.clear_cache()
+            self.logger.info("All sanitization caches cleared")
+    
+    def validate_security_policies(self) -> Dict[str, bool]:
+        """Validate all registered security policies."""
+        validation_results = {}
         
-        modifications_made = original_content != content
+        for policy_name in ['strict', 'basic', 'content', 'form', 'json', 'url']:
+            try:
+                policy = self.policy_manager.get_policy(policy_name)
+                # Basic validation - check required fields exist
+                required_fields = ['description']
+                is_valid = all(field in policy for field in required_fields)
+                validation_results[policy_name] = is_valid
+            except Exception as e:
+                validation_results[policy_name] = False
+                self.logger.error(
+                    "Policy validation failed",
+                    policy_name=policy_name,
+                    error=str(e)
+                )
         
-        return SanitizationResult(
-            original=original_content,
-            sanitized=content,
-            context=SanitizationContext.FILE_CONTENT,
-            policy_name='base64',
-            violations_detected=violations,
-            modifications_made=modifications_made,
-            correlation_id=correlation_id
-        )
+        return validation_results
 
 
-# Global sanitizer instance
-sanitizer = InputSanitizer()
-
-# Convenience functions for common sanitization operations
+# Convenience functions for direct usage
 def sanitize_html(
-    content: str,
-    context: SanitizationContext = SanitizationContext.USER_INPUT,
-    policy: Optional[str] = None
+    html_content: str, 
+    policy: str = 'basic',
+    strict_validation: bool = True
 ) -> str:
     """
     Convenience function for HTML sanitization.
     
     Args:
-        content: HTML content to sanitize
-        context: Sanitization context
-        policy: Optional policy name
+        html_content: HTML content to sanitize
+        policy: Security policy name ('strict', 'basic', 'content')
+        strict_validation: Whether to apply strict validation
         
     Returns:
         Sanitized HTML content
     """
-    result = sanitizer.sanitize_html(content, context, policy)
-    return result.sanitized
+    sanitizer = HTMLSanitizer()
+    return sanitizer.sanitize_html(html_content, policy, strict_validation=strict_validation)
 
 
-def sanitize_text(
-    content: str,
-    context: SanitizationContext = SanitizationContext.USER_INPUT,
-    max_length: Optional[int] = None
-) -> str:
+def sanitize_text(text_content: str, policy: str = 'form') -> str:
     """
     Convenience function for text sanitization.
     
     Args:
-        content: Text content to sanitize
-        context: Sanitization context
-        max_length: Maximum allowed length
+        text_content: Text content to sanitize
+        policy: Security policy name
         
     Returns:
-        Sanitized text content
+        Sanitized text content with HTML removed
     """
-    result = sanitizer.sanitize_text(content, context, max_length)
-    return result.sanitized
+    sanitizer = HTMLSanitizer()
+    return sanitizer.sanitize_text_content(text_content, policy)
 
 
-def sanitize_email(email: str, validate: bool = True) -> str:
+def sanitize_email(email: str, normalize: bool = True) -> str:
     """
     Convenience function for email sanitization.
     
     Args:
         email: Email address to sanitize
-        validate: Whether to perform validation
+        normalize: Whether to normalize email format
         
     Returns:
-        Sanitized email address
+        Validated and sanitized email address
     """
-    result = sanitizer.sanitize_email(email, validate)
-    return result.sanitized
+    sanitizer = InputSanitizer()
+    return sanitizer.sanitize_email(email, normalize=normalize)
 
 
-def sanitize_url(url: str, allowed_schemes: Optional[Set[str]] = None) -> str:
+def sanitize_url(url: str, allow_private: bool = False) -> str:
     """
     Convenience function for URL sanitization.
     
     Args:
         url: URL to sanitize
-        allowed_schemes: Set of allowed schemes
+        allow_private: Whether to allow private network addresses
         
     Returns:
-        Sanitized URL
+        Sanitized and validated URL
     """
-    result = sanitizer.sanitize_url(url, allowed_schemes)
-    return result.sanitized
+    sanitizer = InputSanitizer()
+    policy = 'url' if not allow_private else 'url_permissive'
+    return sanitizer.sanitize_url(url, policy)
 
 
 def sanitize_filename(filename: str, max_length: int = 255) -> str:
@@ -1048,24 +1201,25 @@ def sanitize_filename(filename: str, max_length: int = 255) -> str:
     
     Args:
         filename: Filename to sanitize
-        max_length: Maximum allowed length
+        max_length: Maximum filename length
         
     Returns:
-        Sanitized filename
+        Sanitized filename safe for file system usage
     """
-    result = sanitizer.sanitize_filename(filename, max_length)
-    return result.sanitized
+    sanitizer = InputSanitizer()
+    return sanitizer.sanitize_filename(filename, max_length)
 
 
-# Export all public functions and classes
+# Export main classes and functions
 __all__ = [
+    'SecurityPolicyManager',
+    'HTMLSanitizer', 
     'InputSanitizer',
-    'SanitizationResult',
-    'SanitizationContext',
-    'SecurityViolationType',
-    'HTMLSanitizationPolicy',
-    'SANITIZATION_POLICIES',
-    'sanitizer',
+    'EnterpriseSanitizationManager',
+    'SanitizationError',
+    'InvalidInputError',
+    'SecurityPolicyViolationError',
+    'ConfigurationError',
     'sanitize_html',
     'sanitize_text',
     'sanitize_email',
