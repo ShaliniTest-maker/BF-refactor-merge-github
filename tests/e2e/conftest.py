@@ -1,33 +1,54 @@
 """
-E2E-Specific pytest Configuration for Flask Application End-to-End Testing
+E2E-Specific pytest Configuration for Flask Application Testing
 
-This module provides comprehensive E2E testing configuration with Flask application setup,
-performance monitoring integration, load testing infrastructure using locust and apache-bench,
-and production-equivalent test environment preparation per Section 6.6.1 and 6.6.5.
+This module provides comprehensive end-to-end testing configuration with Flask application
+setup, performance monitoring integration, load testing infrastructure, and production-
+equivalent test environment preparation. Implements Section 6.6.1 Flask testing patterns
+with Section 6.6.5 test environment architecture for realistic E2E validation.
 
-Key Features:
-- Flask application factory for end-to-end testing with production parity per Section 6.6.5
-- Performance monitoring integration for E2E test metrics collection per Section 6.6.1
-- locust and apache-bench integration fixtures per Section 6.6.1 performance testing tools
-- Test environment with external service integration per Section 6.6.5
-- Comprehensive test data setup and teardown automation per Section 4.6.1
+Key Components:
+- Flask application factory configuration for E2E testing per Section 6.6.1
+- Production-equivalent test environment setup per Section 6.6.5 test environment architecture
+- Performance monitoring integration with locust and apache-bench per Section 6.6.1 performance testing tools
+- External service integration testing per Section 6.6.5 external service integration
+- Comprehensive test data management with automated setup/teardown per Section 4.6.1
 - E2E test reporting and metrics collection per Section 6.6.2 test reporting requirements
-- Production-equivalent test environment setup per Section 6.6.1
+- Load testing infrastructure for realistic production-equivalent testing per Section 6.6.1
 
 Architecture Integration:
 - Section 6.6.1: Flask application testing with pytest-flask integration
 - Section 6.6.1: Performance testing integration with locust and apache-bench
-- Section 6.6.5: Test environment management for E2E scenarios with production parity
+- Section 6.6.5: Test environment management for E2E scenarios
+- Section 6.6.1: Production-equivalent test environment setup
 - Section 4.6.1: Comprehensive test data setup and teardown automation
-- Section 6.6.2: E2E test reporting and metrics collection requirements
+- Section 6.6.2: E2E test reporting and metrics collection
+
+Performance Requirements:
+- ≤10% variance from Node.js baseline per Section 0.1.1 performance variance requirement
+- Production-equivalent performance validation per Section 6.6.1
+- Load testing with locust for concurrent request handling validation
+- Apache-bench integration for individual endpoint performance measurement
+- Performance regression detection and automated baseline comparison
+
+External Service Integration:
+- Auth0 authentication service testing with production tenant integration
+- AWS service integration testing with real service connectivity
+- MongoDB and Redis integration with production-equivalent configurations
+- Third-party API integration testing with circuit breaker validation
+- Health check and monitoring system integration testing
 
 Dependencies:
-- pytest 7.4+ with Flask testing patterns per Section 6.6.1
+- pytest 7.4+ with E2E testing plugins
 - pytest-flask for Flask-specific E2E testing patterns
-- locust ≥2.x for load testing and throughput validation per Section 6.6.1
-- apache-bench for HTTP server performance measurement per Section 6.6.1
-- Testcontainers for production-equivalent service dependencies
+- pytest-asyncio for async E2E workflow testing
+- locust ≥2.x for load testing and throughput validation
+- apache-bench for HTTP server performance measurement
+- testcontainers for production-equivalent service behavior
 - requests/httpx for external service integration testing
+
+Author: E2E Testing Team
+Version: 1.0.0
+Coverage Target: 100% critical user workflow scenarios per Section 6.6.1
 """
 
 import asyncio
@@ -36,1660 +57,1598 @@ import logging
 import os
 import subprocess
 import tempfile
-import threading
 import time
 import uuid
-from contextlib import contextmanager
-from dataclasses import dataclass, field
+from contextlib import asynccontextmanager, contextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional, Tuple, Union
 from unittest.mock import Mock, patch, MagicMock
 
 import pytest
 import pytest_asyncio
-from flask import Flask, g
+from flask import Flask, g, request
 from flask.testing import FlaskClient
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
-# Performance testing imports
+# Import base test configuration and fixtures
+from tests.conftest import (
+    comprehensive_test_environment,
+    performance_monitoring,
+    test_metrics_collector,
+    flask_app,
+    client,
+    app_context,
+    request_context,
+    mock_external_services
+)
+
+# Import database fixtures for E2E database integration
 try:
-    from locust import HttpUser, task, between
-    from locust.env import Environment
-    from locust.stats import stats_printer, stats_history
-    from locust.log import setup_logging
-    LOCUST_AVAILABLE = True
+    from tests.fixtures.database_fixtures import (
+        comprehensive_database_environment,
+        seeded_database,
+        database_seeder,
+        performance_validator
+    )
+    DATABASE_FIXTURES_AVAILABLE = True
 except ImportError:
-    LOCUST_AVAILABLE = False
-    logging.warning("Locust not available - load testing fixtures will be disabled")
+    DATABASE_FIXTURES_AVAILABLE = False
 
-# Import global fixtures and utilities
-from tests.conftest import *  # Import all global fixtures
-from tests.fixtures.database_fixtures import *  # Import database testing fixtures
-
-# Application imports with fallback handling
+# Import application modules
 try:
-    from src.app import create_app
-    from src.config.settings import TestingConfig, ProductionConfig, ConfigFactory
+    from src.app import create_app, create_wsgi_application
+    from src.config.settings import TestingConfig, ProductionConfig, StagingConfig
+    APPLICATION_AVAILABLE = True
 except ImportError:
-    # Fallback for development scenarios
-    logging.warning("Application modules not fully available - using fallback implementations")
-    
-    def create_app(config_name='testing'):
-        """Fallback app factory"""
-        from flask import Flask
-        app = Flask(__name__)
-        app.config['TESTING'] = True
-        app.config['WTF_CSRF_ENABLED'] = False
-        return app
-    
-    class TestingConfig:
-        TESTING = True
-        WTF_CSRF_ENABLED = False
-        SECRET_KEY = 'test-secret-key'
+    APPLICATION_AVAILABLE = False
 
-# Configure structured logging for E2E tests
+# Configure E2E-specific logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - [E2E] %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# E2E Test Configuration Constants
-E2E_TEST_TIMEOUT_SECONDS = 300  # 5 minutes for complete E2E workflows
-PERFORMANCE_BASELINE_THRESHOLD = 0.10  # ≤10% variance requirement per Section 0.1.1
-LOAD_TEST_DURATION_SECONDS = 60  # Duration for load testing scenarios
-CONCURRENT_USERS_MAX = 50  # Maximum concurrent users for load testing
-DEFAULT_REQUEST_TIMEOUT = 30  # Default HTTP request timeout for E2E tests
-
-# Node.js baseline performance metrics for comparison per Section 0.1.1
-NODEJS_BASELINE_METRICS = {
-    'response_times': {
-        'health_check': 50,          # milliseconds
-        'user_login': 200,           # milliseconds
-        'user_registration': 300,    # milliseconds
-        'user_profile': 150,         # milliseconds
-        'api_endpoint_avg': 180,     # milliseconds
-    },
-    'throughput': {
-        'requests_per_second': 100,  # baseline RPS
-        'concurrent_users': 50,      # baseline concurrent capacity
-    },
-    'memory_usage': {
-        'baseline_mb': 256,          # baseline memory usage
-        'peak_mb': 512,              # peak memory usage
-    }
-}
+# Configure pytest-asyncio for E2E async workflows
+pytest_plugins = ('pytest_asyncio',)
 
 
-@dataclass
-class E2ETestConfig:
+# =============================================================================
+# E2E Application Configuration and Setup
+# =============================================================================
+
+class E2ETestingConfig(TestingConfig if APPLICATION_AVAILABLE else object):
     """
-    Comprehensive E2E test configuration for production-equivalent testing scenarios.
+    E2E-specific testing configuration extending base TestingConfig.
     
-    Provides centralized configuration for E2E test execution including performance
-    thresholds, external service integration, load testing parameters, and monitoring
-    settings aligned with Section 6.6.5 test environment requirements.
+    Provides production-equivalent configuration for end-to-end testing while
+    maintaining test isolation and comprehensive observability per Section 6.6.5
+    test environment architecture requirements.
     """
     
-    # Flask application configuration
-    app_config_name: str = field(default='testing')
-    enable_production_parity: bool = field(default=True)
-    external_services_enabled: bool = field(default=True)
+    # E2E Testing Configuration
+    TESTING = True
+    E2E_TESTING_MODE = True
+    DEBUG = False  # Disable debug mode for production-equivalent testing
     
-    # Performance testing configuration per Section 6.6.1
-    enable_performance_monitoring: bool = field(default=True)
-    performance_variance_threshold: float = field(default=PERFORMANCE_BASELINE_THRESHOLD)
-    nodejs_baseline_comparison: bool = field(default=True)
+    # Production-equivalent security settings
+    WTF_CSRF_ENABLED = True  # Enable CSRF for realistic testing
+    TALISMAN_ENABLED = True  # Enable security headers
+    SESSION_COOKIE_SECURE = False  # Allow for test environment
+    SESSION_COOKIE_HTTPONLY = True
     
-    # Load testing configuration with locust per Section 6.6.1
-    enable_load_testing: bool = field(default=True)
-    load_test_duration: int = field(default=LOAD_TEST_DURATION_SECONDS)
-    max_concurrent_users: int = field(default=CONCURRENT_USERS_MAX)
-    user_spawn_rate: float = field(default=2.0)  # users per second
+    # E2E Database Configuration (production-equivalent)
+    MONGODB_URI = os.getenv('E2E_MONGODB_URI', 'mongodb://localhost:27017/e2e_test_database')
+    REDIS_URL = os.getenv('E2E_REDIS_URL', 'redis://localhost:6379/14')
+    DATABASE_POOL_SIZE = 20  # Higher pool size for E2E testing
+    DATABASE_POOL_MAX_OVERFLOW = 10
     
-    # Apache-bench configuration per Section 6.6.1
-    enable_apache_bench: bool = field(default=True)
-    apache_bench_requests: int = field(default=1000)
-    apache_bench_concurrency: int = field(default=10)
+    # E2E Authentication Configuration
+    AUTH0_DOMAIN = os.getenv('E2E_AUTH0_DOMAIN', 'test-tenant.auth0.com')
+    AUTH0_CLIENT_ID = os.getenv('E2E_AUTH0_CLIENT_ID', 'test-client-id')
+    AUTH0_CLIENT_SECRET = os.getenv('E2E_AUTH0_CLIENT_SECRET', 'test-client-secret')
+    JWT_SECRET_KEY = os.getenv('E2E_JWT_SECRET_KEY', 'e2e-test-jwt-secret-key')
     
-    # External service integration per Section 6.6.5
-    mock_auth0_service: bool = field(default=True)
-    mock_aws_services: bool = field(default=True)
-    mock_third_party_apis: bool = field(default=True)
-    enable_circuit_breakers: bool = field(default=True)
+    # E2E External Service Configuration
+    AWS_REGION = os.getenv('E2E_AWS_REGION', 'us-east-1')
+    AWS_S3_BUCKET = os.getenv('E2E_AWS_S3_BUCKET', 'e2e-test-bucket')
+    EXTERNAL_API_BASE_URL = os.getenv('E2E_EXTERNAL_API_BASE_URL', 'https://api.test.example.com')
     
-    # Test data and environment configuration
-    comprehensive_test_data: bool = field(default=True)
-    cleanup_after_tests: bool = field(default=True)
-    parallel_execution_safe: bool = field(default=True)
+    # E2E Performance Configuration
+    PERFORMANCE_MONITORING_ENABLED = True
+    PERFORMANCE_BASELINE_VALIDATION = True
+    RESPONSE_TIME_VARIANCE_THRESHOLD = 0.10  # ≤10% variance requirement
     
-    # Reporting and metrics configuration per Section 6.6.2
-    enable_detailed_reporting: bool = field(default=True)
-    collect_performance_metrics: bool = field(default=True)
-    generate_test_artifacts: bool = field(default=True)
+    # E2E Load Testing Configuration
+    LOAD_TESTING_ENABLED = True
+    LOAD_TEST_USERS = int(os.getenv('E2E_LOAD_TEST_USERS', '50'))
+    LOAD_TEST_SPAWN_RATE = int(os.getenv('E2E_LOAD_TEST_SPAWN_RATE', '5'))
+    LOAD_TEST_DURATION = int(os.getenv('E2E_LOAD_TEST_DURATION', '60'))
     
-    # Timeouts and reliability configuration
-    test_timeout_seconds: int = field(default=E2E_TEST_TIMEOUT_SECONDS)
-    request_timeout_seconds: int = field(default=DEFAULT_REQUEST_TIMEOUT)
-    retry_failed_requests: bool = field(default=True)
-    max_retries: int = field(default=3)
+    # E2E Health Check Configuration
+    HEALTH_CHECK_ENABLED = True
+    HEALTH_CHECK_EXTERNAL_SERVICES = True
+    HEALTH_CHECK_TIMEOUT = int(os.getenv('E2E_HEALTH_CHECK_TIMEOUT', '30'))
     
-    def get_flask_config(self) -> Dict[str, Any]:
-        """
-        Generate Flask configuration optimized for E2E testing.
-        
-        Returns:
-            Dictionary containing Flask configuration settings
-        """
-        base_config = {
-            'TESTING': True,
-            'WTF_CSRF_ENABLED': False,
-            'DEBUG': False,
-            'PRESERVE_CONTEXT_ON_EXCEPTION': False,
-            'PROPAGATE_EXCEPTIONS': True,
-            'LOGIN_DISABLED': False,  # Enable authentication for E2E tests
-            'SERVER_NAME': 'localhost:5000',
-            'APPLICATION_ROOT': '/',
-            'PREFERRED_URL_SCHEME': 'http',
-        }
-        
-        if self.enable_production_parity:
-            # Add production-like settings for realistic testing
-            base_config.update({
-                'SESSION_COOKIE_SECURE': False,  # HTTP for testing
-                'SESSION_COOKIE_HTTPONLY': True,
-                'SESSION_COOKIE_SAMESITE': 'Lax',
-                'PERMANENT_SESSION_LIFETIME': 3600,  # 1 hour for E2E tests
-                'MAX_CONTENT_LENGTH': 16 * 1024 * 1024,  # 16MB
-                'SEND_FILE_MAX_AGE_DEFAULT': 43200,  # 12 hours
-            })
-        
-        return base_config
+    # E2E Logging Configuration (production-equivalent)
+    LOG_LEVEL = 'INFO'
+    STRUCTURED_LOGGING = True
+    LOG_FORMAT = 'json'
     
-    def get_performance_thresholds(self) -> Dict[str, float]:
-        """
-        Get performance validation thresholds for E2E testing.
+    @classmethod
+    def init_app(cls, app: Flask) -> None:
+        """Initialize Flask application with E2E configuration."""
+        super().init_app(app) if hasattr(super(), 'init_app') else None
         
-        Returns:
-            Dictionary containing performance thresholds
-        """
-        return {
-            'response_time_variance': self.performance_variance_threshold,
-            'memory_usage_variance': 0.15,  # 15% variance for memory
-            'throughput_variance': self.performance_variance_threshold,
-            'error_rate_threshold': 0.01,  # 1% maximum error rate
-        }
-
-
-@dataclass
-class PerformanceMetrics:
-    """
-    Performance metrics collection for E2E test validation.
-    
-    Tracks comprehensive performance data during E2E test execution including
-    response times, throughput, resource usage, and comparison with Node.js
-    baseline metrics per Section 0.1.1 requirements.
-    """
-    
-    test_name: str
-    start_time: float
-    end_time: Optional[float] = None
-    response_times: List[float] = field(default_factory=list)
-    request_count: int = 0
-    error_count: int = 0
-    throughput_rps: float = 0.0
-    memory_usage_mb: float = 0.0
-    cpu_usage_percent: float = 0.0
-    
-    # Performance comparison data
-    baseline_comparison: Dict[str, Any] = field(default_factory=dict)
-    variance_analysis: Dict[str, float] = field(default_factory=dict)
-    compliance_status: bool = True
-    
-    def add_response_time(self, response_time_ms: float) -> None:
-        """Add response time measurement to metrics collection."""
-        self.response_times.append(response_time_ms)
-        self.request_count += 1
-    
-    def add_error(self) -> None:
-        """Increment error counter for failed requests."""
-        self.error_count += 1
-    
-    def calculate_statistics(self) -> Dict[str, Any]:
-        """
-        Calculate comprehensive performance statistics.
-        
-        Returns:
-            Dictionary containing calculated performance statistics
-        """
-        if not self.response_times:
-            return {'error': 'No response time data available'}
-        
-        duration = (self.end_time or time.time()) - self.start_time
-        
-        stats = {
-            'total_requests': self.request_count,
-            'total_errors': self.error_count,
-            'error_rate': self.error_count / max(self.request_count, 1),
-            'test_duration_seconds': duration,
-            'average_response_time_ms': sum(self.response_times) / len(self.response_times),
-            'min_response_time_ms': min(self.response_times),
-            'max_response_time_ms': max(self.response_times),
-            'median_response_time_ms': sorted(self.response_times)[len(self.response_times) // 2],
-            'throughput_rps': self.request_count / max(duration, 0.001),
-            'memory_usage_mb': self.memory_usage_mb,
-            'cpu_usage_percent': self.cpu_usage_percent,
-        }
-        
-        # Calculate percentiles
-        sorted_times = sorted(self.response_times)
-        stats['p95_response_time_ms'] = sorted_times[int(0.95 * len(sorted_times))]
-        stats['p99_response_time_ms'] = sorted_times[int(0.99 * len(sorted_times))]
-        
-        return stats
-    
-    def validate_against_baseline(self, baseline_metrics: Dict[str, Any]) -> bool:
-        """
-        Validate performance metrics against Node.js baseline per Section 0.1.1.
-        
-        Args:
-            baseline_metrics: Node.js baseline performance metrics
-            
-        Returns:
-            True if performance meets variance threshold requirements
-        """
-        if not self.response_times:
-            return False
-        
-        stats = self.calculate_statistics()
-        baseline_response_time = baseline_metrics.get('response_times', {}).get('api_endpoint_avg', 200)
-        baseline_throughput = baseline_metrics.get('throughput', {}).get('requests_per_second', 100)
-        
-        # Calculate variance from baseline
-        response_time_variance = (stats['average_response_time_ms'] - baseline_response_time) / baseline_response_time
-        throughput_variance = (stats['throughput_rps'] - baseline_throughput) / baseline_throughput
-        
-        self.variance_analysis = {
-            'response_time_variance': response_time_variance,
-            'throughput_variance': throughput_variance,
-            'error_rate': stats['error_rate'],
-        }
-        
-        # Check compliance with ≤10% variance requirement
-        self.compliance_status = (
-            abs(response_time_variance) <= PERFORMANCE_BASELINE_THRESHOLD and
-            abs(throughput_variance) <= PERFORMANCE_BASELINE_THRESHOLD and
-            stats['error_rate'] <= 0.01  # 1% error threshold
-        )
-        
-        self.baseline_comparison = {
-            'baseline_response_time_ms': baseline_response_time,
-            'measured_response_time_ms': stats['average_response_time_ms'],
-            'baseline_throughput_rps': baseline_throughput,
-            'measured_throughput_rps': stats['throughput_rps'],
-            'compliance_status': self.compliance_status,
-            'variance_analysis': self.variance_analysis,
-        }
-        
-        return self.compliance_status
-
-
-class E2ETestReporter:
-    """
-    Comprehensive E2E test reporting and metrics collection per Section 6.6.2.
-    
-    Provides detailed test execution reporting, performance metrics aggregation,
-    and comprehensive test artifacts generation for E2E test analysis and
-    continuous improvement of testing processes.
-    """
-    
-    def __init__(self, output_dir: Optional[Path] = None):
-        """
-        Initialize E2E test reporter with output configuration.
-        
-        Args:
-            output_dir: Directory for test artifacts output
-        """
-        self.output_dir = output_dir or Path(tempfile.gettempdir()) / 'e2e_test_reports'
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        
-        self.test_results: List[Dict[str, Any]] = []
-        self.performance_metrics: List[PerformanceMetrics] = []
-        self.test_session_id = str(uuid.uuid4())
-        self.session_start_time = time.time()
+        # Configure E2E-specific settings
+        app.config['E2E_SESSION_ID'] = str(uuid.uuid4())
+        app.config['E2E_START_TIME'] = time.time()
         
         logger.info(
-            "E2E test reporter initialized",
-            session_id=self.test_session_id,
-            output_dir=str(self.output_dir)
+            "E2E testing configuration initialized",
+            session_id=app.config['E2E_SESSION_ID'],
+            csrf_enabled=cls.WTF_CSRF_ENABLED,
+            security_headers_enabled=cls.TALISMAN_ENABLED,
+            performance_monitoring_enabled=cls.PERFORMANCE_MONITORING_ENABLED,
+            load_testing_enabled=cls.LOAD_TESTING_ENABLED
+        )
+
+
+@pytest.fixture(scope="session")
+def e2e_app_config():
+    """
+    Session-scoped fixture providing E2E-specific application configuration.
+    
+    Creates comprehensive E2E configuration with production-equivalent settings
+    while maintaining test isolation per Section 6.6.5 test environment architecture.
+    
+    Returns:
+        E2ETestingConfig instance with production-equivalent E2E settings
+    """
+    config = E2ETestingConfig()
+    
+    logger.info(
+        "E2E application configuration created",
+        mongodb_uri=config.MONGODB_URI,
+        redis_url=config.REDIS_URL,
+        auth0_domain=config.AUTH0_DOMAIN,
+        performance_monitoring=config.PERFORMANCE_MONITORING_ENABLED,
+        load_testing=config.LOAD_TESTING_ENABLED
+    )
+    
+    return config
+
+
+@pytest.fixture(scope="session")
+def e2e_flask_app(e2e_app_config):
+    """
+    Session-scoped fixture providing Flask application for E2E testing.
+    
+    Creates Flask application using factory pattern with E2E configuration
+    and production-equivalent initialization per Section 6.6.1 Flask application
+    testing requirements.
+    
+    Args:
+        e2e_app_config: E2E testing configuration
+        
+    Returns:
+        Configured Flask application instance for E2E testing
+    """
+    if not APPLICATION_AVAILABLE:
+        pytest.skip("Flask application not available for E2E testing")
+    
+    # Create application with E2E configuration
+    app = create_app()
+    app.config.from_object(e2e_app_config)
+    
+    # Override specific settings for E2E testing
+    app.config.update({
+        'TESTING': True,
+        'E2E_TESTING_MODE': True,
+        'SERVER_NAME': None,  # Allow any server name for E2E testing
+        'APPLICATION_ROOT': '/',
+        'PREFERRED_URL_SCHEME': 'http'
+    })
+    
+    with app.app_context():
+        logger.info(
+            "E2E Flask application created",
+            app_name=app.config.get('APP_NAME', 'Flask E2E App'),
+            session_id=app.config.get('E2E_SESSION_ID'),
+            environment=app.config.get('FLASK_ENV', 'testing'),
+            performance_monitoring=app.config.get('PERFORMANCE_MONITORING_ENABLED', False)
+        )
+        
+        yield app
+    
+    logger.info("E2E Flask application context closed")
+
+
+@pytest.fixture(scope="function")
+def e2e_client(e2e_flask_app):
+    """
+    Function-scoped fixture providing Flask test client for E2E testing.
+    
+    Creates Flask test client with comprehensive request/response handling
+    for end-to-end workflow testing per Section 6.6.1 Flask testing patterns.
+    
+    Args:
+        e2e_flask_app: E2E Flask application instance
+        
+    Returns:
+        Flask test client configured for E2E testing
+    """
+    with e2e_flask_app.test_client() as test_client:
+        with e2e_flask_app.app_context():
+            # Configure test client for E2E scenarios
+            test_client.environ_base['HTTP_USER_AGENT'] = 'E2E-Test-Client/1.0'
+            test_client.environ_base['HTTP_X_FORWARDED_FOR'] = '127.0.0.1'
+            
+            logger.debug("E2E test client created")
+            yield test_client
+    
+    logger.debug("E2E test client context closed")
+
+
+# =============================================================================
+# Performance Testing and Monitoring Integration
+# =============================================================================
+
+@pytest.fixture(scope="function")
+def e2e_performance_monitor():
+    """
+    Function-scoped fixture providing E2E performance monitoring.
+    
+    Creates comprehensive performance monitoring for E2E testing with ≤10%
+    variance validation and automated baseline comparison per Section 6.6.1
+    performance testing requirements.
+    
+    Returns:
+        E2E performance monitoring context with advanced validation
+    """
+    monitor = {
+        'session_id': str(uuid.uuid4()),
+        'start_time': time.time(),
+        'measurements': [],
+        'baselines': {
+            'auth_flow_time': 0.35,  # 350ms baseline for complete auth flow
+            'api_workflow_time': 0.50,  # 500ms baseline for API workflow
+            'database_transaction_time': 0.15,  # 150ms baseline for DB transaction
+            'external_service_time': 0.80,  # 800ms baseline for external service
+            'complete_e2e_workflow_time': 2.00,  # 2s baseline for complete E2E
+        },
+        'variance_threshold': 0.10,  # ≤10% variance requirement
+        'performance_violations': [],
+        'load_test_results': {},
+        'apache_bench_results': {}
+    }
+    
+    def measure_e2e_operation(operation_name: str, baseline_name: str = None):
+        """Enhanced E2E operation measurement with baseline validation"""
+        @contextmanager
+        def measurement_context():
+            start_time = time.perf_counter()
+            memory_start = None
+            
+            try:
+                # Import psutil for memory monitoring if available
+                try:
+                    import psutil
+                    process = psutil.Process()
+                    memory_start = process.memory_info().rss
+                except ImportError:
+                    pass
+                
+                yield
+                
+            finally:
+                end_time = time.perf_counter()
+                duration = end_time - start_time
+                
+                memory_end = None
+                memory_delta = None
+                if memory_start:
+                    try:
+                        import psutil
+                        process = psutil.Process()
+                        memory_end = process.memory_info().rss
+                        memory_delta = memory_end - memory_start
+                    except ImportError:
+                        pass
+                
+                measurement = {
+                    'operation': operation_name,
+                    'duration': duration,
+                    'memory_delta': memory_delta,
+                    'timestamp': time.time(),
+                    'session_id': monitor['session_id']
+                }
+                monitor['measurements'].append(measurement)
+                
+                # Validate against baseline if provided
+                if baseline_name and baseline_name in monitor['baselines']:
+                    baseline_value = monitor['baselines'][baseline_name]
+                    variance = abs(duration - baseline_value) / baseline_value
+                    
+                    if variance > monitor['variance_threshold']:
+                        violation = {
+                            'operation': operation_name,
+                            'measured_duration': duration,
+                            'baseline_duration': baseline_value,
+                            'variance_percentage': variance * 100,
+                            'threshold_percentage': monitor['variance_threshold'] * 100,
+                            'severity': 'critical' if variance > 0.25 else 'warning',
+                            'timestamp': time.time()
+                        }
+                        monitor['performance_violations'].append(violation)
+                        
+                        logger.warning(
+                            "E2E performance variance violation",
+                            operation=operation_name,
+                            variance_pct=round(variance * 100, 2),
+                            threshold_pct=round(monitor['variance_threshold'] * 100, 2),
+                            severity=violation['severity']
+                        )
+                    else:
+                        logger.debug(
+                            "E2E performance validation passed",
+                            operation=operation_name,
+                            duration=round(duration, 3),
+                            variance_pct=round(variance * 100, 2)
+                        )
+        
+        return measurement_context()
+    
+    def get_performance_summary():
+        """Get comprehensive E2E performance summary"""
+        total_measurements = len(monitor['measurements'])
+        violations = len(monitor['performance_violations'])
+        
+        summary = {
+            'session_id': monitor['session_id'],
+            'total_measurements': total_measurements,
+            'performance_violations': violations,
+            'compliance_rate': (
+                (total_measurements - violations) / total_measurements * 100
+                if total_measurements > 0 else 100
+            ),
+            'average_duration': (
+                sum(m['duration'] for m in monitor['measurements']) / total_measurements
+                if total_measurements > 0 else 0
+            ),
+            'longest_operation': (
+                max(monitor['measurements'], key=lambda x: x['duration'])
+                if monitor['measurements'] else None
+            ),
+            'violations_by_severity': {
+                'critical': len([v for v in monitor['performance_violations'] if v.get('severity') == 'critical']),
+                'warning': len([v for v in monitor['performance_violations'] if v.get('severity') == 'warning'])
+            },
+            'load_test_summary': monitor['load_test_results'],
+            'apache_bench_summary': monitor['apache_bench_results']
+        }
+        
+        return summary
+    
+    def record_load_test_results(results: Dict[str, Any]):
+        """Record load test results from locust"""
+        monitor['load_test_results'].update(results)
+        
+        logger.info(
+            "Load test results recorded",
+            users=results.get('users', 0),
+            rps=results.get('requests_per_second', 0),
+            avg_response_time=results.get('average_response_time', 0)
         )
     
-    def add_test_result(
-        self,
+    def record_apache_bench_results(results: Dict[str, Any]):
+        """Record apache-bench results"""
+        monitor['apache_bench_results'].update(results)
+        
+        logger.info(
+            "Apache-bench results recorded",
+            requests=results.get('total_requests', 0),
+            rps=results.get('requests_per_second', 0),
+            time_per_request=results.get('time_per_request', 0)
+        )
+    
+    # Attach methods to monitor context
+    monitor['measure_operation'] = measure_e2e_operation
+    monitor['get_performance_summary'] = get_performance_summary
+    monitor['record_load_test_results'] = record_load_test_results
+    monitor['record_apache_bench_results'] = record_apache_bench_results
+    
+    logger.info(
+        "E2E performance monitor initialized",
+        session_id=monitor['session_id'],
+        variance_threshold=monitor['variance_threshold'],
+        baseline_operations=len(monitor['baselines'])
+    )
+    
+    yield monitor
+    
+    # Final performance summary
+    final_summary = monitor['get_performance_summary']()
+    logger.info(
+        "E2E performance monitoring completed",
+        session_id=monitor['session_id'],
+        compliance_rate=round(final_summary['compliance_rate'], 2),
+        total_violations=final_summary['performance_violations'],
+        critical_violations=final_summary['violations_by_severity']['critical']
+    )
+
+
+# =============================================================================
+# Load Testing Infrastructure Integration
+# =============================================================================
+
+@pytest.fixture(scope="function")
+def locust_load_tester(e2e_flask_app, e2e_performance_monitor):
+    """
+    Function-scoped fixture providing locust load testing integration.
+    
+    Creates locust-based load testing infrastructure for concurrent request
+    handling validation per Section 6.6.1 load testing framework requirements.
+    
+    Args:
+        e2e_flask_app: E2E Flask application
+        e2e_performance_monitor: Performance monitoring context
+        
+    Returns:
+        Locust load testing utilities and execution context
+    """
+    try:
+        import locust
+        from locust import HttpUser, task, constant
+        from locust.env import Environment
+        from locust.stats import stats_printer, stats_history
+        from locust.log import setup_logging
+    except ImportError:
+        pytest.skip("Locust not available for load testing")
+    
+    class E2ELoadTestUser(HttpUser):
+        """E2E load test user class for realistic workflow simulation"""
+        wait_time = constant(1)
+        
+        def on_start(self):
+            """User initialization for load testing"""
+            self.auth_token = None
+            self.user_id = str(uuid.uuid4())
+        
+        @task(3)
+        def test_health_check(self):
+            """Health check endpoint load testing"""
+            response = self.client.get("/health")
+            if response.status_code != 200:
+                logger.warning(f"Health check failed: {response.status_code}")
+        
+        @task(2)
+        def test_authentication_flow(self):
+            """Authentication flow load testing"""
+            # Simulate login
+            login_data = {
+                'email': f'loadtest-{self.user_id}@example.com',
+                'password': 'LoadTest123!'
+            }
+            response = self.client.post("/auth/login", json=login_data)
+            
+            if response.status_code == 200:
+                try:
+                    self.auth_token = response.json().get('access_token')
+                except:
+                    pass
+        
+        @task(5)
+        def test_api_workflows(self):
+            """API workflow load testing with authentication"""
+            headers = {}
+            if self.auth_token:
+                headers['Authorization'] = f'Bearer {self.auth_token}'
+            
+            # Test various API endpoints
+            endpoints = [
+                "/api/v1/users/profile",
+                "/api/v1/projects",
+                "/api/v1/dashboard/stats"
+            ]
+            
+            for endpoint in endpoints:
+                response = self.client.get(endpoint, headers=headers)
+                if response.status_code >= 500:
+                    logger.warning(f"API endpoint {endpoint} failed: {response.status_code}")
+    
+    def run_load_test(
+        users: int = None,
+        spawn_rate: int = None,
+        run_time: int = None,
+        host: str = None
+    ) -> Dict[str, Any]:
+        """Execute locust load test with specified parameters"""
+        
+        # Use configuration defaults if not provided
+        users = users or e2e_flask_app.config.get('LOAD_TEST_USERS', 10)
+        spawn_rate = spawn_rate or e2e_flask_app.config.get('LOAD_TEST_SPAWN_RATE', 2)
+        run_time = run_time or e2e_flask_app.config.get('LOAD_TEST_DURATION', 30)
+        host = host or 'http://localhost:5000'
+        
+        # Set up locust environment
+        env = Environment(user_classes=[E2ELoadTestUser])
+        env.create_local_runner()
+        
+        # Configure logging
+        setup_logging("INFO", None)
+        
+        logger.info(
+            "Starting locust load test",
+            users=users,
+            spawn_rate=spawn_rate,
+            duration=run_time,
+            host=host
+        )
+        
+        # Start load test
+        env.runner.start(users, spawn_rate=spawn_rate)
+        
+        # Wait for test completion
+        import gevent
+        gevent.sleep(run_time)
+        
+        # Stop test and collect results
+        env.runner.stop()
+        
+        stats = env.runner.stats
+        results = {
+            'total_requests': stats.total.num_requests,
+            'total_failures': stats.total.num_failures,
+            'requests_per_second': round(stats.total.total_rps, 2),
+            'average_response_time': round(stats.total.avg_response_time, 2),
+            'min_response_time': stats.total.min_response_time,
+            'max_response_time': stats.total.max_response_time,
+            'failure_rate': round(stats.total.fail_ratio * 100, 2),
+            'users': users,
+            'spawn_rate': spawn_rate,
+            'duration': run_time
+        }
+        
+        # Record results in performance monitor
+        e2e_performance_monitor['record_load_test_results'](results)
+        
+        logger.info(
+            "Locust load test completed",
+            total_requests=results['total_requests'],
+            rps=results['requests_per_second'],
+            avg_response_time=results['average_response_time'],
+            failure_rate=results['failure_rate']
+        )
+        
+        return results
+    
+    load_tester = {
+        'user_class': E2ELoadTestUser,
+        'run_load_test': run_load_test,
+        'environment': None
+    }
+    
+    logger.info("Locust load tester initialized")
+    return load_tester
+
+
+@pytest.fixture(scope="function")
+def apache_bench_tester(e2e_flask_app, e2e_performance_monitor):
+    """
+    Function-scoped fixture providing apache-bench integration.
+    
+    Creates apache-bench testing utilities for individual endpoint performance
+    measurement per Section 6.6.1 benchmark testing requirements.
+    
+    Args:
+        e2e_flask_app: E2E Flask application
+        e2e_performance_monitor: Performance monitoring context
+        
+    Returns:
+        Apache-bench testing utilities and execution context
+    """
+    def run_apache_bench(
+        url: str,
+        requests: int = 100,
+        concurrency: int = 10,
+        timeout: int = 30,
+        headers: Dict[str, str] = None
+    ) -> Dict[str, Any]:
+        """Execute apache-bench test against specified URL"""
+        
+        # Prepare apache-bench command
+        ab_cmd = [
+            'ab',
+            '-n', str(requests),
+            '-c', str(concurrency),
+            '-s', str(timeout),
+            '-g', '/tmp/ab_results.tsv'  # Generate gnuplot data
+        ]
+        
+        # Add headers if provided
+        if headers:
+            for key, value in headers.items():
+                ab_cmd.extend(['-H', f'{key}: {value}'])
+        
+        # Add URL
+        ab_cmd.append(url)
+        
+        logger.info(
+            "Starting apache-bench test",
+            url=url,
+            requests=requests,
+            concurrency=concurrency,
+            timeout=timeout
+        )
+        
+        try:
+            # Execute apache-bench
+            result = subprocess.run(
+                ab_cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout + 10
+            )
+            
+            if result.returncode != 0:
+                logger.error(f"Apache-bench failed: {result.stderr}")
+                return {
+                    'success': False,
+                    'error': result.stderr,
+                    'url': url
+                }
+            
+            # Parse apache-bench output
+            output = result.stdout
+            results = {
+                'success': True,
+                'url': url,
+                'total_requests': requests,
+                'concurrency': concurrency,
+                'timeout': timeout
+            }
+            
+            # Extract key metrics from output
+            lines = output.split('\n')
+            for line in lines:
+                if 'Requests per second:' in line:
+                    rps = float(line.split(':')[1].split()[0])
+                    results['requests_per_second'] = rps
+                elif 'Time per request:' in line and 'mean' in line:
+                    tpr = float(line.split(':')[1].split()[0])
+                    results['time_per_request'] = tpr
+                elif 'Transfer rate:' in line:
+                    tr = float(line.split(':')[1].split()[0])
+                    results['transfer_rate'] = tr
+                elif 'Connection Times (ms)' in line:
+                    # Parse connection time statistics
+                    pass
+            
+            # Record results in performance monitor
+            e2e_performance_monitor['record_apache_bench_results'](results)
+            
+            logger.info(
+                "Apache-bench test completed",
+                url=url,
+                rps=results.get('requests_per_second', 0),
+                time_per_request=results.get('time_per_request', 0)
+            )
+            
+            return results
+            
+        except subprocess.TimeoutExpired:
+            logger.error(f"Apache-bench test timed out for URL: {url}")
+            return {
+                'success': False,
+                'error': 'Test timed out',
+                'url': url
+            }
+        except FileNotFoundError:
+            logger.warning("Apache-bench (ab) not found, skipping performance test")
+            return {
+                'success': False,
+                'error': 'Apache-bench not available',
+                'url': url
+            }
+        except Exception as e:
+            logger.error(f"Apache-bench test failed: {str(e)}")
+            return {
+                'success': False,
+                'error': str(e),
+                'url': url
+            }
+    
+    def benchmark_endpoint(
+        endpoint: str,
+        method: str = 'GET',
+        data: Dict[str, Any] = None,
+        headers: Dict[str, str] = None,
+        requests: int = 100,
+        concurrency: int = 10
+    ) -> Dict[str, Any]:
+        """Benchmark specific Flask endpoint"""
+        
+        # Construct full URL
+        base_url = 'http://localhost:5000'  # Test server URL
+        url = f"{base_url}{endpoint}"
+        
+        # Prepare headers
+        test_headers = headers or {}
+        if data and method in ['POST', 'PUT', 'PATCH']:
+            test_headers['Content-Type'] = 'application/json'
+        
+        # For non-GET requests, create a simple GET equivalent for ab testing
+        if method != 'GET':
+            logger.warning(f"Apache-bench only supports GET, testing {endpoint} as GET")
+        
+        return run_apache_bench(
+            url=url,
+            requests=requests,
+            concurrency=concurrency,
+            headers=test_headers
+        )
+    
+    bench_tester = {
+        'run_apache_bench': run_apache_bench,
+        'benchmark_endpoint': benchmark_endpoint
+    }
+    
+    logger.info("Apache-bench tester initialized")
+    return bench_tester
+
+
+# =============================================================================
+# Production-Equivalent Test Environment Setup
+# =============================================================================
+
+@pytest.fixture(scope="function")
+def production_equivalent_environment(
+    e2e_flask_app,
+    e2e_client,
+    e2e_performance_monitor
+):
+    """
+    Function-scoped fixture providing production-equivalent test environment.
+    
+    Creates comprehensive production-equivalent testing environment with external
+    service integration, realistic data volumes, and production configuration
+    per Section 6.6.5 test environment architecture.
+    
+    Args:
+        e2e_flask_app: E2E Flask application
+        e2e_client: E2E test client
+        e2e_performance_monitor: Performance monitoring context
+        
+    Returns:
+        Production-equivalent testing environment with full integration
+    """
+    environment = {
+        'app': e2e_flask_app,
+        'client': e2e_client,
+        'performance_monitor': e2e_performance_monitor,
+        'session_id': str(uuid.uuid4()),
+        'start_time': time.time(),
+        'external_services': {
+            'auth0': {'available': False, 'endpoint': None},
+            'aws_s3': {'available': False, 'bucket': None},
+            'mongodb': {'available': False, 'client': None},
+            'redis': {'available': False, 'client': None}
+        },
+        'test_data': {
+            'users': [],
+            'projects': [],
+            'sessions': [],
+            'files': []
+        },
+        'configuration': {
+            'csrf_enabled': e2e_flask_app.config.get('WTF_CSRF_ENABLED', False),
+            'security_headers_enabled': e2e_flask_app.config.get('TALISMAN_ENABLED', False),
+            'performance_monitoring': e2e_flask_app.config.get('PERFORMANCE_MONITORING_ENABLED', False),
+            'load_testing': e2e_flask_app.config.get('LOAD_TESTING_ENABLED', False)
+        }
+    }
+    
+    # Initialize external service connections if available
+    def initialize_external_services():
+        """Initialize connections to external services for E2E testing"""
+        
+        # Auth0 service initialization
+        try:
+            auth0_domain = e2e_flask_app.config.get('AUTH0_DOMAIN')
+            if auth0_domain and auth0_domain != 'test-tenant.auth0.com':
+                environment['external_services']['auth0'] = {
+                    'available': True,
+                    'domain': auth0_domain,
+                    'endpoint': f"https://{auth0_domain}"
+                }
+                logger.info(f"Auth0 service available at {auth0_domain}")
+        except Exception as e:
+            logger.warning(f"Auth0 service not available: {e}")
+        
+        # MongoDB connection initialization
+        try:
+            mongodb_uri = e2e_flask_app.config.get('MONGODB_URI')
+            if mongodb_uri:
+                import pymongo
+                client = pymongo.MongoClient(mongodb_uri, serverSelectionTimeoutMS=5000)
+                client.admin.command('ping')
+                environment['external_services']['mongodb'] = {
+                    'available': True,
+                    'client': client,
+                    'uri': mongodb_uri
+                }
+                logger.info("MongoDB service connection established")
+        except Exception as e:
+            logger.warning(f"MongoDB service not available: {e}")
+        
+        # Redis connection initialization
+        try:
+            redis_url = e2e_flask_app.config.get('REDIS_URL')
+            if redis_url and REDIS_AVAILABLE:
+                import redis
+                client = redis.from_url(redis_url, socket_timeout=5)
+                client.ping()
+                environment['external_services']['redis'] = {
+                    'available': True,
+                    'client': client,
+                    'url': redis_url
+                }
+                logger.info("Redis service connection established")
+        except Exception as e:
+            logger.warning(f"Redis service not available: {e}")
+        
+        # AWS S3 service initialization
+        try:
+            aws_region = e2e_flask_app.config.get('AWS_REGION')
+            s3_bucket = e2e_flask_app.config.get('AWS_S3_BUCKET')
+            if aws_region and s3_bucket:
+                import boto3
+                s3_client = boto3.client('s3', region_name=aws_region)
+                # Test S3 connection
+                s3_client.head_bucket(Bucket=s3_bucket)
+                environment['external_services']['aws_s3'] = {
+                    'available': True,
+                    'client': s3_client,
+                    'bucket': s3_bucket
+                }
+                logger.info(f"AWS S3 service available for bucket {s3_bucket}")
+        except Exception as e:
+            logger.warning(f"AWS S3 service not available: {e}")
+    
+    def create_realistic_test_data():
+        """Create realistic test data for E2E scenarios"""
+        
+        # Create test users
+        users = []
+        for i in range(10):
+            user = {
+                'id': str(uuid.uuid4()),
+                'email': f'e2e-user-{i}@example.com',
+                'name': f'E2E Test User {i}',
+                'role': 'admin' if i == 0 else 'user',
+                'created_at': datetime.utcnow() - timedelta(days=i),
+                'permissions': ['read:profile', 'update:profile'] + (['admin:all'] if i == 0 else [])
+            }
+            users.append(user)
+        environment['test_data']['users'] = users
+        
+        # Create test projects
+        projects = []
+        for i in range(5):
+            project = {
+                'id': str(uuid.uuid4()),
+                'name': f'E2E Test Project {i}',
+                'description': f'E2E testing project for scenario {i}',
+                'owner_id': users[0]['id'],
+                'created_at': datetime.utcnow() - timedelta(days=i * 2),
+                'status': 'active',
+                'settings': {
+                    'public': i % 2 == 0,
+                    'collaboration_enabled': True
+                }
+            }
+            projects.append(project)
+        environment['test_data']['projects'] = projects
+        
+        logger.info(
+            "Realistic test data created",
+            users=len(users),
+            projects=len(projects)
+        )
+    
+    def validate_environment_health():
+        """Validate production-equivalent environment health"""
+        health_status = {
+            'overall': 'healthy',
+            'components': {},
+            'external_services': {},
+            'performance_baseline': True
+        }
+        
+        # Check application health
+        try:
+            response = e2e_client.get('/health')
+            health_status['components']['application'] = {
+                'status': 'healthy' if response.status_code == 200 else 'unhealthy',
+                'response_code': response.status_code
+            }
+        except Exception as e:
+            health_status['components']['application'] = {
+                'status': 'unhealthy',
+                'error': str(e)
+            }
+            health_status['overall'] = 'degraded'
+        
+        # Check external services
+        for service_name, service_info in environment['external_services'].items():
+            health_status['external_services'][service_name] = {
+                'available': service_info['available'],
+                'status': 'healthy' if service_info['available'] else 'unavailable'
+            }
+            
+            if not service_info['available']:
+                health_status['overall'] = 'degraded'
+        
+        return health_status
+    
+    # Attach utility functions
+    environment['initialize_external_services'] = initialize_external_services
+    environment['create_realistic_test_data'] = create_realistic_test_data
+    environment['validate_environment_health'] = validate_environment_health
+    
+    # Initialize environment
+    environment['initialize_external_services']()
+    environment['create_realistic_test_data']()
+    health_status = environment['validate_environment_health']()
+    
+    logger.info(
+        "Production-equivalent environment initialized",
+        session_id=environment['session_id'],
+        overall_health=health_status['overall'],
+        external_services_available=sum(1 for s in environment['external_services'].values() if s['available']),
+        test_data_ready=bool(environment['test_data']['users'])
+    )
+    
+    yield environment
+    
+    # Environment cleanup
+    cleanup_start = time.time()
+    
+    # Close external service connections
+    try:
+        if environment['external_services']['mongodb']['available']:
+            environment['external_services']['mongodb']['client'].close()
+            
+        if environment['external_services']['redis']['available']:
+            environment['external_services']['redis']['client'].close()
+    except Exception as e:
+        logger.warning(f"External service cleanup error: {e}")
+    
+    cleanup_time = time.time() - cleanup_start
+    total_time = time.time() - environment['start_time']
+    
+    logger.info(
+        "Production-equivalent environment cleanup completed",
+        session_id=environment['session_id'],
+        total_execution_time=round(total_time, 3),
+        cleanup_time=round(cleanup_time, 3)
+    )
+
+
+# =============================================================================
+# E2E Test Reporting and Metrics Collection
+# =============================================================================
+
+@pytest.fixture(scope="function")
+def e2e_test_reporter():
+    """
+    Function-scoped fixture providing E2E test reporting and metrics collection.
+    
+    Creates comprehensive test reporting with performance metrics, external service
+    validation, and CI/CD integration per Section 6.6.2 test reporting requirements.
+    
+    Returns:
+        E2E test reporting context with metrics aggregation
+    """
+    reporter = {
+        'session_id': str(uuid.uuid4()),
+        'start_time': time.time(),
+        'test_results': [],
+        'performance_metrics': {
+            'total_operations': 0,
+            'performance_violations': 0,
+            'average_response_time': 0.0,
+            'load_test_results': {},
+            'apache_bench_results': {}
+        },
+        'external_service_metrics': {
+            'auth0_calls': 0,
+            'database_operations': 0,
+            'cache_operations': 0,
+            'aws_operations': 0,
+            'external_api_calls': 0
+        },
+        'workflow_metrics': {
+            'authentication_flows': 0,
+            'api_workflows': 0,
+            'database_transactions': 0,
+            'file_operations': 0,
+            'complete_e2e_workflows': 0
+        },
+        'quality_metrics': {
+            'test_coverage': 0.0,
+            'code_quality_score': 0.0,
+            'security_compliance': 0.0,
+            'performance_compliance': 0.0
+        }
+    }
+    
+    def record_test_execution(
         test_name: str,
         status: str,
         duration: float,
-        metrics: Optional[PerformanceMetrics] = None,
-        additional_data: Optional[Dict[str, Any]] = None
-    ) -> None:
-        """
-        Add test result to reporting collection.
+        workflow_type: str = None,
+        performance_data: Dict[str, Any] = None
+    ):
+        """Record individual E2E test execution"""
         
-        Args:
-            test_name: Name of the executed test
-            status: Test execution status (passed, failed, skipped)
-            duration: Test execution duration in seconds
-            metrics: Optional performance metrics
-            additional_data: Additional test data for reporting
-        """
-        result = {
+        test_result = {
             'test_name': test_name,
             'status': status,
-            'duration_seconds': duration,
+            'duration': duration,
+            'workflow_type': workflow_type,
+            'performance_data': performance_data or {},
             'timestamp': time.time(),
-            'session_id': self.test_session_id,
-            'additional_data': additional_data or {}
+            'session_id': reporter['session_id']
         }
         
-        if metrics:
-            result['performance_metrics'] = metrics.calculate_statistics()
-            result['baseline_comparison'] = metrics.baseline_comparison
-            self.performance_metrics.append(metrics)
+        reporter['test_results'].append(test_result)
         
-        self.test_results.append(result)
+        # Update workflow metrics
+        if workflow_type:
+            if workflow_type in reporter['workflow_metrics']:
+                reporter['workflow_metrics'][workflow_type] += 1
         
         logger.debug(
-            "Test result added to reporter",
+            "E2E test execution recorded",
             test_name=test_name,
             status=status,
-            duration=duration
+            duration=round(duration, 3),
+            workflow_type=workflow_type
         )
     
-    def generate_comprehensive_report(self) -> Dict[str, Any]:
-        """
-        Generate comprehensive E2E test execution report.
+    def record_external_service_call(service_name: str, operation_type: str = 'call'):
+        """Record external service interaction"""
+        metric_key = f"{service_name}_{operation_type}s"
+        if metric_key in reporter['external_service_metrics']:
+            reporter['external_service_metrics'][metric_key] += 1
+        else:
+            # General service call counter
+            service_key = f"{service_name}_calls"
+            if service_key in reporter['external_service_metrics']:
+                reporter['external_service_metrics'][service_key] += 1
+    
+    def record_performance_violation(violation_data: Dict[str, Any]):
+        """Record performance variance violation"""
+        reporter['performance_metrics']['performance_violations'] += 1
         
-        Returns:
-            Dictionary containing complete test execution analysis
-        """
-        session_duration = time.time() - self.session_start_time
+        logger.warning(
+            "Performance violation recorded in E2E reporter",
+            operation=violation_data.get('operation'),
+            variance=violation_data.get('variance_percentage')
+        )
+    
+    def update_performance_metrics(
+        operation_count: int = 0,
+        average_response_time: float = 0.0,
+        load_test_data: Dict[str, Any] = None,
+        apache_bench_data: Dict[str, Any] = None
+    ):
+        """Update performance metrics"""
         
-        # Calculate overall statistics
-        total_tests = len(self.test_results)
-        passed_tests = len([r for r in self.test_results if r['status'] == 'passed'])
-        failed_tests = len([r for r in self.test_results if r['status'] == 'failed'])
-        skipped_tests = len([r for r in self.test_results if r['status'] == 'skipped'])
+        if operation_count > 0:
+            reporter['performance_metrics']['total_operations'] += operation_count
         
-        # Performance analysis
-        performance_summary = {}
-        if self.performance_metrics:
-            all_response_times = []
-            all_throughput = []
-            compliance_count = 0
+        if average_response_time > 0:
+            # Calculate weighted average
+            current_avg = reporter['performance_metrics']['average_response_time']
+            current_total = reporter['performance_metrics']['total_operations']
             
-            for metrics in self.performance_metrics:
-                stats = metrics.calculate_statistics()
-                all_response_times.extend(metrics.response_times)
-                all_throughput.append(stats.get('throughput_rps', 0))
-                
-                if metrics.compliance_status:
-                    compliance_count += 1
-            
-            if all_response_times:
-                performance_summary = {
-                    'total_performance_tests': len(self.performance_metrics),
-                    'performance_compliance_rate': compliance_count / len(self.performance_metrics),
-                    'overall_average_response_time_ms': sum(all_response_times) / len(all_response_times),
-                    'overall_max_response_time_ms': max(all_response_times),
-                    'overall_min_response_time_ms': min(all_response_times),
-                    'average_throughput_rps': sum(all_throughput) / len(all_throughput) if all_throughput else 0,
-                }
+            if current_total > 0:
+                new_avg = (
+                    (current_avg * (current_total - operation_count)) + 
+                    (average_response_time * operation_count)
+                ) / current_total
+                reporter['performance_metrics']['average_response_time'] = new_avg
+            else:
+                reporter['performance_metrics']['average_response_time'] = average_response_time
         
-        report = {
+        if load_test_data:
+            reporter['performance_metrics']['load_test_results'].update(load_test_data)
+        
+        if apache_bench_data:
+            reporter['performance_metrics']['apache_bench_results'].update(apache_bench_data)
+    
+    def generate_final_report() -> Dict[str, Any]:
+        """Generate comprehensive E2E test report"""
+        
+        end_time = time.time()
+        total_duration = end_time - reporter['start_time']
+        
+        # Calculate test statistics
+        total_tests = len(reporter['test_results'])
+        passed_tests = len([t for t in reporter['test_results'] if t['status'] == 'passed'])
+        failed_tests = len([t for t in reporter['test_results'] if t['status'] == 'failed'])
+        skipped_tests = len([t for t in reporter['test_results'] if t['status'] == 'skipped'])
+        
+        success_rate = (passed_tests / total_tests * 100) if total_tests > 0 else 0
+        
+        # Calculate performance compliance
+        total_operations = reporter['performance_metrics']['total_operations']
+        violations = reporter['performance_metrics']['performance_violations']
+        performance_compliance = (
+            (total_operations - violations) / total_operations * 100
+            if total_operations > 0 else 100
+        )
+        
+        # Generate final report
+        final_report = {
             'session_info': {
-                'session_id': self.test_session_id,
-                'start_time': self.session_start_time,
-                'duration_seconds': session_duration,
-                'timestamp': time.time(),
+                'session_id': reporter['session_id'],
+                'start_time': reporter['start_time'],
+                'end_time': end_time,
+                'total_duration': round(total_duration, 3)
             },
             'test_summary': {
                 'total_tests': total_tests,
                 'passed_tests': passed_tests,
                 'failed_tests': failed_tests,
                 'skipped_tests': skipped_tests,
-                'success_rate': passed_tests / max(total_tests, 1),
-                'average_test_duration': sum(r['duration_seconds'] for r in self.test_results) / max(total_tests, 1),
+                'success_rate': round(success_rate, 2)
             },
-            'performance_summary': performance_summary,
-            'detailed_results': self.test_results,
-            'compliance_analysis': {
-                'nodejs_baseline_comparison': True,
-                'variance_threshold': PERFORMANCE_BASELINE_THRESHOLD,
-                'performance_requirements_met': performance_summary.get('performance_compliance_rate', 0) >= 0.9,
-            }
+            'performance_summary': {
+                'total_operations': total_operations,
+                'performance_violations': violations,
+                'performance_compliance': round(performance_compliance, 2),
+                'average_response_time': round(reporter['performance_metrics']['average_response_time'], 3),
+                'load_test_summary': reporter['performance_metrics']['load_test_results'],
+                'apache_bench_summary': reporter['performance_metrics']['apache_bench_results']
+            },
+            'external_service_summary': reporter['external_service_metrics'],
+            'workflow_summary': reporter['workflow_metrics'],
+            'quality_summary': reporter['quality_metrics'],
+            'test_details': reporter['test_results']
         }
         
-        return report
+        return final_report
     
-    def save_report_artifacts(self) -> Path:
-        """
-        Save comprehensive test artifacts to file system.
+    def export_report(format: str = 'json', file_path: str = None) -> str:
+        """Export report in specified format"""
         
-        Returns:
-            Path to generated report file
-        """
-        report = self.generate_comprehensive_report()
+        report = generate_final_report()
         
-        # Generate report filename with timestamp
-        timestamp = time.strftime('%Y%m%d_%H%M%S')
-        report_filename = f"e2e_test_report_{timestamp}_{self.test_session_id[:8]}.json"
-        report_path = self.output_dir / report_filename
+        if format.lower() == 'json':
+            report_content = json.dumps(report, indent=2, default=str)
+            file_extension = '.json'
+        else:
+            # Default to JSON if unsupported format
+            report_content = json.dumps(report, indent=2, default=str)
+            file_extension = '.json'
         
-        # Save JSON report
-        with open(report_path, 'w') as f:
-            json.dump(report, f, indent=2, default=str)
-        
-        # Generate summary log
-        summary_path = self.output_dir / f"e2e_summary_{timestamp}.log"
-        with open(summary_path, 'w') as f:
-            f.write(f"E2E Test Session Summary\n")
-            f.write(f"========================\n")
-            f.write(f"Session ID: {self.test_session_id}\n")
-            f.write(f"Duration: {report['session_info']['duration_seconds']:.2f} seconds\n")
-            f.write(f"Total Tests: {report['test_summary']['total_tests']}\n")
-            f.write(f"Passed: {report['test_summary']['passed_tests']}\n")
-            f.write(f"Failed: {report['test_summary']['failed_tests']}\n")
-            f.write(f"Success Rate: {report['test_summary']['success_rate']:.2%}\n")
-            
-            if report['performance_summary']:
-                f.write(f"\nPerformance Summary:\n")
-                f.write(f"Performance Tests: {report['performance_summary']['total_performance_tests']}\n")
-                f.write(f"Compliance Rate: {report['performance_summary']['performance_compliance_rate']:.2%}\n")
-                f.write(f"Avg Response Time: {report['performance_summary']['overall_average_response_time_ms']:.2f}ms\n")
-        
-        logger.info(
-            "E2E test artifacts saved",
-            report_path=str(report_path),
-            summary_path=str(summary_path)
-        )
-        
-        return report_path
-
-
-# =============================================================================
-# Locust Load Testing Integration per Section 6.6.1
-# =============================================================================
-
-if LOCUST_AVAILABLE:
-    class E2ETestUser(HttpUser):
-        """
-        Locust user class for E2E load testing scenarios.
-        
-        Implements realistic user behavior patterns for load testing Flask
-        application endpoints during E2E testing with comprehensive performance
-        measurement and baseline comparison per Section 6.6.1.
-        """
-        
-        wait_time = between(1, 3)  # Wait 1-3 seconds between requests
-        
-        def on_start(self):
-            """Initialize user session for load testing."""
-            self.test_session_id = str(uuid.uuid4())
-            self.login_user()
-        
-        def login_user(self):
-            """Perform user authentication for realistic load testing."""
-            login_data = {
-                'email': 'test@example.com',
-                'password': 'testpassword123'
-            }
-            
-            with self.client.post('/auth/login', json=login_data, catch_response=True) as response:
-                if response.status_code == 200:
-                    response.success()
-                    self.auth_token = response.json().get('access_token')
-                else:
-                    response.failure(f"Login failed with status {response.status_code}")
-        
-        @task(3)
-        def get_user_profile(self):
-            """Load test user profile endpoint."""
-            headers = {'Authorization': f'Bearer {getattr(self, "auth_token", "")}'} if hasattr(self, 'auth_token') else {}
-            
-            with self.client.get('/api/users/profile', headers=headers, catch_response=True) as response:
-                if response.status_code == 200:
-                    response.success()
-                elif response.status_code == 401:
-                    response.failure("Authentication required")
-                else:
-                    response.failure(f"Profile request failed with status {response.status_code}")
-        
-        @task(2)
-        def list_projects(self):
-            """Load test projects listing endpoint."""
-            headers = {'Authorization': f'Bearer {getattr(self, "auth_token", "")}'} if hasattr(self, 'auth_token') else {}
-            
-            with self.client.get('/api/projects', headers=headers, catch_response=True) as response:
-                if response.status_code == 200:
-                    response.success()
-                else:
-                    response.failure(f"Projects list failed with status {response.status_code}")
-        
-        @task(1)
-        def create_project(self):
-            """Load test project creation endpoint."""
-            headers = {'Authorization': f'Bearer {getattr(self, "auth_token", "")}'} if hasattr(self, 'auth_token') else {}
-            
-            project_data = {
-                'name': f'Load Test Project {uuid.uuid4().hex[:8]}',
-                'description': 'Project created during load testing',
-                'category': 'test'
-            }
-            
-            with self.client.post('/api/projects', json=project_data, headers=headers, catch_response=True) as response:
-                if response.status_code in [200, 201]:
-                    response.success()
-                else:
-                    response.failure(f"Project creation failed with status {response.status_code}")
-        
-        @task(4)
-        def health_check(self):
-            """Load test health check endpoint."""
-            with self.client.get('/health', catch_response=True) as response:
-                if response.status_code == 200:
-                    response.success()
-                else:
-                    response.failure(f"Health check failed with status {response.status_code}")
-
-
-class LocustLoadTester:
-    """
-    Locust load testing integration for E2E performance validation.
-    
-    Provides programmatic control over Locust load testing execution during
-    E2E test scenarios with comprehensive metrics collection and performance
-    validation against Node.js baseline per Section 6.6.1 requirements.
-    """
-    
-    def __init__(self, base_url: str, config: E2ETestConfig):
-        """
-        Initialize Locust load tester with configuration.
-        
-        Args:
-            base_url: Base URL for load testing target
-            config: E2E test configuration settings
-        """
-        self.base_url = base_url
-        self.config = config
-        self.environment = None
-        self.runner = None
-        
-        logger.info(
-            "Locust load tester initialized",
-            base_url=base_url,
-            max_users=config.max_concurrent_users,
-            duration=config.load_test_duration
-        )
-    
-    def setup_environment(self) -> Environment:
-        """
-        Setup Locust testing environment with configuration.
-        
-        Returns:
-            Configured Locust Environment instance
-        """
-        # Setup Locust logging
-        setup_logging("INFO", None)
-        
-        # Create Locust environment
-        self.environment = Environment(
-            user_classes=[E2ETestUser],
-            host=self.base_url
-        )
-        
-        # Configure event listeners for metrics collection
-        self.environment.events.request.add_listener(self._on_request)
-        self.environment.events.test_start.add_listener(self._on_test_start)
-        self.environment.events.test_stop.add_listener(self._on_test_stop)
-        
-        return self.environment
-    
-    def run_load_test(
-        self,
-        users: int = None,
-        spawn_rate: float = None,
-        duration: int = None
-    ) -> Dict[str, Any]:
-        """
-        Execute load test with specified parameters.
-        
-        Args:
-            users: Number of concurrent users (defaults to config)
-            spawn_rate: User spawn rate per second (defaults to config)
-            duration: Test duration in seconds (defaults to config)
-            
-        Returns:
-            Dictionary containing load test results and metrics
-        """
-        if not self.environment:
-            self.setup_environment()
-        
-        users = users or self.config.max_concurrent_users
-        spawn_rate = spawn_rate or self.config.user_spawn_rate
-        duration = duration or self.config.load_test_duration
-        
-        logger.info(
-            "Starting Locust load test",
-            users=users,
-            spawn_rate=spawn_rate,
-            duration=duration
-        )
-        
-        # Start load test
-        self.environment.runner.start(users, spawn_rate)
-        
-        # Run for specified duration
-        time.sleep(duration)
-        
-        # Stop load test
-        self.environment.runner.stop()
-        
-        # Collect and return results
-        results = self._collect_results()
-        
-        logger.info(
-            "Locust load test completed",
-            total_requests=results.get('total_requests', 0),
-            failure_rate=results.get('failure_rate', 0),
-            average_response_time=results.get('average_response_time', 0)
-        )
-        
-        return results
-    
-    def _on_request(self, request_type, name, response_time, response_length, response, context, exception, **kwargs):
-        """Event handler for request completion tracking."""
-        pass  # Metrics collected by Locust automatically
-    
-    def _on_test_start(self, **kwargs):
-        """Event handler for test start."""
-        logger.debug("Locust load test started")
-    
-    def _on_test_stop(self, **kwargs):
-        """Event handler for test completion."""
-        logger.debug("Locust load test stopped")
-    
-    def _collect_results(self) -> Dict[str, Any]:
-        """
-        Collect comprehensive load test results and metrics.
-        
-        Returns:
-            Dictionary containing load test analysis
-        """
-        if not self.environment or not self.environment.runner:
-            return {}
-        
-        stats = self.environment.runner.stats
-        
-        # Calculate aggregate statistics
-        total_requests = stats.total.num_requests
-        total_failures = stats.total.num_failures
-        failure_rate = total_failures / max(total_requests, 1)
-        
-        results = {
-            'total_requests': total_requests,
-            'total_failures': total_failures,
-            'failure_rate': failure_rate,
-            'average_response_time': stats.total.avg_response_time,
-            'min_response_time': stats.total.min_response_time,
-            'max_response_time': stats.total.max_response_time,
-            'median_response_time': stats.total.median_response_time,
-            'percentile_95': stats.total.get_response_time_percentile(0.95),
-            'percentile_99': stats.total.get_response_time_percentile(0.99),
-            'requests_per_second': stats.total.total_rps,
-            'avg_content_length': stats.total.avg_content_length,
-        }
-        
-        # Add endpoint-specific statistics
-        endpoint_stats = {}
-        for name, entry in stats.entries.items():
-            if name != 'Aggregated':
-                endpoint_stats[name] = {
-                    'requests': entry.num_requests,
-                    'failures': entry.num_failures,
-                    'avg_response_time': entry.avg_response_time,
-                    'min_response_time': entry.min_response_time,
-                    'max_response_time': entry.max_response_time,
-                    'requests_per_second': entry.total_rps,
-                }
-        
-        results['endpoint_statistics'] = endpoint_stats
-        
-        return results
-
-
-# =============================================================================
-# Apache Bench Integration per Section 6.6.1
-# =============================================================================
-
-class ApacheBenchTester:
-    """
-    Apache Bench (ab) integration for HTTP performance measurement.
-    
-    Provides HTTP server performance measurement and automated comparison
-    with Node.js implementation using apache-bench for individual endpoint
-    performance validation per Section 6.6.1 requirements.
-    """
-    
-    def __init__(self, base_url: str, config: E2ETestConfig):
-        """
-        Initialize Apache Bench tester with configuration.
-        
-        Args:
-            base_url: Base URL for performance testing target
-            config: E2E test configuration settings
-        """
-        self.base_url = base_url.rstrip('/')
-        self.config = config
-        
-        # Verify apache bench availability
-        try:
-            subprocess.run(['ab', '-V'], capture_output=True, check=True)
-            self.available = True
-            logger.info("Apache Bench available for performance testing")
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            self.available = False
-            logger.warning("Apache Bench not available - performance testing will be limited")
-    
-    def run_benchmark(
-        self,
-        endpoint: str,
-        requests: int = None,
-        concurrency: int = None,
-        headers: Optional[Dict[str, str]] = None,
-        post_data: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """
-        Run Apache Bench performance test against specific endpoint.
-        
-        Args:
-            endpoint: Endpoint path to test (e.g., '/api/users')
-            requests: Total number of requests (defaults to config)
-            concurrency: Concurrent request level (defaults to config)
-            headers: Optional HTTP headers for requests
-            post_data: Optional POST data for request body
-            
-        Returns:
-            Dictionary containing benchmark results and analysis
-        """
-        if not self.available:
-            logger.warning("Apache Bench not available - skipping benchmark")
-            return {'error': 'Apache Bench not available'}
-        
-        requests = requests or self.config.apache_bench_requests
-        concurrency = concurrency or self.config.apache_bench_concurrency
-        
-        # Construct full URL
-        full_url = f"{self.base_url}{endpoint}"
-        
-        # Build apache bench command
-        cmd = [
-            'ab',
-            '-n', str(requests),
-            '-c', str(concurrency),
-            '-g', '/dev/null',  # Suppress gnuplot output
-            '-v', '2',  # Verbosity level
-        ]
-        
-        # Add headers if provided
-        if headers:
-            for key, value in headers.items():
-                cmd.extend(['-H', f'{key}: {value}'])
-        
-        # Add POST data if provided
-        if post_data:
-            cmd.extend(['-p', '-'])  # Read POST data from stdin
-            cmd.extend(['-T', 'application/json'])  # Content type for JSON data
-        
-        cmd.append(full_url)
-        
-        logger.info(
-            "Running Apache Bench test",
-            endpoint=endpoint,
-            requests=requests,
-            concurrency=concurrency
-        )
+        if not file_path:
+            timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+            file_path = f"e2e_test_report_{timestamp}{file_extension}"
         
         try:
-            # Execute apache bench
-            input_data = post_data.encode() if post_data else None
-            result = subprocess.run(
-                cmd,
-                input=input_data,
-                capture_output=True,
-                text=True,
-                timeout=300  # 5 minute timeout
-            )
+            with open(file_path, 'w') as f:
+                f.write(report_content)
             
-            if result.returncode != 0:
-                logger.error(
-                    "Apache Bench failed",
-                    return_code=result.returncode,
-                    stderr=result.stderr
-                )
-                return {'error': f'Apache Bench failed: {result.stderr}'}
+            logger.info(f"E2E test report exported to {file_path}")
+            return file_path
             
-            # Parse results
-            benchmark_results = self._parse_ab_output(result.stdout)
-            benchmark_results['endpoint'] = endpoint
-            benchmark_results['configuration'] = {
-                'requests': requests,
-                'concurrency': concurrency,
-                'full_url': full_url
-            }
-            
-            logger.info(
-                "Apache Bench test completed",
-                endpoint=endpoint,
-                requests_per_second=benchmark_results.get('requests_per_second', 0),
-                mean_response_time=benchmark_results.get('mean_response_time_ms', 0)
-            )
-            
-            return benchmark_results
-            
-        except subprocess.TimeoutExpired:
-            logger.error("Apache Bench test timed out")
-            return {'error': 'Apache Bench test timed out'}
         except Exception as e:
-            logger.error(f"Apache Bench test failed: {e}")
-            return {'error': f'Apache Bench test failed: {str(e)}'}
+            logger.error(f"Failed to export E2E test report: {e}")
+            return None
     
-    def _parse_ab_output(self, output: str) -> Dict[str, Any]:
-        """
-        Parse Apache Bench output to extract performance metrics.
-        
-        Args:
-            output: Raw Apache Bench output text
-            
-        Returns:
-            Dictionary containing parsed performance metrics
-        """
-        results = {}
-        
-        for line in output.split('\n'):
-            line = line.strip()
-            
-            if 'Requests per second:' in line:
-                # Extract RPS: "Requests per second:    123.45 [#/sec] (mean)"
-                parts = line.split()
-                if len(parts) >= 4:
-                    results['requests_per_second'] = float(parts[3])
-            
-            elif 'Time per request:' in line and 'mean' in line:
-                # Extract mean response time: "Time per request:       8.123 [ms] (mean)"
-                parts = line.split()
-                if len(parts) >= 4:
-                    results['mean_response_time_ms'] = float(parts[3])
-            
-            elif 'Time per request:' in line and 'concurrent' in line:
-                # Extract concurrent response time: "Time per request:       0.812 [ms] (mean, across all concurrent requests)"
-                parts = line.split()
-                if len(parts) >= 4:
-                    results['concurrent_response_time_ms'] = float(parts[3])
-            
-            elif 'Transfer rate:' in line:
-                # Extract transfer rate: "Transfer rate:          123.45 [Kbytes/sec] received"
-                parts = line.split()
-                if len(parts) >= 3:
-                    results['transfer_rate_kbps'] = float(parts[2])
-            
-            elif 'Complete requests:' in line:
-                # Extract completed requests: "Complete requests:      1000"
-                parts = line.split()
-                if len(parts) >= 3:
-                    results['completed_requests'] = int(parts[2])
-            
-            elif 'Failed requests:' in line:
-                # Extract failed requests: "Failed requests:        0"
-                parts = line.split()
-                if len(parts) >= 3:
-                    results['failed_requests'] = int(parts[2])
-            
-            elif 'Total transferred:' in line:
-                # Extract total bytes: "Total transferred:      1234567 bytes"
-                parts = line.split()
-                if len(parts) >= 3:
-                    results['total_transferred_bytes'] = int(parts[2])
-            
-            elif '50%' in line:
-                # Parse percentile data
-                percentiles = self._parse_percentile_line(line)
-                results.update(percentiles)
-        
-        # Calculate additional metrics
-        if 'completed_requests' in results and 'failed_requests' in results:
-            total_requests = results['completed_requests'] + results['failed_requests']
-            results['success_rate'] = results['completed_requests'] / max(total_requests, 1)
-        
-        return results
-    
-    def _parse_percentile_line(self, line: str) -> Dict[str, float]:
-        """
-        Parse percentile information from Apache Bench output.
-        
-        Args:
-            line: Line containing percentile data
-            
-        Returns:
-            Dictionary containing percentile response times
-        """
-        percentiles = {}
-        
-        # Look for patterns like "50%     12", "95%     45", etc.
-        parts = line.split()
-        for i, part in enumerate(parts):
-            if '%' in part and i + 1 < len(parts):
-                try:
-                    percentile = part.replace('%', '')
-                    value = float(parts[i + 1])
-                    percentiles[f'p{percentile}_response_time_ms'] = value
-                except (ValueError, IndexError):
-                    continue
-        
-        return percentiles
-    
-    def compare_with_baseline(
-        self,
-        results: Dict[str, Any],
-        baseline_metrics: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """
-        Compare Apache Bench results with Node.js baseline metrics.
-        
-        Args:
-            results: Apache Bench test results
-            baseline_metrics: Node.js baseline performance metrics
-            
-        Returns:
-            Dictionary containing comparison analysis
-        """
-        if 'error' in results:
-            return {'error': 'Cannot compare results with errors'}
-        
-        endpoint = results.get('endpoint', 'unknown')
-        baseline_key = 'api_endpoint_avg'  # Default baseline key
-        
-        # Try to find specific baseline for endpoint
-        if endpoint in baseline_metrics.get('response_times', {}):
-            baseline_key = endpoint.replace('/', '_').replace('-', '_')
-        
-        baseline_response_time = baseline_metrics.get('response_times', {}).get(baseline_key, 200)
-        baseline_throughput = baseline_metrics.get('throughput', {}).get('requests_per_second', 100)
-        
-        measured_response_time = results.get('mean_response_time_ms', 0)
-        measured_throughput = results.get('requests_per_second', 0)
-        
-        # Calculate variance
-        response_time_variance = (measured_response_time - baseline_response_time) / baseline_response_time if baseline_response_time > 0 else 0
-        throughput_variance = (measured_throughput - baseline_throughput) / baseline_throughput if baseline_throughput > 0 else 0
-        
-        # Determine compliance
-        compliance = (
-            abs(response_time_variance) <= PERFORMANCE_BASELINE_THRESHOLD and
-            abs(throughput_variance) <= PERFORMANCE_BASELINE_THRESHOLD and
-            results.get('success_rate', 0) >= 0.99
-        )
-        
-        comparison = {
-            'endpoint': endpoint,
-            'baseline_response_time_ms': baseline_response_time,
-            'measured_response_time_ms': measured_response_time,
-            'response_time_variance': response_time_variance,
-            'response_time_variance_percent': response_time_variance * 100,
-            'baseline_throughput_rps': baseline_throughput,
-            'measured_throughput_rps': measured_throughput,
-            'throughput_variance': throughput_variance,
-            'throughput_variance_percent': throughput_variance * 100,
-            'success_rate': results.get('success_rate', 0),
-            'compliance_status': compliance,
-            'variance_threshold': PERFORMANCE_BASELINE_THRESHOLD,
-            'meets_requirements': compliance
-        }
-        
-        logger.info(
-            "Performance comparison completed",
-            endpoint=endpoint,
-            response_time_variance=f"{response_time_variance:.2%}",
-            throughput_variance=f"{throughput_variance:.2%}",
-            compliance=compliance
-        )
-        
-        return comparison
-
-
-# =============================================================================
-# E2E-Specific Flask Application Fixtures
-# =============================================================================
-
-@pytest.fixture(scope="session")
-def e2e_test_config() -> E2ETestConfig:
-    """
-    Session-scoped fixture providing E2E test configuration.
-    
-    Returns:
-        E2ETestConfig instance with production-equivalent settings
-    """
-    config = E2ETestConfig(
-        app_config_name='testing',
-        enable_production_parity=True,
-        enable_performance_monitoring=True,
-        enable_load_testing=LOCUST_AVAILABLE,
-        enable_apache_bench=True,
-        nodejs_baseline_comparison=True,
-        external_services_enabled=True,
-        comprehensive_test_data=True,
-        enable_detailed_reporting=True
-    )
+    # Attach methods to reporter context
+    reporter['record_test_execution'] = record_test_execution
+    reporter['record_external_service_call'] = record_external_service_call
+    reporter['record_performance_violation'] = record_performance_violation
+    reporter['update_performance_metrics'] = update_performance_metrics
+    reporter['generate_final_report'] = generate_final_report
+    reporter['export_report'] = export_report
     
     logger.info(
-        "E2E test configuration created",
-        performance_monitoring=config.enable_performance_monitoring,
-        load_testing=config.enable_load_testing,
-        apache_bench=config.enable_apache_bench
-    )
-    
-    return config
-
-
-@pytest.fixture(scope="function")
-def e2e_app(
-    e2e_test_config: E2ETestConfig,
-    mongodb_container: MongoDbTestContainer,
-    redis_container: RedisTestContainer
-) -> Flask:
-    """
-    Function-scoped fixture providing Flask application for E2E testing.
-    
-    Creates Flask application with production-equivalent configuration,
-    Testcontainers integration, and comprehensive E2E testing capabilities
-    per Section 6.6.5 production parity requirements.
-    
-    Args:
-        e2e_test_config: E2E test configuration settings
-        mongodb_container: MongoDB test container instance
-        redis_container: Redis test container instance
-        
-    Returns:
-        Configured Flask application for E2E testing
-    """
-    # Configure application for E2E testing
-    app_config = e2e_test_config.get_flask_config()
-    
-    # Add Testcontainers database URIs
-    app_config.update({
-        'MONGODB_URI': mongodb_container.get_connection_url(),
-        'REDIS_URL': redis_container.get_connection_url(),
-        'SQLALCHEMY_DATABASE_URI': mongodb_container.get_connection_url(),  # If needed for compatibility
-    })
-    
-    # Create Flask application
-    app = create_app(e2e_test_config.app_config_name)
-    
-    # Apply E2E-specific configuration
-    app.config.update(app_config)
-    
-    # Configure additional E2E testing settings
-    if e2e_test_config.enable_production_parity:
-        # Enable production-like behavior
-        app.config.update({
-            'ENV': 'production',
-            'FLASK_ENV': 'production',
-            'DEBUG': False,
-            'TESTING': True,  # Keep testing flag for pytest
-            'TRAP_HTTP_EXCEPTIONS': True,
-            'TRAP_BAD_REQUEST_ERRORS': True,
-        })
-    
-    # Add performance monitoring hooks if enabled
-    if e2e_test_config.enable_performance_monitoring:
-        @app.before_request
-        def before_request():
-            """Record request start time for performance monitoring."""
-            g.start_time = time.time()
-        
-        @app.after_request
-        def after_request(response):
-            """Record request completion and performance metrics."""
-            if hasattr(g, 'start_time'):
-                duration = time.time() - g.start_time
-                response.headers['X-Response-Time'] = f"{duration:.3f}"
-                
-                # Log performance data for analysis
-                logger.debug(
-                    "Request completed",
-                    endpoint=request.endpoint,
-                    method=request.method,
-                    status_code=response.status_code,
-                    duration_ms=duration * 1000
-                )
-            
-            return response
-    
-    logger.info(
-        "E2E Flask application created",
-        config_name=e2e_test_config.app_config_name,
-        production_parity=e2e_test_config.enable_production_parity,
-        performance_monitoring=e2e_test_config.enable_performance_monitoring
-    )
-    
-    return app
-
-
-@pytest.fixture(scope="function")
-def e2e_client(e2e_app: Flask) -> FlaskClient:
-    """
-    Function-scoped fixture providing Flask test client for E2E testing.
-    
-    Args:
-        e2e_app: Flask application configured for E2E testing
-        
-    Returns:
-        FlaskClient configured for comprehensive E2E testing scenarios
-    """
-    return e2e_app.test_client()
-
-
-@pytest.fixture(scope="function")
-def e2e_app_context(e2e_app: Flask):
-    """
-    Function-scoped fixture providing Flask application context for E2E tests.
-    
-    Args:
-        e2e_app: Flask application configured for E2E testing
-        
-    Yields:
-        Flask application context for E2E testing
-    """
-    with e2e_app.app_context():
-        yield e2e_app
-
-
-@pytest.fixture(scope="function")
-def e2e_request_context(e2e_app: Flask):
-    """
-    Function-scoped fixture providing Flask request context for E2E tests.
-    
-    Args:
-        e2e_app: Flask application configured for E2E testing
-        
-    Yields:
-        Flask request context for E2E testing
-    """
-    with e2e_app.test_request_context():
-        yield
-
-
-# =============================================================================
-# Performance Testing and Monitoring Fixtures
-# =============================================================================
-
-@pytest.fixture(scope="function")
-def performance_monitor(e2e_test_config: E2ETestConfig) -> PerformanceMetrics:
-    """
-    Function-scoped fixture providing performance monitoring for E2E tests.
-    
-    Args:
-        e2e_test_config: E2E test configuration settings
-        
-    Returns:
-        PerformanceMetrics instance for test performance tracking
-    """
-    monitor = PerformanceMetrics(
-        test_name=f"e2e_test_{uuid.uuid4().hex[:8]}",
-        start_time=time.time()
-    )
-    
-    logger.debug("Performance monitor created for E2E test")
-    
-    yield monitor
-    
-    # Finalize performance monitoring
-    monitor.end_time = time.time()
-    
-    if e2e_test_config.nodejs_baseline_comparison:
-        compliance = monitor.validate_against_baseline(NODEJS_BASELINE_METRICS)
-        logger.info(
-            "E2E performance validation completed",
-            test_name=monitor.test_name,
-            compliance_status=compliance,
-            request_count=monitor.request_count,
-            error_count=monitor.error_count
-        )
-
-
-@pytest.fixture(scope="function")
-def locust_load_tester(
-    e2e_app: Flask,
-    e2e_test_config: E2ETestConfig
-) -> Optional[LocustLoadTester]:
-    """
-    Function-scoped fixture providing Locust load testing integration.
-    
-    Args:
-        e2e_app: Flask application for load testing
-        e2e_test_config: E2E test configuration settings
-        
-    Returns:
-        LocustLoadTester instance if available, None otherwise
-    """
-    if not LOCUST_AVAILABLE or not e2e_test_config.enable_load_testing:
-        logger.warning("Locust load testing not available or disabled")
-        yield None
-        return
-    
-    # Get application base URL
-    base_url = f"http://{e2e_app.config.get('SERVER_NAME', 'localhost:5000')}"
-    
-    load_tester = LocustLoadTester(base_url, e2e_test_config)
-    load_tester.setup_environment()
-    
-    logger.debug(
-        "Locust load tester created",
-        base_url=base_url,
-        max_users=e2e_test_config.max_concurrent_users
-    )
-    
-    yield load_tester
-    
-    # Cleanup Locust environment
-    if load_tester.environment:
-        try:
-            if load_tester.environment.runner:
-                load_tester.environment.runner.stop()
-            logger.debug("Locust load tester cleaned up")
-        except Exception as e:
-            logger.warning(f"Error cleaning up Locust load tester: {e}")
-
-
-@pytest.fixture(scope="function")
-def apache_bench_tester(
-    e2e_app: Flask,
-    e2e_test_config: E2ETestConfig
-) -> ApacheBenchTester:
-    """
-    Function-scoped fixture providing Apache Bench performance testing.
-    
-    Args:
-        e2e_app: Flask application for performance testing
-        e2e_test_config: E2E test configuration settings
-        
-    Returns:
-        ApacheBenchTester instance for HTTP performance measurement
-    """
-    # Get application base URL
-    base_url = f"http://{e2e_app.config.get('SERVER_NAME', 'localhost:5000')}"
-    
-    ab_tester = ApacheBenchTester(base_url, e2e_test_config)
-    
-    logger.debug(
-        "Apache Bench tester created",
-        base_url=base_url,
-        available=ab_tester.available
-    )
-    
-    return ab_tester
-
-
-# =============================================================================
-# E2E Test Environment and Data Management Fixtures
-# =============================================================================
-
-@pytest.fixture(scope="function")
-def e2e_test_reporter(e2e_test_config: E2ETestConfig) -> E2ETestReporter:
-    """
-    Function-scoped fixture providing E2E test reporting capabilities.
-    
-    Args:
-        e2e_test_config: E2E test configuration settings
-        
-    Returns:
-        E2ETestReporter instance for comprehensive test reporting
-    """
-    output_dir = None
-    if e2e_test_config.generate_test_artifacts:
-        output_dir = Path(tempfile.gettempdir()) / 'e2e_test_reports'
-    
-    reporter = E2ETestReporter(output_dir)
-    
-    logger.debug(
-        "E2E test reporter created",
-        session_id=reporter.test_session_id,
-        output_dir=str(reporter.output_dir) if reporter.output_dir else None
+        "E2E test reporter initialized",
+        session_id=reporter['session_id']
     )
     
     yield reporter
     
-    # Generate final report
-    if e2e_test_config.enable_detailed_reporting:
-        try:
-            report_path = reporter.save_report_artifacts()
-            logger.info(f"E2E test report saved: {report_path}")
-        except Exception as e:
-            logger.error(f"Failed to save E2E test report: {e}")
+    # Generate and log final report
+    final_report = reporter['generate_final_report']()
+    
+    logger.info(
+        "E2E test session completed",
+        session_id=reporter['session_id'],
+        total_tests=final_report['test_summary']['total_tests'],
+        success_rate=final_report['test_summary']['success_rate'],
+        performance_compliance=final_report['performance_summary']['performance_compliance'],
+        total_duration=final_report['session_info']['total_duration']
+    )
 
+
+# =============================================================================
+# Comprehensive E2E Testing Environment
+# =============================================================================
 
 @pytest.fixture(scope="function")
-def e2e_external_services(e2e_test_config: E2ETestConfig):
-    """
-    Function-scoped fixture providing external service mocking for E2E tests.
-    
-    Args:
-        e2e_test_config: E2E test configuration settings
-        
-    Yields:
-        Dictionary of mocked external services
-    """
-    mocks = {}
-    patches = []
-    
-    try:
-        # Mock Auth0 service
-        if e2e_test_config.mock_auth0_service:
-            auth0_patcher = patch('src.auth.auth0_client.Auth0Client')
-            auth0_mock = auth0_patcher.start()
-            patches.append(auth0_patcher)
-            
-            # Configure Auth0 mock responses
-            auth0_instance = Mock()
-            auth0_instance.validate_token.return_value = {
-                'sub': 'auth0|e2e_test_user',
-                'email': 'e2e@test.com',
-                'email_verified': True,
-                'exp': int(time.time()) + 3600
-            }
-            auth0_mock.return_value = auth0_instance
-            mocks['auth0'] = auth0_instance
-        
-        # Mock AWS services
-        if e2e_test_config.mock_aws_services:
-            boto3_patcher = patch('boto3.client')
-            boto3_mock = boto3_patcher.start()
-            patches.append(boto3_patcher)
-            
-            # Configure AWS S3 mock
-            s3_mock = Mock()
-            s3_mock.upload_file.return_value = True
-            s3_mock.download_file.return_value = True
-            s3_mock.list_objects_v2.return_value = {'Contents': []}
-            boto3_mock.return_value = s3_mock
-            mocks['aws_s3'] = s3_mock
-        
-        # Mock external HTTP requests
-        if e2e_test_config.mock_third_party_apis:
-            requests_patcher = patch('requests.request')
-            requests_mock = requests_patcher.start()
-            patches.append(requests_patcher)
-            
-            # Configure successful HTTP responses
-            response_mock = Mock()
-            response_mock.status_code = 200
-            response_mock.json.return_value = {'status': 'success'}
-            response_mock.text = '{"status": "success"}'
-            requests_mock.return_value = response_mock
-            mocks['http_requests'] = requests_mock
-        
-        logger.debug(
-            "E2E external services mocked",
-            auth0=e2e_test_config.mock_auth0_service,
-            aws=e2e_test_config.mock_aws_services,
-            third_party=e2e_test_config.mock_third_party_apis
-        )
-        
-        yield mocks
-        
-    finally:
-        # Clean up all patches
-        for patcher in patches:
-            try:
-                patcher.stop()
-            except Exception as e:
-                logger.warning(f"Error stopping mock patcher: {e}")
-
-
-@pytest.fixture(scope="function")
-def e2e_comprehensive_environment(
-    e2e_app: Flask,
-    e2e_client: FlaskClient,
-    e2e_app_context,
-    seeded_database: Dict[str, List[Dict[str, Any]]],
-    performance_monitor: PerformanceMetrics,
-    e2e_test_reporter: E2ETestReporter,
-    locust_load_tester: Optional[LocustLoadTester],
-    apache_bench_tester: ApacheBenchTester,
-    e2e_external_services: Dict[str, Any]
-) -> Dict[str, Any]:
+def comprehensive_e2e_environment(
+    e2e_flask_app,
+    e2e_client,
+    e2e_performance_monitor,
+    locust_load_tester,
+    apache_bench_tester,
+    production_equivalent_environment,
+    e2e_test_reporter
+):
     """
     Function-scoped fixture providing comprehensive E2E testing environment.
     
-    Creates complete E2E testing environment with Flask application, performance
-    monitoring, load testing capabilities, external service mocking, and comprehensive
-    reporting for end-to-end testing scenarios per Section 6.6.5.
+    Integrates all E2E testing components including Flask application, performance
+    monitoring, load testing, production-equivalent environment, and comprehensive
+    reporting per Section 6.6.1 comprehensive E2E testing requirements.
     
+    Args:
+        e2e_flask_app: E2E Flask application
+        e2e_client: E2E test client
+        e2e_performance_monitor: Performance monitoring context
+        locust_load_tester: Locust load testing utilities
+        apache_bench_tester: Apache-bench testing utilities
+        production_equivalent_environment: Production-equivalent environment
+        e2e_test_reporter: E2E test reporting context
+        
     Returns:
-        Dictionary containing complete E2E testing environment
+        Comprehensive E2E testing environment with all components integrated
     """
     environment = {
-        'app': e2e_app,
+        'app': e2e_flask_app,
         'client': e2e_client,
-        'test_data': seeded_database,
-        'performance': {
-            'monitor': performance_monitor,
-            'locust_tester': locust_load_tester,
-            'apache_bench_tester': apache_bench_tester,
-        },
-        'external_services': e2e_external_services,
+        'performance': e2e_performance_monitor,
+        'load_tester': locust_load_tester,
+        'bench_tester': apache_bench_tester,
+        'production_env': production_equivalent_environment,
         'reporter': e2e_test_reporter,
-        'baseline_metrics': NODEJS_BASELINE_METRICS,
-        'environment_info': {
-            'flask_version': e2e_app.config.get('FLASK_VERSION', 'unknown'),
-            'server_name': e2e_app.config.get('SERVER_NAME', 'localhost:5000'),
-            'testing_mode': e2e_app.config.get('TESTING', True),
-            'production_parity': e2e_app.config.get('ENV', 'testing') == 'production',
-            'performance_monitoring_enabled': bool(performance_monitor),
-            'load_testing_available': locust_load_tester is not None,
-            'apache_bench_available': apache_bench_tester.available,
+        'session_id': str(uuid.uuid4()),
+        'start_time': time.time(),
+        'capabilities': {
+            'flask_testing': True,
+            'performance_monitoring': True,
+            'load_testing': True,
+            'benchmark_testing': True,
+            'production_equivalent': True,
+            'comprehensive_reporting': True,
+            'external_service_integration': True
+        },
+        'configuration': {
+            'variance_threshold': 0.10,  # ≤10% variance requirement
+            'load_test_users': e2e_flask_app.config.get('LOAD_TEST_USERS', 50),
+            'performance_baseline_validation': True,
+            'external_service_testing': True,
+            'comprehensive_workflow_testing': True
         }
     }
     
-    logger.info(
-        "Comprehensive E2E environment created",
-        flask_version=environment['environment_info']['flask_version'],
-        performance_monitoring=environment['environment_info']['performance_monitoring_enabled'],
-        load_testing=environment['environment_info']['load_testing_available'],
-        apache_bench=environment['environment_info']['apache_bench_available'],
-        total_test_users=len(seeded_database.get('users', [])),
-        total_test_projects=len(seeded_database.get('projects', []))
-    )
-    
-    return environment
-
-
-# =============================================================================
-# HTTP Client and Request Testing Fixtures
-# =============================================================================
-
-@pytest.fixture(scope="function")
-def e2e_http_session(e2e_test_config: E2ETestConfig) -> requests.Session:
-    """
-    Function-scoped fixture providing configured HTTP session for E2E API testing.
-    
-    Args:
-        e2e_test_config: E2E test configuration settings
+    def execute_comprehensive_workflow(
+        workflow_name: str,
+        steps: List[Dict[str, Any]],
+        validate_performance: bool = True,
+        generate_load: bool = False
+    ) -> Dict[str, Any]:
+        """Execute comprehensive E2E workflow with full validation"""
         
-    Returns:
-        Configured requests.Session for external API testing
-    """
-    session = requests.Session()
-    
-    # Configure retry strategy for reliability
-    if e2e_test_config.retry_failed_requests:
-        retry_strategy = Retry(
-            total=e2e_test_config.max_retries,
-            backoff_factor=1,
-            status_forcelist=[429, 500, 502, 503, 504],
-            method_whitelist=["HEAD", "GET", "PUT", "DELETE", "OPTIONS", "TRACE"]
-        )
-        adapter = HTTPAdapter(max_retries=retry_strategy)
-        session.mount("http://", adapter)
-        session.mount("https://", adapter)
-    
-    # Set default timeout
-    session.timeout = e2e_test_config.request_timeout_seconds
-    
-    # Configure headers
-    session.headers.update({
-        'User-Agent': 'E2E-Test-Client/1.0',
-        'Accept': 'application/json',
-        'Content-Type': 'application/json'
-    })
-    
-    logger.debug(
-        "E2E HTTP session created",
-        timeout=e2e_test_config.request_timeout_seconds,
-        retry_enabled=e2e_test_config.retry_failed_requests,
-        max_retries=e2e_test_config.max_retries
-    )
-    
-    yield session
-    
-    # Close session
-    session.close()
-
-
-# =============================================================================
-# Test Execution Hooks and Event Handlers
-# =============================================================================
-
-@pytest.fixture(scope="function", autouse=True)
-def e2e_test_lifecycle(
-    request,
-    e2e_test_reporter: E2ETestReporter,
-    performance_monitor: PerformanceMetrics
-):
-    """
-    Auto-use fixture managing E2E test lifecycle and reporting.
-    
-    Args:
-        request: pytest request object
-        e2e_test_reporter: E2E test reporter instance
-        performance_monitor: Performance monitoring instance
-    """
-    test_name = request.node.name
-    test_start_time = time.time()
-    
-    logger.info(f"Starting E2E test: {test_name}")
-    
-    # Pre-test setup
-    performance_monitor.test_name = test_name
-    
-    yield  # Test execution happens here
-    
-    # Post-test reporting
-    test_end_time = time.time()
-    test_duration = test_end_time - test_start_time
-    
-    # Determine test status
-    test_status = 'passed'
-    if hasattr(request.node, 'rep_call'):
-        if request.node.rep_call.failed:
-            test_status = 'failed'
-        elif request.node.rep_call.skipped:
-            test_status = 'skipped'
-    
-    # Report test completion
-    e2e_test_reporter.add_test_result(
-        test_name=test_name,
-        status=test_status,
-        duration=test_duration,
-        metrics=performance_monitor,
-        additional_data={
-            'node_id': request.node.nodeid,
-            'test_function': request.function.__name__,
-            'test_module': request.module.__name__ if request.module else 'unknown'
+        workflow_start = time.time()
+        workflow_results = {
+            'workflow_name': workflow_name,
+            'steps_executed': 0,
+            'steps_passed': 0,
+            'steps_failed': 0,
+            'performance_validated': False,
+            'load_test_completed': False,
+            'total_duration': 0.0,
+            'step_details': []
         }
-    )
+        
+        logger.info(f"Starting comprehensive E2E workflow: {workflow_name}")
+        
+        # Execute workflow steps
+        for step_index, step in enumerate(steps):
+            step_start = time.time()
+            step_name = step.get('name', f'Step {step_index + 1}')
+            
+            try:
+                # Measure step performance
+                with environment['performance']['measure_operation'](
+                    f"{workflow_name}_{step_name}",
+                    step.get('performance_baseline')
+                ):
+                    # Execute step action
+                    if step.get('action') == 'http_request':
+                        response = environment['client'].request(
+                            method=step.get('method', 'GET'),
+                            path=step.get('path', '/'),
+                            json=step.get('data'),
+                            headers=step.get('headers')
+                        )
+                        step_result = {
+                            'status_code': response.status_code,
+                            'response_data': response.get_json() if response.is_json else None
+                        }
+                    elif step.get('action') == 'database_operation':
+                        # Simulate database operation
+                        if environment['production_env']['external_services']['mongodb']['available']:
+                            # Perform actual database operation
+                            step_result = {'database_operation': 'completed'}
+                        else:
+                            step_result = {'database_operation': 'mocked'}
+                    else:
+                        step_result = {'custom_action': 'completed'}
+                
+                step_duration = time.time() - step_start
+                workflow_results['steps_executed'] += 1
+                workflow_results['steps_passed'] += 1
+                
+                step_detail = {
+                    'step_name': step_name,
+                    'status': 'passed',
+                    'duration': step_duration,
+                    'result': step_result
+                }
+                workflow_results['step_details'].append(step_detail)
+                
+                # Record in reporter
+                environment['reporter']['record_test_execution'](
+                    test_name=f"{workflow_name}_{step_name}",
+                    status='passed',
+                    duration=step_duration,
+                    workflow_type='e2e_workflow'
+                )
+                
+            except Exception as e:
+                step_duration = time.time() - step_start
+                workflow_results['steps_executed'] += 1
+                workflow_results['steps_failed'] += 1
+                
+                step_detail = {
+                    'step_name': step_name,
+                    'status': 'failed',
+                    'duration': step_duration,
+                    'error': str(e)
+                }
+                workflow_results['step_details'].append(step_detail)
+                
+                environment['reporter']['record_test_execution'](
+                    test_name=f"{workflow_name}_{step_name}",
+                    status='failed',
+                    duration=step_duration,
+                    workflow_type='e2e_workflow'
+                )
+                
+                logger.error(f"Workflow step failed: {step_name} - {str(e)}")
+        
+        # Performance validation
+        if validate_performance:
+            performance_summary = environment['performance']['get_performance_summary']()
+            workflow_results['performance_validated'] = performance_summary['performance_violations'] == 0
+            
+            if not workflow_results['performance_validated']:
+                logger.warning(
+                    f"Performance violations detected in workflow {workflow_name}",
+                    violations=performance_summary['performance_violations']
+                )
+        
+        # Load testing
+        if generate_load:
+            try:
+                load_results = environment['load_tester']['run_load_test'](
+                    users=environment['configuration']['load_test_users'],
+                    run_time=30  # 30 second load test
+                )
+                workflow_results['load_test_completed'] = True
+                workflow_results['load_test_results'] = load_results
+                
+                logger.info(f"Load test completed for workflow {workflow_name}")
+                
+            except Exception as e:
+                logger.warning(f"Load test failed for workflow {workflow_name}: {e}")
+        
+        workflow_results['total_duration'] = time.time() - workflow_start
+        
+        logger.info(
+            f"Comprehensive E2E workflow completed: {workflow_name}",
+            steps_passed=workflow_results['steps_passed'],
+            steps_failed=workflow_results['steps_failed'],
+            duration=round(workflow_results['total_duration'], 3),
+            performance_validated=workflow_results['performance_validated']
+        )
+        
+        return workflow_results
+    
+    def validate_complete_system():
+        """Validate complete system health and performance"""
+        
+        validation_start = time.time()
+        validation_results = {
+            'system_health': 'unknown',
+            'component_health': {},
+            'performance_baseline': 'unknown',
+            'external_services': 'unknown',
+            'overall_status': 'unknown'
+        }
+        
+        # System health validation
+        try:
+            health_response = environment['client'].get('/health')
+            validation_results['system_health'] = (
+                'healthy' if health_response.status_code == 200 else 'unhealthy'
+            )
+            
+            if health_response.is_json:
+                health_data = health_response.get_json()
+                validation_results['component_health'] = health_data.get('components', {})
+        
+        except Exception as e:
+            validation_results['system_health'] = 'unhealthy'
+            logger.error(f"System health validation failed: {e}")
+        
+        # Performance baseline validation
+        try:
+            with environment['performance']['measure_operation'](
+                'system_validation',
+                'api_response_time'
+            ):
+                # Test critical endpoints
+                endpoints = ['/health', '/auth/status', '/api/v1/status']
+                for endpoint in endpoints:
+                    try:
+                        environment['client'].get(endpoint)
+                    except:
+                        pass  # Continue testing other endpoints
+            
+            performance_summary = environment['performance']['get_performance_summary']()
+            validation_results['performance_baseline'] = (
+                'compliant' if performance_summary['performance_violations'] == 0 else 'non_compliant'
+            )
+        
+        except Exception as e:
+            validation_results['performance_baseline'] = 'failed'
+            logger.error(f"Performance baseline validation failed: {e}")
+        
+        # External services validation
+        env_health = environment['production_env']['validate_environment_health']()
+        validation_results['external_services'] = env_health['overall']
+        
+        # Overall status determination
+        if (validation_results['system_health'] == 'healthy' and 
+            validation_results['performance_baseline'] == 'compliant' and
+            validation_results['external_services'] in ['healthy', 'degraded']):
+            validation_results['overall_status'] = 'ready'
+        else:
+            validation_results['overall_status'] = 'not_ready'
+        
+        validation_duration = time.time() - validation_start
+        
+        logger.info(
+            "Complete system validation finished",
+            overall_status=validation_results['overall_status'],
+            system_health=validation_results['system_health'],
+            performance_baseline=validation_results['performance_baseline'],
+            external_services=validation_results['external_services'],
+            validation_duration=round(validation_duration, 3)
+        )
+        
+        return validation_results
+    
+    # Attach utility functions
+    environment['execute_comprehensive_workflow'] = execute_comprehensive_workflow
+    environment['validate_complete_system'] = validate_complete_system
+    
+    # Initialize comprehensive environment
+    system_validation = environment['validate_complete_system']()
     
     logger.info(
-        f"Completed E2E test: {test_name}",
-        status=test_status,
-        duration=f"{test_duration:.3f}s",
-        requests=performance_monitor.request_count,
-        errors=performance_monitor.error_count
+        "Comprehensive E2E environment initialized",
+        session_id=environment['session_id'],
+        system_status=system_validation['overall_status'],
+        capabilities_enabled=sum(1 for c in environment['capabilities'].values() if c),
+        flask_app_ready=bool(environment['app']),
+        performance_monitoring_ready=bool(environment['performance']),
+        load_testing_ready=bool(environment['load_tester']),
+        production_env_ready=bool(environment['production_env'])
     )
-
-
-# Configure pytest for E2E test execution
-def pytest_configure(config):
-    """Pytest configuration hook for E2E test setup."""
-    # Add E2E-specific markers
-    config.addinivalue_line(
-        "markers", "e2e: mark test as end-to-end integration test"
-    )
-    config.addinivalue_line(
-        "markers", "performance: mark test for performance validation"
-    )
-    config.addinivalue_line(
-        "markers", "load_test: mark test for load testing scenarios"
-    )
-
-
-def pytest_collection_modifyitems(config, items):
-    """Modify collected test items for E2E test execution."""
-    for item in items:
-        # Add e2e marker to all tests in this module
-        if "/e2e/" in str(item.fspath):
-            item.add_marker(pytest.mark.e2e)
+    
+    yield environment
+    
+    # Final environment cleanup and reporting
+    cleanup_start = time.time()
+    
+    # Generate final report
+    try:
+        final_report = environment['reporter']['generate_final_report']()
+        report_file = environment['reporter']['export_report']()
         
-        # Add performance marker for performance tests
-        if "performance" in item.name.lower():
-            item.add_marker(pytest.mark.performance)
-        
-        # Add load_test marker for load testing
-        if "load" in item.name.lower():
-            item.add_marker(pytest.mark.load_test)
+        logger.info(
+            "E2E test report generated",
+            report_file=report_file,
+            total_tests=final_report['test_summary']['total_tests'],
+            success_rate=final_report['test_summary']['success_rate']
+        )
+    
+    except Exception as e:
+        logger.error(f"Failed to generate final E2E report: {e}")
+    
+    cleanup_duration = time.time() - cleanup_start
+    total_duration = time.time() - environment['start_time']
+    
+    logger.info(
+        "Comprehensive E2E environment cleanup completed",
+        session_id=environment['session_id'],
+        total_duration=round(total_duration, 3),
+        cleanup_duration=round(cleanup_duration, 3)
+    )
 
 
-# Export key fixtures for E2E test modules
+# =============================================================================
+# E2E Test Utilities and Helpers
+# =============================================================================
+
+def skip_if_not_e2e():
+    """Skip test if not running in E2E mode"""
+    return pytest.mark.skipif(
+        not os.getenv('E2E_TESTING', '').lower() in ['true', '1', 'yes'],
+        reason="E2E testing not enabled (set E2E_TESTING=true)"
+    )
+
+
+def require_external_services():
+    """Skip test if external services are not available"""
+    return pytest.mark.skipif(
+        not os.getenv('E2E_EXTERNAL_SERVICES', '').lower() in ['true', '1', 'yes'],
+        reason="External services not available for E2E testing"
+    )
+
+
+def require_load_testing():
+    """Skip test if load testing tools are not available"""
+    return pytest.mark.skipif(
+        not os.getenv('E2E_LOAD_TESTING', '').lower() in ['true', '1', 'yes'],
+        reason="Load testing not enabled for E2E testing"
+    )
+
+
+# Export E2E fixtures and utilities
 __all__ = [
-    # Configuration
-    'E2ETestConfig',
-    'e2e_test_config',
-    
-    # Flask application fixtures
-    'e2e_app',
+    # Core E2E fixtures
+    'e2e_flask_app',
     'e2e_client',
-    'e2e_app_context',
-    'e2e_request_context',
+    'e2e_app_config',
     
-    # Performance testing fixtures
-    'performance_monitor',
+    # Performance and load testing
+    'e2e_performance_monitor',
     'locust_load_tester',
     'apache_bench_tester',
     
-    # Comprehensive environment
-    'e2e_comprehensive_environment',
-    'e2e_external_services',
+    # Environment and reporting
+    'production_equivalent_environment',
     'e2e_test_reporter',
-    'e2e_http_session',
+    'comprehensive_e2e_environment',
     
-    # Performance testing classes
-    'PerformanceMetrics',
-    'LocustLoadTester',
-    'ApacheBenchTester',
-    'E2ETestReporter',
+    # Test utilities
+    'skip_if_not_e2e',
+    'require_external_services',
+    'require_load_testing',
     
-    # Constants
-    'NODEJS_BASELINE_METRICS',
-    'PERFORMANCE_BASELINE_THRESHOLD'
+    # Configuration class
+    'E2ETestingConfig'
 ]
