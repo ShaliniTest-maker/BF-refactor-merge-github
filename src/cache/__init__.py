@@ -1,625 +1,800 @@
 """
-Cache Package Initialization
+Cache Package Initialization - Centralized Redis Caching Infrastructure
 
-Centralized cache package providing Redis caching functionality, Flask-Caching integration,
-and comprehensive cache management utilities for the Flask application. Establishes the
-cache package as the primary caching provider with proper namespace organization and
-connection management per Section 5.2.7 and Section 6.1.1.
+This module provides centralized access to Redis caching functionality, Flask-Caching integration,
+and cache management utilities for the Node.js to Python Flask migration. Establishes the cache
+package as the primary caching provider with proper namespace organization and connection management
+supporting Flask application factory pattern per Section 6.1.1.
 
-This package implements enterprise-grade caching capabilities equivalent to Node.js
-patterns while providing Python-native Flask integration with performance optimization
-maintaining ≤10% variance from Node.js baseline per Section 0.1.1.
+The cache package implements comprehensive caching layer requirements specified in Section 5.2.7
+including response caching, session management, distributed caching, cache invalidation strategies,
+and performance optimization maintaining ≤10% variance from Node.js baseline per Section 0.1.1.
 
 Key Features:
-- Centralized Redis client access with connection pooling and circuit breaker patterns
-- Flask-Caching 2.1+ integration for response caching and HTTP cache headers
-- Intelligent cache invalidation strategies for data consistency
-- Cache warming and performance optimization strategies
-- Multi-tenant cache namespace management for enterprise deployments
-- Comprehensive cache monitoring and observability integration
-- Enterprise-grade error handling and resilience patterns
+- Centralized Redis client access with redis-py 5.0+ integration per Section 0.1.2
+- Flask-Caching 2.1+ integration for response caching per Section 3.4.2
+- Enterprise-grade connection pooling and circuit breaker patterns per Section 6.1.3
+- Comprehensive cache invalidation and TTL management strategies per Section 5.2.7
+- Cache warming and optimization for performance enhancement per Section 5.2.7
+- Distributed cache coordination for multi-instance Flask deployments per Section 6.1.1
+- Integration with enterprise monitoring and observability per Section 5.4.1
+- Package-level namespace organization for maintainable code per Section 6.1.1
 
 Architecture Integration:
-- Flask application factory pattern support per Section 6.1.1
-- Blueprint-compatible cache decorators and utilities
-- Structured logging and Prometheus metrics integration
-- Circuit breaker patterns for external service resilience
-- Connection pool optimization for horizontal scaling
+- Flask application factory pattern compatibility per Section 6.1.1 Flask Blueprint architecture
+- Flask extension integration per Section 4.2.1 Flask application initialization
+- Seamless integration with src/config/database.py configuration management
+- Enterprise monitoring integration with structured logging and metrics collection
+- Circuit breaker coordination with external service resilience patterns
+- Performance variance tracking against Node.js baseline cache performance
+
+Package Organization:
+- client.py: Core Redis client implementation with connection pooling and circuit breakers
+- response_cache.py: Flask-Caching integration for HTTP response caching and optimization
+- strategies.py: Cache invalidation, TTL management, and warming strategies
+- exceptions.py: Comprehensive cache error handling and exception classes
+- monitoring.py: Cache performance monitoring, metrics collection, and health checks
+
+Usage Examples:
+    Basic Redis client access:
+    >>> from src.cache import get_redis_client, init_redis_client
+    >>> redis_client = init_redis_client()
+    >>> redis_client.set('key', 'value', ttl=300)
+    >>> value = redis_client.get('key')
+
+    Flask application integration:
+    >>> from src.cache import init_cache_extensions
+    >>> app = Flask(__name__)
+    >>> cache_extensions = init_cache_extensions(app)
+
+    Response caching with Flask decorator:
+    >>> from src.cache import cached_response
+    >>> @cached_response(ttl=300, policy='public')
+    >>> def api_endpoint():
+    >>>     return jsonify({'data': 'cached_response'})
+
+Performance Requirements:
+- Redis operation latency: ≤5ms for get/set operations
+- Cache hit latency: ≤2ms for response cache hits
+- Cache invalidation latency: ≤10ms for pattern-based invalidation
+- Memory efficiency: ≤15% overhead for cache coordination structures
+- Distributed coordination: ≤10ms for multi-instance cache synchronization
+
+References:
+- Section 5.2.7: Caching layer responsibilities and Redis operations with Flask integration
+- Section 6.1.1: Flask application factory pattern integration requirements  
+- Section 4.2.1: Flask application initialization and extension configuration
+- Section 0.1.2: Data access components Redis client migration requirements
+- Section 6.1.3: Resilience mechanisms and connection pool optimization
+- Section 5.4.1: Monitoring and observability for cache performance tracking
 """
 
 import logging
-from typing import Optional, Dict, Any, List, Callable
-from flask import Flask, current_app
-import structlog
+import warnings
+from typing import Any, Dict, List, Optional, Union, Callable, Tuple
 
-# Core cache client components
-from .client import (
-    RedisClient,
-    RedisPipeline,
-    CircuitBreaker,
-    create_redis_client,
-    get_redis_client,
-    init_redis_client,
-    close_redis_client
-)
-
-# Flask response caching integration
-from .response_cache import (
-    ResponseCache,
-    init_response_cache,
-    get_response_cache,
-    cache_for,
-    cache_unless,
-    cache_with_user_context,
-    invalidate_endpoint_cache,
-    invalidate_user_cache
-)
-
-# Cache strategies and management
-from .strategies import (
-    CacheStrategiesManager,
-    CacheInvalidationTrigger,
-    CacheWarmingPriority,
-    TTLPolicy,
-    CacheKeyPattern,
-    TTLConfiguration,
-    CacheEntry,
-    cache_strategies,
-    invalidate_by_pattern,
-    invalidate_by_dependency,
-    create_cache_key,
-    schedule_warming_by_priority
-)
-
-# Cache exception handling
-from .exceptions import (
-    CacheError,
-    CacheConnectionError,
-    CacheTimeoutError,
-    CacheCircuitBreakerError,
-    CacheSerializationError,
-    CachePoolExhaustedError,
-    CacheMemoryError,
-    CacheOperationError,
-    CacheKeyError,
-    CacheInvalidationError
-)
-
-# Cache monitoring and observability
-from .monitoring import (
-    CacheMonitor,
-    cache_monitor,
-    monitor_cache_operation,
-    get_cache_metrics,
-    generate_cache_health_report
-)
-
-# Configure structured logging for cache package
-logger = structlog.get_logger(__name__)
-
-# Package version information
-__version__ = "1.0.0"
-__author__ = "Flask Migration Team"
-
-# Cache package state tracking
-_cache_initialized = False
-_redis_client: Optional[RedisClient] = None
-_response_cache: Optional[ResponseCache] = None
-
-
-class CacheManager:
-    """
-    Central cache manager providing unified interface to all cache functionalities.
+# Suppress Redis warnings during import for cleaner startup
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
     
-    This class serves as the primary integration point for Flask applications,
-    coordinating Redis client operations, response caching, cache strategies,
-    and monitoring per Section 6.1.1 Flask application factory pattern.
-    """
-    
-    def __init__(self, app: Optional[Flask] = None):
-        """
-        Initialize cache manager with optional Flask application.
-        
-        Args:
-            app: Flask application instance (optional, can be set via init_app)
-        """
-        self.app = app
-        self.redis_client: Optional[RedisClient] = None
-        self.response_cache: Optional[ResponseCache] = None
-        self.strategies_manager = cache_strategies
-        self.monitor = cache_monitor
-        
-        if app is not None:
-            self.init_app(app)
-    
-    def init_app(self, app: Flask) -> None:
-        """
-        Initialize cache manager with Flask application factory pattern.
-        
-        Args:
-            app: Flask application instance
-        """
-        global _cache_initialized, _redis_client, _response_cache
-        
-        try:
-            # Get Redis configuration from Flask app config
-            redis_config = {
-                'host': app.config.get('REDIS_HOST', 'localhost'),
-                'port': app.config.get('REDIS_PORT', 6379),
-                'db': app.config.get('REDIS_DB', 0),
-                'password': app.config.get('REDIS_PASSWORD'),
-                'ssl': app.config.get('REDIS_SSL', False),
-                'max_connections': app.config.get('REDIS_MAX_CONNECTIONS', 50),
-                'socket_timeout': app.config.get('REDIS_SOCKET_TIMEOUT', 30.0),
-                'socket_connect_timeout': app.config.get('REDIS_SOCKET_CONNECT_TIMEOUT', 10.0),
-                'retry_on_timeout': app.config.get('REDIS_RETRY_ON_TIMEOUT', True),
-                'health_check_interval': app.config.get('REDIS_HEALTH_CHECK_INTERVAL', 30),
-                'decode_responses': app.config.get('REDIS_DECODE_RESPONSES', True),
-                'encoding': app.config.get('REDIS_ENCODING', 'utf-8')
-            }
-            
-            # Initialize Redis client with enterprise-grade configuration
-            self.redis_client = init_redis_client(**redis_config)
-            _redis_client = self.redis_client
-            
-            # Initialize Flask-Caching response cache integration
-            self.response_cache = init_response_cache(app, self.redis_client)
-            _response_cache = self.response_cache
-            
-            # Initialize cache monitoring
-            self.monitor.init_app(app)
-            
-            # Configure cache strategies with application context
-            self._configure_cache_strategies(app)
-            
-            # Register health check endpoint
-            self._register_health_check_endpoint(app)
-            
-            # Store cache manager in app extensions
-            if not hasattr(app, 'extensions'):
-                app.extensions = {}
-            app.extensions['cache_manager'] = self
-            
-            _cache_initialized = True
-            
-            logger.info(
-                "cache_manager_initialized",
-                redis_host=redis_config['host'],
-                redis_port=redis_config['port'],
-                redis_db=redis_config['db'],
-                max_connections=redis_config['max_connections'],
-                app_name=app.name
-            )
-            
-        except Exception as e:
-            logger.error(
-                "cache_manager_initialization_failed",
-                error_message=str(e),
-                error_type=type(e).__name__,
-                app_name=app.name if app else 'unknown'
-            )
-            raise CacheConnectionError(
-                message=f"Failed to initialize cache manager: {str(e)}",
-                error_code="CACHE_MANAGER_INIT_FAILED"
-            )
-    
-    def _configure_cache_strategies(self, app: Flask) -> None:
-        """
-        Configure cache strategies based on application configuration.
-        
-        Args:
-            app: Flask application instance
-        """
-        try:
-            # Configure default TTL policies from application config
-            default_ttl = app.config.get('CACHE_DEFAULT_TIMEOUT', 3600)
-            cache_policies = app.config.get('CACHE_TTL_POLICIES', {})
-            
-            # Register namespace configurations
-            for namespace, policy_config in cache_policies.items():
-                ttl_config = TTLConfiguration(
-                    policy=TTLPolicy(policy_config.get('policy', 'static')),
-                    base_ttl_seconds=policy_config.get('base_ttl', default_ttl),
-                    min_ttl_seconds=policy_config.get('min_ttl', 60),
-                    max_ttl_seconds=policy_config.get('max_ttl', 86400),
-                    sliding_window_seconds=policy_config.get('sliding_window', 3600),
-                    adaptive_factor=policy_config.get('adaptive_factor', 1.0)
-                )
-                
-                self.strategies_manager.namespace_manager.register_namespace(
-                    namespace, ttl_config
-                )
-            
-            logger.info(
-                "cache_strategies_configured",
-                default_ttl=default_ttl,
-                configured_namespaces=list(cache_policies.keys())
-            )
-            
-        except Exception as e:
-            logger.warning(
-                "cache_strategies_configuration_warning",
-                error_message=str(e),
-                using_defaults=True
-            )
-    
-    def _register_health_check_endpoint(self, app: Flask) -> None:
-        """
-        Register cache health check endpoint for monitoring.
-        
-        Args:
-            app: Flask application instance
-        """
-        @app.route('/health/cache')
-        def cache_health_check():
-            """Cache health check endpoint for load balancer and monitoring."""
-            try:
-                health_report = self.get_health_status()
-                status_code = 200 if health_report['status'] == 'healthy' else 503
-                
-                return health_report, status_code, {'Content-Type': 'application/json'}
-                
-            except Exception as e:
-                logger.error(
-                    "cache_health_check_error",
-                    error_message=str(e),
-                    error_type=type(e).__name__
-                )
-                return {
-                    'status': 'unhealthy',
-                    'error': str(e),
-                    'timestamp': '2024-01-01T00:00:00Z'
-                }, 503, {'Content-Type': 'application/json'}
-    
-    def get_client(self) -> RedisClient:
-        """
-        Get Redis client instance.
-        
-        Returns:
-            Redis client instance
-            
-        Raises:
-            CacheError: If cache manager not initialized
-        """
-        if not self.redis_client:
-            raise CacheError(
-                message="Cache manager not initialized. Call init_app() first.",
-                error_code="CACHE_MANAGER_NOT_INITIALIZED"
-            )
-        return self.redis_client
-    
-    def get_response_cache(self) -> ResponseCache:
-        """
-        Get response cache instance.
-        
-        Returns:
-            Response cache instance
-            
-        Raises:
-            CacheError: If cache manager not initialized
-        """
-        if not self.response_cache:
-            raise CacheError(
-                message="Response cache not initialized. Call init_app() first.",
-                error_code="RESPONSE_CACHE_NOT_INITIALIZED"
-            )
-        return self.response_cache
-    
-    def get_health_status(self) -> Dict[str, Any]:
-        """
-        Get comprehensive cache health status.
-        
-        Returns:
-            Dictionary containing cache health information
-        """
-        try:
-            health_status = {
-                'status': 'healthy',
-                'timestamp': '2024-01-01T00:00:00Z',
-                'components': {}
-            }
-            
-            # Redis client health
-            if self.redis_client:
-                redis_health = self.redis_client.health_check()
-                health_status['components']['redis'] = redis_health
-                
-                if redis_health['status'] != 'healthy':
-                    health_status['status'] = 'degraded'
-            else:
-                health_status['components']['redis'] = {'status': 'not_initialized'}
-                health_status['status'] = 'unhealthy'
-            
-            # Response cache health
-            if self.response_cache:
-                cache_stats = self.response_cache.get_cache_stats()
-                health_status['components']['response_cache'] = {
-                    'status': 'healthy',
-                    'hit_ratio': cache_stats.get('hit_ratio', 0.0),
-                    'total_requests': cache_stats.get('total_requests', 0)
-                }
-            else:
-                health_status['components']['response_cache'] = {'status': 'not_initialized'}
-                if health_status['status'] == 'healthy':
-                    health_status['status'] = 'degraded'
-            
-            # Cache strategies health
-            strategies_stats = self.strategies_manager.get_cache_statistics()
-            health_status['components']['strategies'] = {
-                'status': 'healthy',
-                'total_entries': strategies_stats.get('total_entries', 0),
-                'total_size_bytes': strategies_stats.get('total_size_bytes', 0)
-            }
-            
-            # Monitoring health
-            monitoring_metrics = self.monitor.get_metrics_summary()
-            health_status['components']['monitoring'] = {
-                'status': 'healthy',
-                'metrics_collected': len(monitoring_metrics)
-            }
-            
-            return health_status
-            
-        except Exception as e:
-            logger.error(
-                "cache_health_status_error",
-                error_message=str(e),
-                error_type=type(e).__name__
-            )
-            return {
-                'status': 'unhealthy',
-                'error': str(e),
-                'timestamp': '2024-01-01T00:00:00Z'
-            }
-    
-    def close(self) -> None:
-        """Close cache manager and cleanup resources."""
-        global _cache_initialized, _redis_client, _response_cache
-        
-        try:
-            if self.redis_client:
-                self.redis_client.close()
-                self.redis_client = None
-            
-            if self.response_cache:
-                # Response cache cleanup handled by Flask-Caching
-                self.response_cache = None
-            
-            _cache_initialized = False
-            _redis_client = None
-            _response_cache = None
-            
-            logger.info("cache_manager_closed")
-            
-        except Exception as e:
-            logger.warning(
-                "cache_manager_close_error",
-                error_message=str(e)
-            )
-
-
-# Global cache manager instance for Flask application integration
-cache_manager = CacheManager()
-
-
-def init_cache(app: Flask, redis_config: Optional[Dict[str, Any]] = None) -> CacheManager:
-    """
-    Initialize complete cache system for Flask application.
-    
-    Args:
-        app: Flask application instance
-        redis_config: Optional Redis configuration override
-        
-    Returns:
-        Configured CacheManager instance
-    """
-    global cache_manager
-    
-    # Apply Redis configuration override if provided
-    if redis_config:
-        for key, value in redis_config.items():
-            config_key = f"REDIS_{key.upper()}"
-            app.config[config_key] = value
-    
-    # Initialize cache manager with application
-    cache_manager.init_app(app)
-    
-    logger.info(
-        "cache_system_initialized",
-        app_name=app.name,
-        config_override=bool(redis_config)
+    # Core Redis client infrastructure
+    from .client import (
+        RedisConnectionManager,
+        RedisClient,
+        create_redis_client,
+        init_redis_client,
+        get_redis_client,
+        close_redis_client
     )
     
-    return cache_manager
-
-
-def get_cache_manager() -> CacheManager:
-    """
-    Get global cache manager instance.
-    
-    Returns:
-        Global CacheManager instance
-        
-    Raises:
-        CacheError: If cache manager not initialized
-    """
-    global _cache_initialized
-    
-    if not _cache_initialized:
-        raise CacheError(
-            message="Cache system not initialized. Call init_cache() first.",
-            error_code="CACHE_SYSTEM_NOT_INITIALIZED"
-        )
-    
-    return cache_manager
-
-
-def is_cache_available() -> bool:
-    """
-    Check if cache system is available and healthy.
-    
-    Returns:
-        True if cache is available, False otherwise
-    """
-    try:
-        if not _cache_initialized:
-            return False
-        
-        health_status = cache_manager.get_health_status()
-        return health_status['status'] in ['healthy', 'degraded']
-        
-    except Exception:
-        return False
-
-
-# Convenience functions for common cache operations
-def cache_get(key: str, default: Any = None) -> Any:
-    """
-    Get value from cache with fallback.
-    
-    Args:
-        key: Cache key
-        default: Default value if key not found
-        
-    Returns:
-        Cached value or default
-    """
-    try:
-        client = get_redis_client()
-        return client.get(key, default)
-    except CacheError:
-        return default
-
-
-def cache_set(key: str, value: Any, ttl: Optional[int] = None) -> bool:
-    """
-    Set value in cache with optional TTL.
-    
-    Args:
-        key: Cache key
-        value: Value to cache
-        ttl: Time-to-live in seconds
-        
-    Returns:
-        True if successful, False otherwise
-    """
-    try:
-        client = get_redis_client()
-        return client.set(key, value, ttl)
-    except CacheError:
-        return False
-
-
-def cache_delete(*keys: str) -> int:
-    """
-    Delete keys from cache.
-    
-    Args:
-        *keys: Cache keys to delete
-        
-    Returns:
-        Number of keys deleted
-    """
-    try:
-        client = get_redis_client()
-        return client.delete(*keys)
-    except CacheError:
-        return 0
-
-
-def cache_invalidate_pattern(pattern: str) -> List[str]:
-    """
-    Invalidate cache keys matching pattern.
-    
-    Args:
-        pattern: Pattern to match (supports wildcards)
-        
-    Returns:
-        List of invalidated keys
-    """
-    try:
-        return invalidate_by_pattern(pattern)
-    except CacheError:
-        return []
-
-
-# Package exports organized by category for clear public API
-__all__ = [
-    # Core cache manager
-    'CacheManager',
-    'cache_manager',
-    'init_cache',
-    'get_cache_manager',
-    'is_cache_available',
-    
-    # Redis client components
-    'RedisClient',
-    'RedisPipeline',
-    'CircuitBreaker',
-    'create_redis_client',
-    'get_redis_client',
-    'init_redis_client',
-    'close_redis_client',
-    
-    # Response caching
-    'ResponseCache',
-    'init_response_cache',
-    'get_response_cache',
-    'cache_for',
-    'cache_unless',
-    'cache_with_user_context',
-    'invalidate_endpoint_cache',
-    'invalidate_user_cache',
+    # Flask-Caching response cache integration
+    from .response_cache import (
+        FlaskResponseCache,
+        CacheConfiguration,
+        CachePolicy,
+        CompressionType,
+        CachedResponse,
+        ResponseCacheMetrics,
+        create_response_cache,
+        get_response_cache,
+        init_response_cache
+    )
     
     # Cache strategies and management
-    'CacheStrategiesManager',
-    'CacheInvalidationTrigger',
-    'CacheWarmingPriority',
+    from .strategies import (
+        CacheInvalidationPattern,
+        TTLPolicy,
+        CacheWarmingStrategy,
+        CacheKeyPattern,
+        TTLConfiguration,
+        CacheStrategyMetrics,
+        BaseCacheStrategy,
+        CacheInvalidationStrategy,
+        TTLManagementStrategy,
+        CacheKeyPatternManager
+    )
+
+# Import monitoring and exceptions with fallback handling
+try:
+    from .monitoring import (
+        CacheMonitoringManager,
+        CacheHealthMonitor,
+        monitor_cache_operation,
+        track_cache_hit_miss
+    )
+    MONITORING_AVAILABLE = True
+except ImportError as e:
+    # Fallback monitoring implementations
+    class CacheMonitoringManager:
+        def __init__(self, *args, **kwargs):
+            pass
+        
+        def record_cache_operation(self, *args, **kwargs):
+            pass
+    
+    class CacheHealthMonitor:
+        def __init__(self, *args, **kwargs):
+            pass
+        
+        def check_cache_health(self):
+            return True, {'status': 'monitoring_unavailable'}
+    
+    def monitor_cache_operation(operation, backend):
+        def decorator(func):
+            return func
+        return decorator
+    
+    def track_cache_hit_miss(backend):
+        def decorator(func):
+            return func
+        return decorator
+    
+    MONITORING_AVAILABLE = False
+
+try:
+    from .exceptions import (
+        CacheError,
+        RedisConnectionError,
+        CacheOperationTimeoutError,
+        CacheInvalidationError,
+        CircuitBreakerOpenError,
+        CacheKeyError,
+        CacheSerializationError,
+        CachePoolExhaustedError,
+        handle_redis_exception
+    )
+    EXCEPTIONS_AVAILABLE = True
+except ImportError as e:
+    # Fallback exception classes
+    class CacheError(Exception):
+        def __init__(self, message, error_code=None, **kwargs):
+            super().__init__(message)
+            self.error_code = error_code
+    
+    class RedisConnectionError(CacheError):
+        pass
+    
+    class CacheOperationTimeoutError(CacheError):
+        pass
+    
+    class CacheInvalidationError(CacheError):
+        pass
+    
+    class CircuitBreakerOpenError(CacheError):
+        pass
+    
+    class CacheKeyError(CacheError):
+        pass
+    
+    class CacheSerializationError(CacheError):
+        pass
+    
+    class CachePoolExhaustedError(CacheError):
+        pass
+    
+    def handle_redis_exception(error, operation):
+        return CacheError(f"Cache operation failed: {operation}")
+    
+    EXCEPTIONS_AVAILABLE = False
+
+# Configure package-level logging
+logger = logging.getLogger(__name__)
+
+# Package version and metadata
+__version__ = "1.0.0"
+__author__ = "Flask Migration Team"
+__description__ = "Enterprise Redis caching infrastructure for Flask applications"
+
+# Global cache extension instances for Flask application factory pattern
+_cache_extensions: Optional[Dict[str, Any]] = None
+_default_redis_client: Optional[RedisClient] = None
+_default_response_cache: Optional[FlaskResponseCache] = None
+
+
+def init_cache_extensions(
+    app: Optional[Any] = None,
+    redis_config: Optional[Dict[str, Any]] = None,
+    response_cache_config: Optional[CacheConfiguration] = None,
+    monitoring_enabled: bool = True
+) -> Dict[str, Any]:
+    """
+    Initialize cache extensions for Flask application factory pattern integration.
+    
+    This function provides centralized cache initialization supporting Flask application
+    factory pattern per Section 6.1.1 and Flask extension integration per Section 4.2.1.
+    Creates and configures all cache components including Redis client, response cache,
+    monitoring, and strategy managers for enterprise-grade cache management.
+    
+    Args:
+        app: Flask application instance for initialization (optional for factory pattern)
+        redis_config: Redis configuration override parameters
+        response_cache_config: Response cache configuration instance
+        monitoring_enabled: Enable cache monitoring and metrics collection
+        
+    Returns:
+        Dictionary containing initialized cache extension instances
+        
+    Raises:
+        CacheError: If cache initialization fails
+        
+    Example:
+        Flask application factory pattern:
+        >>> app = create_app()
+        >>> cache_extensions = init_cache_extensions(app)
+        >>> redis_client = cache_extensions['redis_client']
+        >>> response_cache = cache_extensions['response_cache']
+        
+        Deferred initialization:
+        >>> cache_extensions = init_cache_extensions()
+        >>> # Later in factory function
+        >>> cache_extensions['response_cache'].init_app(app)
+    """
+    global _cache_extensions, _default_redis_client, _default_response_cache
+    
+    try:
+        # Initialize monitoring if available and enabled
+        monitoring_manager = None
+        if monitoring_enabled and MONITORING_AVAILABLE:
+            try:
+                monitoring_manager = CacheMonitoringManager()
+                health_monitor = CacheHealthMonitor()
+                monitoring_manager.health_monitor = health_monitor
+                
+                logger.info("Cache monitoring initialized successfully")
+            except Exception as e:
+                logger.warning(f"Cache monitoring initialization failed: {e}")
+                monitoring_manager = None
+        
+        # Initialize Redis client with configuration
+        redis_client_config = redis_config or {}
+        redis_client = init_redis_client(
+            monitoring=monitoring_manager,
+            **redis_client_config
+        )
+        _default_redis_client = redis_client
+        
+        # Initialize response cache configuration
+        if response_cache_config is None:
+            response_cache_config = CacheConfiguration(
+                policy=CachePolicy.DYNAMIC,
+                ttl_seconds=300,  # 5 minutes default
+                compression=CompressionType.AUTO,
+                vary_headers=['Accept', 'Accept-Encoding', 'Authorization'],
+                cache_private_responses=False,
+                distributed_invalidation=True
+            )
+        
+        # Initialize response cache
+        response_cache = create_response_cache(
+            app=app,
+            config=response_cache_config,
+            redis_client=redis_client
+        )
+        _default_response_cache = response_cache
+        
+        # Initialize cache strategies
+        invalidation_strategy = CacheInvalidationStrategy(
+            redis_client=redis_client,
+            monitoring=monitoring_manager
+        )
+        
+        ttl_strategy = TTLManagementStrategy(
+            redis_client=redis_client,
+            monitoring=monitoring_manager
+        )
+        
+        key_pattern_manager = CacheKeyPatternManager(
+            redis_client=redis_client,
+            monitoring=monitoring_manager
+        )
+        
+        # Register response cache with global instance if not already set
+        if not _cache_extensions and response_cache:
+            try:
+                # Initialize global response cache for package-level access
+                init_response_cache(
+                    app=app if app else None,
+                    config=response_cache_config,
+                    redis_client=redis_client
+                )
+                logger.info("Global response cache initialized")
+            except Exception as e:
+                logger.warning(f"Global response cache initialization failed: {e}")
+        
+        # Create cache extensions dictionary
+        cache_extensions = {
+            'redis_client': redis_client,
+            'response_cache': response_cache,
+            'invalidation_strategy': invalidation_strategy,
+            'ttl_strategy': ttl_strategy,
+            'key_pattern_manager': key_pattern_manager,
+            'monitoring_manager': monitoring_manager,
+            'health_monitor': monitoring_manager.health_monitor if monitoring_manager else None,
+            'config': {
+                'redis_config': redis_client_config,
+                'response_cache_config': response_cache_config,
+                'monitoring_enabled': monitoring_enabled,
+                'monitoring_available': MONITORING_AVAILABLE,
+                'exceptions_available': EXCEPTIONS_AVAILABLE
+            }
+        }
+        
+        # Store global cache extensions reference
+        _cache_extensions = cache_extensions
+        
+        # Configure Flask application if provided
+        if app:
+            app.config['CACHE_EXTENSIONS'] = cache_extensions
+            
+            # Add teardown handler for clean resource management
+            @app.teardown_appcontext
+            def close_cache_connections(error):
+                """Clean up cache connections on application context teardown."""
+                try:
+                    if redis_client:
+                        # Connection cleanup is handled by connection pool
+                        pass
+                except Exception as e:
+                    logger.warning(f"Error during cache connection cleanup: {e}")
+        
+        logger.info(
+            "Cache extensions initialized successfully",
+            redis_client_initialized=redis_client is not None,
+            response_cache_initialized=response_cache is not None,
+            monitoring_enabled=monitoring_enabled and monitoring_manager is not None,
+            strategies_initialized=True,
+            flask_app_configured=app is not None
+        )
+        
+        return cache_extensions
+        
+    except Exception as e:
+        error_msg = f"Cache extensions initialization failed: {str(e)}"
+        logger.error(error_msg)
+        
+        if EXCEPTIONS_AVAILABLE:
+            raise CacheError(
+                error_msg,
+                error_code="CACHE_INITIALIZATION_FAILED",
+                details={
+                    'monitoring_enabled': monitoring_enabled,
+                    'monitoring_available': MONITORING_AVAILABLE,
+                    'exceptions_available': EXCEPTIONS_AVAILABLE,
+                    'redis_config': redis_config,
+                    'has_flask_app': app is not None
+                }
+            )
+        else:
+            raise Exception(error_msg)
+
+
+def get_cache_extensions() -> Optional[Dict[str, Any]]:
+    """
+    Get initialized cache extensions for application access.
+    
+    Returns:
+        Dictionary containing cache extension instances or None if not initialized
+        
+    Example:
+        >>> cache_extensions = get_cache_extensions()
+        >>> if cache_extensions:
+        >>>     redis_client = cache_extensions['redis_client']
+        >>>     response_cache = cache_extensions['response_cache']
+    """
+    return _cache_extensions
+
+
+def get_default_redis_client() -> Optional[RedisClient]:
+    """
+    Get default Redis client instance for package-level access.
+    
+    Returns:
+        Default RedisClient instance or None if not initialized
+        
+    Example:
+        >>> redis_client = get_default_redis_client()
+        >>> if redis_client:
+        >>>     redis_client.set('key', 'value', ttl=300)
+    """
+    return _default_redis_client
+
+
+def get_default_response_cache() -> Optional[FlaskResponseCache]:
+    """
+    Get default response cache instance for package-level access.
+    
+    Returns:
+        Default FlaskResponseCache instance or None if not initialized
+        
+    Example:
+        >>> response_cache = get_default_response_cache()
+        >>> if response_cache:
+        >>>     stats = response_cache.get_cache_stats()
+    """
+    return _default_response_cache
+
+
+def cached_response(
+    ttl: Optional[int] = None,
+    policy: Union[str, CachePolicy] = CachePolicy.DYNAMIC,
+    key_prefix: str = 'cached_response',
+    tags: Optional[List[str]] = None,
+    vary_headers: Optional[List[str]] = None,
+    unless: Optional[Callable] = None
+):
+    """
+    Convenient decorator for Flask response caching with sensible defaults.
+    
+    This decorator provides easy response caching for Flask routes with automatic
+    cache key generation, TTL management, and policy-based configuration per
+    Section 5.2.7 response caching requirements.
+    
+    Args:
+        ttl: Cache timeout in seconds (uses configuration default if None)
+        policy: Cache policy (string or CachePolicy enum)
+        key_prefix: Prefix for cache key generation
+        tags: Tags for cache invalidation
+        vary_headers: Headers that affect cache variance
+        unless: Function to determine if caching should be skipped
+        
+    Returns:
+        Decorator function for Flask route caching
+        
+    Example:
+        >>> @app.route('/api/data')
+        >>> @cached_response(ttl=600, policy='public', tags=['api', 'data'])
+        >>> def get_data():
+        >>>     return jsonify({'data': 'cached_data'})
+    """
+    def decorator(func):
+        # Get response cache instance
+        response_cache = get_default_response_cache()
+        
+        if not response_cache:
+            logger.warning(
+                "Response cache not initialized, caching disabled for function",
+                function=func.__name__
+            )
+            return func
+        
+        # Convert string policy to enum
+        cache_policy = policy
+        if isinstance(policy, str):
+            try:
+                cache_policy = CachePolicy(policy.lower())
+            except ValueError:
+                logger.warning(f"Invalid cache policy '{policy}', using default")
+                cache_policy = CachePolicy.DYNAMIC
+        
+        # Use response cache decorator with configured parameters
+        return response_cache.cached(
+            timeout=ttl,
+            key_prefix=key_prefix,
+            unless=unless,
+            policy=cache_policy,
+            cache_tags=tags,
+            vary_headers=vary_headers
+        )(func)
+    
+    return decorator
+
+
+def invalidate_cache(
+    keys: Optional[Union[str, List[str]]] = None,
+    patterns: Optional[List[str]] = None,
+    tags: Optional[List[str]] = None,
+    strategy: Union[str, CacheInvalidationPattern] = CacheInvalidationPattern.IMMEDIATE
+) -> Dict[str, Any]:
+    """
+    Convenient function for cache invalidation with multiple strategies.
+    
+    Provides easy cache invalidation with support for key-based, pattern-based,
+    and tag-based invalidation strategies per Section 5.2.7 cache invalidation
+    and TTL management requirements.
+    
+    Args:
+        keys: Specific cache keys to invalidate
+        patterns: Key patterns for bulk invalidation
+        tags: Cache tags for tag-based invalidation
+        strategy: Invalidation strategy (string or enum)
+        
+    Returns:
+        Dictionary containing invalidation results
+        
+    Example:
+        >>> # Invalidate specific keys
+        >>> result = invalidate_cache(keys=['user:123:profile', 'session:abc'])
+        
+        >>> # Pattern-based invalidation
+        >>> result = invalidate_cache(patterns=['user:*:cache', 'api:*'])
+        
+        >>> # Tag-based invalidation
+        >>> result = invalidate_cache(tags=['user_data', 'api_cache'])
+    """
+    response_cache = get_default_response_cache()
+    
+    if not response_cache:
+        raise CacheError(
+            "Response cache not initialized, cannot perform invalidation",
+            error_code="CACHE_NOT_INITIALIZED"
+        )
+    
+    # Convert string strategy to enum
+    invalidation_strategy = strategy
+    if isinstance(strategy, str):
+        try:
+            invalidation_strategy = CacheInvalidationPattern(strategy.lower())
+        except ValueError:
+            logger.warning(f"Invalid invalidation strategy '{strategy}', using immediate")
+            invalidation_strategy = CacheInvalidationPattern.IMMEDIATE
+    
+    return response_cache.invalidate_cache(
+        keys=keys,
+        patterns=patterns,
+        tags=tags,
+        invalidation_pattern=invalidation_strategy
+    )
+
+
+def get_cache_health() -> Dict[str, Any]:
+    """
+    Get comprehensive cache health status for monitoring integration.
+    
+    Returns:
+        Dictionary containing cache health information across all components
+        
+    Example:
+        >>> health = get_cache_health()
+        >>> print(f"Redis healthy: {health['redis']['healthy']}")
+        >>> print(f"Response cache hit rate: {health['response_cache']['hit_rate']}")
+    """
+    health_status = {
+        'timestamp': None,
+        'overall_healthy': False,
+        'redis': {'healthy': False, 'details': {}},
+        'response_cache': {'healthy': False, 'details': {}},
+        'monitoring': {'available': MONITORING_AVAILABLE, 'details': {}},
+        'extensions': {'initialized': _cache_extensions is not None}
+    }
+    
+    try:
+        # Check Redis health
+        redis_client = get_default_redis_client()
+        if redis_client:
+            redis_healthy, redis_details = redis_client.health_check()
+            health_status['redis']['healthy'] = redis_healthy
+            health_status['redis']['details'] = redis_details
+        
+        # Check response cache health
+        response_cache = get_default_response_cache()
+        if response_cache:
+            try:
+                cache_stats = response_cache.get_cache_stats()
+                health_status['response_cache']['healthy'] = True
+                health_status['response_cache']['details'] = cache_stats
+            except Exception as e:
+                health_status['response_cache']['details'] = {'error': str(e)}
+        
+        # Check monitoring health
+        if _cache_extensions and _cache_extensions.get('monitoring_manager'):
+            try:
+                monitoring_manager = _cache_extensions['monitoring_manager']
+                health_monitor = _cache_extensions.get('health_monitor')
+                
+                if health_monitor:
+                    monitoring_healthy, monitoring_details = health_monitor.check_cache_health()
+                    health_status['monitoring']['available'] = True
+                    health_status['monitoring']['healthy'] = monitoring_healthy
+                    health_status['monitoring']['details'] = monitoring_details
+            except Exception as e:
+                health_status['monitoring']['details'] = {'error': str(e)}
+        
+        # Overall health assessment
+        health_status['overall_healthy'] = (
+            health_status['redis']['healthy'] and 
+            health_status['response_cache']['healthy'] and
+            health_status['extensions']['initialized']
+        )
+        
+        health_status['timestamp'] = health_status['redis']['details'].get('timestamp')
+        
+    except Exception as e:
+        logger.error(f"Cache health check failed: {e}")
+        health_status['error'] = str(e)
+    
+    return health_status
+
+
+def get_cache_stats() -> Dict[str, Any]:
+    """
+    Get comprehensive cache statistics for monitoring and optimization.
+    
+    Returns:
+        Dictionary containing performance metrics across all cache components
+        
+    Example:
+        >>> stats = get_cache_stats()
+        >>> print(f"Redis connections: {stats['redis']['connection_pool']['in_use_connections']}")
+        >>> print(f"Cache hit rate: {stats['response_cache']['hit_rate']}")
+    """
+    stats = {
+        'timestamp': None,
+        'package_info': {
+            'version': __version__,
+            'monitoring_available': MONITORING_AVAILABLE,
+            'exceptions_available': EXCEPTIONS_AVAILABLE,
+            'extensions_initialized': _cache_extensions is not None
+        },
+        'redis': {},
+        'response_cache': {},
+        'strategies': {}
+    }
+    
+    try:
+        # Get Redis statistics
+        redis_client = get_default_redis_client()
+        if redis_client:
+            stats['redis'] = redis_client.get_stats()
+        
+        # Get response cache statistics
+        response_cache = get_default_response_cache()
+        if response_cache:
+            stats['response_cache'] = response_cache.get_cache_stats()
+        
+        # Get strategy statistics
+        if _cache_extensions:
+            for strategy_name in ['invalidation_strategy', 'ttl_strategy', 'key_pattern_manager']:
+                strategy = _cache_extensions.get(strategy_name)
+                if strategy and hasattr(strategy, 'get_metrics_summary'):
+                    stats['strategies'][strategy_name] = strategy.get_metrics_summary()
+        
+        # Set overall timestamp
+        stats['timestamp'] = (
+            stats['redis'].get('timestamp') or 
+            stats['response_cache'].get('timestamp')
+        )
+        
+    except Exception as e:
+        logger.error(f"Cache statistics collection failed: {e}")
+        stats['error'] = str(e)
+    
+    return stats
+
+
+def cleanup_cache_resources():
+    """
+    Clean up cache resources for application shutdown.
+    
+    Properly closes Redis connections, clears cache instances, and releases
+    resources for graceful application shutdown per enterprise deployment
+    requirements.
+    
+    Example:
+        >>> # During application shutdown
+        >>> cleanup_cache_resources()
+    """
+    global _cache_extensions, _default_redis_client, _default_response_cache
+    
+    try:
+        # Close Redis client connections
+        if _default_redis_client:
+            _default_redis_client.close()
+            _default_redis_client = None
+        
+        # Close global Redis client
+        try:
+            close_redis_client()
+        except Exception as e:
+            logger.warning(f"Error closing global Redis client: {e}")
+        
+        # Clear cache extensions
+        if _cache_extensions:
+            # Close monitoring if available
+            monitoring_manager = _cache_extensions.get('monitoring_manager')
+            if monitoring_manager and hasattr(monitoring_manager, 'close'):
+                try:
+                    monitoring_manager.close()
+                except Exception as e:
+                    logger.warning(f"Error closing monitoring manager: {e}")
+            
+            _cache_extensions = None
+        
+        # Clear response cache reference
+        _default_response_cache = None
+        
+        logger.info("Cache resources cleaned up successfully")
+        
+    except Exception as e:
+        logger.error(f"Cache resource cleanup failed: {e}")
+
+
+# Export comprehensive public API for cache package
+__all__ = [
+    # Package metadata
+    '__version__',
+    '__author__',
+    '__description__',
+    
+    # Core Redis client components
+    'RedisConnectionManager',
+    'RedisClient',
+    'create_redis_client',
+    'init_redis_client',
+    'get_redis_client',
+    'close_redis_client',
+    
+    # Flask response cache components
+    'FlaskResponseCache',
+    'CacheConfiguration',
+    'CachePolicy',
+    'CompressionType',
+    'CachedResponse',
+    'ResponseCacheMetrics',
+    'create_response_cache',
+    'get_response_cache',
+    'init_response_cache',
+    
+    # Cache strategy components
+    'CacheInvalidationPattern',
     'TTLPolicy',
+    'CacheWarmingStrategy',
     'CacheKeyPattern',
     'TTLConfiguration',
-    'CacheEntry',
-    'cache_strategies',
-    'invalidate_by_pattern',
-    'invalidate_by_dependency',
-    'create_cache_key',
-    'schedule_warming_by_priority',
+    'CacheStrategyMetrics',
+    'BaseCacheStrategy',
+    'CacheInvalidationStrategy',
+    'TTLManagementStrategy',
+    'CacheKeyPatternManager',
     
-    # Exception handling
+    # Monitoring components (available if imported successfully)
+    'CacheMonitoringManager',
+    'CacheHealthMonitor',
+    'monitor_cache_operation',
+    'track_cache_hit_miss',
+    
+    # Exception components (available if imported successfully)
     'CacheError',
-    'CacheConnectionError',
-    'CacheTimeoutError',
-    'CacheCircuitBreakerError',
+    'RedisConnectionError',
+    'CacheOperationTimeoutError',
+    'CacheInvalidationError',
+    'CircuitBreakerOpenError',
+    'CacheKeyError',
     'CacheSerializationError',
     'CachePoolExhaustedError',
-    'CacheMemoryError',
-    'CacheOperationError',
-    'CacheKeyError',
-    'CacheInvalidationError',
+    'handle_redis_exception',
     
-    # Monitoring and observability
-    'CacheMonitor',
-    'cache_monitor',
-    'monitor_cache_operation',
-    'get_cache_metrics',
-    'generate_cache_health_report',
+    # Package-level integration functions
+    'init_cache_extensions',
+    'get_cache_extensions',
+    'get_default_redis_client',
+    'get_default_response_cache',
+    'cached_response',
+    'invalidate_cache',
+    'get_cache_health',
+    'get_cache_stats',
+    'cleanup_cache_resources',
     
-    # Convenience functions
-    'cache_get',
-    'cache_set',
-    'cache_delete',
-    'cache_invalidate_pattern',
-    
-    # Package metadata
-    '__version__'
+    # Package status flags
+    'MONITORING_AVAILABLE',
+    'EXCEPTIONS_AVAILABLE'
 ]
-
-# Log package initialization
-logger.info(
-    "cache_package_loaded",
-    version=__version__,
-    components_exported=len(__all__),
-    redis_client_available=bool(_redis_client),
-    response_cache_available=bool(_response_cache),
-    cache_initialized=_cache_initialized
-)
