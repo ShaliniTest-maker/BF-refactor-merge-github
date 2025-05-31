@@ -1,2260 +1,2387 @@
 """
-Comprehensive Security Audit Automation for Enterprise Compliance
+Comprehensive Security Audit Automation Module
 
-This module implements enterprise-grade security audit automation with comprehensive
-compliance validation, regulatory testing, automated audit trail generation, and
-comprehensive security posture assessment per Section 6.4.6 requirements.
+This module implements enterprise-grade security audit automation for Flask application 
+security validation, providing comprehensive compliance validation, security posture 
+assessment, and regulatory compliance testing with automated audit trail generation 
+as specified in Section 6.4.6 of the technical specification.
 
 Key Features:
-- SOC 2 Type II compliance validation and automated audit trail generation
-- ISO 27001 security management system compliance testing and reporting
-- PCI DSS payment security standards validation and assessment
-- GDPR data protection compliance verification and privacy controls testing
-- OWASP Top 10 vulnerability assessment with comprehensive attack simulation
-- Automated security posture monitoring with real-time threat assessment
-- Comprehensive compliance dashboard integration with executive reporting
-- Enterprise security metrics collection and trend analysis
-- Automated penetration testing with vulnerability management integration
-- Security threshold validation with automated remediation recommendations
+- Comprehensive security audit automation for enterprise compliance per Section 6.4.6
+- Regulatory compliance validation (SOC 2, ISO 27001, PCI DSS) per Section 6.4.6
+- Automated audit trail generation for compliance verification per Section 6.4.6
+- Security posture monitoring and assessment per Section 6.4.6
+- Real-time security monitoring with Prometheus metrics integration
+- Enterprise compliance dashboard integration per Section 6.4.6
+- Automated penetration testing with OWASP compliance validation
+- Comprehensive security reporting with executive dashboard integration
 
-Compliance Frameworks Supported:
-- SOC 2 Type II: Security, Availability, Processing Integrity, Confidentiality, Privacy
-- ISO 27001: Information Security Management System controls and processes
-- PCI DSS: Payment Card Industry Data Security Standards compliance
-- GDPR: General Data Protection Regulation privacy and data protection
-- NIST Cybersecurity Framework: Identify, Protect, Detect, Respond, Recover
-- CIS Controls: Center for Internet Security Critical Controls
-- SANS Top 25: Most Dangerous Software Weaknesses
+Architecture Integration:
+- Section 6.4.6: Comprehensive enterprise compliance requirements and audit frameworks
+- Section 6.4.5: Security Controls Matrix with automated vulnerability scanning
+- Section 6.6.1: Security testing approach with pytest framework integration
+- Section 6.6.3: Quality metrics with security coverage enforcement
+- Section 3.6: Monitoring & Observability with Prometheus metrics collection
+- Integration with tests/security/conftest.py for security testing fixtures
+- Integration with tests/security/security_config.py for security configurations
+- Integration with src/auth/audit.py for enterprise audit logging
 
-Security Testing Integration:
-- Automated vulnerability scanning with Bandit 1.7+ and Safety 3.0+
-- Dynamic application security testing with OWASP ZAP 2.14+ and Nuclei 3.1+
-- Container security validation with Trivy 0.48+ and Snyk Container
-- Static application security testing with Semgrep 1.45+ and CodeQL
-- Comprehensive penetration testing automation with attack simulation
-- Real-time security metrics collection with Prometheus integration
-- Comprehensive audit logging with structlog JSON formatting
+Security Testing Coverage:
+- Authentication security (JWT validation, Auth0 integration, session management)
+- Authorization security (RBAC, permissions, resource access control)
+- Input validation security (XSS prevention, injection attacks, data sanitization)
+- Session security (Flask-Session with Redis, encryption, secure cookies)
+- Transport security (HTTPS/TLS enforcement, security headers, CORS)
+- Infrastructure security (container scanning, dependency validation)
+- API security (rate limiting, versioning, swagger security)
+- Data protection (encryption, PII handling, GDPR compliance)
 
-Dependencies:
-- pytest 7.4+: Primary testing framework with security-focused configuration
-- pytest-asyncio: Asynchronous security testing capabilities
-- structlog 23.1+: Structured JSON logging for SIEM integration
-- prometheus_client 0.17+: Security metrics collection and monitoring
-- requests 2.31+: HTTP client for security testing and API validation
-- cryptography 41.0+: Cryptographic security validation and testing
-- boto3 1.28+: AWS service security integration and validation
-- pydantic 2.3+: Data validation and security model enforcement
+Compliance Frameworks:
+- SOC 2 Type II: Comprehensive audit trail and security control validation
+- ISO 27001: Information security management system compliance
+- PCI DSS: Payment card industry security standards validation
+- GDPR: Data protection and privacy compliance verification
+- OWASP Top 10: Web application security vulnerability assessment
+- NIST Cybersecurity Framework: Risk management and security control alignment
 
-Author: Flask Security Team
+Performance Requirements:
+- Security audit execution: ≤30 minutes for comprehensive audit
+- Compliance validation: ≤10 minutes for framework validation
+- Report generation: ≤5 minutes for executive dashboard updates
+- Real-time monitoring: ≤1 second latency for security event correlation
+
+Author: Flask Migration Team
 Version: 1.0.0
-Compliance: SOC 2, ISO 27001, PCI DSS, GDPR, OWASP Top 10, NIST Framework
+Dependencies: pytest 7.4+, pytest-mock, bandit 1.7+, safety 3.0+, owasp-zap-api 0.0.21+
 """
 
 import asyncio
+import csv
 import json
+import logging
 import os
-import secrets
 import subprocess
 import tempfile
 import time
 import uuid
-from datetime import datetime, timezone, timedelta
-from pathlib import Path
-from typing import Dict, Any, List, Optional, Union, Tuple, Callable, Set
-from dataclasses import dataclass, field
+from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from contextlib import contextmanager
+from dataclasses import dataclass, field, asdict
+from datetime import datetime, timedelta, timezone
 from enum import Enum
-from unittest.mock import Mock, patch
-import logging
-import concurrent.futures
-from contextlib import asynccontextmanager
-import hashlib
-import base64
+from pathlib import Path
+from threading import Lock, Thread
+from typing import Any, Dict, List, Optional, Tuple, Union, Callable, Generator
+from urllib.parse import urlparse
 
 import pytest
-import pytest_asyncio
-import structlog
-from prometheus_client import Counter, Histogram, Gauge, Enum as PrometheusEnum
 import requests
 from flask import Flask
 from flask.testing import FlaskClient
-import boto3
-from botocore.exceptions import ClientError
-from cryptography.fernet import Fernet
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from pydantic import BaseModel, ValidationError
-import redis
-from dateutil import parser as dateutil_parser
+from prometheus_client import CollectorRegistry, Counter, Histogram, Gauge, Enum as PrometheusEnum
 
-# Import project dependencies
+# Import security testing framework dependencies
 from tests.security.conftest import (
-    SecurityTestConfig, SecurityMonitor, AttackSimulator, TalismanValidator,
-    Auth0SecurityMock, RateLimiterAttackSimulator, OWASPAttackPayloads,
-    SecurityMetricsCollector, PenetrationTestSuite, AsyncSecurityValidator,
-    SecurityTestDataFactory, security_config, security_test_environment,
-    flask_talisman_validator, auth0_security_mock, rate_limiter_attack_simulator,
-    owasp_attack_payloads, security_metrics_collector, penetration_test_suite,
-    async_security_validator, security_test_data_factory
+    SecurityTestConfig,
+    SecurityPayloads, 
+    SecurityAuditLogger as TestAuditLogger,
+    MockAuth0SecurityService,
+    SecurityValidationTools,
+    MockAttackScenarios,
+    SecurityPerformanceMonitor,
+    comprehensive_security_environment
 )
+
 from tests.security.security_config import (
-    SecurityTestConfiguration, SecurityTestRunner, SecurityTestResult,
-    PenetrationTestConfig, SecurityTestSeverity, AttackType, ComplianceFramework,
-    get_security_config, create_security_test_runner, security_config as config_instance
+    SecurityTestOrchestrator,
+    BanditSecurityScanner,
+    SafetyDependencyScanner,
+    OWASPZAPScanner,
+    PenetrationTestRunner,
+    ComplianceValidator,
+    SecurityTestLevel,
+    VulnerabilitySeverity,
+    AttackCategory
 )
+
+# Import enterprise audit logging
 from src.auth.audit import (
-    SecurityEventType, SecurityEventSeverity, SecurityEventContext,
-    SecurityAuditLogger, get_audit_logger, configure_audit_logger,
-    audit_security_event, audit_exception, audit_endpoint
+    SecurityAuditLogger,
+    SecurityAuditConfig,
+    SecurityAuditMetrics,
+    SecurityEventType,
+    PIISanitizer,
+    init_security_audit
 )
 
-# Configure security audit logging
-configure_audit_logger(
-    logger_name="security.audit.automation",
-    enable_metrics=True,
-    correlation_header="X-Security-Audit-ID"
-)
-audit_logger = get_audit_logger()
-
-# Initialize structured logger for security audit automation
-security_logger = structlog.get_logger("security.audit.automation")
-
-# Prometheus metrics for security audit automation
-audit_metrics = {
-    'compliance_scans_total': Counter(
-        'security_compliance_scans_total',
-        'Total compliance scans executed',
-        ['framework', 'result', 'environment']
-    ),
-    'vulnerability_findings_total': Counter(
-        'security_vulnerability_findings_total',
-        'Total vulnerability findings by severity',
-        ['severity', 'category', 'scanner']
-    ),
-    'audit_execution_duration': Histogram(
-        'security_audit_execution_duration_seconds',
-        'Security audit execution duration',
-        ['audit_type', 'scope', 'compliance_framework']
-    ),
-    'compliance_score': Gauge(
-        'security_compliance_score',
-        'Current compliance score by framework',
-        ['framework', 'domain', 'control_category']
-    ),
-    'security_posture_score': Gauge(
-        'security_posture_score',
-        'Overall security posture score',
-        ['assessment_type', 'time_period']
-    ),
-    'audit_trail_events_total': Counter(
-        'security_audit_trail_events_total',
-        'Total audit trail events generated',
-        ['event_type', 'criticality', 'compliance_framework']
-    ),
-    'remediation_recommendations_total': Counter(
-        'security_remediation_recommendations_total',
-        'Total remediation recommendations generated',
-        ['priority', 'category', 'automation_available']
-    )
-}
+# Configure module logger
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
-class ComplianceStatus(Enum):
-    """Compliance status enumeration for audit results."""
-    COMPLIANT = "compliant"
-    NON_COMPLIANT = "non_compliant"
-    PARTIALLY_COMPLIANT = "partially_compliant"
-    NOT_ASSESSED = "not_assessed"
-    REQUIRES_REVIEW = "requires_review"
+class ComplianceFramework(Enum):
+    """Enterprise compliance framework definitions for audit automation."""
+    
+    SOC2_TYPE2 = "soc2_type2"
+    ISO_27001 = "iso_27001"
+    PCI_DSS = "pci_dss"
+    GDPR = "gdpr"
+    OWASP_TOP_10 = "owasp_top_10"
+    NIST_CSF = "nist_csf"
+    HIPAA = "hipaa"
+    SOX = "sox"
 
 
 class AuditSeverity(Enum):
-    """Audit finding severity levels for enterprise compliance."""
+    """Security audit finding severity levels for risk assessment."""
+    
     CRITICAL = "critical"
     HIGH = "high"
     MEDIUM = "medium"
     LOW = "low"
-    INFORMATIONAL = "informational"
+    INFO = "info"
 
 
-class RemediationPriority(Enum):
-    """Remediation priority levels for security findings."""
-    IMMEDIATE = "immediate"
-    URGENT = "urgent"
-    HIGH = "high"
-    MEDIUM = "medium"
-    LOW = "low"
+class AuditStatus(Enum):
+    """Security audit execution status tracking."""
+    
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 @dataclass
-class ComplianceAssessment:
+class SecurityFinding:
     """
-    Comprehensive compliance assessment result with detailed findings and recommendations.
+    Comprehensive security finding data structure for audit trail and compliance reporting.
     
-    This dataclass provides structured compliance assessment information for:
-    - Enterprise compliance reporting and executive dashboards
-    - Regulatory audit evidence collection and documentation
-    - Automated remediation planning and tracking
-    - Risk management and control effectiveness assessment
+    This class provides standardized security finding representation with enterprise-grade
+    metadata and compliance tracking capabilities for comprehensive audit documentation.
     """
     
-    assessment_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    framework: ComplianceFramework = ComplianceFramework.SOC2_TYPE2
-    assessment_date: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    scope: str = "full_system"
-    compliance_status: ComplianceStatus = ComplianceStatus.NOT_ASSESSED
-    overall_score: float = 0.0
-    control_assessments: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    findings: List[Dict[str, Any]] = field(default_factory=list)
-    recommendations: List[Dict[str, Any]] = field(default_factory=list)
-    evidence_artifacts: List[str] = field(default_factory=list)
-    assessor_details: Dict[str, str] = field(default_factory=dict)
-    next_assessment_date: Optional[datetime] = None
-    executive_summary: str = ""
-    risk_rating: str = "medium"
-    remediation_timeline: Optional[datetime] = None
+    finding_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    title: str = ""
+    description: str = ""
+    severity: AuditSeverity = AuditSeverity.INFO
+    category: str = ""
+    cwe_id: Optional[str] = None
+    owasp_category: Optional[str] = None
+    compliance_frameworks: List[ComplianceFramework] = field(default_factory=list)
+    affected_components: List[str] = field(default_factory=list)
+    evidence: Dict[str, Any] = field(default_factory=dict)
+    remediation: str = ""
+    remediation_effort: str = "medium"  # low, medium, high
+    business_impact: str = ""
+    technical_impact: str = ""
+    likelihood: str = "medium"  # low, medium, high
+    cvss_score: Optional[float] = None
+    discovered_date: datetime = field(default_factory=datetime.utcnow)
+    last_seen_date: datetime = field(default_factory=datetime.utcnow)
+    status: str = "open"  # open, remediated, accepted, false_positive
+    assigned_to: Optional[str] = None
+    source_scanner: str = ""
+    source_test: str = ""
+    references: List[str] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
     
     def to_dict(self) -> Dict[str, Any]:
-        """Convert assessment to dictionary for JSON serialization."""
-        return {
-            'assessment_id': self.assessment_id,
-            'framework': self.framework.value,
-            'assessment_date': self.assessment_date.isoformat(),
-            'scope': self.scope,
-            'compliance_status': self.compliance_status.value,
-            'overall_score': self.overall_score,
-            'control_assessments': self.control_assessments,
-            'findings': self.findings,
-            'recommendations': self.recommendations,
-            'evidence_artifacts': self.evidence_artifacts,
-            'assessor_details': self.assessor_details,
-            'next_assessment_date': self.next_assessment_date.isoformat() if self.next_assessment_date else None,
-            'executive_summary': self.executive_summary,
-            'risk_rating': self.risk_rating,
-            'remediation_timeline': self.remediation_timeline.isoformat() if self.remediation_timeline else None
+        """Convert finding to dictionary for JSON serialization."""
+        data = asdict(self)
+        data['severity'] = self.severity.value
+        data['compliance_frameworks'] = [f.value for f in self.compliance_frameworks]
+        data['discovered_date'] = self.discovered_date.isoformat()
+        data['last_seen_date'] = self.last_seen_date.isoformat()
+        return data
+    
+    def calculate_risk_score(self) -> float:
+        """
+        Calculate comprehensive risk score based on CVSS, likelihood, and business impact.
+        
+        Returns:
+            Risk score from 0.0 to 10.0
+        """
+        # Base score from CVSS if available
+        base_score = self.cvss_score or self._severity_to_score()
+        
+        # Likelihood multiplier
+        likelihood_multiplier = {
+            'low': 0.3,
+            'medium': 0.6,
+            'high': 1.0
+        }.get(self.likelihood.lower(), 0.6)
+        
+        # Business impact multiplier
+        business_multiplier = 1.0
+        if 'critical' in self.business_impact.lower():
+            business_multiplier = 1.3
+        elif 'high' in self.business_impact.lower():
+            business_multiplier = 1.1
+        elif 'low' in self.business_impact.lower():
+            business_multiplier = 0.8
+        
+        risk_score = base_score * likelihood_multiplier * business_multiplier
+        return min(10.0, max(0.0, risk_score))
+    
+    def _severity_to_score(self) -> float:
+        """Convert severity to numerical score."""
+        severity_scores = {
+            AuditSeverity.CRITICAL: 9.0,
+            AuditSeverity.HIGH: 7.5,
+            AuditSeverity.MEDIUM: 5.0,
+            AuditSeverity.LOW: 2.5,
+            AuditSeverity.INFO: 0.5
         }
+        return severity_scores.get(self.severity, 5.0)
 
 
 @dataclass
-class SecurityPostureAssessment:
+class ComplianceResult:
     """
-    Comprehensive security posture assessment with threat landscape analysis.
+    Comprehensive compliance validation result for regulatory framework assessment.
     
-    Provides structured security posture information for:
-    - Real-time security monitoring and alerting
-    - Threat intelligence integration and analysis
-    - Security metrics trending and baseline comparison
-    - Executive security dashboard and reporting
+    This class provides detailed compliance status tracking with control mapping,
+    gap analysis, and remediation planning for enterprise compliance management.
     """
     
-    assessment_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    assessment_timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    framework: ComplianceFramework
+    overall_score: float = 0.0
+    max_possible_score: float = 100.0
+    compliance_percentage: float = 0.0
+    status: str = "non_compliant"  # compliant, partially_compliant, non_compliant
+    control_results: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    gaps_identified: List[str] = field(default_factory=list)
+    recommendations: List[str] = field(default_factory=list)
+    findings_count: Dict[str, int] = field(default_factory=dict)
+    assessment_date: datetime = field(default_factory=datetime.utcnow)
+    next_assessment_due: datetime = field(default_factory=lambda: datetime.utcnow() + timedelta(days=365))
+    assessor: str = "automated_audit_system"
+    evidence_links: List[str] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    
+    def __post_init__(self):
+        """Calculate compliance percentage and status after initialization."""
+        if self.max_possible_score > 0:
+            self.compliance_percentage = (self.overall_score / self.max_possible_score) * 100
+        
+        # Determine compliance status based on percentage
+        if self.compliance_percentage >= 95:
+            self.status = "compliant"
+        elif self.compliance_percentage >= 70:
+            self.status = "partially_compliant"
+        else:
+            self.status = "non_compliant"
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert compliance result to dictionary for JSON serialization."""
+        data = asdict(self)
+        data['framework'] = self.framework.value
+        data['assessment_date'] = self.assessment_date.isoformat()
+        data['next_assessment_due'] = self.next_assessment_due.isoformat()
+        return data
+
+
+@dataclass
+class SecurityAuditReport:
+    """
+    Comprehensive security audit report with executive summary and detailed findings.
+    
+    This class provides enterprise-grade audit reporting with compliance dashboards,
+    executive summaries, and detailed technical findings for stakeholder communication.
+    """
+    
+    report_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    audit_name: str = "Comprehensive Security Audit"
+    audit_scope: str = "Full Application Security Assessment"
+    execution_date: datetime = field(default_factory=datetime.utcnow)
+    completion_date: Optional[datetime] = None
+    duration_minutes: float = 0.0
+    auditor: str = "Automated Security Audit System"
+    
+    # Executive Summary
     overall_security_score: float = 0.0
-    threat_level: str = "medium"
-    vulnerability_summary: Dict[str, int] = field(default_factory=dict)
-    control_effectiveness: Dict[str, float] = field(default_factory=dict)
-    security_metrics: Dict[str, Any] = field(default_factory=dict)
-    threat_indicators: List[Dict[str, Any]] = field(default_factory=list)
-    security_trends: Dict[str, List[float]] = field(default_factory=dict)
-    recommendations: List[Dict[str, Any]] = field(default_factory=list)
-    baseline_comparison: Dict[str, Any] = field(default_factory=dict)
-    executive_summary: str = ""
-    next_assessment: Optional[datetime] = None
+    risk_level: str = "medium"  # low, medium, high, critical
+    compliance_status: str = "partially_compliant"
     
-    def calculate_risk_score(self) -> float:
-        """Calculate composite risk score based on assessment data."""
-        threat_weights = {
-            "critical": 1.0,
-            "high": 0.8,
-            "medium": 0.5,
-            "low": 0.2
+    # Findings Summary
+    total_findings: int = 0
+    critical_findings: int = 0
+    high_findings: int = 0
+    medium_findings: int = 0
+    low_findings: int = 0
+    info_findings: int = 0
+    
+    # Detailed Results
+    findings: List[SecurityFinding] = field(default_factory=list)
+    compliance_results: Dict[str, ComplianceResult] = field(default_factory=dict)
+    security_metrics: Dict[str, Any] = field(default_factory=dict)
+    performance_metrics: Dict[str, Any] = field(default_factory=dict)
+    
+    # Remediation Planning
+    immediate_actions: List[str] = field(default_factory=list)
+    short_term_actions: List[str] = field(default_factory=list)
+    long_term_actions: List[str] = field(default_factory=list)
+    estimated_remediation_effort: str = "medium"
+    
+    # Quality Assurance
+    test_coverage: float = 0.0
+    automated_tests_passed: int = 0
+    automated_tests_failed: int = 0
+    manual_verification_required: List[str] = field(default_factory=list)
+    
+    # Metadata
+    audit_configuration: Dict[str, Any] = field(default_factory=dict)
+    environment_details: Dict[str, Any] = field(default_factory=dict)
+    tool_versions: Dict[str, str] = field(default_factory=dict)
+    
+    def __post_init__(self):
+        """Calculate derived metrics after initialization."""
+        self._calculate_findings_summary()
+        self._calculate_risk_level()
+        self._calculate_security_score()
+    
+    def _calculate_findings_summary(self):
+        """Calculate findings summary statistics."""
+        self.total_findings = len(self.findings)
+        
+        severity_counts = defaultdict(int)
+        for finding in self.findings:
+            severity_counts[finding.severity] += 1
+        
+        self.critical_findings = severity_counts[AuditSeverity.CRITICAL]
+        self.high_findings = severity_counts[AuditSeverity.HIGH]
+        self.medium_findings = severity_counts[AuditSeverity.MEDIUM]
+        self.low_findings = severity_counts[AuditSeverity.LOW]
+        self.info_findings = severity_counts[AuditSeverity.INFO]
+    
+    def _calculate_risk_level(self):
+        """Calculate overall risk level based on findings severity."""
+        if self.critical_findings > 0:
+            self.risk_level = "critical"
+        elif self.high_findings > 0:
+            self.risk_level = "high"
+        elif self.medium_findings > 3:  # Multiple medium findings = high risk
+            self.risk_level = "high"
+        elif self.medium_findings > 0 or self.low_findings > 5:
+            self.risk_level = "medium"
+        else:
+            self.risk_level = "low"
+    
+    def _calculate_security_score(self):
+        """Calculate overall security score (0-100)."""
+        base_score = 100.0
+        
+        # Deduct points based on findings severity
+        penalties = {
+            AuditSeverity.CRITICAL: 25.0,
+            AuditSeverity.HIGH: 15.0,
+            AuditSeverity.MEDIUM: 8.0,
+            AuditSeverity.LOW: 3.0,
+            AuditSeverity.INFO: 1.0
         }
         
-        vulnerability_risk = sum(
-            count * threat_weights.get(severity, 0.5)
-            for severity, count in self.vulnerability_summary.items()
-        )
+        total_penalty = 0.0
+        for finding in self.findings:
+            total_penalty += penalties.get(finding.severity, 0.0)
         
-        control_risk = 100 - (
-            sum(self.control_effectiveness.values()) / 
-            len(self.control_effectiveness) if self.control_effectiveness else 0
-        )
+        # Factor in compliance scores
+        if self.compliance_results:
+            avg_compliance = sum(
+                result.compliance_percentage 
+                for result in self.compliance_results.values()
+            ) / len(self.compliance_results)
+            base_score = (base_score * 0.7) + (avg_compliance * 0.3)
         
-        return min(100.0, (vulnerability_risk * 0.6) + (control_risk * 0.4))
+        self.overall_security_score = max(0.0, min(100.0, base_score - total_penalty))
+    
+    def get_executive_summary(self) -> Dict[str, Any]:
+        """Generate executive summary for stakeholder communication."""
+        return {
+            'audit_overview': {
+                'report_id': self.report_id,
+                'audit_name': self.audit_name,
+                'execution_date': self.execution_date.strftime('%Y-%m-%d'),
+                'duration_hours': round(self.duration_minutes / 60, 2),
+                'scope': self.audit_scope
+            },
+            'security_posture': {
+                'overall_score': round(self.overall_security_score, 1),
+                'risk_level': self.risk_level,
+                'compliance_status': self.compliance_status,
+                'improvement_trend': 'stable'  # Would track over time
+            },
+            'key_findings': {
+                'total_findings': self.total_findings,
+                'critical_issues': self.critical_findings,
+                'high_priority_issues': self.high_findings,
+                'requires_immediate_attention': self.critical_findings + self.high_findings
+            },
+            'compliance_overview': {
+                'frameworks_assessed': len(self.compliance_results),
+                'fully_compliant': sum(
+                    1 for result in self.compliance_results.values() 
+                    if result.status == 'compliant'
+                ),
+                'compliance_gaps': sum(
+                    len(result.gaps_identified) 
+                    for result in self.compliance_results.values()
+                )
+            },
+            'recommended_actions': {
+                'immediate': len(self.immediate_actions),
+                'short_term': len(self.short_term_actions),
+                'long_term': len(self.long_term_actions),
+                'estimated_effort': self.estimated_remediation_effort
+            }
+        }
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert audit report to dictionary for JSON serialization."""
+        data = asdict(self)
+        data['execution_date'] = self.execution_date.isoformat()
+        if self.completion_date:
+            data['completion_date'] = self.completion_date.isoformat()
+        data['findings'] = [finding.to_dict() for finding in self.findings]
+        data['compliance_results'] = {
+            name: result.to_dict() 
+            for name, result in self.compliance_results.items()
+        }
+        return data
 
 
-class SecurityAuditEngine:
+class SecurityAuditMetrics:
     """
-    Comprehensive Security Audit Engine for Enterprise Compliance Validation.
+    Comprehensive Prometheus metrics for security audit monitoring and observability.
     
-    This class provides enterprise-grade security audit capabilities with:
-    - Automated compliance framework validation and reporting
-    - Comprehensive vulnerability assessment and penetration testing
-    - Real-time security posture monitoring and threat assessment
-    - Automated audit trail generation and evidence collection
-    - Executive dashboard integration and compliance reporting
-    - Remediation planning and security improvement recommendations
+    This class provides enterprise-grade metrics collection for security audit execution,
+    compliance validation, and security posture monitoring with dashboard integration.
+    """
     
-    Compliance Frameworks Supported:
-    - SOC 2 Type II: Complete security control assessment and audit trail
-    - ISO 27001: Information security management system validation
-    - PCI DSS: Payment security standards compliance testing
-    - GDPR: Data protection and privacy compliance verification
-    - NIST Cybersecurity Framework: Comprehensive cybersecurity assessment
-    - CIS Controls: Critical security controls validation
-    - OWASP Top 10: Web application security vulnerability assessment
-    
-    Key Features:
-    - Automated vulnerability scanning with industry-standard tools
-    - Dynamic application security testing with comprehensive attack simulation
-    - Compliance control validation with evidence collection
-    - Real-time security metrics and threat intelligence integration
-    - Executive reporting with risk assessment and remediation planning
-    - Integration with security operations center (SOC) workflows
-    
-    Example:
-        audit_engine = SecurityAuditEngine()
+    def __init__(self, registry: Optional[CollectorRegistry] = None):
+        """Initialize security audit metrics with optional custom registry."""
+        self.registry = registry or CollectorRegistry()
         
-        # Execute comprehensive compliance audit
-        assessment = await audit_engine.execute_compliance_audit(
-            framework=ComplianceFramework.SOC2_TYPE2,
-            scope="production_environment"
+        # Audit Execution Metrics
+        self.audit_executions_total = Counter(
+            'security_audit_executions_total',
+            'Total number of security audit executions',
+            ['audit_type', 'status', 'trigger'],
+            registry=self.registry
         )
         
-        # Generate security posture report
-        posture = await audit_engine.assess_security_posture()
+        self.audit_duration_seconds = Histogram(
+            'security_audit_duration_seconds',
+            'Security audit execution duration',
+            ['audit_type', 'scope'],
+            buckets=[60, 300, 600, 1200, 1800, 3600, 7200],
+            registry=self.registry
+        )
         
-        # Create executive dashboard report
-        dashboard_data = audit_engine.generate_executive_dashboard()
+        # Security Findings Metrics
+        self.security_findings_total = Counter(
+            'security_findings_total',
+            'Total security findings by severity and category',
+            ['severity', 'category', 'scanner', 'compliance_framework'],
+            registry=self.registry
+        )
+        
+        self.security_score_gauge = Gauge(
+            'security_score',
+            'Overall security score (0-100)',
+            ['application', 'environment'],
+            registry=self.registry
+        )
+        
+        self.risk_level_enum = PrometheusEnum(
+            'security_risk_level',
+            'Current security risk level',
+            ['application'],
+            states=['low', 'medium', 'high', 'critical'],
+            registry=self.registry
+        )
+        
+        # Compliance Metrics
+        self.compliance_score_gauge = Gauge(
+            'compliance_framework_score',
+            'Compliance framework score percentage',
+            ['framework', 'environment'],
+            registry=self.registry
+        )
+        
+        self.compliance_status_enum = PrometheusEnum(
+            'compliance_framework_status',
+            'Compliance framework status',
+            ['framework'],
+            states=['compliant', 'partially_compliant', 'non_compliant'],
+            registry=self.registry
+        )
+        
+        self.compliance_gaps_total = Counter(
+            'compliance_gaps_total',
+            'Total compliance gaps identified',
+            ['framework', 'control_category', 'severity'],
+            registry=self.registry
+        )
+        
+        # Vulnerability Metrics
+        self.vulnerabilities_by_severity = Gauge(
+            'vulnerabilities_by_severity',
+            'Current vulnerabilities by severity level',
+            ['severity', 'category'],
+            registry=self.registry
+        )
+        
+        self.vulnerability_age_histogram = Histogram(
+            'vulnerability_age_days',
+            'Age of vulnerabilities in days',
+            ['severity'],
+            buckets=[1, 7, 14, 30, 60, 90, 180, 365],
+            registry=self.registry
+        )
+        
+        # Security Test Coverage Metrics
+        self.test_coverage_percentage = Gauge(
+            'security_test_coverage_percentage',
+            'Security test coverage percentage',
+            ['test_category', 'environment'],
+            registry=self.registry
+        )
+        
+        self.automated_tests_total = Counter(
+            'security_automated_tests_total',
+            'Total automated security tests executed',
+            ['test_type', 'result'],
+            registry=self.registry
+        )
+        
+        # Performance Metrics
+        self.scanner_performance_seconds = Histogram(
+            'security_scanner_performance_seconds',
+            'Security scanner execution time',
+            ['scanner', 'scan_type'],
+            buckets=[10, 30, 60, 300, 600, 1200, 1800],
+            registry=self.registry
+        )
+        
+        self.audit_memory_usage_bytes = Gauge(
+            'security_audit_memory_usage_bytes',
+            'Memory usage during security audit',
+            registry=self.registry
+        )
+        
+        # Remediation Metrics
+        self.remediation_efforts_histogram = Histogram(
+            'security_remediation_effort_hours',
+            'Estimated remediation effort in hours',
+            ['finding_severity', 'category'],
+            buckets=[1, 4, 8, 16, 40, 80, 160],
+            registry=self.registry
+        )
+        
+        self.findings_remediated_total = Counter(
+            'security_findings_remediated_total',
+            'Total security findings remediated',
+            ['severity', 'category', 'remediation_type'],
+            registry=self.registry
+        )
+    
+    def record_audit_execution(
+        self, 
+        audit_type: str, 
+        status: str, 
+        duration: float,
+        trigger: str = "scheduled"
+    ):
+        """Record security audit execution metrics."""
+        self.audit_executions_total.labels(
+            audit_type=audit_type,
+            status=status,
+            trigger=trigger
+        ).inc()
+        
+        self.audit_duration_seconds.labels(
+            audit_type=audit_type,
+            scope="comprehensive"
+        ).observe(duration)
+    
+    def record_security_finding(
+        self,
+        severity: str,
+        category: str,
+        scanner: str,
+        compliance_framework: str = "general"
+    ):
+        """Record security finding discovery."""
+        self.security_findings_total.labels(
+            severity=severity,
+            category=category,
+            scanner=scanner,
+            compliance_framework=compliance_framework
+        ).inc()
+    
+    def update_security_score(self, score: float, application: str = "flask_app"):
+        """Update overall security score gauge."""
+        self.security_score_gauge.labels(
+            application=application,
+            environment="production"
+        ).set(score)
+    
+    def update_risk_level(self, risk_level: str, application: str = "flask_app"):
+        """Update security risk level enum."""
+        self.risk_level_enum.labels(application=application).state(risk_level)
+    
+    def update_compliance_metrics(self, framework: str, score: float, status: str):
+        """Update compliance framework metrics."""
+        self.compliance_score_gauge.labels(
+            framework=framework,
+            environment="production"
+        ).set(score)
+        
+        self.compliance_status_enum.labels(framework=framework).state(status)
+    
+    def record_vulnerability_metrics(self, findings: List[SecurityFinding]):
+        """Record comprehensive vulnerability metrics."""
+        # Clear existing vulnerability gauges
+        self.vulnerabilities_by_severity.clear()
+        
+        # Count vulnerabilities by severity and category
+        severity_counts = defaultdict(lambda: defaultdict(int))
+        
+        for finding in findings:
+            severity = finding.severity.value
+            category = finding.category
+            severity_counts[severity][category] += 1
+            
+            # Record vulnerability age
+            age_days = (datetime.utcnow() - finding.discovered_date).days
+            self.vulnerability_age_histogram.labels(severity=severity).observe(age_days)
+        
+        # Update vulnerability gauges
+        for severity, categories in severity_counts.items():
+            for category, count in categories.items():
+                self.vulnerabilities_by_severity.labels(
+                    severity=severity,
+                    category=category
+                ).set(count)
+
+
+class ComprehensiveSecurityAuditor:
+    """
+    Enterprise-grade comprehensive security auditor implementing automated compliance 
+    validation, security posture assessment, and regulatory compliance testing.
+    
+    This class provides the core security audit automation functionality including:
+    - Comprehensive security testing orchestration across multiple scanners and frameworks
+    - Enterprise compliance validation for SOC 2, ISO 27001, PCI DSS, and GDPR
+    - Automated audit trail generation with comprehensive documentation
+    - Security posture monitoring with real-time metrics and alerting
+    - Executive dashboard integration with stakeholder-focused reporting
+    - Continuous compliance monitoring with gap analysis and remediation planning
+    
+    The auditor integrates with existing security testing infrastructure and provides
+    enterprise-grade audit capabilities with minimal performance impact.
     """
     
-    def __init__(self, 
-                 config: Optional[SecurityTestConfiguration] = None,
-                 redis_client: Optional[redis.Redis] = None,
-                 audit_trail_retention_days: int = 2555):  # 7 years for compliance
+    def __init__(
+        self,
+        app: Optional[Flask] = None,
+        config: Optional[Dict[str, Any]] = None,
+        audit_logger: Optional[SecurityAuditLogger] = None
+    ):
         """
-        Initialize Security Audit Engine with enterprise configuration.
+        Initialize comprehensive security auditor with enterprise configuration.
         
         Args:
-            config: Security testing configuration instance
-            redis_client: Redis client for audit data caching
-            audit_trail_retention_days: Audit trail retention period in days
+            app: Flask application instance for integration testing
+            config: Security audit configuration dictionary
+            audit_logger: Enterprise audit logger for compliance tracking
         """
-        self.config = config or get_security_config()
-        self.redis_client = redis_client or self._create_redis_client()
-        self.audit_trail_retention_days = audit_trail_retention_days
-        self.logger = security_logger.bind(component="security_audit_engine")
+        self.app = app
+        self.config = config or {}
+        self.audit_logger = audit_logger
         
-        # Initialize audit components
-        self.vulnerability_scanner = VulnerabilityScanner(self.config)
-        self.compliance_validator = ComplianceValidator(self.config)
-        self.posture_assessor = SecurityPostureAssessor(self.config)
-        self.evidence_collector = AuditEvidenceCollector(self.redis_client)
-        self.dashboard_generator = ComplianceDashboardGenerator()
+        # Initialize audit metrics
+        self.metrics = SecurityAuditMetrics()
         
-        # Initialize audit trail storage
-        self.audit_trail_key = "security_audit_trail"
-        self.compliance_cache_key = "compliance_assessments"
+        # Initialize security testing framework
+        self.security_config = SecurityTestConfig()
+        self.test_orchestrator = SecurityTestOrchestrator(self.security_config)
         
-        self.logger.info("Security Audit Engine initialized successfully")
+        # Initialize compliance validators
+        self.compliance_validators = {
+            ComplianceFramework.SOC2_TYPE2: self._create_soc2_validator(),
+            ComplianceFramework.ISO_27001: self._create_iso27001_validator(),
+            ComplianceFramework.PCI_DSS: self._create_pci_dss_validator(),
+            ComplianceFramework.GDPR: self._create_gdpr_validator(),
+            ComplianceFramework.OWASP_TOP_10: self._create_owasp_validator(),
+            ComplianceFramework.NIST_CSF: self._create_nist_validator()
+        }
+        
+        # Initialize audit execution tracking
+        self.current_audit: Optional[SecurityAuditReport] = None
+        self.audit_history: List[SecurityAuditReport] = []
+        self.audit_lock = Lock()
+        
+        # Initialize performance monitoring
+        self.performance_monitor = SecurityPerformanceMonitor(None)
+        
+        # Configure audit scheduling
+        self.scheduled_audits = {}
+        self.audit_scheduler_thread: Optional[Thread] = None
+        
+        logger.info("Comprehensive Security Auditor initialized successfully")
     
-    def _create_redis_client(self) -> redis.Redis:
-        """Create Redis client for audit data storage."""
-        return redis.Redis(
-            host=os.getenv('REDIS_HOST', 'localhost'),
-            port=int(os.getenv('REDIS_PORT', 6379)),
-            password=os.getenv('REDIS_PASSWORD'),
-            db=int(os.getenv('REDIS_AUDIT_DB', 3)),
-            decode_responses=True,
-            max_connections=50,
-            retry_on_timeout=True,
-            socket_timeout=30.0
-        )
-    
-    async def execute_comprehensive_audit(
+    def execute_comprehensive_audit(
         self,
-        target_url: str,
-        frameworks: List[ComplianceFramework],
-        scope: str = "full_system",
+        scope: List[str] = None,
+        compliance_frameworks: List[ComplianceFramework] = None,
         include_penetration_testing: bool = True,
         generate_executive_report: bool = True
-    ) -> Dict[str, Any]:
+    ) -> SecurityAuditReport:
         """
-        Execute comprehensive security audit across multiple compliance frameworks.
+        Execute comprehensive security audit with full enterprise compliance validation.
         
-        This method performs a complete security audit including:
-        - Multi-framework compliance validation and assessment
-        - Comprehensive vulnerability scanning and penetration testing
-        - Security posture assessment and threat analysis
-        - Automated audit trail generation and evidence collection
-        - Executive reporting and compliance dashboard integration
+        This method orchestrates a complete security assessment including static analysis,
+        dynamic testing, penetration testing, compliance validation, and executive reporting.
         
         Args:
-            target_url: Target application URL for security testing
-            frameworks: List of compliance frameworks to validate
-            scope: Audit scope definition and boundaries
+            scope: List of security domains to audit (defaults to all)
+            compliance_frameworks: Compliance frameworks to validate against
             include_penetration_testing: Whether to include penetration testing
             generate_executive_report: Whether to generate executive summary
             
         Returns:
-            Comprehensive audit results with compliance assessments and recommendations
-        """
-        audit_start_time = time.time()
-        audit_id = f"audit_{uuid.uuid4().hex[:8]}"
-        
-        self.logger.info(
-            "Starting comprehensive security audit",
-            audit_id=audit_id,
-            target_url=target_url,
-            frameworks=[f.value for f in frameworks],
-            scope=scope
-        )
-        
-        try:
-            # Initialize audit context
-            audit_context = {
-                'audit_id': audit_id,
-                'start_time': datetime.now(timezone.utc),
-                'target_url': target_url,
-                'frameworks': [f.value for f in frameworks],
-                'scope': scope,
-                'status': 'in_progress'
-            }
+            SecurityAuditReport with comprehensive findings and compliance results
             
-            # Store audit context in Redis
-            await self._store_audit_context(audit_context)
+        Example:
+            auditor = ComprehensiveSecurityAuditor(app=flask_app)
             
-            # Log audit start event
-            audit_security_event(
-                SecurityEventType.SYS_CONFIG_CHANGED,
-                severity=SecurityEventSeverity.INFO,
-                additional_data={
-                    'audit_type': 'comprehensive_security_audit',
-                    'audit_id': audit_id,
-                    'frameworks': [f.value for f in frameworks],
-                    'scope': scope
-                }
+            report = auditor.execute_comprehensive_audit(
+                scope=['authentication', 'authorization', 'data_protection'],
+                compliance_frameworks=[ComplianceFramework.SOC2_TYPE2, ComplianceFramework.GDPR],
+                include_penetration_testing=True
             )
             
-            # Execute parallel audit components
-            audit_tasks = []
+            print(f"Security Score: {report.overall_security_score}")
+            print(f"Critical Findings: {report.critical_findings}")
+        """
+        audit_start_time = datetime.utcnow()
+        
+        # Initialize audit report
+        with self.audit_lock:
+            self.current_audit = SecurityAuditReport(
+                audit_name="Comprehensive Security Audit",
+                audit_scope=", ".join(scope) if scope else "Full Application Security Assessment",
+                execution_date=audit_start_time,
+                auditor="Comprehensive Security Auditor v1.0"
+            )
+        
+        try:
+            logger.info("Starting comprehensive security audit execution")
             
-            # Compliance framework validation
-            for framework in frameworks:
-                task = self.execute_compliance_audit(framework, scope)
-                audit_tasks.append(('compliance', framework, task))
+            # Log audit initiation
+            if self.audit_logger:
+                self.audit_logger.log_security_event(
+                    event_type=SecurityEventType.ADMIN_SECURITY_POLICY_UPDATE,
+                    message="Comprehensive security audit initiated",
+                    severity="info",
+                    metadata={
+                        'audit_id': self.current_audit.report_id,
+                        'scope': scope or ['full_application'],
+                        'compliance_frameworks': [f.value for f in (compliance_frameworks or [])],
+                        'penetration_testing_enabled': include_penetration_testing
+                    }
+                )
             
-            # Vulnerability assessment
-            vuln_task = self.vulnerability_scanner.execute_comprehensive_scan(target_url)
-            audit_tasks.append(('vulnerability', 'comprehensive', vuln_task))
+            # Phase 1: Static Security Analysis
+            logger.info("Phase 1: Executing static security analysis")
+            static_findings = self._execute_static_analysis()
+            self.current_audit.findings.extend(static_findings)
             
-            # Security posture assessment
-            posture_task = self.assess_security_posture()
-            audit_tasks.append(('posture', 'assessment', posture_task))
+            # Phase 2: Dynamic Security Testing
+            logger.info("Phase 2: Executing dynamic security testing")
+            dynamic_findings = self._execute_dynamic_testing()
+            self.current_audit.findings.extend(dynamic_findings)
             
-            # Penetration testing (if enabled)
+            # Phase 3: Penetration Testing (if enabled)
             if include_penetration_testing:
-                pentest_task = self._execute_penetration_testing(target_url)
-                audit_tasks.append(('penetration', 'testing', pentest_task))
+                logger.info("Phase 3: Executing penetration testing scenarios")
+                pentest_findings = self._execute_penetration_testing()
+                self.current_audit.findings.extend(pentest_findings)
             
-            # Execute all tasks concurrently
-            results = {}
-            compliance_assessments = {}
+            # Phase 4: Compliance Validation
+            logger.info("Phase 4: Executing compliance framework validation")
+            compliance_results = self._execute_compliance_validation(
+                compliance_frameworks or [
+                    ComplianceFramework.SOC2_TYPE2,
+                    ComplianceFramework.OWASP_TOP_10,
+                    ComplianceFramework.GDPR
+                ]
+            )
+            self.current_audit.compliance_results = compliance_results
             
-            async with asyncio.TaskGroup() as tg:
-                for task_type, task_name, task_coro in audit_tasks:
-                    if task_type == 'compliance':
-                        result = await task_coro
-                        compliance_assessments[task_name.value] = result
-                    else:
-                        results[f"{task_type}_{task_name}"] = await task_coro
+            # Phase 5: Security Posture Assessment
+            logger.info("Phase 5: Executing security posture assessment")
+            posture_findings = self._execute_security_posture_assessment()
+            self.current_audit.findings.extend(posture_findings)
             
-            # Aggregate results
-            audit_results = {
-                'audit_id': audit_id,
-                'audit_metadata': {
-                    'start_time': audit_context['start_time'].isoformat(),
-                    'end_time': datetime.now(timezone.utc).isoformat(),
-                    'duration_seconds': time.time() - audit_start_time,
-                    'target_url': target_url,
-                    'scope': scope,
-                    'frameworks_assessed': len(frameworks)
-                },
-                'compliance_assessments': compliance_assessments,
-                'vulnerability_assessment': results.get('vulnerability_comprehensive', {}),
-                'security_posture': results.get('posture_assessment', {}),
-                'penetration_testing': results.get('penetration_testing', {}) if include_penetration_testing else {},
-                'overall_compliance_score': self._calculate_overall_compliance_score(compliance_assessments),
-                'security_recommendations': self._generate_security_recommendations(results, compliance_assessments),
-                'audit_trail': await self._generate_audit_trail(audit_id),
-                'evidence_artifacts': await self.evidence_collector.collect_audit_evidence(audit_id)
-            }
+            # Phase 6: Risk Analysis and Prioritization
+            logger.info("Phase 6: Executing risk analysis and prioritization")
+            self._execute_risk_analysis()
+            
+            # Phase 7: Remediation Planning
+            logger.info("Phase 7: Generating remediation recommendations")
+            self._generate_remediation_plan()
+            
+            # Finalize audit report
+            self.current_audit.completion_date = datetime.utcnow()
+            self.current_audit.duration_minutes = (
+                self.current_audit.completion_date - audit_start_time
+            ).total_seconds() / 60
+            
+            # Update metrics
+            self._update_audit_metrics()
             
             # Generate executive report if requested
             if generate_executive_report:
-                audit_results['executive_report'] = self.dashboard_generator.generate_executive_summary(audit_results)
+                self._generate_executive_dashboard()
             
-            # Store comprehensive audit results
-            await self._store_audit_results(audit_id, audit_results)
-            
-            # Record audit completion metrics
-            audit_metrics['compliance_scans_total'].labels(
-                framework='comprehensive',
-                result='completed',
-                environment=scope
-            ).inc()
-            
-            audit_metrics['audit_execution_duration'].labels(
-                audit_type='comprehensive',
-                scope=scope,
-                compliance_framework='multiple'
-            ).observe(time.time() - audit_start_time)
+            # Add to audit history
+            self.audit_history.append(self.current_audit)
             
             # Log audit completion
-            self.logger.info(
-                "Comprehensive security audit completed successfully",
-                audit_id=audit_id,
-                duration_seconds=time.time() - audit_start_time,
-                frameworks_assessed=len(frameworks),
-                overall_score=audit_results['overall_compliance_score']
-            )
-            
-            # Generate audit completion event
-            audit_security_event(
-                SecurityEventType.SYS_CONFIG_CHANGED,
-                severity=SecurityEventSeverity.INFO,
-                additional_data={
-                    'audit_type': 'comprehensive_security_audit_completed',
-                    'audit_id': audit_id,
-                    'overall_score': audit_results['overall_compliance_score'],
-                    'recommendations_count': len(audit_results['security_recommendations']),
-                    'duration_seconds': time.time() - audit_start_time
-                }
-            )
-            
-            return audit_results
-            
-        except Exception as e:
-            # Handle audit failure
-            self.logger.error(
-                "Comprehensive security audit failed",
-                audit_id=audit_id,
-                error=str(e),
-                duration_seconds=time.time() - audit_start_time
-            )
-            
-            # Log audit failure event
-            audit_security_event(
-                SecurityEventType.SYS_CONFIG_CHANGED,
-                severity=SecurityEventSeverity.HIGH,
-                additional_data={
-                    'audit_type': 'comprehensive_security_audit_failed',
-                    'audit_id': audit_id,
-                    'error': str(e),
-                    'duration_seconds': time.time() - audit_start_time
-                }
-            )
-            
-            # Store failure information
-            failure_info = {
-                'audit_id': audit_id,
-                'status': 'failed',
-                'error': str(e),
-                'timestamp': datetime.now(timezone.utc).isoformat()
-            }
-            await self._store_audit_failure(audit_id, failure_info)
-            
-            raise
-    
-    async def execute_compliance_audit(
-        self,
-        framework: ComplianceFramework,
-        scope: str = "full_system"
-    ) -> ComplianceAssessment:
-        """
-        Execute comprehensive compliance audit for specific framework.
-        
-        This method performs detailed compliance validation including:
-        - Control implementation assessment and testing
-        - Evidence collection and documentation
-        - Gap analysis and remediation planning
-        - Compliance scoring and reporting
-        - Automated audit trail generation
-        
-        Args:
-            framework: Compliance framework to assess
-            scope: Assessment scope and boundaries
-            
-        Returns:
-            Detailed compliance assessment with findings and recommendations
-        """
-        assessment_start_time = time.time()
-        assessment_id = f"compliance_{framework.value}_{uuid.uuid4().hex[:8]}"
-        
-        self.logger.info(
-            "Starting compliance audit",
-            assessment_id=assessment_id,
-            framework=framework.value,
-            scope=scope
-        )
-        
-        try:
-            # Initialize assessment
-            assessment = ComplianceAssessment(
-                assessment_id=assessment_id,
-                framework=framework,
-                scope=scope,
-                assessor_details={
-                    'system': 'automated_security_audit_engine',
-                    'version': '1.0.0',
-                    'assessment_method': 'comprehensive_automated_testing'
-                }
-            )
-            
-            # Execute framework-specific compliance validation
-            if framework == ComplianceFramework.SOC2_TYPE2:
-                assessment = await self._assess_soc2_compliance(assessment)
-            elif framework == ComplianceFramework.ISO27001:
-                assessment = await self._assess_iso27001_compliance(assessment)
-            elif framework == ComplianceFramework.PCI_DSS:
-                assessment = await self._assess_pci_dss_compliance(assessment)
-            elif framework == ComplianceFramework.GDPR:
-                assessment = await self._assess_gdpr_compliance(assessment)
-            elif framework == ComplianceFramework.NIST_CYBERSECURITY:
-                assessment = await self._assess_nist_compliance(assessment)
-            elif framework == ComplianceFramework.OWASP_TOP10:
-                assessment = await self._assess_owasp_top10_compliance(assessment)
-            else:
-                assessment = await self._assess_generic_compliance(assessment, framework)
-            
-            # Calculate overall compliance score
-            assessment.overall_score = self._calculate_compliance_score(assessment)
-            
-            # Determine compliance status
-            assessment.compliance_status = self._determine_compliance_status(assessment.overall_score)
-            
-            # Generate executive summary
-            assessment.executive_summary = self._generate_compliance_summary(assessment)
-            
-            # Set next assessment date (typically annual for most frameworks)
-            assessment.next_assessment_date = datetime.now(timezone.utc) + timedelta(days=365)
-            
-            # Calculate remediation timeline based on findings
-            assessment.remediation_timeline = self._calculate_remediation_timeline(assessment)
-            
-            # Store assessment results
-            await self._store_compliance_assessment(assessment)
-            
-            # Record compliance metrics
-            audit_metrics['compliance_scans_total'].labels(
-                framework=framework.value,
-                result=assessment.compliance_status.value,
-                environment=scope
-            ).inc()
-            
-            audit_metrics['compliance_score'].labels(
-                framework=framework.value,
-                domain=scope,
-                control_category='overall'
-            ).set(assessment.overall_score)
-            
-            audit_metrics['audit_execution_duration'].labels(
-                audit_type='compliance_assessment',
-                scope=scope,
-                compliance_framework=framework.value
-            ).observe(time.time() - assessment_start_time)
-            
-            # Log assessment completion
-            self.logger.info(
-                "Compliance audit completed",
-                assessment_id=assessment_id,
-                framework=framework.value,
-                compliance_score=assessment.overall_score,
-                compliance_status=assessment.compliance_status.value,
-                findings_count=len(assessment.findings),
-                duration_seconds=time.time() - assessment_start_time
-            )
-            
-            # Generate compliance assessment event
-            audit_security_event(
-                SecurityEventType.SYS_CONFIG_CHANGED,
-                severity=SecurityEventSeverity.INFO if assessment.compliance_status == ComplianceStatus.COMPLIANT else SecurityEventSeverity.MEDIUM,
-                additional_data={
-                    'event_type': 'compliance_assessment_completed',
-                    'framework': framework.value,
-                    'assessment_id': assessment_id,
-                    'compliance_score': assessment.overall_score,
-                    'compliance_status': assessment.compliance_status.value,
-                    'findings_count': len(assessment.findings)
-                }
-            )
-            
-            return assessment
-            
-        except Exception as e:
-            # Handle assessment failure
-            self.logger.error(
-                "Compliance audit failed",
-                assessment_id=assessment_id,
-                framework=framework.value,
-                error=str(e),
-                duration_seconds=time.time() - assessment_start_time
-            )
-            
-            # Log compliance audit failure
-            audit_security_event(
-                SecurityEventType.SYS_CONFIG_CHANGED,
-                severity=SecurityEventSeverity.HIGH,
-                additional_data={
-                    'event_type': 'compliance_assessment_failed',
-                    'framework': framework.value,
-                    'assessment_id': assessment_id,
-                    'error': str(e)
-                }
-            )
-            
-            raise
-    
-    async def assess_security_posture(self) -> SecurityPostureAssessment:
-        """
-        Assess comprehensive security posture with threat landscape analysis.
-        
-        This method performs real-time security posture assessment including:
-        - Vulnerability landscape analysis and trending
-        - Security control effectiveness measurement
-        - Threat indicator collection and analysis
-        - Security metrics baseline comparison
-        - Risk assessment and threat modeling
-        
-        Returns:
-            Comprehensive security posture assessment with recommendations
-        """
-        posture_start_time = time.time()
-        assessment_id = f"posture_{uuid.uuid4().hex[:8]}"
-        
-        self.logger.info("Starting security posture assessment", assessment_id=assessment_id)
-        
-        try:
-            # Initialize posture assessment
-            posture = SecurityPostureAssessment(assessment_id=assessment_id)
-            
-            # Collect vulnerability data
-            posture.vulnerability_summary = await self._collect_vulnerability_summary()
-            
-            # Assess control effectiveness
-            posture.control_effectiveness = await self._assess_control_effectiveness()
-            
-            # Collect security metrics
-            posture.security_metrics = await self._collect_security_metrics()
-            
-            # Analyze threat indicators
-            posture.threat_indicators = await self._analyze_threat_indicators()
-            
-            # Calculate security trends
-            posture.security_trends = await self._calculate_security_trends()
-            
-            # Generate baseline comparison
-            posture.baseline_comparison = await self._generate_baseline_comparison()
-            
-            # Calculate overall security score
-            posture.overall_security_score = self._calculate_security_score(posture)
-            
-            # Calculate composite risk score
-            risk_score = posture.calculate_risk_score()
-            
-            # Determine threat level
-            posture.threat_level = self._determine_threat_level(risk_score)
-            
-            # Generate security recommendations
-            posture.recommendations = self._generate_posture_recommendations(posture)
-            
-            # Generate executive summary
-            posture.executive_summary = self._generate_posture_summary(posture)
-            
-            # Set next assessment time
-            posture.next_assessment = datetime.now(timezone.utc) + timedelta(hours=24)
-            
-            # Store posture assessment
-            await self._store_posture_assessment(posture)
-            
-            # Record security posture metrics
-            audit_metrics['security_posture_score'].labels(
-                assessment_type='comprehensive',
-                time_period='current'
-            ).set(posture.overall_security_score)
-            
-            # Log posture assessment completion
-            self.logger.info(
-                "Security posture assessment completed",
-                assessment_id=assessment_id,
-                security_score=posture.overall_security_score,
-                threat_level=posture.threat_level,
-                vulnerability_count=sum(posture.vulnerability_summary.values()),
-                duration_seconds=time.time() - posture_start_time
-            )
-            
-            # Generate security posture event
-            audit_security_event(
-                SecurityEventType.SYS_CONFIG_CHANGED,
-                severity=SecurityEventSeverity.INFO if posture.threat_level in ['low', 'medium'] else SecurityEventSeverity.HIGH,
-                additional_data={
-                    'event_type': 'security_posture_assessment',
-                    'assessment_id': assessment_id,
-                    'security_score': posture.overall_security_score,
-                    'threat_level': posture.threat_level,
-                    'risk_score': risk_score
-                }
-            )
-            
-            return posture
-            
-        except Exception as e:
-            # Handle posture assessment failure
-            self.logger.error(
-                "Security posture assessment failed",
-                assessment_id=assessment_id,
-                error=str(e),
-                duration_seconds=time.time() - posture_start_time
-            )
-            
-            # Log posture assessment failure
-            audit_security_event(
-                SecurityEventType.SYS_CONFIG_CHANGED,
-                severity=SecurityEventSeverity.HIGH,
-                additional_data={
-                    'event_type': 'security_posture_assessment_failed',
-                    'assessment_id': assessment_id,
-                    'error': str(e)
-                }
-            )
-            
-            raise
-    
-    async def generate_audit_trail(
-        self,
-        start_date: Optional[datetime] = None,
-        end_date: Optional[datetime] = None,
-        event_types: Optional[List[str]] = None,
-        compliance_frameworks: Optional[List[ComplianceFramework]] = None
-    ) -> Dict[str, Any]:
-        """
-        Generate comprehensive audit trail for compliance reporting.
-        
-        This method creates detailed audit trails including:
-        - Security event chronological tracking and analysis
-        - Compliance framework evidence collection
-        - User access and privilege change tracking
-        - System configuration change documentation
-        - Incident response and remediation tracking
-        
-        Args:
-            start_date: Audit trail start date (default: 30 days ago)
-            end_date: Audit trail end date (default: now)
-            event_types: Specific event types to include
-            compliance_frameworks: Frameworks requiring audit trail
-            
-        Returns:
-            Comprehensive audit trail with compliance evidence
-        """
-        trail_start_time = time.time()
-        trail_id = f"trail_{uuid.uuid4().hex[:8]}"
-        
-        # Set default date range
-        if not end_date:
-            end_date = datetime.now(timezone.utc)
-        if not start_date:
-            start_date = end_date - timedelta(days=30)
-        
-        self.logger.info(
-            "Generating audit trail",
-            trail_id=trail_id,
-            start_date=start_date.isoformat(),
-            end_date=end_date.isoformat(),
-            frameworks=[f.value for f in compliance_frameworks] if compliance_frameworks else None
-        )
-        
-        try:
-            # Collect audit events from various sources
-            audit_trail = {
-                'trail_id': trail_id,
-                'generation_metadata': {
-                    'start_date': start_date.isoformat(),
-                    'end_date': end_date.isoformat(),
-                    'generated_at': datetime.now(timezone.utc).isoformat(),
-                    'frameworks': [f.value for f in compliance_frameworks] if compliance_frameworks else [],
-                    'event_types_filter': event_types
-                },
-                'security_events': await self._collect_security_events(start_date, end_date, event_types),
-                'compliance_events': await self._collect_compliance_events(start_date, end_date, compliance_frameworks),
-                'access_events': await self._collect_access_events(start_date, end_date),
-                'configuration_changes': await self._collect_configuration_changes(start_date, end_date),
-                'incident_events': await self._collect_incident_events(start_date, end_date),
-                'vulnerability_events': await self._collect_vulnerability_events(start_date, end_date),
-                'audit_statistics': {},
-                'compliance_evidence': {},
-                'integrity_verification': {}
-            }
-            
-            # Calculate audit statistics
-            audit_trail['audit_statistics'] = self._calculate_audit_statistics(audit_trail)
-            
-            # Generate compliance evidence summaries
-            if compliance_frameworks:
-                audit_trail['compliance_evidence'] = await self._generate_compliance_evidence(
-                    audit_trail, compliance_frameworks
+            if self.audit_logger:
+                self.audit_logger.log_security_event(
+                    event_type=SecurityEventType.ADMIN_SECURITY_POLICY_UPDATE,
+                    message="Comprehensive security audit completed",
+                    severity="info",
+                    metadata={
+                        'audit_id': self.current_audit.report_id,
+                        'duration_minutes': self.current_audit.duration_minutes,
+                        'total_findings': self.current_audit.total_findings,
+                        'security_score': self.current_audit.overall_security_score,
+                        'risk_level': self.current_audit.risk_level
+                    }
                 )
             
-            # Add integrity verification
-            audit_trail['integrity_verification'] = self._generate_integrity_verification(audit_trail)
+            logger.info(f"Comprehensive security audit completed successfully. "
+                       f"Security Score: {self.current_audit.overall_security_score:.1f}, "
+                       f"Findings: {self.current_audit.total_findings}")
             
-            # Store audit trail
-            await self._store_audit_trail(trail_id, audit_trail)
-            
-            # Record audit trail metrics
-            audit_metrics['audit_trail_events_total'].labels(
-                event_type='comprehensive',
-                criticality='routine',
-                compliance_framework='multiple' if compliance_frameworks and len(compliance_frameworks) > 1 else 
-                            compliance_frameworks[0].value if compliance_frameworks else 'general'
-            ).inc(audit_trail['audit_statistics']['total_events'])
-            
-            # Log audit trail generation completion
-            self.logger.info(
-                "Audit trail generated successfully",
-                trail_id=trail_id,
-                total_events=audit_trail['audit_statistics']['total_events'],
-                duration_seconds=time.time() - trail_start_time
-            )
-            
-            # Generate audit trail completion event
-            audit_security_event(
-                SecurityEventType.SYS_CONFIG_CHANGED,
-                severity=SecurityEventSeverity.INFO,
-                additional_data={
-                    'event_type': 'audit_trail_generated',
-                    'trail_id': trail_id,
-                    'total_events': audit_trail['audit_statistics']['total_events'],
-                    'date_range_days': (end_date - start_date).days
-                }
-            )
-            
-            return audit_trail
+            return self.current_audit
             
         except Exception as e:
-            # Handle audit trail generation failure
-            self.logger.error(
-                "Audit trail generation failed",
-                trail_id=trail_id,
-                error=str(e),
-                duration_seconds=time.time() - trail_start_time
-            )
+            logger.error(f"Comprehensive security audit failed: {str(e)}")
             
-            # Log audit trail failure
-            audit_security_event(
-                SecurityEventType.SYS_CONFIG_CHANGED,
-                severity=SecurityEventSeverity.HIGH,
-                additional_data={
-                    'event_type': 'audit_trail_generation_failed',
-                    'trail_id': trail_id,
-                    'error': str(e)
-                }
-            )
+            if self.current_audit:
+                self.current_audit.completion_date = datetime.utcnow()
+                self.current_audit.duration_minutes = (
+                    self.current_audit.completion_date - audit_start_time
+                ).total_seconds() / 60
+            
+            # Log audit failure
+            if self.audit_logger:
+                self.audit_logger.log_security_event(
+                    event_type=SecurityEventType.ADMIN_SECURITY_POLICY_UPDATE,
+                    message="Comprehensive security audit failed",
+                    severity="high",
+                    metadata={
+                        'audit_id': self.current_audit.report_id if self.current_audit else 'unknown',
+                        'error': str(e),
+                        'phase': 'comprehensive_audit'
+                    }
+                )
             
             raise
     
-    def generate_executive_dashboard(
-        self,
-        time_period: str = "30_days",
-        include_trends: bool = True,
-        include_recommendations: bool = True
-    ) -> Dict[str, Any]:
-        """
-        Generate executive security dashboard with comprehensive metrics and insights.
+    def _execute_static_analysis(self) -> List[SecurityFinding]:
+        """Execute comprehensive static security analysis using multiple scanners."""
+        findings = []
         
-        This method creates executive-level security reporting including:
-        - Overall security posture and compliance status
-        - Security trend analysis and risk assessment
-        - Compliance framework adherence and gaps
-        - Security investment recommendations and ROI analysis
-        - Incident response effectiveness and lessons learned
+        try:
+            # Bandit Static Analysis
+            logger.info("Running Bandit static analysis security scan")
+            bandit_scanner = BanditSecurityScanner(self.security_config)
+            bandit_results = bandit_scanner.run_security_scan()
+            
+            if bandit_results.get('scan_status') == 'completed':
+                for issue in bandit_results.get('issues', []):
+                    finding = SecurityFinding(
+                        title=f"Static Analysis: {issue.get('test_name', 'Security Issue')}",
+                        description=issue.get('issue_text', 'Static analysis security finding'),
+                        severity=self._map_bandit_severity(issue.get('issue_severity', 'LOW')),
+                        category="static_analysis",
+                        cwe_id=issue.get('test_id'),
+                        affected_components=[issue.get('filename', 'unknown')],
+                        evidence={
+                            'line_number': issue.get('line_number'),
+                            'code': issue.get('code'),
+                            'confidence': issue.get('issue_confidence'),
+                            'more_info': issue.get('more_info')
+                        },
+                        remediation=self._generate_bandit_remediation(issue),
+                        source_scanner="bandit",
+                        source_test=issue.get('test_name', 'bandit_scan'),
+                        compliance_frameworks=[ComplianceFramework.OWASP_TOP_10, ComplianceFramework.SOC2_TYPE2]
+                    )
+                    findings.append(finding)
+            
+            # Safety Dependency Analysis
+            logger.info("Running Safety dependency vulnerability scan")
+            safety_scanner = SafetyDependencyScanner(self.security_config)
+            safety_results = safety_scanner.run_dependency_scan()
+            
+            if safety_results.get('scan_status') == 'completed':
+                for vuln in safety_results.get('vulnerabilities', []):
+                    finding = SecurityFinding(
+                        title=f"Dependency Vulnerability: {vuln.get('package_name', 'Unknown Package')}",
+                        description=vuln.get('advisory', 'Vulnerable dependency detected'),
+                        severity=self._map_safety_severity(vuln),
+                        category="dependency_vulnerability",
+                        cwe_id=vuln.get('cve', vuln.get('id')),
+                        affected_components=[vuln.get('package_name', 'unknown')],
+                        evidence={
+                            'vulnerable_spec': vuln.get('vulnerable_spec'),
+                            'installed_version': vuln.get('installed_version'),
+                            'advisory_url': vuln.get('more_info_url')
+                        },
+                        remediation=f"Update {vuln.get('package_name')} to version {vuln.get('safe_version', 'latest')}",
+                        source_scanner="safety",
+                        source_test="dependency_scan",
+                        compliance_frameworks=[ComplianceFramework.OWASP_TOP_10, ComplianceFramework.SOC2_TYPE2]
+                    )
+                    findings.append(finding)
+            
+            logger.info(f"Static analysis completed: {len(findings)} findings discovered")
+            
+        except Exception as e:
+            logger.error(f"Static analysis execution failed: {str(e)}")
+            # Create error finding
+            error_finding = SecurityFinding(
+                title="Static Analysis Execution Error",
+                description=f"Static security analysis failed: {str(e)}",
+                severity=AuditSeverity.HIGH,
+                category="audit_failure",
+                remediation="Review static analysis configuration and dependencies",
+                source_scanner="static_analysis",
+                source_test="execution_error"
+            )
+            findings.append(error_finding)
+        
+        return findings
+    
+    def _execute_dynamic_testing(self) -> List[SecurityFinding]:
+        """Execute comprehensive dynamic security testing using OWASP ZAP."""
+        findings = []
+        
+        try:
+            if not self.security_config.ZAP_ENABLED:
+                logger.info("OWASP ZAP dynamic testing disabled, skipping")
+                return findings
+            
+            logger.info("Running OWASP ZAP dynamic security testing")
+            zap_scanner = OWASPZAPScanner(self.security_config)
+            zap_results = zap_scanner.run_security_scan()
+            
+            if zap_results.get('scan_status') == 'completed':
+                alerts = zap_results.get('alerts', {}).get('alerts', [])
+                
+                for alert in alerts:
+                    finding = SecurityFinding(
+                        title=f"Dynamic Analysis: {alert.get('alert', 'Security Alert')}",
+                        description=alert.get('desc', 'Dynamic analysis security finding'),
+                        severity=self._map_zap_risk_to_severity(alert.get('risk', 'Low')),
+                        category="dynamic_analysis",
+                        cwe_id=alert.get('cweid'),
+                        owasp_category=alert.get('wasc_id'),
+                        affected_components=[alert.get('url', 'unknown')],
+                        evidence={
+                            'url': alert.get('url'),
+                            'method': alert.get('method'),
+                            'evidence': alert.get('evidence'),
+                            'attack': alert.get('attack'),
+                            'param': alert.get('param'),
+                            'confidence': alert.get('confidence'),
+                            'reference': alert.get('reference')
+                        },
+                        remediation=alert.get('solution', 'Review and remediate the identified vulnerability'),
+                        source_scanner="owasp_zap",
+                        source_test="dynamic_scan",
+                        compliance_frameworks=[ComplianceFramework.OWASP_TOP_10, ComplianceFramework.PCI_DSS]
+                    )
+                    findings.append(finding)
+            
+            logger.info(f"Dynamic testing completed: {len(findings)} findings discovered")
+            
+        except Exception as e:
+            logger.error(f"Dynamic testing execution failed: {str(e)}")
+            # Create error finding
+            error_finding = SecurityFinding(
+                title="Dynamic Testing Execution Error",
+                description=f"Dynamic security testing failed: {str(e)}",
+                severity=AuditSeverity.HIGH,
+                category="audit_failure",
+                remediation="Review OWASP ZAP configuration and target application availability",
+                source_scanner="owasp_zap",
+                source_test="execution_error"
+            )
+            findings.append(error_finding)
+        
+        return findings
+    
+    def _execute_penetration_testing(self) -> List[SecurityFinding]:
+        """Execute comprehensive penetration testing scenarios."""
+        findings = []
+        
+        try:
+            logger.info("Running comprehensive penetration testing scenarios")
+            penetration_tester = PenetrationTestRunner(self.security_config)
+            pentest_results = penetration_tester.run_penetration_tests()
+            
+            if pentest_results.get('test_status') == 'completed':
+                scenarios = pentest_results.get('scenarios', {})
+                
+                for scenario_name, scenario_result in scenarios.items():
+                    if scenario_result.get('status') == 'completed':
+                        vulnerabilities = scenario_result.get('vulnerabilities_found', [])
+                        
+                        for vuln in vulnerabilities:
+                            finding = SecurityFinding(
+                                title=f"Penetration Test: {vuln.get('type', 'Security Vulnerability')}",
+                                description=vuln.get('description', 'Penetration testing vulnerability'),
+                                severity=self._map_pentest_severity(vuln.get('severity', 'medium')),
+                                category="penetration_testing",
+                                affected_components=[vuln.get('endpoint', scenario_name)],
+                                evidence={
+                                    'attack_vector': vuln.get('payload'),
+                                    'endpoint': vuln.get('endpoint'),
+                                    'method': vuln.get('method'),
+                                    'response_code': vuln.get('response_code'),
+                                    'scenario': scenario_name
+                                },
+                                remediation=vuln.get('remediation', 'Implement security controls to prevent exploitation'),
+                                likelihood="high",  # Penetration test findings are exploitable
+                                technical_impact="High - Vulnerability confirmed through exploitation",
+                                source_scanner="penetration_testing",
+                                source_test=scenario_name,
+                                compliance_frameworks=[ComplianceFramework.OWASP_TOP_10, ComplianceFramework.SOC2_TYPE2]
+                            )
+                            findings.append(finding)
+            
+            logger.info(f"Penetration testing completed: {len(findings)} findings discovered")
+            
+        except Exception as e:
+            logger.error(f"Penetration testing execution failed: {str(e)}")
+            # Create error finding
+            error_finding = SecurityFinding(
+                title="Penetration Testing Execution Error",
+                description=f"Penetration testing failed: {str(e)}",
+                severity=AuditSeverity.MEDIUM,
+                category="audit_failure",
+                remediation="Review penetration testing configuration and target application",
+                source_scanner="penetration_testing",
+                source_test="execution_error"
+            )
+            findings.append(error_finding)
+        
+        return findings
+    
+    def _execute_compliance_validation(
+        self, 
+        frameworks: List[ComplianceFramework]
+    ) -> Dict[str, ComplianceResult]:
+        """Execute comprehensive compliance validation for specified frameworks."""
+        compliance_results = {}
+        
+        for framework in frameworks:
+            try:
+                logger.info(f"Validating compliance for {framework.value}")
+                
+                validator = self.compliance_validators.get(framework)
+                if validator:
+                    result = validator(self.current_audit.findings if self.current_audit else [])
+                    compliance_results[framework.value] = result
+                    
+                    # Update compliance metrics
+                    self.metrics.update_compliance_metrics(
+                        framework=framework.value,
+                        score=result.compliance_percentage,
+                        status=result.status
+                    )
+                    
+                else:
+                    logger.warning(f"No validator available for framework: {framework.value}")
+                    
+            except Exception as e:
+                logger.error(f"Compliance validation failed for {framework.value}: {str(e)}")
+                
+                # Create error result
+                error_result = ComplianceResult(
+                    framework=framework,
+                    overall_score=0.0,
+                    status="validation_error",
+                    gaps_identified=[f"Validation error: {str(e)}"],
+                    recommendations=["Review compliance validation configuration"]
+                )
+                compliance_results[framework.value] = error_result
+        
+        logger.info(f"Compliance validation completed for {len(compliance_results)} frameworks")
+        return compliance_results
+    
+    def _execute_security_posture_assessment(self) -> List[SecurityFinding]:
+        """Execute comprehensive security posture assessment."""
+        findings = []
+        
+        try:
+            logger.info("Executing security posture assessment")
+            
+            # Security Configuration Assessment
+            config_findings = self._assess_security_configuration()
+            findings.extend(config_findings)
+            
+            # Authentication Security Assessment
+            auth_findings = self._assess_authentication_security()
+            findings.extend(auth_findings)
+            
+            # Authorization Security Assessment
+            authz_findings = self._assess_authorization_security()
+            findings.extend(authz_findings)
+            
+            # Data Protection Assessment
+            data_findings = self._assess_data_protection()
+            findings.extend(data_findings)
+            
+            # Infrastructure Security Assessment
+            infra_findings = self._assess_infrastructure_security()
+            findings.extend(infra_findings)
+            
+            logger.info(f"Security posture assessment completed: {len(findings)} findings")
+            
+        except Exception as e:
+            logger.error(f"Security posture assessment failed: {str(e)}")
+            
+            error_finding = SecurityFinding(
+                title="Security Posture Assessment Error",
+                description=f"Security posture assessment failed: {str(e)}",
+                severity=AuditSeverity.MEDIUM,
+                category="audit_failure",
+                remediation="Review security posture assessment configuration",
+                source_scanner="posture_assessment",
+                source_test="execution_error"
+            )
+            findings.append(error_finding)
+        
+        return findings
+    
+    def _assess_security_configuration(self) -> List[SecurityFinding]:
+        """Assess security configuration and hardening."""
+        findings = []
+        
+        # Check Flask security configuration
+        if self.app:
+            # Check secret key configuration
+            if not self.app.config.get('SECRET_KEY') or self.app.config.get('SECRET_KEY') == 'dev':
+                findings.append(SecurityFinding(
+                    title="Weak or Default Secret Key",
+                    description="Flask application using weak or default secret key",
+                    severity=AuditSeverity.HIGH,
+                    category="configuration",
+                    cwe_id="CWE-798",
+                    remediation="Configure strong, randomly generated SECRET_KEY",
+                    compliance_frameworks=[ComplianceFramework.SOC2_TYPE2, ComplianceFramework.OWASP_TOP_10]
+                ))
+            
+            # Check debug mode
+            if self.app.config.get('DEBUG'):
+                findings.append(SecurityFinding(
+                    title="Debug Mode Enabled in Production",
+                    description="Flask debug mode enabled, exposing sensitive information",
+                    severity=AuditSeverity.CRITICAL,
+                    category="configuration",
+                    cwe_id="CWE-489",
+                    remediation="Disable debug mode in production environment",
+                    compliance_frameworks=[ComplianceFramework.OWASP_TOP_10, ComplianceFramework.PCI_DSS]
+                ))
+            
+            # Check session configuration
+            if not self.app.config.get('SESSION_COOKIE_SECURE'):
+                findings.append(SecurityFinding(
+                    title="Insecure Session Cookies",
+                    description="Session cookies not configured with Secure flag",
+                    severity=AuditSeverity.MEDIUM,
+                    category="session_management",
+                    cwe_id="CWE-614",
+                    remediation="Enable SESSION_COOKIE_SECURE for HTTPS-only cookies",
+                    compliance_frameworks=[ComplianceFramework.OWASP_TOP_10, ComplianceFramework.PCI_DSS]
+                ))
+        
+        return findings
+    
+    def _assess_authentication_security(self) -> List[SecurityFinding]:
+        """Assess authentication security implementation."""
+        findings = []
+        
+        # JWT Configuration Assessment
+        findings.append(SecurityFinding(
+            title="JWT Security Configuration Review",
+            description="Verify JWT implementation follows security best practices",
+            severity=AuditSeverity.INFO,
+            category="authentication",
+            remediation="Review JWT configuration for proper algorithm, expiration, and validation",
+            compliance_frameworks=[ComplianceFramework.SOC2_TYPE2, ComplianceFramework.OWASP_TOP_10]
+        ))
+        
+        # Session Management Assessment
+        findings.append(SecurityFinding(
+            title="Session Management Security Review",
+            description="Verify session management implementation security",
+            severity=AuditSeverity.INFO,
+            category="session_management",
+            remediation="Review session timeout, encryption, and regeneration policies",
+            compliance_frameworks=[ComplianceFramework.SOC2_TYPE2, ComplianceFramework.PCI_DSS]
+        ))
+        
+        return findings
+    
+    def _assess_authorization_security(self) -> List[SecurityFinding]:
+        """Assess authorization and access control security."""
+        findings = []
+        
+        # RBAC Implementation Assessment
+        findings.append(SecurityFinding(
+            title="Role-Based Access Control Review",
+            description="Verify RBAC implementation and permission granularity",
+            severity=AuditSeverity.INFO,
+            category="authorization",
+            remediation="Review role definitions, permission assignments, and access control enforcement",
+            compliance_frameworks=[ComplianceFramework.SOC2_TYPE2, ComplianceFramework.OWASP_TOP_10]
+        ))
+        
+        return findings
+    
+    def _assess_data_protection(self) -> List[SecurityFinding]:
+        """Assess data protection and privacy controls."""
+        findings = []
+        
+        # Encryption Assessment
+        findings.append(SecurityFinding(
+            title="Data Encryption Implementation Review",
+            description="Verify data encryption for data at rest and in transit",
+            severity=AuditSeverity.INFO,
+            category="data_protection",
+            remediation="Review encryption implementation for sensitive data handling",
+            compliance_frameworks=[ComplianceFramework.GDPR, ComplianceFramework.PCI_DSS]
+        ))
+        
+        # PII Handling Assessment
+        findings.append(SecurityFinding(
+            title="PII Handling and Privacy Controls",
+            description="Assess personally identifiable information handling procedures",
+            severity=AuditSeverity.INFO,
+            category="privacy",
+            remediation="Review PII collection, processing, and retention policies",
+            compliance_frameworks=[ComplianceFramework.GDPR, ComplianceFramework.SOC2_TYPE2]
+        ))
+        
+        return findings
+    
+    def _assess_infrastructure_security(self) -> List[SecurityFinding]:
+        """Assess infrastructure and deployment security."""
+        findings = []
+        
+        # Container Security Assessment
+        findings.append(SecurityFinding(
+            title="Container Security Configuration",
+            description="Assess container security configuration and image scanning",
+            severity=AuditSeverity.INFO,
+            category="infrastructure",
+            remediation="Review container security policies and image vulnerability scanning",
+            compliance_frameworks=[ComplianceFramework.SOC2_TYPE2, ComplianceFramework.NIST_CSF]
+        ))
+        
+        return findings
+    
+    def _execute_risk_analysis(self) -> None:
+        """Execute comprehensive risk analysis and prioritization."""
+        if not self.current_audit:
+            return
+        
+        logger.info("Executing risk analysis and prioritization")
+        
+        # Calculate risk scores for all findings
+        for finding in self.current_audit.findings:
+            # Set business impact based on severity and category
+            if finding.severity in [AuditSeverity.CRITICAL, AuditSeverity.HIGH]:
+                finding.business_impact = "High - Could impact business operations or data security"
+            elif finding.severity == AuditSeverity.MEDIUM:
+                finding.business_impact = "Medium - May impact security posture"
+            else:
+                finding.business_impact = "Low - Minimal business impact"
+            
+            # Set technical impact
+            if finding.category in ["injection", "authentication", "authorization"]:
+                finding.technical_impact = "High - Could lead to system compromise"
+            elif finding.category in ["session_management", "data_protection"]:
+                finding.technical_impact = "Medium - Could expose sensitive data"
+            else:
+                finding.technical_impact = "Low - Limited technical impact"
+            
+            # Set likelihood based on category and exploitability
+            if finding.source_scanner == "penetration_testing":
+                finding.likelihood = "high"  # Confirmed exploitable
+            elif finding.category in ["injection", "xss", "authentication"]:
+                finding.likelihood = "medium"
+            else:
+                finding.likelihood = "low"
+        
+        # Sort findings by risk score
+        self.current_audit.findings.sort(
+            key=lambda f: f.calculate_risk_score(), 
+            reverse=True
+        )
+        
+        logger.info("Risk analysis completed")
+    
+    def _generate_remediation_plan(self) -> None:
+        """Generate comprehensive remediation plan with prioritized actions."""
+        if not self.current_audit:
+            return
+        
+        logger.info("Generating remediation plan")
+        
+        immediate_actions = []
+        short_term_actions = []
+        long_term_actions = []
+        
+        for finding in self.current_audit.findings:
+            risk_score = finding.calculate_risk_score()
+            
+            if risk_score >= 8.0 or finding.severity == AuditSeverity.CRITICAL:
+                immediate_actions.append(
+                    f"Critical: {finding.title} - {finding.remediation}"
+                )
+            elif risk_score >= 5.0 or finding.severity == AuditSeverity.HIGH:
+                short_term_actions.append(
+                    f"High Priority: {finding.title} - {finding.remediation}"
+                )
+            else:
+                long_term_actions.append(
+                    f"Standard Priority: {finding.title} - {finding.remediation}"
+                )
+        
+        self.current_audit.immediate_actions = immediate_actions[:10]  # Top 10 critical
+        self.current_audit.short_term_actions = short_term_actions[:20]  # Top 20 high
+        self.current_audit.long_term_actions = long_term_actions[:30]  # Top 30 standard
+        
+        # Estimate overall remediation effort
+        effort_scores = []
+        for finding in self.current_audit.findings:
+            if finding.severity == AuditSeverity.CRITICAL:
+                effort_scores.append(3)
+            elif finding.severity == AuditSeverity.HIGH:
+                effort_scores.append(2)
+            else:
+                effort_scores.append(1)
+        
+        avg_effort = sum(effort_scores) / len(effort_scores) if effort_scores else 1
+        if avg_effort >= 2.5:
+            self.current_audit.estimated_remediation_effort = "high"
+        elif avg_effort >= 1.5:
+            self.current_audit.estimated_remediation_effort = "medium"
+        else:
+            self.current_audit.estimated_remediation_effort = "low"
+        
+        logger.info(f"Remediation plan generated: {len(immediate_actions)} immediate, "
+                   f"{len(short_term_actions)} short-term, {len(long_term_actions)} long-term actions")
+    
+    def _update_audit_metrics(self) -> None:
+        """Update Prometheus metrics with audit results."""
+        if not self.current_audit:
+            return
+        
+        # Record audit execution
+        self.metrics.record_audit_execution(
+            audit_type="comprehensive",
+            status="completed",
+            duration=self.current_audit.duration_minutes * 60
+        )
+        
+        # Update security score and risk level
+        self.metrics.update_security_score(self.current_audit.overall_security_score)
+        self.metrics.update_risk_level(self.current_audit.risk_level)
+        
+        # Record findings metrics
+        for finding in self.current_audit.findings:
+            self.metrics.record_security_finding(
+                severity=finding.severity.value,
+                category=finding.category,
+                scanner=finding.source_scanner
+            )
+        
+        # Update vulnerability metrics
+        self.metrics.record_vulnerability_metrics(self.current_audit.findings)
+        
+        # Update compliance metrics
+        for framework_name, result in self.current_audit.compliance_results.items():
+            self.metrics.update_compliance_metrics(
+                framework=framework_name,
+                score=result.compliance_percentage,
+                status=result.status
+            )
+    
+    def _generate_executive_dashboard(self) -> None:
+        """Generate executive dashboard data for stakeholder communication."""
+        if not self.current_audit:
+            return
+        
+        logger.info("Generating executive dashboard")
+        
+        # Create executive summary
+        executive_summary = self.current_audit.get_executive_summary()
+        
+        # Store dashboard data
+        dashboard_data = {
+            'executive_summary': executive_summary,
+            'security_trends': self._calculate_security_trends(),
+            'compliance_dashboard': self._generate_compliance_dashboard(),
+            'risk_heatmap': self._generate_risk_heatmap(),
+            'remediation_roadmap': self._generate_remediation_roadmap()
+        }
+        
+        # Save dashboard data
+        self.current_audit.metadata['executive_dashboard'] = dashboard_data
+        
+        logger.info("Executive dashboard generated successfully")
+    
+    def _calculate_security_trends(self) -> Dict[str, Any]:
+        """Calculate security trends from historical audit data."""
+        if len(self.audit_history) < 2:
+            return {'trend': 'stable', 'message': 'Insufficient historical data'}
+        
+        # Compare with previous audit
+        previous_audit = self.audit_history[-2]
+        current_score = self.current_audit.overall_security_score
+        previous_score = previous_audit.overall_security_score
+        
+        score_change = current_score - previous_score
+        
+        if score_change > 5:
+            trend = 'improving'
+        elif score_change < -5:
+            trend = 'declining'
+        else:
+            trend = 'stable'
+        
+        return {
+            'trend': trend,
+            'score_change': score_change,
+            'current_score': current_score,
+            'previous_score': previous_score,
+            'message': f"Security score {trend} by {abs(score_change):.1f} points"
+        }
+    
+    def _generate_compliance_dashboard(self) -> Dict[str, Any]:
+        """Generate compliance dashboard visualization data."""
+        if not self.current_audit or not self.current_audit.compliance_results:
+            return {}
+        
+        compliance_summary = {}
+        for framework_name, result in self.current_audit.compliance_results.items():
+            compliance_summary[framework_name] = {
+                'score': result.compliance_percentage,
+                'status': result.status,
+                'gaps': len(result.gaps_identified),
+                'next_assessment': result.next_assessment_due.strftime('%Y-%m-%d')
+            }
+        
+        return compliance_summary
+    
+    def _generate_risk_heatmap(self) -> Dict[str, Any]:
+        """Generate risk heatmap for visualization."""
+        if not self.current_audit:
+            return {}
+        
+        # Categorize findings by category and severity
+        risk_matrix = defaultdict(lambda: defaultdict(int))
+        
+        for finding in self.current_audit.findings:
+            category = finding.category
+            severity = finding.severity.value
+            risk_matrix[category][severity] += 1
+        
+        return dict(risk_matrix)
+    
+    def _generate_remediation_roadmap(self) -> Dict[str, Any]:
+        """Generate remediation roadmap with timelines."""
+        if not self.current_audit:
+            return {}
+        
+        return {
+            'immediate': {
+                'count': len(self.current_audit.immediate_actions),
+                'timeline': '0-30 days',
+                'priority': 'critical'
+            },
+            'short_term': {
+                'count': len(self.current_audit.short_term_actions),
+                'timeline': '1-3 months',
+                'priority': 'high'
+            },
+            'long_term': {
+                'count': len(self.current_audit.long_term_actions),
+                'timeline': '3-12 months',
+                'priority': 'medium'
+            }
+        }
+    
+    # Compliance Framework Validators
+    
+    def _create_soc2_validator(self) -> Callable:
+        """Create SOC 2 Type II compliance validator."""
+        def validate_soc2_compliance(findings: List[SecurityFinding]) -> ComplianceResult:
+            result = ComplianceResult(
+                framework=ComplianceFramework.SOC2_TYPE2,
+                assessor="SOC 2 Automated Validator"
+            )
+            
+            # SOC 2 Trust Criteria Assessment
+            trust_criteria = {
+                'security': {'weight': 30, 'score': 100},
+                'availability': {'weight': 20, 'score': 100},
+                'processing_integrity': {'weight': 20, 'score': 100},
+                'confidentiality': {'weight': 15, 'score': 100},
+                'privacy': {'weight': 15, 'score': 100}
+            }
+            
+            # Deduct points based on findings
+            for finding in findings:
+                penalty = self._calculate_soc2_penalty(finding)
+                
+                # Apply penalties to relevant criteria
+                if finding.category in ['authentication', 'authorization', 'session_management']:
+                    trust_criteria['security']['score'] -= penalty
+                elif finding.category in ['infrastructure', 'availability']:
+                    trust_criteria['availability']['score'] -= penalty
+                elif finding.category in ['data_validation', 'integrity']:
+                    trust_criteria['processing_integrity']['score'] -= penalty
+                elif finding.category in ['encryption', 'data_protection']:
+                    trust_criteria['confidentiality']['score'] -= penalty
+                elif finding.category in ['privacy', 'pii_handling']:
+                    trust_criteria['privacy']['score'] -= penalty
+            
+            # Calculate weighted score
+            total_score = 0
+            for criteria, data in trust_criteria.items():
+                criteria_score = max(0, min(100, data['score']))
+                weighted_score = criteria_score * (data['weight'] / 100)
+                total_score += weighted_score
+                result.control_results[criteria] = {
+                    'score': criteria_score,
+                    'weight': data['weight'],
+                    'status': 'compliant' if criteria_score >= 80 else 'non_compliant'
+                }
+            
+            result.overall_score = total_score
+            
+            # Identify gaps
+            for criteria, data in result.control_results.items():
+                if data['status'] == 'non_compliant':
+                    result.gaps_identified.append(f"SOC 2 {criteria.title()} criteria not meeting requirements")
+            
+            # Generate recommendations
+            if result.overall_score < 80:
+                result.recommendations.append("Implement comprehensive security controls")
+                result.recommendations.append("Establish formal security policies and procedures")
+                result.recommendations.append("Conduct regular security training")
+            
+            return result
+        
+        return validate_soc2_compliance
+    
+    def _create_iso27001_validator(self) -> Callable:
+        """Create ISO 27001 compliance validator."""
+        def validate_iso27001_compliance(findings: List[SecurityFinding]) -> ComplianceResult:
+            result = ComplianceResult(
+                framework=ComplianceFramework.ISO_27001,
+                assessor="ISO 27001 Automated Validator"
+            )
+            
+            # ISO 27001 Control Categories
+            control_categories = {
+                'access_control': {'weight': 20, 'score': 100},
+                'cryptography': {'weight': 15, 'score': 100},
+                'operations_security': {'weight': 15, 'score': 100},
+                'communications_security': {'weight': 10, 'score': 100},
+                'system_acquisition': {'weight': 10, 'score': 100},
+                'supplier_relationships': {'weight': 5, 'score': 100},
+                'incident_management': {'weight': 10, 'score': 100},
+                'business_continuity': {'weight': 5, 'score': 100},
+                'compliance': {'weight': 10, 'score': 100}
+            }
+            
+            # Apply penalties based on findings
+            for finding in findings:
+                penalty = self._calculate_iso27001_penalty(finding)
+                
+                if finding.category in ['authentication', 'authorization']:
+                    control_categories['access_control']['score'] -= penalty
+                elif finding.category in ['encryption', 'data_protection']:
+                    control_categories['cryptography']['score'] -= penalty
+                elif finding.category in ['configuration', 'infrastructure']:
+                    control_categories['operations_security']['score'] -= penalty
+                elif finding.category in ['transport_security', 'network']:
+                    control_categories['communications_security']['score'] -= penalty
+            
+            # Calculate weighted score
+            total_score = 0
+            for category, data in control_categories.items():
+                category_score = max(0, min(100, data['score']))
+                weighted_score = category_score * (data['weight'] / 100)
+                total_score += weighted_score
+                result.control_results[category] = {
+                    'score': category_score,
+                    'weight': data['weight'],
+                    'status': 'compliant' if category_score >= 85 else 'non_compliant'
+                }
+            
+            result.overall_score = total_score
+            
+            # Identify gaps
+            for category, data in result.control_results.items():
+                if data['status'] == 'non_compliant':
+                    result.gaps_identified.append(f"ISO 27001 {category.replace('_', ' ').title()} controls inadequate")
+            
+            return result
+        
+        return validate_iso27001_compliance
+    
+    def _create_pci_dss_validator(self) -> Callable:
+        """Create PCI DSS compliance validator."""
+        def validate_pci_dss_compliance(findings: List[SecurityFinding]) -> ComplianceResult:
+            result = ComplianceResult(
+                framework=ComplianceFramework.PCI_DSS,
+                assessor="PCI DSS Automated Validator"
+            )
+            
+            # PCI DSS Requirements
+            pci_requirements = {
+                'network_security': {'weight': 15, 'score': 100},
+                'cardholder_data_protection': {'weight': 20, 'score': 100},
+                'encryption_in_transit': {'weight': 15, 'score': 100},
+                'vulnerability_management': {'weight': 15, 'score': 100},
+                'access_control': {'weight': 15, 'score': 100},
+                'network_monitoring': {'weight': 10, 'score': 100},
+                'security_testing': {'weight': 10, 'score': 100}
+            }
+            
+            # Apply penalties
+            for finding in findings:
+                penalty = self._calculate_pci_penalty(finding)
+                
+                if finding.category in ['network', 'infrastructure']:
+                    pci_requirements['network_security']['score'] -= penalty
+                elif finding.category in ['data_protection', 'privacy']:
+                    pci_requirements['cardholder_data_protection']['score'] -= penalty
+                elif finding.category in ['encryption', 'transport_security']:
+                    pci_requirements['encryption_in_transit']['score'] -= penalty
+                elif finding.category in ['dependency_vulnerability', 'static_analysis']:
+                    pci_requirements['vulnerability_management']['score'] -= penalty
+                elif finding.category in ['authentication', 'authorization']:
+                    pci_requirements['access_control']['score'] -= penalty
+            
+            # Calculate score
+            total_score = sum(
+                max(0, min(100, data['score'])) * (data['weight'] / 100)
+                for data in pci_requirements.values()
+            )
+            result.overall_score = total_score
+            
+            return result
+        
+        return validate_pci_dss_compliance
+    
+    def _create_gdpr_validator(self) -> Callable:
+        """Create GDPR compliance validator."""
+        def validate_gdpr_compliance(findings: List[SecurityFinding]) -> ComplianceResult:
+            result = ComplianceResult(
+                framework=ComplianceFramework.GDPR,
+                assessor="GDPR Automated Validator"
+            )
+            
+            # GDPR Principles
+            gdpr_principles = {
+                'lawfulness_fairness_transparency': {'weight': 15, 'score': 100},
+                'purpose_limitation': {'weight': 10, 'score': 100},
+                'data_minimisation': {'weight': 15, 'score': 100},
+                'accuracy': {'weight': 10, 'score': 100},
+                'storage_limitation': {'weight': 15, 'score': 100},
+                'integrity_confidentiality': {'weight': 20, 'score': 100},
+                'accountability': {'weight': 15, 'score': 100}
+            }
+            
+            # Apply penalties for privacy and data protection findings
+            for finding in findings:
+                if finding.category in ['privacy', 'data_protection', 'encryption']:
+                    penalty = self._calculate_gdpr_penalty(finding)
+                    gdpr_principles['integrity_confidentiality']['score'] -= penalty
+                    gdpr_principles['accountability']['score'] -= penalty / 2
+            
+            # Calculate score
+            total_score = sum(
+                max(0, min(100, data['score'])) * (data['weight'] / 100)
+                for data in gdpr_principles.values()
+            )
+            result.overall_score = total_score
+            
+            return result
+        
+        return validate_gdpr_compliance
+    
+    def _create_owasp_validator(self) -> Callable:
+        """Create OWASP Top 10 compliance validator."""
+        def validate_owasp_compliance(findings: List[SecurityFinding]) -> ComplianceResult:
+            result = ComplianceResult(
+                framework=ComplianceFramework.OWASP_TOP_10,
+                assessor="OWASP Top 10 Automated Validator"
+            )
+            
+            # OWASP Top 10 Categories
+            owasp_categories = {
+                'broken_access_control': {'weight': 12, 'score': 100},
+                'cryptographic_failures': {'weight': 12, 'score': 100},
+                'injection': {'weight': 12, 'score': 100},
+                'insecure_design': {'weight': 10, 'score': 100},
+                'security_misconfiguration': {'weight': 12, 'score': 100},
+                'vulnerable_components': {'weight': 12, 'score': 100},
+                'authentication_failures': {'weight': 10, 'score': 100},
+                'integrity_failures': {'weight': 8, 'score': 100},
+                'logging_monitoring_failures': {'weight': 6, 'score': 100},
+                'ssrf': {'weight': 6, 'score': 100}
+            }
+            
+            # Map findings to OWASP categories and apply penalties
+            for finding in findings:
+                penalty = self._calculate_owasp_penalty(finding)
+                
+                if finding.category in ['authorization', 'access_control']:
+                    owasp_categories['broken_access_control']['score'] -= penalty
+                elif finding.category in ['encryption', 'cryptography']:
+                    owasp_categories['cryptographic_failures']['score'] -= penalty
+                elif finding.category in ['injection', 'xss', 'sql_injection']:
+                    owasp_categories['injection']['score'] -= penalty
+                elif finding.category in ['configuration', 'security_headers']:
+                    owasp_categories['security_misconfiguration']['score'] -= penalty
+                elif finding.category in ['dependency_vulnerability']:
+                    owasp_categories['vulnerable_components']['score'] -= penalty
+                elif finding.category in ['authentication', 'session_management']:
+                    owasp_categories['authentication_failures']['score'] -= penalty
+            
+            # Calculate score
+            total_score = sum(
+                max(0, min(100, data['score'])) * (data['weight'] / 100)
+                for data in owasp_categories.values()
+            )
+            result.overall_score = total_score
+            
+            return result
+        
+        return validate_owasp_compliance
+    
+    def _create_nist_validator(self) -> Callable:
+        """Create NIST Cybersecurity Framework validator."""
+        def validate_nist_compliance(findings: List[SecurityFinding]) -> ComplianceResult:
+            result = ComplianceResult(
+                framework=ComplianceFramework.NIST_CSF,
+                assessor="NIST CSF Automated Validator"
+            )
+            
+            # NIST Framework Functions
+            nist_functions = {
+                'identify': {'weight': 20, 'score': 100},
+                'protect': {'weight': 25, 'score': 100},
+                'detect': {'weight': 20, 'score': 100},
+                'respond': {'weight': 15, 'score': 100},
+                'recover': {'weight': 20, 'score': 100}
+            }
+            
+            # Apply penalties based on findings
+            for finding in findings:
+                penalty = self._calculate_nist_penalty(finding)
+                
+                # Most security findings impact the "Protect" function
+                nist_functions['protect']['score'] -= penalty
+                
+                # Configuration and vulnerability findings impact "Identify"
+                if finding.category in ['configuration', 'vulnerability_management']:
+                    nist_functions['identify']['score'] -= penalty / 2
+            
+            # Calculate score
+            total_score = sum(
+                max(0, min(100, data['score'])) * (data['weight'] / 100)
+                for data in nist_functions.values()
+            )
+            result.overall_score = total_score
+            
+            return result
+        
+        return validate_nist_compliance
+    
+    # Penalty Calculation Methods
+    
+    def _calculate_soc2_penalty(self, finding: SecurityFinding) -> float:
+        """Calculate SOC 2 compliance penalty for a finding."""
+        base_penalties = {
+            AuditSeverity.CRITICAL: 25.0,
+            AuditSeverity.HIGH: 15.0,
+            AuditSeverity.MEDIUM: 8.0,
+            AuditSeverity.LOW: 3.0,
+            AuditSeverity.INFO: 1.0
+        }
+        return base_penalties.get(finding.severity, 5.0)
+    
+    def _calculate_iso27001_penalty(self, finding: SecurityFinding) -> float:
+        """Calculate ISO 27001 compliance penalty for a finding."""
+        base_penalties = {
+            AuditSeverity.CRITICAL: 30.0,
+            AuditSeverity.HIGH: 20.0,
+            AuditSeverity.MEDIUM: 10.0,
+            AuditSeverity.LOW: 4.0,
+            AuditSeverity.INFO: 1.0
+        }
+        return base_penalties.get(finding.severity, 5.0)
+    
+    def _calculate_pci_penalty(self, finding: SecurityFinding) -> float:
+        """Calculate PCI DSS compliance penalty for a finding."""
+        base_penalties = {
+            AuditSeverity.CRITICAL: 35.0,
+            AuditSeverity.HIGH: 25.0,
+            AuditSeverity.MEDIUM: 12.0,
+            AuditSeverity.LOW: 5.0,
+            AuditSeverity.INFO: 1.0
+        }
+        return base_penalties.get(finding.severity, 7.0)
+    
+    def _calculate_gdpr_penalty(self, finding: SecurityFinding) -> float:
+        """Calculate GDPR compliance penalty for a finding."""
+        base_penalties = {
+            AuditSeverity.CRITICAL: 40.0,
+            AuditSeverity.HIGH: 25.0,
+            AuditSeverity.MEDIUM: 12.0,
+            AuditSeverity.LOW: 5.0,
+            AuditSeverity.INFO: 2.0
+        }
+        return base_penalties.get(finding.severity, 8.0)
+    
+    def _calculate_owasp_penalty(self, finding: SecurityFinding) -> float:
+        """Calculate OWASP Top 10 compliance penalty for a finding."""
+        base_penalties = {
+            AuditSeverity.CRITICAL: 30.0,
+            AuditSeverity.HIGH: 20.0,
+            AuditSeverity.MEDIUM: 10.0,
+            AuditSeverity.LOW: 4.0,
+            AuditSeverity.INFO: 1.0
+        }
+        return base_penalties.get(finding.severity, 6.0)
+    
+    def _calculate_nist_penalty(self, finding: SecurityFinding) -> float:
+        """Calculate NIST CSF compliance penalty for a finding."""
+        base_penalties = {
+            AuditSeverity.CRITICAL: 25.0,
+            AuditSeverity.HIGH: 15.0,
+            AuditSeverity.MEDIUM: 8.0,
+            AuditSeverity.LOW: 3.0,
+            AuditSeverity.INFO: 1.0
+        }
+        return base_penalties.get(finding.severity, 5.0)
+    
+    # Severity Mapping Methods
+    
+    def _map_bandit_severity(self, bandit_severity: str) -> AuditSeverity:
+        """Map Bandit severity to audit severity."""
+        mapping = {
+            'HIGH': AuditSeverity.HIGH,
+            'MEDIUM': AuditSeverity.MEDIUM,
+            'LOW': AuditSeverity.LOW
+        }
+        return mapping.get(bandit_severity.upper(), AuditSeverity.INFO)
+    
+    def _map_safety_severity(self, vulnerability: Dict[str, Any]) -> AuditSeverity:
+        """Map Safety vulnerability to audit severity."""
+        # Safety doesn't provide direct severity, use heuristics
+        advisory = vulnerability.get('advisory', '').lower()
+        
+        if any(term in advisory for term in ['critical', 'remote code execution', 'rce']):
+            return AuditSeverity.CRITICAL
+        elif any(term in advisory for term in ['high', 'privilege escalation', 'sql injection']):
+            return AuditSeverity.HIGH
+        elif any(term in advisory for term in ['medium', 'xss', 'csrf']):
+            return AuditSeverity.MEDIUM
+        else:
+            return AuditSeverity.LOW
+    
+    def _map_zap_risk_to_severity(self, zap_risk: str) -> AuditSeverity:
+        """Map ZAP risk level to audit severity."""
+        mapping = {
+            'High': AuditSeverity.HIGH,
+            'Medium': AuditSeverity.MEDIUM,
+            'Low': AuditSeverity.LOW,
+            'Informational': AuditSeverity.INFO
+        }
+        return mapping.get(zap_risk, AuditSeverity.INFO)
+    
+    def _map_pentest_severity(self, pentest_severity: str) -> AuditSeverity:
+        """Map penetration test severity to audit severity."""
+        mapping = {
+            'critical': AuditSeverity.CRITICAL,
+            'high': AuditSeverity.HIGH,
+            'medium': AuditSeverity.MEDIUM,
+            'low': AuditSeverity.LOW,
+            'info': AuditSeverity.INFO
+        }
+        return mapping.get(pentest_severity.lower(), AuditSeverity.MEDIUM)
+    
+    def _generate_bandit_remediation(self, issue: Dict[str, Any]) -> str:
+        """Generate specific remediation advice for Bandit findings."""
+        test_id = issue.get('test_id', '')
+        
+        remediation_map = {
+            'B101': 'Remove or properly handle assert statements in production code',
+            'B102': 'Use safe functions instead of exec()',
+            'B103': 'Avoid setting file permissions to 0777',
+            'B104': 'Use secure methods for network binding',
+            'B105': 'Use secure password hashing algorithms',
+            'B106': 'Avoid hardcoded passwords in source code',
+            'B107': 'Use secure random number generators',
+            'B108': 'Use secure temporary file creation methods',
+            'B110': 'Avoid try/except with bare except clauses',
+            'B201': 'Use parameterized queries to prevent SQL injection',
+            'B301': 'Use safe pickle alternatives or validate input',
+            'B302': 'Use secure methods for object serialization',
+            'B303': 'Use secure hash algorithms instead of MD5',
+            'B304': 'Use secure hash algorithms instead of MD4',
+            'B305': 'Use secure hash algorithms instead of SHA1',
+            'B306': 'Use tempfile module for temporary file creation',
+            'B307': 'Use safe eval alternatives or input validation',
+            'B308': 'Use secure random number generators',
+            'B309': 'Use secure HTTP methods and headers',
+            'B310': 'Use secure URL validation',
+            'B311': 'Use secure random number generators',
+            'B312': 'Use secure random number generators',
+            'B313': 'Use secure XML parsing to prevent XXE attacks',
+            'B314': 'Use secure XML processing to prevent XXE attacks',
+            'B315': 'Use secure XML processing to prevent XXE attacks',
+            'B316': 'Use secure XML processing to prevent XXE attacks',
+            'B317': 'Use secure XML processing to prevent XXE attacks',
+            'B318': 'Use secure XML processing to prevent XXE attacks',
+            'B319': 'Use secure XML processing to prevent XXE attacks',
+            'B320': 'Use secure XML processing to prevent XXE attacks',
+            'B321': 'Use secure FTP methods with proper authentication',
+            'B322': 'Use secure input validation for user data',
+            'B323': 'Use secure URL parsing and validation',
+            'B324': 'Use strong hash algorithms for security purposes',
+            'B325': 'Use secure temporary directory creation',
+            'B401': 'Use secure import mechanisms',
+            'B402': 'Use secure import mechanisms',
+            'B403': 'Use secure import mechanisms',
+            'B404': 'Use secure subprocess calls',
+            'B405': 'Use secure import mechanisms',
+            'B406': 'Use secure import mechanisms',
+            'B407': 'Use secure XML processing',
+            'B408': 'Use secure XML processing',
+            'B409': 'Use secure XML processing',
+            'B410': 'Use secure XML processing',
+            'B411': 'Use secure XML processing',
+            'B412': 'Use secure XML processing',
+            'B501': 'Use certificate verification for requests',
+            'B502': 'Use secure SSL/TLS configurations',
+            'B503': 'Use secure SSL/TLS configurations',
+            'B504': 'Use secure SSL/TLS configurations',
+            'B505': 'Use secure SSH configurations',
+            'B506': 'Use secure YAML loading methods',
+            'B507': 'Use secure SSH key configurations',
+            'B601': 'Avoid shell injection vulnerabilities',
+            'B602': 'Use subprocess with shell=False',
+            'B603': 'Use subprocess with shell=False',
+            'B604': 'Use secure subprocess calls',
+            'B605': 'Use secure subprocess calls',
+            'B606': 'Use secure subprocess calls',
+            'B607': 'Use secure subprocess calls',
+            'B608': 'Use secure SQL query construction',
+            'B609': 'Use secure subprocess calls',
+            'B610': 'Use secure subprocess calls',
+            'B611': 'Use secure subprocess calls',
+            'B701': 'Use secure Jinja2 configurations',
+            'B702': 'Use secure test configurations',
+            'B703': 'Use secure test configurations'
+        }
+        
+        return remediation_map.get(test_id, 'Review the security issue and implement appropriate mitigations')
+    
+    # Public API Methods
+    
+    def get_latest_audit_report(self) -> Optional[SecurityAuditReport]:
+        """
+        Get the latest completed security audit report.
+        
+        Returns:
+            Latest SecurityAuditReport or None if no audits completed
+        """
+        return self.current_audit if self.current_audit else None
+    
+    def get_audit_history(self, limit: int = 10) -> List[SecurityAuditReport]:
+        """
+        Get historical audit reports.
         
         Args:
-            time_period: Time period for dashboard data (30_days, 90_days, 1_year)
-            include_trends: Whether to include trend analysis
-            include_recommendations: Whether to include strategic recommendations
+            limit: Maximum number of reports to return
             
         Returns:
-            Comprehensive executive dashboard data
+            List of historical SecurityAuditReport instances
         """
-        dashboard_start_time = time.time()
-        dashboard_id = f"exec_dashboard_{uuid.uuid4().hex[:8]}"
+        return self.audit_history[-limit:] if self.audit_history else []
+    
+    def export_audit_report(
+        self, 
+        report: Optional[SecurityAuditReport] = None,
+        format_type: str = 'json',
+        include_executive_summary: bool = True
+    ) -> str:
+        """
+        Export audit report in specified format.
         
-        self.logger.info(
-            "Generating executive security dashboard",
-            dashboard_id=dashboard_id,
-            time_period=time_period
-        )
-        
-        try:
-            dashboard_data = self.dashboard_generator.generate_comprehensive_dashboard(
-                time_period=time_period,
-                include_trends=include_trends,
-                include_recommendations=include_recommendations
-            )
+        Args:
+            report: SecurityAuditReport to export (defaults to latest)
+            format_type: Export format ('json', 'csv', 'html')
+            include_executive_summary: Whether to include executive summary
             
-            # Add metadata
-            dashboard_data['dashboard_metadata'] = {
-                'dashboard_id': dashboard_id,
-                'generated_at': datetime.now(timezone.utc).isoformat(),
-                'time_period': time_period,
-                'generation_duration_seconds': time.time() - dashboard_start_time
-            }
-            
-            # Log dashboard generation
-            self.logger.info(
-                "Executive dashboard generated successfully",
-                dashboard_id=dashboard_id,
-                duration_seconds=time.time() - dashboard_start_time
-            )
-            
-            return dashboard_data
-            
-        except Exception as e:
-            self.logger.error(
-                "Executive dashboard generation failed",
-                dashboard_id=dashboard_id,
-                error=str(e)
-            )
-            raise
-    
-    async def _assess_soc2_compliance(self, assessment: ComplianceAssessment) -> ComplianceAssessment:
-        """Assess SOC 2 Type II compliance with comprehensive control validation."""
-        soc2_controls = {
-            'CC1': 'Control Environment',
-            'CC2': 'Communication and Information',
-            'CC3': 'Risk Assessment',
-            'CC4': 'Monitoring Activities',
-            'CC5': 'Control Activities',
-            'CC6': 'Logical and Physical Access Controls',
-            'CC7': 'System Operations',
-            'CC8': 'Change Management',
-            'CC9': 'Risk Mitigation'
-        }
+        Returns:
+            Exported report as string
+        """
+        target_report = report or self.current_audit
+        if not target_report:
+            raise ValueError("No audit report available for export")
         
-        for control_id, control_name in soc2_controls.items():
-            control_assessment = await self._assess_soc2_control(control_id, control_name)
-            assessment.control_assessments[control_id] = control_assessment
-            
-            # Add findings for non-compliant controls
-            if control_assessment['compliance_status'] != 'compliant':
-                assessment.findings.append({
-                    'finding_id': f"SOC2_{control_id}_{uuid.uuid4().hex[:8]}",
-                    'control_id': control_id,
-                    'control_name': control_name,
-                    'severity': control_assessment.get('severity', 'medium'),
-                    'description': control_assessment.get('description', f'Control {control_id} not fully compliant'),
-                    'evidence': control_assessment.get('evidence', []),
-                    'recommendations': control_assessment.get('recommendations', [])
-                })
-        
-        # Generate SOC 2 specific recommendations
-        assessment.recommendations.extend(await self._generate_soc2_recommendations(assessment))
-        
-        return assessment
-    
-    async def _assess_soc2_control(self, control_id: str, control_name: str) -> Dict[str, Any]:
-        """Assess individual SOC 2 control implementation."""
-        control_tests = {
-            'CC1': self._test_control_environment,
-            'CC2': self._test_communication_information,
-            'CC3': self._test_risk_assessment,
-            'CC4': self._test_monitoring_activities,
-            'CC5': self._test_control_activities,
-            'CC6': self._test_access_controls,
-            'CC7': self._test_system_operations,
-            'CC8': self._test_change_management,
-            'CC9': self._test_risk_mitigation
-        }
-        
-        test_function = control_tests.get(control_id, self._test_generic_control)
-        test_results = await test_function(control_id)
-        
-        return {
-            'control_id': control_id,
-            'control_name': control_name,
-            'test_results': test_results,
-            'compliance_status': test_results.get('status', 'non_compliant'),
-            'score': test_results.get('score', 0),
-            'evidence': test_results.get('evidence', []),
-            'recommendations': test_results.get('recommendations', []),
-            'tested_at': datetime.now(timezone.utc).isoformat()
-        }
-    
-    async def _test_access_controls(self, control_id: str) -> Dict[str, Any]:
-        """Test logical and physical access controls (CC6)."""
-        test_results = {
-            'status': 'compliant',
-            'score': 100,
-            'evidence': [],
-            'recommendations': [],
-            'tests_performed': []
-        }
-        
-        # Test authentication controls
-        auth_test = await self._test_authentication_controls()
-        test_results['tests_performed'].append({
-            'test_name': 'authentication_controls',
-            'result': auth_test,
-            'compliant': auth_test.get('compliant', False)
-        })
-        
-        if not auth_test.get('compliant', False):
-            test_results['status'] = 'non_compliant'
-            test_results['score'] -= 20
-            test_results['recommendations'].append({
-                'recommendation': 'Strengthen authentication controls',
-                'priority': 'high',
-                'details': auth_test.get('issues', [])
-            })
-        
-        # Test authorization controls
-        authz_test = await self._test_authorization_controls()
-        test_results['tests_performed'].append({
-            'test_name': 'authorization_controls',
-            'result': authz_test,
-            'compliant': authz_test.get('compliant', False)
-        })
-        
-        if not authz_test.get('compliant', False):
-            test_results['status'] = 'non_compliant'
-            test_results['score'] -= 20
-            test_results['recommendations'].append({
-                'recommendation': 'Improve authorization mechanisms',
-                'priority': 'high',
-                'details': authz_test.get('issues', [])
-            })
-        
-        # Test session management
-        session_test = await self._test_session_management()
-        test_results['tests_performed'].append({
-            'test_name': 'session_management',
-            'result': session_test,
-            'compliant': session_test.get('compliant', False)
-        })
-        
-        if not session_test.get('compliant', False):
-            test_results['status'] = 'partially_compliant' if test_results['status'] == 'compliant' else 'non_compliant'
-            test_results['score'] -= 15
-            test_results['recommendations'].append({
-                'recommendation': 'Enhance session management security',
-                'priority': 'medium',
-                'details': session_test.get('issues', [])
-            })
-        
-        # Collect evidence
-        test_results['evidence'] = [
-            'Authentication control validation results',
-            'Authorization mechanism assessment',
-            'Session management security review',
-            'Access control policy compliance verification'
-        ]
-        
-        return test_results
-    
-    async def _test_authentication_controls(self) -> Dict[str, Any]:
-        """Test authentication control implementation."""
-        auth_tests = {
-            'jwt_validation': True,  # Assume JWT validation is properly implemented
-            'mfa_support': True,     # Auth0 MFA support
-            'password_policy': True, # Auth0 password policies
-            'session_timeout': True, # Flask-Session timeout
-            'brute_force_protection': True  # Rate limiting
-        }
-        
-        issues = []
-        for test_name, result in auth_tests.items():
-            if not result:
-                issues.append(f"Authentication control failure: {test_name}")
-        
-        return {
-            'compliant': len(issues) == 0,
-            'test_results': auth_tests,
-            'issues': issues,
-            'score': max(0, 100 - (len(issues) * 20))
-        }
-    
-    async def _test_authorization_controls(self) -> Dict[str, Any]:
-        """Test authorization control implementation."""
-        authz_tests = {
-            'rbac_implementation': True,     # Role-based access control
-            'permission_validation': True,   # Permission checking
-            'resource_protection': True,     # Resource-level authorization
-            'privilege_escalation_prevention': True,  # Anti-privilege escalation
-            'least_privilege': True          # Principle of least privilege
-        }
-        
-        issues = []
-        for test_name, result in authz_tests.items():
-            if not result:
-                issues.append(f"Authorization control failure: {test_name}")
-        
-        return {
-            'compliant': len(issues) == 0,
-            'test_results': authz_tests,
-            'issues': issues,
-            'score': max(0, 100 - (len(issues) * 20))
-        }
-    
-    async def _test_session_management(self) -> Dict[str, Any]:
-        """Test session management security."""
-        session_tests = {
-            'session_encryption': True,      # Redis session encryption
-            'session_regeneration': True,    # Session ID regeneration
-            'session_timeout': True,         # Automatic timeout
-            'secure_cookies': True,          # Secure cookie flags
-            'csrf_protection': True          # CSRF token validation
-        }
-        
-        issues = []
-        for test_name, result in session_tests.items():
-            if not result:
-                issues.append(f"Session management failure: {test_name}")
-        
-        return {
-            'compliant': len(issues) == 0,
-            'test_results': session_tests,
-            'issues': issues,
-            'score': max(0, 100 - (len(issues) * 20))
-        }
-    
-    async def _test_control_environment(self, control_id: str) -> Dict[str, Any]:
-        """Test control environment (CC1)."""
-        return {
-            'status': 'compliant',
-            'score': 95,
-            'evidence': ['Security policy documentation', 'Code review processes'],
-            'recommendations': [],
-            'details': 'Control environment adequately designed and implemented'
-        }
-    
-    async def _test_communication_information(self, control_id: str) -> Dict[str, Any]:
-        """Test communication and information (CC2)."""
-        return {
-            'status': 'compliant',
-            'score': 90,
-            'evidence': ['Security awareness training', 'Incident response procedures'],
-            'recommendations': [],
-            'details': 'Communication processes effectively support security objectives'
-        }
-    
-    async def _test_risk_assessment(self, control_id: str) -> Dict[str, Any]:
-        """Test risk assessment (CC3)."""
-        return {
-            'status': 'compliant',
-            'score': 85,
-            'evidence': ['Risk assessment documentation', 'Threat modeling processes'],
-            'recommendations': ['Enhance threat intelligence integration'],
-            'details': 'Risk assessment processes operational with improvement opportunities'
-        }
-    
-    async def _test_monitoring_activities(self, control_id: str) -> Dict[str, Any]:
-        """Test monitoring activities (CC4)."""
-        return {
-            'status': 'compliant',
-            'score': 92,
-            'evidence': ['Security monitoring systems', 'Audit log analysis'],
-            'recommendations': [],
-            'details': 'Monitoring activities provide adequate security oversight'
-        }
-    
-    async def _test_control_activities(self, control_id: str) -> Dict[str, Any]:
-        """Test control activities (CC5)."""
-        return {
-            'status': 'compliant',
-            'score': 88,
-            'evidence': ['Access control implementation', 'Security testing procedures'],
-            'recommendations': ['Automate additional security controls'],
-            'details': 'Control activities effectively implemented with automation opportunities'
-        }
-    
-    async def _test_system_operations(self, control_id: str) -> Dict[str, Any]:
-        """Test system operations (CC7)."""
-        return {
-            'status': 'compliant',
-            'score': 93,
-            'evidence': ['Operations procedures', 'Capacity management'],
-            'recommendations': [],
-            'details': 'System operations maintain security and availability'
-        }
-    
-    async def _test_change_management(self, control_id: str) -> Dict[str, Any]:
-        """Test change management (CC8)."""
-        return {
-            'status': 'compliant',
-            'score': 90,
-            'evidence': ['Change control procedures', 'Testing protocols'],
-            'recommendations': [],
-            'details': 'Change management processes ensure security during modifications'
-        }
-    
-    async def _test_risk_mitigation(self, control_id: str) -> Dict[str, Any]:
-        """Test risk mitigation (CC9)."""
-        return {
-            'status': 'compliant',
-            'score': 87,
-            'evidence': ['Risk mitigation strategies', 'Incident response capabilities'],
-            'recommendations': ['Enhance automated response capabilities'],
-            'details': 'Risk mitigation processes adequately address identified risks'
-        }
-    
-    async def _test_generic_control(self, control_id: str) -> Dict[str, Any]:
-        """Generic control test for unspecified controls."""
-        return {
-            'status': 'partially_compliant',
-            'score': 70,
-            'evidence': ['Generic control validation'],
-            'recommendations': ['Implement specific control testing'],
-            'details': f'Generic assessment for control {control_id}'
-        }
-    
-    def _calculate_compliance_score(self, assessment: ComplianceAssessment) -> float:
-        """Calculate overall compliance score from control assessments."""
-        if not assessment.control_assessments:
-            return 0.0
-        
-        total_score = sum(
-            control.get('score', 0)
-            for control in assessment.control_assessments.values()
-        )
-        
-        return total_score / len(assessment.control_assessments)
-    
-    def _determine_compliance_status(self, score: float) -> ComplianceStatus:
-        """Determine compliance status based on score."""
-        if score >= 95:
-            return ComplianceStatus.COMPLIANT
-        elif score >= 80:
-            return ComplianceStatus.PARTIALLY_COMPLIANT
+        if format_type == 'json':
+            return self._export_json_report(target_report, include_executive_summary)
+        elif format_type == 'csv':
+            return self._export_csv_report(target_report)
+        elif format_type == 'html':
+            return self._export_html_report(target_report, include_executive_summary)
         else:
-            return ComplianceStatus.NON_COMPLIANT
+            raise ValueError(f"Unsupported export format: {format_type}")
     
-    def _generate_compliance_summary(self, assessment: ComplianceAssessment) -> str:
-        """Generate executive summary for compliance assessment."""
-        status_text = {
-            ComplianceStatus.COMPLIANT: "fully compliant",
-            ComplianceStatus.PARTIALLY_COMPLIANT: "partially compliant",
-            ComplianceStatus.NON_COMPLIANT: "non-compliant",
-            ComplianceStatus.NOT_ASSESSED: "not assessed",
-            ComplianceStatus.REQUIRES_REVIEW: "requires manual review"
-        }
+    def _export_json_report(self, report: SecurityAuditReport, include_summary: bool) -> str:
+        """Export audit report as JSON."""
+        data = report.to_dict()
         
-        return f"""
-        Security compliance assessment for {assessment.framework.value} completed with an overall score of {assessment.overall_score:.1f}%.
-        The system is {status_text.get(assessment.compliance_status, 'unknown status')} with {len(assessment.findings)} findings identified.
-        {len(assessment.recommendations)} recommendations have been generated for compliance improvement.
-        Next assessment scheduled for {assessment.next_assessment_date.strftime('%Y-%m-%d') if assessment.next_assessment_date else 'TBD'}.
-        """.strip()
-    
-    async def _generate_soc2_recommendations(self, assessment: ComplianceAssessment) -> List[Dict[str, Any]]:
-        """Generate SOC 2 specific recommendations."""
-        recommendations = []
+        if include_summary:
+            data['executive_summary'] = report.get_executive_summary()
         
-        # Analyze findings and generate targeted recommendations
-        for finding in assessment.findings:
-            if finding.get('severity') in ['high', 'critical']:
-                recommendations.append({
-                    'recommendation_id': f"SOC2_REC_{uuid.uuid4().hex[:8]}",
-                    'priority': RemediationPriority.HIGH.value,
-                    'category': 'compliance',
-                    'title': f"Address {finding['control_id']} compliance gap",
-                    'description': f"Remediate finding in {finding['control_name']}",
-                    'estimated_effort': 'medium',
-                    'business_impact': 'high',
-                    'automation_available': True
-                })
+        return json.dumps(data, indent=2, default=str)
+    
+    def _export_csv_report(self, report: SecurityAuditReport) -> str:
+        """Export audit report findings as CSV."""
+        output = []
         
-        # Add general SOC 2 enhancement recommendations
-        recommendations.append({
-            'recommendation_id': f"SOC2_GEN_{uuid.uuid4().hex[:8]}",
-            'priority': RemediationPriority.MEDIUM.value,
-            'category': 'enhancement',
-            'title': 'Implement continuous compliance monitoring',
-            'description': 'Deploy automated SOC 2 compliance monitoring for real-time validation',
-            'estimated_effort': 'high',
-            'business_impact': 'medium',
-            'automation_available': True
-        })
-        
-        return recommendations
-    
-    async def _store_audit_context(self, context: Dict[str, Any]) -> None:
-        """Store audit context in Redis."""
-        key = f"audit_context:{context['audit_id']}"
-        self.redis_client.setex(key, 86400, json.dumps(context, default=str))  # 24 hour expiry
-    
-    async def _store_audit_results(self, audit_id: str, results: Dict[str, Any]) -> None:
-        """Store comprehensive audit results."""
-        key = f"audit_results:{audit_id}"
-        self.redis_client.setex(key, 2592000, json.dumps(results, default=str))  # 30 day expiry
-        
-        # Also store in longer-term audit trail
-        trail_key = f"{self.audit_trail_key}:{datetime.now(timezone.utc).strftime('%Y-%m')}"
-        self.redis_client.lpush(trail_key, json.dumps({
-            'audit_id': audit_id,
-            'timestamp': datetime.now(timezone.utc).isoformat(),
-            'type': 'comprehensive_audit',
-            'summary': {
-                'overall_score': results.get('overall_compliance_score', 0),
-                'frameworks_assessed': len(results.get('compliance_assessments', {})),
-                'recommendations_count': len(results.get('security_recommendations', []))
-            }
-        }, default=str))
-        
-        # Set monthly trail expiry
-        self.redis_client.expire(trail_key, self.audit_trail_retention_days * 86400)
-    
-    async def _store_audit_failure(self, audit_id: str, failure_info: Dict[str, Any]) -> None:
-        """Store audit failure information."""
-        key = f"audit_failure:{audit_id}"
-        self.redis_client.setex(key, 604800, json.dumps(failure_info, default=str))  # 7 day expiry
-    
-    def _calculate_overall_compliance_score(self, assessments: Dict[str, ComplianceAssessment]) -> float:
-        """Calculate overall compliance score across all frameworks."""
-        if not assessments:
-            return 0.0
-        
-        total_score = sum(
-            assessment.overall_score if hasattr(assessment, 'overall_score') else 0
-            for assessment in assessments.values()
-        )
-        
-        return total_score / len(assessments)
-    
-    def _generate_security_recommendations(
-        self,
-        scan_results: Dict[str, Any],
-        compliance_assessments: Dict[str, ComplianceAssessment]
-    ) -> List[Dict[str, Any]]:
-        """Generate comprehensive security recommendations."""
-        recommendations = []
-        
-        # Extract recommendations from compliance assessments
-        for framework, assessment in compliance_assessments.items():
-            if hasattr(assessment, 'recommendations'):
-                recommendations.extend(assessment.recommendations)
-        
-        # Add vulnerability-based recommendations
-        vulnerability_data = scan_results.get('vulnerability_comprehensive', {})
-        if vulnerability_data.get('critical_findings'):
-            recommendations.append({
-                'recommendation_id': f"VULN_CRIT_{uuid.uuid4().hex[:8]}",
-                'priority': RemediationPriority.IMMEDIATE.value,
-                'category': 'vulnerability',
-                'title': 'Address critical vulnerabilities',
-                'description': f"Immediately remediate {len(vulnerability_data['critical_findings'])} critical vulnerabilities",
-                'estimated_effort': 'high',
-                'business_impact': 'critical',
-                'automation_available': False
-            })
-        
-        # Add security posture recommendations
-        posture_data = scan_results.get('posture_assessment', {})
-        if posture_data.get('threat_level') in ['high', 'critical']:
-            recommendations.append({
-                'recommendation_id': f"POSTURE_{uuid.uuid4().hex[:8]}",
-                'priority': RemediationPriority.HIGH.value,
-                'category': 'security_posture',
-                'title': 'Improve security posture',
-                'description': 'Implement additional security controls to reduce threat level',
-                'estimated_effort': 'medium',
-                'business_impact': 'high',
-                'automation_available': True
-            })
-        
-        # Record recommendation metrics
-        for rec in recommendations:
-            audit_metrics['remediation_recommendations_total'].labels(
-                priority=rec.get('priority', 'medium'),
-                category=rec.get('category', 'general'),
-                automation_available=str(rec.get('automation_available', False)).lower()
-            ).inc()
-        
-        return recommendations
-    
-    async def _generate_audit_trail(self, audit_id: str) -> Dict[str, Any]:
-        """Generate audit trail for specific audit."""
-        return {
-            'audit_id': audit_id,
-            'trail_generated_at': datetime.now(timezone.utc).isoformat(),
-            'events_included': 'comprehensive_audit_execution',
-            'integrity_hash': hashlib.sha256(audit_id.encode()).hexdigest()
-        }
-    
-    # Additional helper methods for comprehensive compliance testing
-    async def _assess_iso27001_compliance(self, assessment: ComplianceAssessment) -> ComplianceAssessment:
-        """Assess ISO 27001 compliance."""
-        # Simplified ISO 27001 assessment
-        assessment.overall_score = 88.0
-        assessment.compliance_status = ComplianceStatus.PARTIALLY_COMPLIANT
-        assessment.executive_summary = "ISO 27001 assessment completed with good compliance level"
-        return assessment
-    
-    async def _assess_pci_dss_compliance(self, assessment: ComplianceAssessment) -> ComplianceAssessment:
-        """Assess PCI DSS compliance."""
-        # Simplified PCI DSS assessment
-        assessment.overall_score = 92.0
-        assessment.compliance_status = ComplianceStatus.COMPLIANT
-        assessment.executive_summary = "PCI DSS assessment shows strong compliance"
-        return assessment
-    
-    async def _assess_gdpr_compliance(self, assessment: ComplianceAssessment) -> ComplianceAssessment:
-        """Assess GDPR compliance."""
-        # Simplified GDPR assessment
-        assessment.overall_score = 85.0
-        assessment.compliance_status = ComplianceStatus.PARTIALLY_COMPLIANT
-        assessment.executive_summary = "GDPR assessment shows adequate data protection measures"
-        return assessment
-    
-    async def _assess_nist_compliance(self, assessment: ComplianceAssessment) -> ComplianceAssessment:
-        """Assess NIST Cybersecurity Framework compliance."""
-        # Simplified NIST assessment
-        assessment.overall_score = 90.0
-        assessment.compliance_status = ComplianceStatus.COMPLIANT
-        assessment.executive_summary = "NIST Framework assessment demonstrates strong cybersecurity posture"
-        return assessment
-    
-    async def _assess_owasp_top10_compliance(self, assessment: ComplianceAssessment) -> ComplianceAssessment:
-        """Assess OWASP Top 10 compliance."""
-        # Simplified OWASP Top 10 assessment
-        assessment.overall_score = 95.0
-        assessment.compliance_status = ComplianceStatus.COMPLIANT
-        assessment.executive_summary = "OWASP Top 10 assessment shows excellent web application security"
-        return assessment
-    
-    async def _assess_generic_compliance(self, assessment: ComplianceAssessment, framework: ComplianceFramework) -> ComplianceAssessment:
-        """Generic compliance assessment for other frameworks."""
-        assessment.overall_score = 80.0
-        assessment.compliance_status = ComplianceStatus.PARTIALLY_COMPLIANT
-        assessment.executive_summary = f"Generic assessment for {framework.value} completed"
-        return assessment
-    
-    def _calculate_remediation_timeline(self, assessment: ComplianceAssessment) -> Optional[datetime]:
-        """Calculate remediation timeline based on findings severity."""
-        if not assessment.findings:
-            return None
-        
-        # Calculate based on most severe finding
-        severities = [finding.get('severity', 'low') for finding in assessment.findings]
-        if 'critical' in severities:
-            return datetime.now(timezone.utc) + timedelta(days=7)
-        elif 'high' in severities:
-            return datetime.now(timezone.utc) + timedelta(days=30)
-        elif 'medium' in severities:
-            return datetime.now(timezone.utc) + timedelta(days=90)
-        else:
-            return datetime.now(timezone.utc) + timedelta(days=180)
-    
-    async def _store_compliance_assessment(self, assessment: ComplianceAssessment) -> None:
-        """Store compliance assessment results."""
-        key = f"{self.compliance_cache_key}:{assessment.framework.value}:{assessment.assessment_id}"
-        self.redis_client.setex(key, 2592000, json.dumps(assessment.to_dict()))  # 30 day expiry
-    
-    # Placeholder methods for security posture assessment
-    async def _collect_vulnerability_summary(self) -> Dict[str, int]:
-        """Collect vulnerability summary from security scanners."""
-        return {'critical': 0, 'high': 2, 'medium': 5, 'low': 8, 'informational': 12}
-    
-    async def _assess_control_effectiveness(self) -> Dict[str, float]:
-        """Assess security control effectiveness."""
-        return {
-            'authentication': 95.0,
-            'authorization': 90.0,
-            'encryption': 98.0,
-            'monitoring': 85.0,
-            'incident_response': 88.0
-        }
-    
-    async def _collect_security_metrics(self) -> Dict[str, Any]:
-        """Collect comprehensive security metrics."""
-        return {
-            'security_events_24h': 1247,
-            'blocked_attacks_24h': 23,
-            'false_positives_24h': 3,
-            'average_response_time': 2.3,
-            'uptime_percentage': 99.9
-        }
-    
-    async def _analyze_threat_indicators(self) -> List[Dict[str, Any]]:
-        """Analyze threat indicators and IOCs."""
-        return [
-            {
-                'indicator_type': 'suspicious_ip',
-                'value': '192.168.1.100',
-                'threat_level': 'medium',
-                'last_seen': datetime.now(timezone.utc).isoformat()
-            }
+        # CSV Header
+        headers = [
+            'Finding ID', 'Title', 'Severity', 'Category', 'CWE ID', 
+            'OWASP Category', 'Risk Score', 'Remediation', 'Source Scanner',
+            'Discovered Date', 'Status'
         ]
-    
-    async def _calculate_security_trends(self) -> Dict[str, List[float]]:
-        """Calculate security trends over time."""
-        return {
-            'vulnerability_count': [10, 8, 7, 5, 4, 3, 2],
-            'security_score': [85, 87, 88, 90, 92, 94, 95],
-            'incident_count': [5, 3, 2, 1, 1, 0, 0]
-        }
-    
-    async def _generate_baseline_comparison(self) -> Dict[str, Any]:
-        """Generate baseline comparison data."""
-        return {
-            'current_score': 95.0,
-            'baseline_score': 85.0,
-            'improvement': 10.0,
-            'trend': 'improving'
-        }
-    
-    def _calculate_security_score(self, posture: SecurityPostureAssessment) -> float:
-        """Calculate overall security score."""
-        if not posture.control_effectiveness:
-            return 0.0
+        output.append(','.join(headers))
         
-        return sum(posture.control_effectiveness.values()) / len(posture.control_effectiveness)
-    
-    def _determine_threat_level(self, risk_score: float) -> str:
-        """Determine threat level based on risk score."""
-        if risk_score >= 80:
-            return 'critical'
-        elif risk_score >= 60:
-            return 'high'
-        elif risk_score >= 40:
-            return 'medium'
-        else:
-            return 'low'
-    
-    def _generate_posture_recommendations(self, posture: SecurityPostureAssessment) -> List[Dict[str, Any]]:
-        """Generate security posture recommendations."""
-        recommendations = []
-        
-        # Analyze control effectiveness
-        for control, effectiveness in posture.control_effectiveness.items():
-            if effectiveness < 90:
-                recommendations.append({
-                    'recommendation_id': f"CTRL_{control.upper()}_{uuid.uuid4().hex[:8]}",
-                    'priority': RemediationPriority.MEDIUM.value,
-                    'category': 'control_improvement',
-                    'title': f"Improve {control} control effectiveness",
-                    'description': f"Current effectiveness: {effectiveness}%. Target: 95%+",
-                    'estimated_effort': 'medium',
-                    'automation_available': True
-                })
-        
-        return recommendations
-    
-    def _generate_posture_summary(self, posture: SecurityPostureAssessment) -> str:
-        """Generate security posture executive summary."""
-        return f"""
-        Security posture assessment completed with overall score of {posture.overall_security_score:.1f}%.
-        Current threat level: {posture.threat_level}.
-        Total vulnerabilities: {sum(posture.vulnerability_summary.values())}.
-        {len(posture.recommendations)} improvement recommendations generated.
-        """.strip()
-    
-    async def _store_posture_assessment(self, posture: SecurityPostureAssessment) -> None:
-        """Store security posture assessment."""
-        key = f"security_posture:{posture.assessment_id}"
-        posture_data = {
-            'assessment_id': posture.assessment_id,
-            'timestamp': posture.assessment_timestamp.isoformat(),
-            'security_score': posture.overall_security_score,
-            'threat_level': posture.threat_level,
-            'vulnerability_summary': posture.vulnerability_summary,
-            'control_effectiveness': posture.control_effectiveness,
-            'recommendations_count': len(posture.recommendations)
-        }
-        self.redis_client.setex(key, 86400, json.dumps(posture_data))  # 24 hour expiry
-    
-    # Placeholder methods for audit trail generation
-    async def _collect_security_events(self, start_date: datetime, end_date: datetime, event_types: Optional[List[str]]) -> List[Dict[str, Any]]:
-        """Collect security events for audit trail."""
-        return [
-            {
-                'event_id': str(uuid.uuid4()),
-                'timestamp': datetime.now(timezone.utc).isoformat(),
-                'event_type': 'authentication_success',
-                'user_id': 'user123',
-                'source_ip': '192.168.1.100'
-            }
-        ]
-    
-    async def _collect_compliance_events(self, start_date: datetime, end_date: datetime, frameworks: Optional[List[ComplianceFramework]]) -> List[Dict[str, Any]]:
-        """Collect compliance-related events."""
-        return [
-            {
-                'event_id': str(uuid.uuid4()),
-                'timestamp': datetime.now(timezone.utc).isoformat(),
-                'event_type': 'compliance_check',
-                'framework': 'SOC2',
-                'result': 'passed'
-            }
-        ]
-    
-    async def _collect_access_events(self, start_date: datetime, end_date: datetime) -> List[Dict[str, Any]]:
-        """Collect access control events."""
-        return []
-    
-    async def _collect_configuration_changes(self, start_date: datetime, end_date: datetime) -> List[Dict[str, Any]]:
-        """Collect configuration change events."""
-        return []
-    
-    async def _collect_incident_events(self, start_date: datetime, end_date: datetime) -> List[Dict[str, Any]]:
-        """Collect security incident events."""
-        return []
-    
-    async def _collect_vulnerability_events(self, start_date: datetime, end_date: datetime) -> List[Dict[str, Any]]:
-        """Collect vulnerability-related events."""
-        return []
-    
-    def _calculate_audit_statistics(self, audit_trail: Dict[str, Any]) -> Dict[str, Any]:
-        """Calculate audit trail statistics."""
-        total_events = sum([
-            len(audit_trail.get('security_events', [])),
-            len(audit_trail.get('compliance_events', [])),
-            len(audit_trail.get('access_events', [])),
-            len(audit_trail.get('configuration_changes', [])),
-            len(audit_trail.get('incident_events', [])),
-            len(audit_trail.get('vulnerability_events', []))
-        ])
-        
-        return {
-            'total_events': total_events,
-            'security_events': len(audit_trail.get('security_events', [])),
-            'compliance_events': len(audit_trail.get('compliance_events', [])),
-            'access_events': len(audit_trail.get('access_events', [])),
-            'configuration_changes': len(audit_trail.get('configuration_changes', [])),
-            'incident_events': len(audit_trail.get('incident_events', [])),
-            'vulnerability_events': len(audit_trail.get('vulnerability_events', []))
-        }
-    
-    async def _generate_compliance_evidence(self, audit_trail: Dict[str, Any], frameworks: List[ComplianceFramework]) -> Dict[str, Any]:
-        """Generate compliance evidence summaries."""
-        evidence = {}
-        for framework in frameworks:
-            evidence[framework.value] = {
-                'evidence_collected': True,
-                'completeness': 95.0,
-                'artifacts_count': len(audit_trail.get('compliance_events', [])),
-                'last_updated': datetime.now(timezone.utc).isoformat()
-            }
-        return evidence
-    
-    def _generate_integrity_verification(self, audit_trail: Dict[str, Any]) -> Dict[str, Any]:
-        """Generate integrity verification for audit trail."""
-        trail_content = json.dumps(audit_trail, sort_keys=True, default=str)
-        integrity_hash = hashlib.sha256(trail_content.encode()).hexdigest()
-        
-        return {
-            'integrity_hash': integrity_hash,
-            'verification_timestamp': datetime.now(timezone.utc).isoformat(),
-            'algorithm': 'SHA256',
-            'verified': True
-        }
-    
-    async def _store_audit_trail(self, trail_id: str, audit_trail: Dict[str, Any]) -> None:
-        """Store audit trail with long-term retention."""
-        key = f"audit_trail:{trail_id}"
-        self.redis_client.setex(key, self.audit_trail_retention_days * 86400, json.dumps(audit_trail, default=str))
-    
-    async def _execute_penetration_testing(self, target_url: str) -> Dict[str, Any]:
-        """Execute comprehensive penetration testing."""
-        return {
-            'pentest_id': f"pentest_{uuid.uuid4().hex[:8]}",
-            'target_url': target_url,
-            'tests_executed': ['sql_injection', 'xss', 'authentication_bypass'],
-            'vulnerabilities_found': 0,
-            'overall_risk': 'low',
-            'recommendations': []
-        }
-
-
-class VulnerabilityScanner:
-    """Comprehensive vulnerability scanner with multiple security tools integration."""
-    
-    def __init__(self, config: SecurityTestConfiguration):
-        self.config = config
-        self.logger = security_logger.bind(component="vulnerability_scanner")
-    
-    async def execute_comprehensive_scan(self, target_url: str) -> Dict[str, Any]:
-        """Execute comprehensive vulnerability scan."""
-        scan_start_time = time.time()
-        scan_id = f"vuln_scan_{uuid.uuid4().hex[:8]}"
-        
-        self.logger.info("Starting comprehensive vulnerability scan", scan_id=scan_id, target_url=target_url)
-        
-        try:
-            scan_results = {
-                'scan_id': scan_id,
-                'target_url': target_url,
-                'scan_start': datetime.now(timezone.utc).isoformat(),
-                'static_analysis': await self._run_static_analysis(),
-                'dependency_scan': await self._run_dependency_scan(),
-                'dynamic_scan': await self._run_dynamic_scan(target_url),
-                'container_scan': await self._run_container_scan()
-            }
-            
-            # Aggregate findings
-            scan_results['summary'] = self._aggregate_scan_results(scan_results)
-            scan_results['scan_end'] = datetime.now(timezone.utc).isoformat()
-            scan_results['duration_seconds'] = time.time() - scan_start_time
-            
-            # Record vulnerability metrics
-            for severity, count in scan_results['summary'].get('by_severity', {}).items():
-                audit_metrics['vulnerability_findings_total'].labels(
-                    severity=severity,
-                    category='comprehensive',
-                    scanner='automated'
-                ).inc(count)
-            
-            self.logger.info(
-                "Vulnerability scan completed",
-                scan_id=scan_id,
-                total_findings=scan_results['summary'].get('total_findings', 0),
-                duration_seconds=time.time() - scan_start_time
-            )
-            
-            return scan_results
-            
-        except Exception as e:
-            self.logger.error("Vulnerability scan failed", scan_id=scan_id, error=str(e))
-            raise
-    
-    async def _run_static_analysis(self) -> Dict[str, Any]:
-        """Run static analysis with Bandit and Semgrep."""
-        return {
-            'tool': 'bandit',
-            'findings': [],
-            'summary': {'total': 0, 'high': 0, 'medium': 0, 'low': 0}
-        }
-    
-    async def _run_dependency_scan(self) -> Dict[str, Any]:
-        """Run dependency vulnerability scan with Safety."""
-        return {
-            'tool': 'safety',
-            'findings': [],
-            'summary': {'total': 0, 'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
-        }
-    
-    async def _run_dynamic_scan(self, target_url: str) -> Dict[str, Any]:
-        """Run dynamic security scan with OWASP ZAP."""
-        return {
-            'tool': 'owasp_zap',
-            'target_url': target_url,
-            'findings': [],
-            'summary': {'total': 0, 'high': 0, 'medium': 0, 'low': 0}
-        }
-    
-    async def _run_container_scan(self) -> Dict[str, Any]:
-        """Run container security scan with Trivy."""
-        return {
-            'tool': 'trivy',
-            'findings': [],
-            'summary': {'total': 0, 'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
-        }
-    
-    def _aggregate_scan_results(self, scan_results: Dict[str, Any]) -> Dict[str, Any]:
-        """Aggregate scan results across all tools."""
-        total_findings = 0
-        by_severity = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0, 'informational': 0}
-        
-        for scan_type, results in scan_results.items():
-            if isinstance(results, dict) and 'summary' in results:
-                summary = results['summary']
-                if 'total' in summary:
-                    total_findings += summary['total']
-                
-                for severity in by_severity.keys():
-                    if severity in summary:
-                        by_severity[severity] += summary[severity]
-        
-        return {
-            'total_findings': total_findings,
-            'by_severity': by_severity,
-            'tools_used': ['bandit', 'safety', 'owasp_zap', 'trivy']
-        }
-
-
-class ComplianceValidator:
-    """Compliance validation engine for multiple frameworks."""
-    
-    def __init__(self, config: SecurityTestConfiguration):
-        self.config = config
-        self.logger = security_logger.bind(component="compliance_validator")
-
-
-class SecurityPostureAssessor:
-    """Security posture assessment engine."""
-    
-    def __init__(self, config: SecurityTestConfiguration):
-        self.config = config
-        self.logger = security_logger.bind(component="security_posture_assessor")
-
-
-class AuditEvidenceCollector:
-    """Audit evidence collection and management."""
-    
-    def __init__(self, redis_client: redis.Redis):
-        self.redis_client = redis_client
-        self.logger = security_logger.bind(component="audit_evidence_collector")
-    
-    async def collect_audit_evidence(self, audit_id: str) -> List[str]:
-        """Collect comprehensive audit evidence."""
-        return [
-            f"audit_log_{audit_id}.json",
-            f"compliance_report_{audit_id}.pdf",
-            f"vulnerability_scan_{audit_id}.json",
-            f"penetration_test_{audit_id}.json"
-        ]
-
-
-class ComplianceDashboardGenerator:
-    """Compliance dashboard and executive reporting generator."""
-    
-    def __init__(self):
-        self.logger = security_logger.bind(component="compliance_dashboard_generator")
-    
-    def generate_executive_summary(self, audit_results: Dict[str, Any]) -> Dict[str, Any]:
-        """Generate executive summary for audit results."""
-        return {
-            'summary_id': f"exec_summary_{uuid.uuid4().hex[:8]}",
-            'generated_at': datetime.now(timezone.utc).isoformat(),
-            'overall_compliance_score': audit_results.get('overall_compliance_score', 0),
-            'key_findings': audit_results.get('security_recommendations', [])[:5],
-            'risk_level': 'medium',
-            'next_actions': [
-                'Review high-priority recommendations',
-                'Schedule remediation activities',
-                'Update security policies'
+        # CSV Data
+        for finding in report.findings:
+            row = [
+                finding.finding_id,
+                f'"{finding.title}"',
+                finding.severity.value,
+                finding.category,
+                finding.cwe_id or '',
+                finding.owasp_category or '',
+                str(finding.calculate_risk_score()),
+                f'"{finding.remediation}"',
+                finding.source_scanner,
+                finding.discovered_date.strftime('%Y-%m-%d'),
+                finding.status
             ]
-        }
+            output.append(','.join(row))
+        
+        return '\n'.join(output)
     
-    def generate_comprehensive_dashboard(
-        self,
-        time_period: str = "30_days",
-        include_trends: bool = True,
-        include_recommendations: bool = True
-    ) -> Dict[str, Any]:
-        """Generate comprehensive executive dashboard."""
-        return {
-            'dashboard_type': 'executive_security',
-            'time_period': time_period,
-            'overall_security_score': 92.5,
-            'compliance_summary': {
-                'soc2': {'score': 95, 'status': 'compliant'},
-                'iso27001': {'score': 88, 'status': 'partially_compliant'},
-                'pci_dss': {'score': 92, 'status': 'compliant'}
+    def _export_html_report(self, report: SecurityAuditReport, include_summary: bool) -> str:
+        """Export audit report as HTML."""
+        html_parts = [
+            '<!DOCTYPE html>',
+            '<html>',
+            '<head>',
+            '<title>Security Audit Report</title>',
+            '<style>',
+            'body { font-family: Arial, sans-serif; margin: 40px; }',
+            'h1, h2, h3 { color: #333; }',
+            '.summary { background: #f5f5f5; padding: 20px; border-radius: 5px; }',
+            '.finding { border: 1px solid #ddd; margin: 10px 0; padding: 15px; border-radius: 5px; }',
+            '.critical { border-left: 5px solid #d32f2f; }',
+            '.high { border-left: 5px solid #f57c00; }',
+            '.medium { border-left: 5px solid #fbc02d; }',
+            '.low { border-left: 5px solid #388e3c; }',
+            '.info { border-left: 5px solid #1976d2; }',
+            '</style>',
+            '</head>',
+            '<body>',
+            f'<h1>Security Audit Report</h1>',
+            f'<p><strong>Report ID:</strong> {report.report_id}</p>',
+            f'<p><strong>Execution Date:</strong> {report.execution_date.strftime("%Y-%m-%d %H:%M:%S")}</p>',
+            f'<p><strong>Duration:</strong> {report.duration_minutes:.1f} minutes</p>'
+        ]
+        
+        if include_summary:
+            summary = report.get_executive_summary()
+            html_parts.extend([
+                '<div class="summary">',
+                '<h2>Executive Summary</h2>',
+                f'<p><strong>Security Score:</strong> {summary["security_posture"]["overall_score"]}/100</p>',
+                f'<p><strong>Risk Level:</strong> {summary["security_posture"]["risk_level"].title()}</p>',
+                f'<p><strong>Total Findings:</strong> {summary["key_findings"]["total_findings"]}</p>',
+                f'<p><strong>Critical Issues:</strong> {summary["key_findings"]["critical_issues"]}</p>',
+                '</div>'
+            ])
+        
+        html_parts.append('<h2>Security Findings</h2>')
+        
+        for finding in report.findings:
+            severity_class = finding.severity.value
+            html_parts.extend([
+                f'<div class="finding {severity_class}">',
+                f'<h3>{finding.title}</h3>',
+                f'<p><strong>Severity:</strong> {finding.severity.value.title()}</p>',
+                f'<p><strong>Category:</strong> {finding.category}</p>',
+                f'<p><strong>Description:</strong> {finding.description}</p>',
+                f'<p><strong>Remediation:</strong> {finding.remediation}</p>',
+                f'<p><strong>Risk Score:</strong> {finding.calculate_risk_score():.1f}/10</p>',
+                '</div>'
+            ])
+        
+        html_parts.extend(['</body>', '</html>'])
+        
+        return '\n'.join(html_parts)
+    
+    def get_compliance_dashboard(self) -> Dict[str, Any]:
+        """
+        Get comprehensive compliance dashboard data for enterprise reporting.
+        
+        Returns:
+            Dictionary containing compliance dashboard metrics and visualizations
+        """
+        if not self.current_audit:
+            return {'error': 'No audit data available'}
+        
+        dashboard = {
+            'overview': {
+                'last_audit_date': self.current_audit.execution_date.strftime('%Y-%m-%d'),
+                'overall_security_score': self.current_audit.overall_security_score,
+                'risk_level': self.current_audit.risk_level,
+                'total_findings': self.current_audit.total_findings,
+                'compliance_frameworks_assessed': len(self.current_audit.compliance_results)
             },
-            'vulnerability_summary': {
-                'critical': 0,
-                'high': 2,
-                'medium': 8,
-                'low': 15
+            'compliance_status': {},
+            'findings_by_severity': {
+                'critical': self.current_audit.critical_findings,
+                'high': self.current_audit.high_findings,
+                'medium': self.current_audit.medium_findings,
+                'low': self.current_audit.low_findings,
+                'info': self.current_audit.info_findings
             },
-            'security_trends': {
-                'security_score_trend': [85, 87, 89, 91, 92.5],
-                'vulnerability_trend': [25, 20, 18, 15, 12]
-            } if include_trends else {},
-            'strategic_recommendations': [
-                'Implement automated compliance monitoring',
-                'Enhance threat detection capabilities',
-                'Strengthen incident response procedures'
-            ] if include_recommendations else []
+            'remediation_plan': {
+                'immediate_actions': len(self.current_audit.immediate_actions),
+                'short_term_actions': len(self.current_audit.short_term_actions),
+                'long_term_actions': len(self.current_audit.long_term_actions)
+            },
+            'trends': self._calculate_security_trends(),
+            'next_audit_due': (
+                self.current_audit.execution_date + timedelta(days=90)
+            ).strftime('%Y-%m-%d')
         }
+        
+        # Add compliance framework details
+        for framework_name, result in self.current_audit.compliance_results.items():
+            dashboard['compliance_status'][framework_name] = {
+                'score': result.compliance_percentage,
+                'status': result.status,
+                'gaps': len(result.gaps_identified),
+                'next_assessment': result.next_assessment_due.strftime('%Y-%m-%d')
+            }
+        
+        return dashboard
 
 
-# Test fixtures and pytest integration
-@pytest.fixture(scope="session")
-def security_audit_engine(security_config):
-    """Pytest fixture providing security audit engine."""
-    return SecurityAuditEngine(config=security_config)
-
-
-@pytest.fixture(scope="function")
-def vulnerability_scanner(security_config):
-    """Pytest fixture providing vulnerability scanner."""
-    return VulnerabilityScanner(config=security_config)
-
-
-@pytest.fixture(scope="function")
-def compliance_validator(security_config):
-    """Pytest fixture providing compliance validator."""
-    return ComplianceValidator(config=security_config)
-
-
-@pytest.mark.asyncio
-async def test_comprehensive_security_audit(security_audit_engine, target_url="https://localhost:5000"):
+# Pytest Integration and Test Automation
+class SecurityAuditTestSuite:
     """
-    Test comprehensive security audit execution.
+    Pytest-integrated security audit test suite for automated testing and CI/CD integration.
     
-    This test validates the complete security audit process including:
-    - Multi-framework compliance validation
-    - Vulnerability assessment and scanning
-    - Security posture evaluation
-    - Audit trail generation
-    - Executive reporting
+    This class provides pytest-compatible test methods for automated security testing
+    with comprehensive coverage and enterprise-grade reporting capabilities.
     """
-    frameworks = [
-        ComplianceFramework.SOC2_TYPE2,
-        ComplianceFramework.OWASP_TOP10,
-        ComplianceFramework.NIST_CYBERSECURITY
-    ]
     
-    audit_results = await security_audit_engine.execute_comprehensive_audit(
-        target_url=target_url,
-        frameworks=frameworks,
-        scope="test_environment",
-        include_penetration_testing=True,
-        generate_executive_report=True
+    def __init__(self, auditor: ComprehensiveSecurityAuditor):
+        """Initialize security audit test suite with auditor instance."""
+        self.auditor = auditor
+        self.test_results = []
+    
+    def test_comprehensive_security_audit(self):
+        """Test comprehensive security audit execution."""
+        # Execute comprehensive audit
+        report = self.auditor.execute_comprehensive_audit(
+            compliance_frameworks=[
+                ComplianceFramework.SOC2_TYPE2,
+                ComplianceFramework.OWASP_TOP_10,
+                ComplianceFramework.GDPR
+            ]
+        )
+        
+        # Assertions for test validation
+        assert report is not None, "Security audit report should be generated"
+        assert report.overall_security_score >= 0, "Security score should be non-negative"
+        assert report.overall_security_score <= 100, "Security score should not exceed 100"
+        assert len(report.compliance_results) > 0, "Compliance results should be available"
+        
+        # Check critical findings threshold
+        assert report.critical_findings <= 5, f"Too many critical findings: {report.critical_findings}"
+        
+        # Log test results
+        logger.info(f"Security audit test completed: Score={report.overall_security_score}, "
+                   f"Findings={report.total_findings}, Risk={report.risk_level}")
+        
+        return report
+    
+    def test_compliance_validation(self):
+        """Test individual compliance framework validation."""
+        frameworks_to_test = [
+            ComplianceFramework.SOC2_TYPE2,
+            ComplianceFramework.OWASP_TOP_10,
+            ComplianceFramework.GDPR
+        ]
+        
+        for framework in frameworks_to_test:
+            result = self.auditor._execute_compliance_validation([framework])
+            
+            assert framework.value in result, f"Compliance result missing for {framework.value}"
+            
+            compliance_result = result[framework.value]
+            assert compliance_result.compliance_percentage >= 0, "Compliance percentage should be non-negative"
+            assert compliance_result.compliance_percentage <= 100, "Compliance percentage should not exceed 100"
+            
+            logger.info(f"Compliance test passed for {framework.value}: "
+                       f"{compliance_result.compliance_percentage:.1f}%")
+    
+    def test_security_metrics_collection(self):
+        """Test security metrics collection and reporting."""
+        # Verify metrics are being collected
+        assert self.auditor.metrics is not None, "Security metrics should be initialized"
+        
+        # Test metric recording
+        self.auditor.metrics.record_audit_execution(
+            audit_type="test",
+            status="completed",
+            duration=60.0
+        )
+        
+        self.auditor.metrics.update_security_score(85.0)
+        self.auditor.metrics.update_risk_level("medium")
+        
+        logger.info("Security metrics collection test completed")
+    
+    def test_audit_report_export(self):
+        """Test audit report export functionality."""
+        if not self.auditor.current_audit:
+            # Create a minimal audit report for testing
+            self.auditor.current_audit = SecurityAuditReport(
+                audit_name="Test Audit",
+                overall_security_score=85.0
+            )
+        
+        # Test JSON export
+        json_report = self.auditor.export_audit_report(format_type='json')
+        assert len(json_report) > 0, "JSON report should not be empty"
+        
+        # Validate JSON structure
+        import json
+        report_data = json.loads(json_report)
+        assert 'report_id' in report_data, "Report should have ID"
+        assert 'overall_security_score' in report_data, "Report should have security score"
+        
+        # Test CSV export
+        csv_report = self.auditor.export_audit_report(format_type='csv')
+        assert len(csv_report) > 0, "CSV report should not be empty"
+        
+        # Test HTML export
+        html_report = self.auditor.export_audit_report(format_type='html')
+        assert '<html>' in html_report, "HTML report should contain HTML tags"
+        
+        logger.info("Audit report export test completed")
+
+
+# Factory function for creating security auditor instances
+def create_security_auditor(
+    app: Optional[Flask] = None,
+    config: Optional[Dict[str, Any]] = None,
+    enable_audit_logging: bool = True
+) -> ComprehensiveSecurityAuditor:
+    """
+    Factory function for creating comprehensive security auditor instances.
+    
+    Args:
+        app: Flask application instance for integration testing
+        config: Security audit configuration dictionary
+        enable_audit_logging: Whether to enable enterprise audit logging
+        
+    Returns:
+        ComprehensiveSecurityAuditor instance ready for use
+        
+    Example:
+        # Create auditor for Flask application
+        app = Flask(__name__)
+        auditor = create_security_auditor(app=app)
+        
+        # Execute comprehensive audit
+        report = auditor.execute_comprehensive_audit()
+        print(f"Security Score: {report.overall_security_score}")
+    """
+    # Initialize audit logger if enabled
+    audit_logger = None
+    if enable_audit_logging and app:
+        audit_logger = init_security_audit(app)
+    
+    # Create and return auditor instance
+    auditor = ComprehensiveSecurityAuditor(
+        app=app,
+        config=config,
+        audit_logger=audit_logger
     )
     
-    # Validate audit results structure
-    assert 'audit_id' in audit_results
-    assert 'compliance_assessments' in audit_results
-    assert 'vulnerability_assessment' in audit_results
-    assert 'security_posture' in audit_results
-    assert 'executive_report' in audit_results
-    
-    # Validate compliance assessments
-    assert len(audit_results['compliance_assessments']) == len(frameworks)
-    for framework in frameworks:
-        assert framework.value in audit_results['compliance_assessments']
-    
-    # Validate overall compliance score
-    assert isinstance(audit_results['overall_compliance_score'], (int, float))
-    assert 0 <= audit_results['overall_compliance_score'] <= 100
-    
-    # Validate security recommendations
-    assert 'security_recommendations' in audit_results
-    assert isinstance(audit_results['security_recommendations'], list)
-    
-    # Validate audit trail
-    assert 'audit_trail' in audit_results
-    assert 'audit_id' in audit_results['audit_trail']
+    logger.info("Comprehensive Security Auditor created successfully")
+    return auditor
 
 
-@pytest.mark.asyncio
-async def test_soc2_compliance_assessment(security_audit_engine):
-    """
-    Test SOC 2 Type II compliance assessment.
-    
-    This test validates SOC 2 compliance assessment including:
-    - Common Criteria control validation
-    - Security control implementation testing
-    - Compliance scoring and status determination
-    - Evidence collection and documentation
-    """
-    assessment = await security_audit_engine.execute_compliance_audit(
-        framework=ComplianceFramework.SOC2_TYPE2,
-        scope="production_environment"
-    )
-    
-    # Validate assessment structure
-    assert assessment.framework == ComplianceFramework.SOC2_TYPE2
-    assert assessment.scope == "production_environment"
-    assert isinstance(assessment.overall_score, (int, float))
-    assert assessment.compliance_status in [s for s in ComplianceStatus]
-    
-    # Validate SOC 2 controls
-    expected_controls = ['CC1', 'CC2', 'CC3', 'CC4', 'CC5', 'CC6', 'CC7', 'CC8', 'CC9']
-    for control in expected_controls:
-        assert control in assessment.control_assessments
-        assert 'compliance_status' in assessment.control_assessments[control]
-        assert 'score' in assessment.control_assessments[control]
-    
-    # Validate executive summary
-    assert len(assessment.executive_summary) > 0
-    
-    # Validate recommendations
-    assert isinstance(assessment.recommendations, list)
-
-
-@pytest.mark.asyncio
-async def test_security_posture_assessment(security_audit_engine):
-    """
-    Test comprehensive security posture assessment.
-    
-    This test validates security posture assessment including:
-    - Vulnerability landscape analysis
-    - Security control effectiveness measurement
-    - Threat indicator analysis
-    - Risk scoring and threat level determination
-    """
-    posture = await security_audit_engine.assess_security_posture()
-    
-    # Validate posture assessment structure
-    assert hasattr(posture, 'assessment_id')
-    assert hasattr(posture, 'overall_security_score')
-    assert hasattr(posture, 'threat_level')
-    assert hasattr(posture, 'vulnerability_summary')
-    assert hasattr(posture, 'control_effectiveness')
-    
-    # Validate security score
-    assert isinstance(posture.overall_security_score, (int, float))
-    assert 0 <= posture.overall_security_score <= 100
-    
-    # Validate threat level
-    assert posture.threat_level in ['low', 'medium', 'high', 'critical']
-    
-    # Validate vulnerability summary
-    assert isinstance(posture.vulnerability_summary, dict)
-    
-    # Validate control effectiveness
-    assert isinstance(posture.control_effectiveness, dict)
-    
-    # Validate risk score calculation
-    risk_score = posture.calculate_risk_score()
-    assert isinstance(risk_score, (int, float))
-    assert 0 <= risk_score <= 100
-
-
-@pytest.mark.asyncio
-async def test_audit_trail_generation(security_audit_engine):
-    """
-    Test comprehensive audit trail generation.
-    
-    This test validates audit trail generation including:
-    - Security event collection and chronological ordering
-    - Compliance evidence aggregation
-    - Audit statistics calculation
-    - Integrity verification and tamper protection
-    """
-    end_date = datetime.now(timezone.utc)
-    start_date = end_date - timedelta(days=7)
-    
-    audit_trail = await security_audit_engine.generate_audit_trail(
-        start_date=start_date,
-        end_date=end_date,
-        compliance_frameworks=[ComplianceFramework.SOC2_TYPE2]
-    )
-    
-    # Validate audit trail structure
-    assert 'trail_id' in audit_trail
-    assert 'generation_metadata' in audit_trail
-    assert 'security_events' in audit_trail
-    assert 'compliance_events' in audit_trail
-    assert 'audit_statistics' in audit_trail
-    assert 'integrity_verification' in audit_trail
-    
-    # Validate metadata
-    metadata = audit_trail['generation_metadata']
-    assert 'start_date' in metadata
-    assert 'end_date' in metadata
-    assert 'generated_at' in metadata
-    
-    # Validate audit statistics
-    stats = audit_trail['audit_statistics']
-    assert 'total_events' in stats
-    assert isinstance(stats['total_events'], int)
-    
-    # Validate integrity verification
-    integrity = audit_trail['integrity_verification']
-    assert 'integrity_hash' in integrity
-    assert 'verification_timestamp' in integrity
-    assert integrity['verified'] is True
-
-
-@pytest.mark.asyncio
-async def test_vulnerability_scanning(vulnerability_scanner):
-    """
-    Test comprehensive vulnerability scanning.
-    
-    This test validates vulnerability scanning including:
-    - Static analysis with multiple tools
-    - Dependency vulnerability assessment
-    - Dynamic security testing
-    - Container security validation
-    """
-    scan_results = await vulnerability_scanner.execute_comprehensive_scan(
-        target_url="https://localhost:5000"
-    )
-    
-    # Validate scan results structure
-    assert 'scan_id' in scan_results
-    assert 'target_url' in scan_results
-    assert 'static_analysis' in scan_results
-    assert 'dependency_scan' in scan_results
-    assert 'dynamic_scan' in scan_results
-    assert 'container_scan' in scan_results
-    assert 'summary' in scan_results
-    
-    # Validate summary
-    summary = scan_results['summary']
-    assert 'total_findings' in summary
-    assert 'by_severity' in summary
-    assert 'tools_used' in summary
-    
-    # Validate severity breakdown
-    severity_breakdown = summary['by_severity']
-    expected_severities = ['critical', 'high', 'medium', 'low', 'informational']
-    for severity in expected_severities:
-        assert severity in severity_breakdown
-        assert isinstance(severity_breakdown[severity], int)
-
-
-def test_executive_dashboard_generation(security_audit_engine):
-    """
-    Test executive dashboard generation.
-    
-    This test validates executive dashboard generation including:
-    - Comprehensive security metrics aggregation
-    - Compliance status summary
-    - Strategic recommendation generation
-    - Executive-level reporting and visualization
-    """
-    dashboard = security_audit_engine.generate_executive_dashboard(
-        time_period="30_days",
-        include_trends=True,
-        include_recommendations=True
-    )
-    
-    # Validate dashboard structure
-    assert 'dashboard_metadata' in dashboard
-    assert 'overall_security_score' in dashboard
-    assert 'compliance_summary' in dashboard
-    assert 'vulnerability_summary' in dashboard
-    
-    # Validate metadata
-    metadata = dashboard['dashboard_metadata']
-    assert 'dashboard_id' in metadata
-    assert 'generated_at' in metadata
-    assert 'time_period' in metadata
-    
-    # Validate security score
-    assert isinstance(dashboard['overall_security_score'], (int, float))
-    assert 0 <= dashboard['overall_security_score'] <= 100
-    
-    # Validate compliance summary
-    compliance_summary = dashboard['compliance_summary']
-    assert isinstance(compliance_summary, dict)
-    
-    # Validate vulnerability summary
-    vulnerability_summary = dashboard['vulnerability_summary']
-    assert isinstance(vulnerability_summary, dict)
-
-
-# Export main components for external use
+# Export public API
 __all__ = [
-    'SecurityAuditEngine',
-    'VulnerabilityScanner',
-    'ComplianceValidator',
-    'SecurityPostureAssessor',
-    'AuditEvidenceCollector',
-    'ComplianceDashboardGenerator',
-    'ComplianceAssessment',
-    'SecurityPostureAssessment',
-    'ComplianceStatus',
-    'AuditSeverity',
-    'RemediationPriority',
+    # Main Classes
+    'ComprehensiveSecurityAuditor',
+    'SecurityAuditReport',
+    'SecurityFinding',
+    'ComplianceResult',
+    'SecurityAuditMetrics',
+    'SecurityAuditTestSuite',
+    
+    # Enums
     'ComplianceFramework',
-    'AttackType',
-    'SecurityTestSeverity',
-    'security_audit_engine',
-    'vulnerability_scanner',
-    'compliance_validator'
+    'AuditSeverity', 
+    'AuditStatus',
+    
+    # Factory Functions
+    'create_security_auditor',
 ]
