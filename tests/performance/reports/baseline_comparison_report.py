@@ -1,2340 +1,2327 @@
 """
-Node.js Baseline Comparison Report Generation System
+Node.js Baseline Comparison Report Generation Engine
 
-This comprehensive reporting system provides detailed analysis of performance variance,
-regression detection, and compliance validation for the Flask migration project.
-Generates executive summaries and technical details for migration success validation
-with automated ≤10% variance enforcement per Section 0.1.1 requirements.
+This comprehensive baseline comparison report generation system creates detailed analysis reports
+comparing Flask implementation performance against Node.js baseline metrics. Provides executive
+summaries, technical details, and automated compliance validation ensuring adherence to the
+≤10% variance requirement per Section 0.1.1 primary objective.
 
 Architecture Compliance:
 - Section 0.1.1: Performance optimization ensuring ≤10% variance from Node.js baseline
-- Section 0.3.2: Response time, memory usage, CPU utilization variance analysis
-- Section 0.3.4: Executive summary generation for stakeholder communication
-- Section 6.6.1: Automated regression detection reporting and trend analysis
+- Section 0.3.2: Continuous performance monitoring with baseline comparison requirements
+- Section 0.3.4: Comprehensive documentation requirements for stakeholder communication
+- Section 6.5: Monitoring and observability integration with enterprise APM systems
+- Section 6.6.1: Testing strategy baseline comparison validation and regression detection
+- Section 6.6.2: CI/CD integration with automated performance validation gates
 
 Key Features:
-- Comprehensive Node.js baseline comparison analysis with statistical validation
-- Executive summary generation for stakeholder review and decision making
-- Technical detailed reports for engineering teams and optimization planning
-- Automated ≤10% variance validation with deployment recommendation generation
-- Response time, memory usage, CPU utilization variance analysis and reporting
-- Database query performance comparison with variance tracking and optimization guidance
-- Trend analysis and regression detection with predictive analytics
-- Multi-format report generation (JSON, HTML, PDF) for various stakeholder needs
-- CI/CD pipeline integration with automated failure detection and rollback recommendations
+- Automated Node.js baseline variance calculation and compliance reporting
+- Response time, memory usage, CPU utilization detailed analysis per Section 0.3.2
+- Database query performance comparison with variance threshold enforcement
+- Executive summary generation for stakeholder communication per Section 0.3.4
+- Regression detection with automated alerting and deployment blocking
+- Multi-format report output (JSON, HTML, Markdown) for different audiences
+- CI/CD integration with deployment approval/blocking recommendations
+- Trend analysis with historical performance data correlation
+- Enterprise monitoring integration with APM data collection
 
 Dependencies:
-- tests.performance.baseline_data: Node.js performance reference metrics and validation logic
-- tests.performance.test_baseline_comparison: Performance comparison test suite integration
-- datetime: Timestamp management and report generation metadata
-- pathlib: Report file management and output directory handling
-- jinja2: HTML report template rendering for stakeholder presentation
-- json: Structured report data serialization and API integration
-- statistics: Statistical analysis and variance calculation algorithms
+- tests/performance/baseline_data.py: Node.js baseline metrics and variance calculation
+- tests/performance/test_baseline_comparison.py: Testing patterns and result structures
+- tests/performance/reports/performance_report_generator.py: Report generation framework
+- structlog ≥23.1: Structured logging for enterprise integration
+- plotly ≥5.0: Interactive charts and data visualization (optional)
+- jinja2 ≥3.1.0: Template rendering for HTML reports (optional)
 
-Author: Flask Migration Team - Performance Engineering
+Author: Flask Migration Team
 Version: 1.0.0
-Report Coverage: 100% - All baseline comparison scenarios and performance metrics
-Compliance: SOX, GDPR, Enterprise Security Standards
+Coverage: 100% - Comprehensive baseline comparison for all performance scenarios
 """
 
 import asyncio
 import json
 import logging
+import os
 import statistics
 import traceback
-from collections import defaultdict, OrderedDict
-from dataclasses import dataclass, field, asdict
-from datetime import datetime, timedelta, timezone
-from enum import Enum
+import warnings
+from collections import defaultdict, deque
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Union, Any, Tuple, NamedTuple, Callable
+from typing import Dict, List, Optional, Tuple, Union, Any, NamedTuple, Set
+from dataclasses import dataclass, field, asdict
+from enum import Enum
 import uuid
-import io
-import base64
+import math
 
-# Third-party imports for report generation
-try:
-    from jinja2 import Environment, FileSystemLoader, Template
-    JINJA2_AVAILABLE = True
-except ImportError:
-    JINJA2_AVAILABLE = False
-    Environment = None
-    Template = None
-
-try:
-    import matplotlib
-    matplotlib.use('Agg')  # Use non-interactive backend
-    import matplotlib.pyplot as plt
-    import matplotlib.dates as mdates
-    from matplotlib.backends.backend_pdf import PdfPages
-    MATPLOTLIB_AVAILABLE = True
-except ImportError:
-    MATPLOTLIB_AVAILABLE = False
-    plt = None
-    PdfPages = None
-
-try:
-    import pandas as pd
-    PANDAS_AVAILABLE = True
-except ImportError:
-    PANDAS_AVAILABLE = False
-    pd = None
-
-# Project imports
+# Project performance testing framework integration
 from tests.performance.baseline_data import (
+    NodeJSPerformanceBaseline,
     BaselineDataManager,
-    ResponseTimeBaseline,
-    ResourceUtilizationBaseline,
-    DatabasePerformanceBaseline,
-    ThroughputBaseline,
-    NetworkIOBaseline,
-    get_default_baseline_data,
-    validate_flask_performance_against_baseline,
-    default_baseline_manager,
-    PERFORMANCE_VARIANCE_THRESHOLD,
-    MEMORY_VARIANCE_THRESHOLD,
-    WARNING_VARIANCE_THRESHOLD,
-    CRITICAL_VARIANCE_THRESHOLD
+    BaselineValidationStatus,
+    BaselineDataSource,
+    BaselineMetricCategory,
+    get_baseline_manager,
+    get_nodejs_baseline,
+    compare_with_baseline,
+    validate_baseline_data,
+    create_performance_thresholds
 )
 
 from tests.performance.test_baseline_comparison import (
+    BaselineComparisonResult,
     BaselineComparisonTestSuite,
-    PerformanceComparisonResult,
-    PerformanceTrendAnalyzer,
-    CRITICAL_PERFORMANCE_METRICS,
-    PERFORMANCE_TEST_CATEGORIES
+    TestBaselineComparison,
+    VarianceAnalysis,
+    PerformanceStatus,
+    CRITICAL_VARIANCE_THRESHOLD,
+    WARNING_VARIANCE_THRESHOLD,
+    MEMORY_VARIANCE_THRESHOLD,
+    RESPONSE_TIME_THRESHOLD_MS,
+    THROUGHPUT_THRESHOLD_RPS,
+    ERROR_RATE_THRESHOLD,
+    CPU_UTILIZATION_THRESHOLD,
+    MEMORY_UTILIZATION_THRESHOLD,
+    MIN_TEST_DURATION_SECONDS,
+    BASELINE_COMPARISON_SAMPLE_SIZE
 )
 
+from tests.performance.reports.performance_report_generator import (
+    PerformanceReportGenerator,
+    PerformanceDataAggregator,
+    PerformanceVisualizationEngine,
+    RecommendationEngine,
+    ReportFormat,
+    ReportAudience,
+    TestResult,
+    create_performance_report_generator,
+    validate_performance_requirements
+)
 
-# Report generation constants and configuration
-REPORT_VERSION = "1.0.0"
-REPORT_TEMPLATE_DIR = Path(__file__).parent / "templates"
-REPORT_OUTPUT_DIR = Path(__file__).parent / "output"
-REPORT_RETENTION_DAYS = 90
-MAX_CHART_DATA_POINTS = 500
-EXECUTIVE_SUMMARY_MAX_ISSUES = 5
+# Structured logging for enterprise integration
+try:
+    import structlog
+    STRUCTLOG_AVAILABLE = True
+except ImportError:
+    STRUCTLOG_AVAILABLE = False
+    warnings.warn("structlog not available - falling back to standard logging")
 
-# Report format and output configuration
-SUPPORTED_REPORT_FORMATS = ['json', 'html', 'pdf', 'markdown', 'csv']
-DEFAULT_REPORT_FORMAT = 'html'
-REPORT_CHARSET = 'utf-8'
-TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S UTC"
+# Data visualization for enhanced reporting
+try:
+    import plotly.graph_objects as go
+    import plotly.express as px
+    from plotly.subplots import make_subplots
+    import plotly.io as pio
+    PLOTLY_AVAILABLE = True
+except ImportError:
+    PLOTLY_AVAILABLE = False
+    plotly = None
 
-# Performance variance severity classifications per Section 0.1.1
-VARIANCE_SEVERITY_LEVELS = {
-    'excellent': (0.0, WARNING_VARIANCE_THRESHOLD),      # 0-5% variance
-    'good': (WARNING_VARIANCE_THRESHOLD, 8.0),           # 5-8% variance
-    'warning': (8.0, PERFORMANCE_VARIANCE_THRESHOLD),    # 8-10% variance
-    'critical': (PERFORMANCE_VARIANCE_THRESHOLD, 15.0),  # 10-15% variance
-    'failure': (15.0, float('inf'))                      # >15% variance
+# Template rendering for HTML reports
+try:
+    import jinja2
+    from jinja2 import Environment, FileSystemLoader, select_autoescape
+    JINJA2_AVAILABLE = True
+except ImportError:
+    JINJA2_AVAILABLE = False
+    jinja2 = None
+
+# Baseline comparison constants per Section 0.1.1 and Section 0.3.2
+PERFORMANCE_VARIANCE_LIMIT = 10.0        # ≤10% variance requirement per Section 0.1.1
+MEMORY_VARIANCE_LIMIT = 15.0             # ≤15% memory variance per Section 0.3.2
+WARNING_VARIANCE_LIMIT = 5.0             # Warning at 5% variance for early detection
+CRITICAL_VARIANCE_LIMIT = 10.0           # Critical threshold at 10% variance
+DEPLOYMENT_BLOCKING_LIMIT = 12.0         # Block deployment at >12% variance
+REGRESSION_DETECTION_WINDOW = 5          # Historical data points for regression analysis
+MIN_STATISTICAL_CONFIDENCE = 85.0        # Minimum confidence for valid analysis
+BASELINE_REFRESH_THRESHOLD_DAYS = 30     # Refresh baseline data after 30 days
+
+# Report generation configuration
+DEFAULT_REPORT_TITLE = "Node.js Baseline Performance Comparison Report"
+REPORT_CACHE_TTL_SECONDS = 3600          # 1 hour cache for generated reports
+CHART_WIDTH = 1000                       # Chart width for visualizations
+CHART_HEIGHT = 600                       # Chart height for visualizations
+MAX_TREND_POINTS = 50                    # Maximum trend data points to display
+
+# Performance colors for consistent visualization
+PERFORMANCE_COLORS = {
+    'excellent': '#4CAF50',              # Green for performance within warning threshold
+    'warning': '#FF9800',                # Orange for performance approaching limits
+    'critical': '#FF5722',               # Red for performance exceeding thresholds
+    'failure': '#D32F2F',                # Dark red for performance failures
+    'baseline': '#2196F3',               # Blue for Node.js baseline reference
+    'improvement': '#8BC34A',            # Light green for performance improvements
+    'regression': '#F44336'              # Red for performance regressions
 }
 
 
-class ReportType(Enum):
-    """Report type classification for different stakeholder audiences."""
+class ComparisonStatus(Enum):
+    """Baseline comparison status enumeration for compliance tracking."""
     
-    EXECUTIVE_SUMMARY = "executive_summary"
-    TECHNICAL_DETAILED = "technical_detailed"
-    COMPLIANCE_AUDIT = "compliance_audit"
-    REGRESSION_ANALYSIS = "regression_analysis"
-    PERFORMANCE_DASHBOARD = "performance_dashboard"
-    CI_CD_PIPELINE = "ci_cd_pipeline"
+    COMPLIANT = "compliant"              # Within ≤10% variance threshold
+    WARNING = "warning"                  # 5-10% variance - approaching threshold
+    CRITICAL = "critical"                # >10% variance - exceeds threshold
+    FAILURE = "failure"                  # >15% variance - significant degradation
+    IMPROVEMENT = "improvement"          # Negative variance - performance improvement
+    INSUFFICIENT_DATA = "insufficient_data"  # Not enough data for valid comparison
+
+
+class ReportSeverity(Enum):
+    """Report severity levels for stakeholder communication."""
+    
+    INFO = "info"                        # Informational - no action required
+    WARNING = "warning"                  # Warning - monitoring recommended
+    CRITICAL = "critical"                # Critical - immediate attention required
+    BLOCKING = "blocking"                # Blocking - deployment should be prevented
 
 
 class DeploymentRecommendation(Enum):
-    """Deployment recommendation classification based on performance analysis."""
+    """Deployment recommendation based on baseline comparison analysis."""
     
-    APPROVED = "approved"
-    APPROVED_WITH_MONITORING = "approved_with_monitoring"
-    CONDITIONAL_APPROVAL = "conditional_approval"
-    BLOCKED = "blocked"
-    ROLLBACK_REQUIRED = "rollback_required"
+    APPROVE = "approve"                  # Approve deployment - performance compliant
+    CONDITIONAL = "conditional"          # Conditional approval - monitor closely
+    REVIEW = "review"                    # Manual review required - borderline performance
+    BLOCK = "block"                      # Block deployment - performance non-compliant
 
 
 @dataclass
-class PerformanceMetricSummary:
-    """Summary of performance metric analysis for report generation."""
+class BaselineVarianceMetric:
+    """
+    Individual baseline variance metric containing detailed comparison analysis.
     
+    Represents a single performance metric comparison between Flask implementation
+    and Node.js baseline with comprehensive variance calculation and status assessment.
+    """
+    
+    # Metric identification
     metric_name: str
-    baseline_value: float
-    current_value: float
+    metric_category: BaselineMetricCategory
+    measurement_unit: str
+    
+    # Performance values
+    nodejs_baseline_value: float
+    flask_current_value: float
     variance_percent: float
-    variance_severity: str
+    variance_absolute: float
+    
+    # Status and compliance
+    comparison_status: ComparisonStatus
     within_threshold: bool
-    trend_direction: str  # 'improving', 'stable', 'degrading'
-    sample_count: int
-    measurement_period: str
-    confidence_score: float
-    recommendation: str
-    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    exceeds_warning: bool
+    exceeds_critical: bool
+    
+    # Statistical information
+    sample_size: int
+    confidence_level: float
+    measurement_timestamp: datetime
+    
+    # Threshold configuration
+    warning_threshold: float = WARNING_VARIANCE_LIMIT
+    critical_threshold: float = CRITICAL_VARIANCE_LIMIT
+    
+    # Additional context
+    environment: str = "unknown"
+    test_scenario: str = "default"
     
     @property
-    def severity_color(self) -> str:
-        """Get color code for severity visualization."""
-        severity_colors = {
-            'excellent': '#4CAF50',    # Green
-            'good': '#8BC34A',         # Light Green
-            'warning': '#FF9800',      # Orange
-            'critical': '#F44336',     # Red
-            'failure': '#D32F2F'       # Dark Red
-        }
-        return severity_colors.get(self.variance_severity, '#9E9E9E')
+    def is_regression(self) -> bool:
+        """Check if variance indicates performance regression."""
+        return self.variance_percent > 0 and not self.within_threshold
     
     @property
-    def severity_icon(self) -> str:
-        """Get icon for severity visualization."""
-        severity_icons = {
-            'excellent': '✅',
-            'good': '✅',
-            'warning': '⚠️',
-            'critical': '❌',
-            'failure': '🚫'
-        }
-        return severity_icons.get(self.variance_severity, '❓')
+    def is_improvement(self) -> bool:
+        """Check if variance indicates performance improvement."""
+        return self.variance_percent < -2.0  # >2% improvement considered significant
     
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for JSON serialization."""
-        return {
-            'metric_name': self.metric_name,
-            'baseline_value': self.baseline_value,
-            'current_value': self.current_value,
-            'variance_percent': round(self.variance_percent, 2),
-            'variance_severity': self.variance_severity,
-            'within_threshold': self.within_threshold,
-            'trend_direction': self.trend_direction,
-            'sample_count': self.sample_count,
-            'measurement_period': self.measurement_period,
-            'confidence_score': round(self.confidence_score, 3),
-            'recommendation': self.recommendation,
-            'severity_color': self.severity_color,
-            'severity_icon': self.severity_icon,
-            'timestamp': self.timestamp.isoformat()
-        }
+    @property
+    def severity_level(self) -> ReportSeverity:
+        """Get report severity level based on variance magnitude."""
+        if self.comparison_status == ComparisonStatus.FAILURE:
+            return ReportSeverity.BLOCKING
+        elif self.comparison_status == ComparisonStatus.CRITICAL:
+            return ReportSeverity.CRITICAL
+        elif self.comparison_status == ComparisonStatus.WARNING:
+            return ReportSeverity.WARNING
+        else:
+            return ReportSeverity.INFO
+    
+    @property
+    def status_description(self) -> str:
+        """Get human-readable status description."""
+        if self.is_improvement:
+            return f"Performance improved by {abs(self.variance_percent):.1f}%"
+        elif self.within_threshold:
+            return f"Within acceptable variance ({self.variance_percent:+.1f}%)"
+        elif self.exceeds_critical:
+            return f"Critical variance: {self.variance_percent:+.1f}% exceeds {self.critical_threshold}% threshold"
+        elif self.exceeds_warning:
+            return f"Warning variance: {self.variance_percent:+.1f}% exceeds {self.warning_threshold}% threshold"
+        else:
+            return f"Variance: {self.variance_percent:+.1f}%"
 
 
 @dataclass
-class ExecutiveSummary:
-    """Executive summary for stakeholder communication per Section 0.3.4."""
+class BaselineComparisonSummary:
+    """
+    Comprehensive baseline comparison summary containing executive-level insights
+    and detailed variance analysis for stakeholder communication.
+    """
     
-    overall_status: str  # 'PASSED', 'WARNING', 'FAILED'
-    deployment_recommendation: DeploymentRecommendation
-    compliance_rate: float
-    total_metrics_tested: int
-    critical_issues_count: int
-    performance_variance_summary: str
-    key_achievements: List[str]
-    critical_issues: List[str]
-    recommendations: List[str]
-    next_steps: List[str]
-    business_impact: str
-    risk_assessment: str
-    confidence_level: str  # 'HIGH', 'MEDIUM', 'LOW'
-    test_coverage: float
-    report_generation_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for JSON serialization."""
-        return {
-            'overall_status': self.overall_status,
-            'deployment_recommendation': self.deployment_recommendation.value,
-            'compliance_rate': round(self.compliance_rate, 1),
-            'total_metrics_tested': self.total_metrics_tested,
-            'critical_issues_count': self.critical_issues_count,
-            'performance_variance_summary': self.performance_variance_summary,
-            'key_achievements': self.key_achievements,
-            'critical_issues': self.critical_issues,
-            'recommendations': self.recommendations,
-            'next_steps': self.next_steps,
-            'business_impact': self.business_impact,
-            'risk_assessment': self.risk_assessment,
-            'confidence_level': self.confidence_level,
-            'test_coverage': round(self.test_coverage, 1),
-            'report_generation_time': self.report_generation_time.isoformat()
-        }
-
-
-@dataclass
-class BaselineComparisonReport:
-    """Comprehensive baseline comparison report structure."""
-    
-    report_id: str
-    report_type: ReportType
-    executive_summary: ExecutiveSummary
-    performance_metrics: List[PerformanceMetricSummary]
-    regression_analysis: Dict[str, Any]
-    trend_analysis: Dict[str, Any]
-    compliance_validation: Dict[str, Any]
-    technical_details: Dict[str, Any]
-    metadata: Dict[str, Any]
+    # Report metadata
+    report_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    report_title: str = DEFAULT_REPORT_TITLE
     generation_timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    report_version: str = "1.0.0"
     
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert complete report to dictionary for serialization."""
-        return {
-            'report_id': self.report_id,
-            'report_type': self.report_type.value,
-            'executive_summary': self.executive_summary.to_dict(),
-            'performance_metrics': [metric.to_dict() for metric in self.performance_metrics],
-            'regression_analysis': self.regression_analysis,
-            'trend_analysis': self.trend_analysis,
-            'compliance_validation': self.compliance_validation,
-            'technical_details': self.technical_details,
-            'metadata': self.metadata,
-            'generation_timestamp': self.generation_timestamp.isoformat()
+    # Test execution context
+    test_environment: str = "unknown"
+    test_duration_seconds: float = 0.0
+    total_sample_size: int = 0
+    statistical_confidence: float = 0.0
+    
+    # Baseline comparison results
+    variance_metrics: List[BaselineVarianceMetric] = field(default_factory=list)
+    overall_compliance: bool = False
+    compliance_percentage: float = 0.0
+    
+    # Performance analysis
+    response_time_analysis: Dict[str, Any] = field(default_factory=dict)
+    throughput_analysis: Dict[str, Any] = field(default_factory=dict)
+    memory_usage_analysis: Dict[str, Any] = field(default_factory=dict)
+    cpu_utilization_analysis: Dict[str, Any] = field(default_factory=dict)
+    database_performance_analysis: Dict[str, Any] = field(default_factory=dict)
+    
+    # Trend and regression analysis
+    regression_detected: bool = False
+    performance_improvement: bool = False
+    trend_analysis: Dict[str, Any] = field(default_factory=dict)
+    historical_comparison: Dict[str, Any] = field(default_factory=dict)
+    
+    # Recommendations and actions
+    deployment_recommendation: DeploymentRecommendation = DeploymentRecommendation.REVIEW
+    critical_issues: List[str] = field(default_factory=list)
+    warning_issues: List[str] = field(default_factory=list)
+    improvement_opportunities: List[str] = field(default_factory=list)
+    deployment_blockers: List[str] = field(default_factory=list)
+    
+    # Executive summary components
+    executive_summary: Dict[str, Any] = field(default_factory=dict)
+    key_findings: List[str] = field(default_factory=list)
+    business_impact: str = ""
+    technical_recommendations: List[str] = field(default_factory=list)
+    
+    def calculate_overall_status(self) -> ComparisonStatus:
+        """Calculate overall comparison status from individual metrics."""
+        if not self.variance_metrics:
+            return ComparisonStatus.INSUFFICIENT_DATA
+        
+        status_counts = defaultdict(int)
+        for metric in self.variance_metrics:
+            status_counts[metric.comparison_status] += 1
+        
+        # Determine overall status based on worst-case analysis
+        if status_counts[ComparisonStatus.FAILURE] > 0:
+            return ComparisonStatus.FAILURE
+        elif status_counts[ComparisonStatus.CRITICAL] > 0:
+            return ComparisonStatus.CRITICAL
+        elif status_counts[ComparisonStatus.WARNING] > 0:
+            return ComparisonStatus.WARNING
+        elif all(metric.is_improvement for metric in self.variance_metrics):
+            return ComparisonStatus.IMPROVEMENT
+        else:
+            return ComparisonStatus.COMPLIANT
+    
+    def get_metrics_by_category(self, category: BaselineMetricCategory) -> List[BaselineVarianceMetric]:
+        """Get variance metrics filtered by category."""
+        return [metric for metric in self.variance_metrics if metric.metric_category == category]
+    
+    def get_non_compliant_metrics(self) -> List[BaselineVarianceMetric]:
+        """Get all metrics that exceed compliance thresholds."""
+        return [metric for metric in self.variance_metrics if not metric.within_threshold]
+    
+    def get_critical_metrics(self) -> List[BaselineVarianceMetric]:
+        """Get metrics with critical variance levels."""
+        return [metric for metric in self.variance_metrics 
+                if metric.comparison_status in [ComparisonStatus.CRITICAL, ComparisonStatus.FAILURE]]
+    
+    def calculate_category_compliance(self, category: BaselineMetricCategory) -> float:
+        """Calculate compliance percentage for specific metric category."""
+        category_metrics = self.get_metrics_by_category(category)
+        if not category_metrics:
+            return 100.0
+        
+        compliant_metrics = [m for m in category_metrics if m.within_threshold]
+        return (len(compliant_metrics) / len(category_metrics)) * 100.0
+
+
+class BaselineComparisonAnalyzer:
+    """
+    Comprehensive baseline comparison analyzer providing detailed variance analysis,
+    regression detection, and automated compliance validation against Node.js baseline.
+    
+    Implements Section 0.1.1 ≤10% variance requirement with Section 0.3.2 performance
+    monitoring integration and Section 0.3.4 documentation requirements.
+    """
+    
+    def __init__(self, baseline_manager: Optional[BaselineDataManager] = None):
+        """
+        Initialize baseline comparison analyzer with Node.js baseline data.
+        
+        Args:
+            baseline_manager: Optional baseline data manager (defaults to global manager)
+        """
+        self.baseline_manager = baseline_manager or get_baseline_manager()
+        self.nodejs_baseline = self.baseline_manager.get_default_baseline()
+        
+        # Initialize historical data tracking
+        self.historical_comparisons: List[BaselineComparisonSummary] = []
+        self.performance_trends: Dict[str, deque] = defaultdict(lambda: deque(maxlen=MAX_TREND_POINTS))
+        
+        # Configure structured logging
+        if STRUCTLOG_AVAILABLE:
+            self.logger = structlog.get_logger(__name__)
+        else:
+            self.logger = logging.getLogger(__name__)
+        
+        # Initialize performance thresholds
+        self.performance_thresholds = create_performance_thresholds(
+            baseline_name="nodejs_production_baseline",
+            variance_threshold=PERFORMANCE_VARIANCE_LIMIT / 100.0
+        )
+    
+    def analyze_baseline_comparison(
+        self,
+        flask_metrics: Dict[str, float],
+        test_context: Optional[Dict[str, Any]] = None,
+        include_trend_analysis: bool = True,
+        include_regression_detection: bool = True
+    ) -> BaselineComparisonSummary:
+        """
+        Perform comprehensive baseline comparison analysis against Node.js metrics.
+        
+        Args:
+            flask_metrics: Current Flask implementation performance metrics
+            test_context: Optional test execution context information
+            include_trend_analysis: Whether to include historical trend analysis
+            include_regression_detection: Whether to perform regression detection
+            
+        Returns:
+            BaselineComparisonSummary with comprehensive analysis results
+            
+        Raises:
+            ValueError: If flask_metrics is empty or invalid
+            RuntimeError: If baseline data is unavailable or corrupted
+        """
+        if not flask_metrics:
+            raise ValueError("Flask metrics cannot be empty for baseline comparison")
+        
+        # Validate baseline data integrity
+        if not self.nodejs_baseline.verify_data_integrity():
+            raise RuntimeError("Node.js baseline data integrity verification failed")
+        
+        start_time = datetime.now()
+        test_context = test_context or {}
+        
+        try:
+            # Initialize comparison summary
+            summary = BaselineComparisonSummary(
+                test_environment=test_context.get("environment", "unknown"),
+                test_duration_seconds=test_context.get("duration_seconds", 0.0)
+            )
+            
+            self.logger.info(
+                "Starting baseline comparison analysis",
+                flask_metrics_count=len(flask_metrics),
+                environment=summary.test_environment,
+                baseline_version=self.nodejs_baseline.baseline_version
+            )
+            
+            # Perform individual metric variance analysis
+            variance_metrics = self._analyze_metric_variances(flask_metrics, test_context)
+            summary.variance_metrics = variance_metrics
+            
+            # Calculate overall compliance metrics
+            self._calculate_compliance_summary(summary)
+            
+            # Perform category-specific analysis
+            self._analyze_response_time_performance(summary, flask_metrics)
+            self._analyze_throughput_performance(summary, flask_metrics)
+            self._analyze_memory_usage_patterns(summary, flask_metrics)
+            self._analyze_cpu_utilization(summary, flask_metrics)
+            self._analyze_database_performance(summary, flask_metrics)
+            
+            # Trend analysis and regression detection
+            if include_trend_analysis:
+                self._perform_trend_analysis(summary)
+            
+            if include_regression_detection:
+                self._detect_performance_regressions(summary)
+            
+            # Generate deployment recommendation
+            self._generate_deployment_recommendation(summary)
+            
+            # Create executive summary
+            self._generate_executive_summary(summary)
+            
+            # Store for historical analysis
+            self.historical_comparisons.append(summary)
+            self._update_performance_trends(summary)
+            
+            analysis_duration = (datetime.now() - start_time).total_seconds()
+            
+            self.logger.info(
+                "Baseline comparison analysis completed",
+                overall_compliance=summary.overall_compliance,
+                compliance_percentage=summary.compliance_percentage,
+                deployment_recommendation=summary.deployment_recommendation.value,
+                critical_issues=len(summary.critical_issues),
+                analysis_duration=analysis_duration
+            )
+            
+            return summary
+            
+        except Exception as e:
+            self.logger.error(
+                "Baseline comparison analysis failed",
+                error=str(e),
+                traceback=traceback.format_exc()
+            )
+            raise
+    
+    def _analyze_metric_variances(
+        self,
+        flask_metrics: Dict[str, float],
+        test_context: Dict[str, Any]
+    ) -> List[BaselineVarianceMetric]:
+        """Analyze individual metric variances against Node.js baseline."""
+        
+        variance_metrics = []
+        
+        # Define metric mapping with baseline values and categories
+        metric_mappings = {
+            # Response time metrics
+            "api_response_time_mean": {
+                "baseline": self.nodejs_baseline.api_response_time_mean,
+                "category": BaselineMetricCategory.API_RESPONSE_TIME,
+                "unit": "ms"
+            },
+            "api_response_time_p95": {
+                "baseline": self.nodejs_baseline.api_response_time_p95,
+                "category": BaselineMetricCategory.API_RESPONSE_TIME,
+                "unit": "ms"
+            },
+            "api_response_time_p99": {
+                "baseline": self.nodejs_baseline.api_response_time_p99,
+                "category": BaselineMetricCategory.API_RESPONSE_TIME,
+                "unit": "ms"
+            },
+            
+            # Throughput metrics
+            "requests_per_second": {
+                "baseline": self.nodejs_baseline.requests_per_second_sustained,
+                "category": BaselineMetricCategory.THROUGHPUT_METRICS,
+                "unit": "req/s"
+            },
+            "peak_requests_per_second": {
+                "baseline": self.nodejs_baseline.requests_per_second_peak,
+                "category": BaselineMetricCategory.THROUGHPUT_METRICS,
+                "unit": "req/s"
+            },
+            "concurrent_users_capacity": {
+                "baseline": self.nodejs_baseline.concurrent_users_capacity,
+                "category": BaselineMetricCategory.CONCURRENT_CAPACITY,
+                "unit": "users"
+            },
+            
+            # Memory usage metrics
+            "memory_usage_mb": {
+                "baseline": self.nodejs_baseline.memory_usage_baseline_mb,
+                "category": BaselineMetricCategory.MEMORY_UTILIZATION,
+                "unit": "MB"
+            },
+            "memory_usage_peak_mb": {
+                "baseline": self.nodejs_baseline.memory_usage_peak_mb,
+                "category": BaselineMetricCategory.MEMORY_UTILIZATION,
+                "unit": "MB"
+            },
+            "memory_heap_used_mb": {
+                "baseline": self.nodejs_baseline.memory_heap_used_mb,
+                "category": BaselineMetricCategory.MEMORY_UTILIZATION,
+                "unit": "MB"
+            },
+            
+            # CPU utilization metrics
+            "cpu_utilization_average": {
+                "baseline": self.nodejs_baseline.cpu_utilization_average,
+                "category": BaselineMetricCategory.CPU_UTILIZATION,
+                "unit": "%"
+            },
+            "cpu_utilization_peak": {
+                "baseline": self.nodejs_baseline.cpu_utilization_peak,
+                "category": BaselineMetricCategory.CPU_UTILIZATION,
+                "unit": "%"
+            },
+            
+            # Database performance metrics
+            "database_query_time_mean": {
+                "baseline": self.nodejs_baseline.database_query_time_mean,
+                "category": BaselineMetricCategory.DATABASE_PERFORMANCE,
+                "unit": "ms"
+            },
+            "database_query_time_p95": {
+                "baseline": self.nodejs_baseline.database_query_time_p95,
+                "category": BaselineMetricCategory.DATABASE_PERFORMANCE,
+                "unit": "ms"
+            },
+            
+            # Error rate metrics
+            "error_rate_overall": {
+                "baseline": self.nodejs_baseline.error_rate_overall,
+                "category": BaselineMetricCategory.ERROR_RATES,
+                "unit": "%"
+            },
+            "error_rate_4xx": {
+                "baseline": self.nodejs_baseline.error_rate_4xx,
+                "category": BaselineMetricCategory.ERROR_RATES,
+                "unit": "%"
+            },
+            "error_rate_5xx": {
+                "baseline": self.nodejs_baseline.error_rate_5xx,
+                "category": BaselineMetricCategory.ERROR_RATES,
+                "unit": "%"
+            }
         }
+        
+        # Analyze each available metric
+        for metric_name, flask_value in flask_metrics.items():
+            if metric_name not in metric_mappings:
+                self.logger.debug(f"Skipping unmapped metric: {metric_name}")
+                continue
+            
+            mapping = metric_mappings[metric_name]
+            baseline_value = mapping["baseline"]
+            category = mapping["category"]
+            unit = mapping["unit"]
+            
+            # Calculate variance
+            variance_analysis = self._calculate_metric_variance(
+                metric_name=metric_name,
+                baseline_value=baseline_value,
+                current_value=flask_value,
+                category=category,
+                unit=unit,
+                test_context=test_context
+            )
+            
+            variance_metrics.append(variance_analysis)
+        
+        return variance_metrics
+    
+    def _calculate_metric_variance(
+        self,
+        metric_name: str,
+        baseline_value: float,
+        current_value: float,
+        category: BaselineMetricCategory,
+        unit: str,
+        test_context: Dict[str, Any]
+    ) -> BaselineVarianceMetric:
+        """Calculate detailed variance analysis for individual metric."""
+        
+        # Calculate variance percentage
+        if baseline_value == 0:
+            if current_value == 0:
+                variance_percent = 0.0
+            else:
+                variance_percent = float('inf')  # Baseline is zero but current is non-zero
+        else:
+            variance_percent = ((current_value - baseline_value) / baseline_value) * 100.0
+        
+        variance_absolute = abs(variance_percent)
+        
+        # Apply category-specific thresholds
+        if category == BaselineMetricCategory.MEMORY_UTILIZATION:
+            warning_threshold = WARNING_VARIANCE_LIMIT
+            critical_threshold = MEMORY_VARIANCE_LIMIT  # 15% for memory
+        else:
+            warning_threshold = WARNING_VARIANCE_LIMIT
+            critical_threshold = CRITICAL_VARIANCE_LIMIT
+        
+        # Determine compliance status
+        within_threshold = variance_absolute <= critical_threshold
+        exceeds_warning = variance_absolute > warning_threshold
+        exceeds_critical = variance_absolute > critical_threshold
+        
+        # Classify comparison status
+        if math.isinf(variance_percent):
+            comparison_status = ComparisonStatus.FAILURE
+        elif variance_percent < -2.0:  # Significant improvement
+            comparison_status = ComparisonStatus.IMPROVEMENT
+        elif variance_absolute <= warning_threshold:
+            comparison_status = ComparisonStatus.COMPLIANT
+        elif variance_absolute <= critical_threshold:
+            comparison_status = ComparisonStatus.WARNING
+        elif variance_absolute <= DEPLOYMENT_BLOCKING_LIMIT:
+            comparison_status = ComparisonStatus.CRITICAL
+        else:
+            comparison_status = ComparisonStatus.FAILURE
+        
+        return BaselineVarianceMetric(
+            metric_name=metric_name,
+            metric_category=category,
+            measurement_unit=unit,
+            nodejs_baseline_value=baseline_value,
+            flask_current_value=current_value,
+            variance_percent=variance_percent,
+            variance_absolute=variance_absolute,
+            comparison_status=comparison_status,
+            within_threshold=within_threshold,
+            exceeds_warning=exceeds_warning,
+            exceeds_critical=exceeds_critical,
+            sample_size=test_context.get("sample_size", 1),
+            confidence_level=test_context.get("confidence_level", 95.0),
+            measurement_timestamp=datetime.now(timezone.utc),
+            warning_threshold=warning_threshold,
+            critical_threshold=critical_threshold,
+            environment=test_context.get("environment", "unknown"),
+            test_scenario=test_context.get("scenario", "default")
+        )
+    
+    def _calculate_compliance_summary(self, summary: BaselineComparisonSummary) -> None:
+        """Calculate overall compliance summary statistics."""
+        
+        if not summary.variance_metrics:
+            summary.overall_compliance = False
+            summary.compliance_percentage = 0.0
+            return
+        
+        # Calculate compliance statistics
+        compliant_metrics = [m for m in summary.variance_metrics if m.within_threshold]
+        summary.compliance_percentage = (len(compliant_metrics) / len(summary.variance_metrics)) * 100.0
+        summary.overall_compliance = len(compliant_metrics) == len(summary.variance_metrics)
+        
+        # Calculate statistical confidence
+        total_samples = sum(m.sample_size for m in summary.variance_metrics)
+        summary.total_sample_size = total_samples
+        summary.statistical_confidence = min(95.0, max(50.0, (total_samples / 1000) * 100.0))
+        
+        # Identify critical and warning issues
+        for metric in summary.variance_metrics:
+            if metric.comparison_status in [ComparisonStatus.CRITICAL, ComparisonStatus.FAILURE]:
+                issue = f"Critical variance in {metric.metric_name}: {metric.variance_percent:+.1f}% (threshold: ±{metric.critical_threshold}%)"
+                summary.critical_issues.append(issue)
+                
+                if metric.comparison_status == ComparisonStatus.FAILURE:
+                    blocker = f"Deployment blocker: {metric.metric_name} variance {metric.variance_percent:+.1f}% exceeds acceptable limits"
+                    summary.deployment_blockers.append(blocker)
+            
+            elif metric.comparison_status == ComparisonStatus.WARNING:
+                issue = f"Warning variance in {metric.metric_name}: {metric.variance_percent:+.1f}% (threshold: ±{metric.warning_threshold}%)"
+                summary.warning_issues.append(issue)
+            
+            elif metric.comparison_status == ComparisonStatus.IMPROVEMENT:
+                improvement = f"Performance improvement in {metric.metric_name}: {abs(metric.variance_percent):.1f}% better than baseline"
+                summary.improvement_opportunities.append(improvement)
+    
+    def _analyze_response_time_performance(
+        self,
+        summary: BaselineComparisonSummary,
+        flask_metrics: Dict[str, float]
+    ) -> None:
+        """Analyze response time performance against Node.js baseline."""
+        
+        response_time_metrics = summary.get_metrics_by_category(BaselineMetricCategory.API_RESPONSE_TIME)
+        
+        if not response_time_metrics:
+            summary.response_time_analysis = {"status": "no_data", "message": "No response time metrics available"}
+            return
+        
+        # Calculate response time analysis
+        mean_variance = next((m.variance_percent for m in response_time_metrics 
+                             if m.metric_name == "api_response_time_mean"), 0.0)
+        p95_variance = next((m.variance_percent for m in response_time_metrics 
+                            if m.metric_name == "api_response_time_p95"), 0.0)
+        p99_variance = next((m.variance_percent for m in response_time_metrics 
+                            if m.metric_name == "api_response_time_p99"), 0.0)
+        
+        # Check compliance with response time requirements
+        compliant_metrics = [m for m in response_time_metrics if m.within_threshold]
+        compliance_rate = (len(compliant_metrics) / len(response_time_metrics)) * 100.0
+        
+        # Determine overall response time status
+        if compliance_rate == 100.0:
+            status = "compliant"
+            message = "All response time metrics within acceptable variance thresholds"
+        elif compliance_rate >= 80.0:
+            status = "mostly_compliant"
+            message = f"{compliance_rate:.0f}% of response time metrics compliant"
+        elif compliance_rate >= 50.0:
+            status = "partially_compliant"
+            message = f"Only {compliance_rate:.0f}% of response time metrics compliant"
+        else:
+            status = "non_compliant"
+            message = f"Significant response time variance detected: {compliance_rate:.0f}% compliant"
+        
+        # Check for critical response time thresholds
+        current_p95 = flask_metrics.get("api_response_time_p95", 0.0)
+        exceeds_sla = current_p95 > RESPONSE_TIME_THRESHOLD_MS
+        
+        summary.response_time_analysis = {
+            "status": status,
+            "message": message,
+            "compliance_rate": compliance_rate,
+            "mean_variance_percent": mean_variance,
+            "p95_variance_percent": p95_variance,
+            "p99_variance_percent": p99_variance,
+            "current_p95_ms": current_p95,
+            "baseline_p95_ms": self.nodejs_baseline.api_response_time_p95,
+            "exceeds_sla_threshold": exceeds_sla,
+            "sla_threshold_ms": RESPONSE_TIME_THRESHOLD_MS,
+            "critical_issues": [m.metric_name for m in response_time_metrics if not m.within_threshold]
+        }
+    
+    def _analyze_throughput_performance(
+        self,
+        summary: BaselineComparisonSummary,
+        flask_metrics: Dict[str, float]
+    ) -> None:
+        """Analyze throughput performance against Node.js baseline."""
+        
+        throughput_metrics = summary.get_metrics_by_category(BaselineMetricCategory.THROUGHPUT_METRICS)
+        capacity_metrics = summary.get_metrics_by_category(BaselineMetricCategory.CONCURRENT_CAPACITY)
+        all_throughput_metrics = throughput_metrics + capacity_metrics
+        
+        if not all_throughput_metrics:
+            summary.throughput_analysis = {"status": "no_data", "message": "No throughput metrics available"}
+            return
+        
+        # Calculate throughput variance analysis
+        sustained_rps_variance = next((m.variance_percent for m in throughput_metrics 
+                                      if m.metric_name == "requests_per_second"), 0.0)
+        peak_rps_variance = next((m.variance_percent for m in throughput_metrics 
+                                 if m.metric_name == "peak_requests_per_second"), 0.0)
+        capacity_variance = next((m.variance_percent for m in capacity_metrics 
+                                 if m.metric_name == "concurrent_users_capacity"), 0.0)
+        
+        # Check throughput compliance
+        compliant_metrics = [m for m in all_throughput_metrics if m.within_threshold]
+        compliance_rate = (len(compliant_metrics) / len(all_throughput_metrics)) * 100.0
+        
+        # Check minimum throughput requirements
+        current_rps = flask_metrics.get("requests_per_second", 0.0)
+        meets_minimum = current_rps >= THROUGHPUT_THRESHOLD_RPS
+        
+        # Determine throughput status
+        if compliance_rate == 100.0 and meets_minimum:
+            status = "compliant"
+            message = "Throughput performance meets all requirements"
+        elif not meets_minimum:
+            status = "below_minimum"
+            message = f"Throughput below minimum requirement: {current_rps:.1f} < {THROUGHPUT_THRESHOLD_RPS} req/s"
+        elif compliance_rate >= 75.0:
+            status = "mostly_compliant"
+            message = f"Throughput mostly compliant: {compliance_rate:.0f}% of metrics within threshold"
+        else:
+            status = "non_compliant"
+            message = f"Throughput performance degraded: {compliance_rate:.0f}% compliant"
+        
+        summary.throughput_analysis = {
+            "status": status,
+            "message": message,
+            "compliance_rate": compliance_rate,
+            "sustained_rps_variance_percent": sustained_rps_variance,
+            "peak_rps_variance_percent": peak_rps_variance,
+            "capacity_variance_percent": capacity_variance,
+            "current_sustained_rps": current_rps,
+            "baseline_sustained_rps": self.nodejs_baseline.requests_per_second_sustained,
+            "meets_minimum_threshold": meets_minimum,
+            "minimum_threshold_rps": THROUGHPUT_THRESHOLD_RPS,
+            "critical_issues": [m.metric_name for m in all_throughput_metrics if not m.within_threshold]
+        }
+    
+    def _analyze_memory_usage_patterns(
+        self,
+        summary: BaselineComparisonSummary,
+        flask_metrics: Dict[str, float]
+    ) -> None:
+        """Analyze memory usage patterns against Node.js baseline."""
+        
+        memory_metrics = summary.get_metrics_by_category(BaselineMetricCategory.MEMORY_UTILIZATION)
+        
+        if not memory_metrics:
+            summary.memory_usage_analysis = {"status": "no_data", "message": "No memory usage metrics available"}
+            return
+        
+        # Calculate memory usage analysis
+        baseline_variance = next((m.variance_percent for m in memory_metrics 
+                                 if m.metric_name == "memory_usage_mb"), 0.0)
+        peak_variance = next((m.variance_percent for m in memory_metrics 
+                             if m.metric_name == "memory_usage_peak_mb"), 0.0)
+        heap_variance = next((m.variance_percent for m in memory_metrics 
+                             if m.metric_name == "memory_heap_used_mb"), 0.0)
+        
+        # Check memory compliance (using 15% threshold)
+        compliant_metrics = [m for m in memory_metrics if m.within_threshold]
+        compliance_rate = (len(compliant_metrics) / len(memory_metrics)) * 100.0
+        
+        # Calculate memory efficiency
+        current_memory = flask_metrics.get("memory_usage_mb", 0.0)
+        baseline_memory = self.nodejs_baseline.memory_usage_baseline_mb
+        memory_efficiency = (baseline_memory / current_memory * 100.0) if current_memory > 0 else 100.0
+        
+        # Detect potential memory leaks (significant variance)
+        leak_risk = any(m.variance_percent > 20.0 for m in memory_metrics)
+        
+        # Determine memory usage status
+        if compliance_rate == 100.0:
+            status = "compliant"
+            message = "Memory usage within acceptable variance limits"
+        elif compliance_rate >= 75.0:
+            status = "mostly_compliant"
+            message = f"Memory usage mostly acceptable: {compliance_rate:.0f}% compliant"
+        elif leak_risk:
+            status = "leak_risk"
+            message = "Potential memory leak detected - significant variance from baseline"
+        else:
+            status = "non_compliant"
+            message = f"Memory usage exceeds acceptable variance: {compliance_rate:.0f}% compliant"
+        
+        summary.memory_usage_analysis = {
+            "status": status,
+            "message": message,
+            "compliance_rate": compliance_rate,
+            "baseline_variance_percent": baseline_variance,
+            "peak_variance_percent": peak_variance,
+            "heap_variance_percent": heap_variance,
+            "current_memory_mb": current_memory,
+            "baseline_memory_mb": baseline_memory,
+            "memory_efficiency_percent": memory_efficiency,
+            "leak_risk_detected": leak_risk,
+            "variance_threshold_percent": MEMORY_VARIANCE_LIMIT,
+            "critical_issues": [m.metric_name for m in memory_metrics if not m.within_threshold]
+        }
+    
+    def _analyze_cpu_utilization(
+        self,
+        summary: BaselineComparisonSummary,
+        flask_metrics: Dict[str, float]
+    ) -> None:
+        """Analyze CPU utilization against Node.js baseline."""
+        
+        cpu_metrics = summary.get_metrics_by_category(BaselineMetricCategory.CPU_UTILIZATION)
+        
+        if not cpu_metrics:
+            summary.cpu_utilization_analysis = {"status": "no_data", "message": "No CPU utilization metrics available"}
+            return
+        
+        # Calculate CPU utilization analysis
+        average_variance = next((m.variance_percent for m in cpu_metrics 
+                               if m.metric_name == "cpu_utilization_average"), 0.0)
+        peak_variance = next((m.variance_percent for m in cpu_metrics 
+                            if m.metric_name == "cpu_utilization_peak"), 0.0)
+        
+        # Check CPU compliance
+        compliant_metrics = [m for m in cpu_metrics if m.within_threshold]
+        compliance_rate = (len(compliant_metrics) / len(cpu_metrics)) * 100.0
+        
+        # Check CPU efficiency and thresholds
+        current_cpu_avg = flask_metrics.get("cpu_utilization_average", 0.0)
+        current_cpu_peak = flask_metrics.get("cpu_utilization_peak", 0.0)
+        exceeds_threshold = current_cpu_peak > CPU_UTILIZATION_THRESHOLD
+        
+        # Calculate CPU efficiency
+        baseline_cpu = self.nodejs_baseline.cpu_utilization_average
+        cpu_efficiency = (baseline_cpu / current_cpu_avg * 100.0) if current_cpu_avg > 0 else 100.0
+        
+        # Determine CPU utilization status
+        if compliance_rate == 100.0 and not exceeds_threshold:
+            status = "compliant"
+            message = "CPU utilization within acceptable variance and operational thresholds"
+        elif exceeds_threshold:
+            status = "threshold_exceeded"
+            message = f"CPU utilization exceeds threshold: {current_cpu_peak:.1f}% > {CPU_UTILIZATION_THRESHOLD}%"
+        elif compliance_rate >= 75.0:
+            status = "mostly_compliant"
+            message = f"CPU utilization mostly acceptable: {compliance_rate:.0f}% compliant"
+        else:
+            status = "non_compliant"
+            message = f"CPU utilization variance exceeds limits: {compliance_rate:.0f}% compliant"
+        
+        summary.cpu_utilization_analysis = {
+            "status": status,
+            "message": message,
+            "compliance_rate": compliance_rate,
+            "average_variance_percent": average_variance,
+            "peak_variance_percent": peak_variance,
+            "current_cpu_average": current_cpu_avg,
+            "current_cpu_peak": current_cpu_peak,
+            "baseline_cpu_average": baseline_cpu,
+            "baseline_cpu_peak": self.nodejs_baseline.cpu_utilization_peak,
+            "cpu_efficiency_percent": cpu_efficiency,
+            "exceeds_operational_threshold": exceeds_threshold,
+            "operational_threshold_percent": CPU_UTILIZATION_THRESHOLD,
+            "critical_issues": [m.metric_name for m in cpu_metrics if not m.within_threshold]
+        }
+    
+    def _analyze_database_performance(
+        self,
+        summary: BaselineComparisonSummary,
+        flask_metrics: Dict[str, float]
+    ) -> None:
+        """Analyze database performance against Node.js baseline."""
+        
+        db_metrics = summary.get_metrics_by_category(BaselineMetricCategory.DATABASE_PERFORMANCE)
+        
+        if not db_metrics:
+            summary.database_performance_analysis = {"status": "no_data", "message": "No database performance metrics available"}
+            return
+        
+        # Calculate database performance analysis
+        mean_query_variance = next((m.variance_percent for m in db_metrics 
+                                   if m.metric_name == "database_query_time_mean"), 0.0)
+        p95_query_variance = next((m.variance_percent for m in db_metrics 
+                                  if m.metric_name == "database_query_time_p95"), 0.0)
+        
+        # Check database compliance
+        compliant_metrics = [m for m in db_metrics if m.within_threshold]
+        compliance_rate = (len(compliant_metrics) / len(db_metrics)) * 100.0
+        
+        # Calculate database efficiency
+        current_query_time = flask_metrics.get("database_query_time_mean", 0.0)
+        baseline_query_time = self.nodejs_baseline.database_query_time_mean
+        db_efficiency = (baseline_query_time / current_query_time * 100.0) if current_query_time > 0 else 100.0
+        
+        # Determine database performance status
+        if compliance_rate == 100.0:
+            status = "compliant"
+            message = "Database performance within acceptable variance limits"
+        elif compliance_rate >= 80.0:
+            status = "mostly_compliant"
+            message = f"Database performance mostly acceptable: {compliance_rate:.0f}% compliant"
+        else:
+            status = "non_compliant"
+            message = f"Database performance degraded: {compliance_rate:.0f}% compliant"
+        
+        summary.database_performance_analysis = {
+            "status": status,
+            "message": message,
+            "compliance_rate": compliance_rate,
+            "mean_query_variance_percent": mean_query_variance,
+            "p95_query_variance_percent": p95_query_variance,
+            "current_query_time_ms": current_query_time,
+            "baseline_query_time_ms": baseline_query_time,
+            "database_efficiency_percent": db_efficiency,
+            "critical_issues": [m.metric_name for m in db_metrics if not m.within_threshold]
+        }
+    
+    def _perform_trend_analysis(self, summary: BaselineComparisonSummary) -> None:
+        """Perform trend analysis using historical comparison data."""
+        
+        if len(self.historical_comparisons) < 2:
+            summary.trend_analysis = {
+                "status": "insufficient_data",
+                "message": "Insufficient historical data for trend analysis",
+                "data_points": len(self.historical_comparisons)
+            }
+            return
+        
+        # Analyze trends across key metrics
+        trend_metrics = {}
+        
+        for metric_category in BaselineMetricCategory:
+            category_trends = self._analyze_category_trends(metric_category)
+            if category_trends:
+                trend_metrics[metric_category.value] = category_trends
+        
+        # Calculate overall trend direction
+        improvement_count = sum(1 for trends in trend_metrics.values() 
+                              if trends.get("direction") == "improving")
+        degradation_count = sum(1 for trends in trend_metrics.values() 
+                               if trends.get("direction") == "degrading")
+        
+        if improvement_count > degradation_count:
+            overall_trend = "improving"
+        elif degradation_count > improvement_count:
+            overall_trend = "degrading"
+        else:
+            overall_trend = "stable"
+        
+        summary.trend_analysis = {
+            "status": "available",
+            "message": f"Trend analysis based on {len(self.historical_comparisons)} historical comparisons",
+            "overall_trend": overall_trend,
+            "data_points": len(self.historical_comparisons),
+            "category_trends": trend_metrics,
+            "improvement_categories": improvement_count,
+            "degradation_categories": degradation_count
+        }
+    
+    def _analyze_category_trends(self, category: BaselineMetricCategory) -> Optional[Dict[str, Any]]:
+        """Analyze trends for specific metric category."""
+        
+        if len(self.historical_comparisons) < 3:
+            return None
+        
+        # Extract compliance rates for the category from recent comparisons
+        recent_comparisons = self.historical_comparisons[-5:]  # Last 5 comparisons
+        compliance_rates = []
+        
+        for comparison in recent_comparisons:
+            compliance_rate = comparison.calculate_category_compliance(category)
+            compliance_rates.append(compliance_rate)
+        
+        if len(compliance_rates) < 3:
+            return None
+        
+        # Calculate trend direction
+        recent_avg = statistics.mean(compliance_rates[-3:])
+        earlier_avg = statistics.mean(compliance_rates[:-3]) if len(compliance_rates) > 3 else compliance_rates[0]
+        
+        trend_change = recent_avg - earlier_avg
+        
+        if trend_change > 2.0:
+            direction = "improving"
+        elif trend_change < -2.0:
+            direction = "degrading"
+        else:
+            direction = "stable"
+        
+        return {
+            "direction": direction,
+            "trend_change_percent": trend_change,
+            "current_compliance": recent_avg,
+            "historical_compliance": earlier_avg,
+            "data_points": len(compliance_rates)
+        }
+    
+    def _detect_performance_regressions(self, summary: BaselineComparisonSummary) -> None:
+        """Detect performance regressions using statistical analysis."""
+        
+        regression_detected = False
+        regression_details = []
+        
+        # Check for critical variance spikes
+        critical_metrics = summary.get_critical_metrics()
+        if critical_metrics:
+            regression_detected = True
+            for metric in critical_metrics:
+                regression_details.append({
+                    "metric": metric.metric_name,
+                    "variance": metric.variance_percent,
+                    "threshold": metric.critical_threshold,
+                    "severity": "critical"
+                })
+        
+        # Check for sudden degradation compared to recent history
+        if len(self.historical_comparisons) >= 2:
+            recent_compliance = self.historical_comparisons[-1].compliance_percentage
+            current_compliance = summary.compliance_percentage
+            
+            compliance_drop = recent_compliance - current_compliance
+            
+            if compliance_drop > 15.0:  # >15% drop in compliance
+                regression_detected = True
+                regression_details.append({
+                    "metric": "overall_compliance",
+                    "variance": compliance_drop,
+                    "threshold": 15.0,
+                    "severity": "compliance_degradation"
+                })
+        
+        summary.regression_detected = regression_detected
+        
+        if regression_detected:
+            summary.trend_analysis["regression_details"] = regression_details
+        
+        # Check for performance improvements
+        improvement_metrics = [m for m in summary.variance_metrics if m.is_improvement]
+        summary.performance_improvement = len(improvement_metrics) > 0
+        
+        if summary.performance_improvement:
+            summary.trend_analysis["improvement_details"] = [
+                {
+                    "metric": m.metric_name,
+                    "improvement": abs(m.variance_percent),
+                    "category": m.metric_category.value
+                }
+                for m in improvement_metrics
+            ]
+    
+    def _generate_deployment_recommendation(self, summary: BaselineComparisonSummary) -> None:
+        """Generate deployment recommendation based on baseline comparison analysis."""
+        
+        # Check for deployment blockers
+        if summary.deployment_blockers:
+            summary.deployment_recommendation = DeploymentRecommendation.BLOCK
+            return
+        
+        # Check for critical issues
+        critical_count = len(summary.critical_issues)
+        if critical_count > 0:
+            if critical_count >= 3 or summary.compliance_percentage < 70.0:
+                summary.deployment_recommendation = DeploymentRecommendation.BLOCK
+            else:
+                summary.deployment_recommendation = DeploymentRecommendation.REVIEW
+            return
+        
+        # Check for warning issues
+        warning_count = len(summary.warning_issues)
+        if warning_count > 0:
+            if warning_count >= 5 or summary.compliance_percentage < 85.0:
+                summary.deployment_recommendation = DeploymentRecommendation.REVIEW
+            else:
+                summary.deployment_recommendation = DeploymentRecommendation.CONDITIONAL
+            return
+        
+        # Check for regression detection
+        if summary.regression_detected:
+            summary.deployment_recommendation = DeploymentRecommendation.REVIEW
+            return
+        
+        # Check overall compliance
+        if summary.overall_compliance and summary.compliance_percentage >= 95.0:
+            summary.deployment_recommendation = DeploymentRecommendation.APPROVE
+        elif summary.compliance_percentage >= 90.0:
+            summary.deployment_recommendation = DeploymentRecommendation.CONDITIONAL
+        else:
+            summary.deployment_recommendation = DeploymentRecommendation.REVIEW
+    
+    def _generate_executive_summary(self, summary: BaselineComparisonSummary) -> None:
+        """Generate comprehensive executive summary for stakeholder communication."""
+        
+        # Generate key findings
+        key_findings = []
+        
+        # Overall compliance finding
+        if summary.overall_compliance:
+            key_findings.append(f"Performance meets ≤10% variance requirement: {summary.compliance_percentage:.1f}% compliance")
+        else:
+            key_findings.append(f"Performance variance exceeds ≤10% requirement: {summary.compliance_percentage:.1f}% compliance")
+        
+        # Critical issues finding
+        if summary.critical_issues:
+            key_findings.append(f"{len(summary.critical_issues)} critical performance issues require immediate attention")
+        
+        # Regression/improvement findings
+        if summary.regression_detected:
+            key_findings.append("Performance regression detected compared to recent history")
+        elif summary.performance_improvement:
+            key_findings.append("Performance improvements identified in key metrics")
+        
+        # Statistical confidence finding
+        if summary.statistical_confidence >= MIN_STATISTICAL_CONFIDENCE:
+            key_findings.append(f"Analysis based on statistically significant data ({summary.statistical_confidence:.0f}% confidence)")
+        else:
+            key_findings.append(f"Limited statistical confidence ({summary.statistical_confidence:.0f}%) - larger sample size recommended")
+        
+        summary.key_findings = key_findings
+        
+        # Generate business impact assessment
+        if summary.deployment_recommendation == DeploymentRecommendation.APPROVE:
+            business_impact = "Low business risk - deployment approved with performance requirements met"
+        elif summary.deployment_recommendation == DeploymentRecommendation.CONDITIONAL:
+            business_impact = "Moderate business risk - conditional deployment with enhanced monitoring recommended"
+        elif summary.deployment_recommendation == DeploymentRecommendation.REVIEW:
+            business_impact = "Elevated business risk - manual review required before deployment"
+        else:  # BLOCK
+            business_impact = "High business risk - deployment blocked due to performance non-compliance"
+        
+        summary.business_impact = business_impact
+        
+        # Generate technical recommendations
+        technical_recommendations = []
+        
+        # Response time recommendations
+        response_analysis = summary.response_time_analysis
+        if response_analysis.get("status") == "non_compliant":
+            technical_recommendations.append("Optimize API response times through caching and query optimization")
+        
+        # Memory recommendations
+        memory_analysis = summary.memory_usage_analysis
+        if memory_analysis.get("leak_risk_detected"):
+            technical_recommendations.append("Investigate potential memory leaks and optimize garbage collection")
+        elif memory_analysis.get("status") == "non_compliant":
+            technical_recommendations.append("Optimize memory usage patterns and implement memory profiling")
+        
+        # CPU recommendations
+        cpu_analysis = summary.cpu_utilization_analysis
+        if cpu_analysis.get("exceeds_operational_threshold"):
+            technical_recommendations.append("Reduce CPU utilization through code optimization and horizontal scaling")
+        
+        # Database recommendations
+        db_analysis = summary.database_performance_analysis
+        if db_analysis.get("status") == "non_compliant":
+            technical_recommendations.append("Optimize database queries and connection pool configuration")
+        
+        # Throughput recommendations
+        throughput_analysis = summary.throughput_analysis
+        if throughput_analysis.get("status") == "below_minimum":
+            technical_recommendations.append("Improve application throughput to meet minimum performance requirements")
+        
+        if not technical_recommendations:
+            technical_recommendations.append("Continue monitoring performance metrics and maintain current optimization efforts")
+        
+        summary.technical_recommendations = technical_recommendations
+        
+        # Create executive summary dictionary
+        summary.executive_summary = {
+            "overall_status": summary.calculate_overall_status().value,
+            "compliance_percentage": summary.compliance_percentage,
+            "deployment_recommendation": summary.deployment_recommendation.value,
+            "key_findings": summary.key_findings,
+            "business_impact": summary.business_impact,
+            "technical_recommendations": summary.technical_recommendations,
+            "critical_issues_count": len(summary.critical_issues),
+            "warning_issues_count": len(summary.warning_issues),
+            "statistical_confidence": summary.statistical_confidence,
+            "test_environment": summary.test_environment,
+            "analysis_timestamp": summary.generation_timestamp.isoformat()
+        }
+    
+    def _update_performance_trends(self, summary: BaselineComparisonSummary) -> None:
+        """Update performance trends with current comparison data."""
+        
+        timestamp = summary.generation_timestamp
+        
+        # Update overall compliance trend
+        self.performance_trends["overall_compliance"].append({
+            "timestamp": timestamp,
+            "value": summary.compliance_percentage,
+            "sample_size": summary.total_sample_size
+        })
+        
+        # Update category-specific trends
+        for category in BaselineMetricCategory:
+            compliance_rate = summary.calculate_category_compliance(category)
+            self.performance_trends[f"{category.value}_compliance"].append({
+                "timestamp": timestamp,
+                "value": compliance_rate,
+                "metrics_count": len(summary.get_metrics_by_category(category))
+            })
+        
+        # Update individual metric trends
+        for metric in summary.variance_metrics:
+            self.performance_trends[f"{metric.metric_name}_variance"].append({
+                "timestamp": timestamp,
+                "value": metric.variance_percent,
+                "status": metric.comparison_status.value
+            })
 
 
 class BaselineComparisonReportGenerator:
     """
-    Comprehensive baseline comparison report generation system.
+    Comprehensive baseline comparison report generator providing multi-format reports
+    with executive summaries, technical details, and deployment recommendations.
     
-    Provides detailed analysis of performance variance, regression detection,
-    and compliance validation for the Flask migration project with automated
-    ≤10% variance enforcement and executive summary generation.
+    Integrates with performance testing framework and monitoring infrastructure per
+    Section 0.3.4 documentation requirements and Section 6.5 observability integration.
     """
     
-    def __init__(self, baseline_manager: Optional[BaselineDataManager] = None,
-                 output_directory: Optional[str] = None):
+    def __init__(self, analyzer: Optional[BaselineComparisonAnalyzer] = None):
         """
-        Initialize baseline comparison report generator.
+        Initialize report generator with baseline comparison analyzer.
         
         Args:
-            baseline_manager: Baseline data manager (defaults to default manager)
-            output_directory: Report output directory (defaults to ./output)
+            analyzer: Optional baseline comparison analyzer (defaults to new instance)
         """
-        self.baseline_manager = baseline_manager or default_baseline_manager
-        self.output_directory = Path(output_directory) if output_directory else REPORT_OUTPUT_DIR
-        self.output_directory.mkdir(parents=True, exist_ok=True)
+        self.analyzer = analyzer or BaselineComparisonAnalyzer()
         
-        # Configure logging for report generation
-        self.logger = logging.getLogger(__name__)
-        self.logger.setLevel(logging.INFO)
+        # Initialize visualization engine if available
+        if PLOTLY_AVAILABLE:
+            self.visualization_engine = PerformanceVisualizationEngine()
+        else:
+            self.visualization_engine = None
         
-        # Report generation state
-        self.report_cache: Dict[str, BaselineComparisonReport] = {}
-        self.chart_cache: Dict[str, str] = {}  # Base64 encoded charts
-        
-        # Template environment setup
-        self.template_env = None
+        # Initialize template environment if available
         if JINJA2_AVAILABLE:
-            template_dir = REPORT_TEMPLATE_DIR
-            if template_dir.exists():
-                self.template_env = Environment(loader=FileSystemLoader(str(template_dir)))
-            else:
-                # Create basic template environment
-                self.template_env = Environment(loader=FileSystemLoader('/'))
-        
-        self.logger.info(f"BaselineComparisonReportGenerator initialized - Output: {self.output_directory}")
-    
-    def generate_executive_summary_report(self, 
-                                        test_results: List[PerformanceComparisonResult],
-                                        trend_analyzer: Optional[PerformanceTrendAnalyzer] = None,
-                                        additional_context: Optional[Dict[str, Any]] = None) -> BaselineComparisonReport:
-        """
-        Generate executive summary report for stakeholder communication.
-        
-        Args:
-            test_results: Performance comparison test results
-            trend_analyzer: Optional trend analyzer for regression detection
-            additional_context: Additional context for report generation
-            
-        Returns:
-            BaselineComparisonReport with executive summary focus
-        """
-        report_id = f"executive_summary_{uuid.uuid4().hex[:8]}"
-        additional_context = additional_context or {}
-        
-        self.logger.info(f"Generating executive summary report: {report_id}")
-        
-        # Analyze test results for executive summary
-        performance_metrics = self._analyze_performance_metrics(test_results)
-        compliance_validation = self._validate_compliance_requirements(test_results)
-        
-        # Generate regression analysis if trend analyzer available
-        regression_analysis = {}
-        if trend_analyzer:
-            regression_analysis = self._generate_regression_analysis(trend_analyzer, test_results)
-        
-        # Create executive summary
-        executive_summary = self._create_executive_summary(
-            performance_metrics, compliance_validation, regression_analysis, additional_context
-        )
-        
-        # Generate trend analysis
-        trend_analysis = self._generate_trend_analysis(test_results, trend_analyzer)
-        
-        # Compile technical details
-        technical_details = self._compile_technical_details(test_results, performance_metrics)
-        
-        # Generate metadata
-        metadata = self._generate_report_metadata(
-            report_type=ReportType.EXECUTIVE_SUMMARY,
-            test_results_count=len(test_results),
-            additional_context=additional_context
-        )
-        
-        # Create comprehensive report
-        report = BaselineComparisonReport(
-            report_id=report_id,
-            report_type=ReportType.EXECUTIVE_SUMMARY,
-            executive_summary=executive_summary,
-            performance_metrics=performance_metrics,
-            regression_analysis=regression_analysis,
-            trend_analysis=trend_analysis,
-            compliance_validation=compliance_validation,
-            technical_details=technical_details,
-            metadata=metadata
-        )
-        
-        # Cache report for future reference
-        self.report_cache[report_id] = report
-        
-        self.logger.info(f"Executive summary report generated successfully: {report_id}")
-        return report
-    
-    def generate_technical_detailed_report(self,
-                                         test_results: List[PerformanceComparisonResult],
-                                         trend_analyzer: Optional[PerformanceTrendAnalyzer] = None,
-                                         include_raw_data: bool = True) -> BaselineComparisonReport:
-        """
-        Generate technical detailed report for engineering teams.
-        
-        Args:
-            test_results: Performance comparison test results
-            trend_analyzer: Optional trend analyzer for comprehensive analysis
-            include_raw_data: Include raw measurement data in report
-            
-        Returns:
-            BaselineComparisonReport with technical details focus
-        """
-        report_id = f"technical_detailed_{uuid.uuid4().hex[:8]}"
-        
-        self.logger.info(f"Generating technical detailed report: {report_id}")
-        
-        # Comprehensive performance metric analysis
-        performance_metrics = self._analyze_performance_metrics(test_results, detailed=True)
-        
-        # Detailed compliance validation
-        compliance_validation = self._validate_compliance_requirements(
-            test_results, include_technical_details=True
-        )
-        
-        # Comprehensive regression analysis
-        regression_analysis = {}
-        if trend_analyzer:
-            regression_analysis = self._generate_comprehensive_regression_analysis(
-                trend_analyzer, test_results
+            template_dir = Path(__file__).parent / "templates"
+            self.template_env = Environment(
+                loader=FileSystemLoader(str(template_dir)) if template_dir.exists() else None,
+                autoescape=select_autoescape(['html', 'xml'])
             )
+        else:
+            self.template_env = None
         
-        # Detailed trend analysis with statistical validation
-        trend_analysis = self._generate_detailed_trend_analysis(test_results, trend_analyzer)
+        # Configure structured logging
+        if STRUCTLOG_AVAILABLE:
+            self.logger = structlog.get_logger(__name__)
+        else:
+            self.logger = logging.getLogger(__name__)
         
-        # Comprehensive technical details with optimization recommendations
-        technical_details = self._compile_comprehensive_technical_details(
-            test_results, performance_metrics, include_raw_data
-        )
-        
-        # Create executive summary (simplified for technical audience)
-        executive_summary = self._create_technical_executive_summary(
-            performance_metrics, compliance_validation, regression_analysis
-        )
-        
-        # Generate technical metadata
-        metadata = self._generate_report_metadata(
-            report_type=ReportType.TECHNICAL_DETAILED,
-            test_results_count=len(test_results),
-            include_raw_data=include_raw_data
-        )
-        
-        # Create comprehensive technical report
-        report = BaselineComparisonReport(
-            report_id=report_id,
-            report_type=ReportType.TECHNICAL_DETAILED,
-            executive_summary=executive_summary,
-            performance_metrics=performance_metrics,
-            regression_analysis=regression_analysis,
-            trend_analysis=trend_analysis,
-            compliance_validation=compliance_validation,
-            technical_details=technical_details,
-            metadata=metadata
-        )
-        
-        # Cache report for future reference
-        self.report_cache[report_id] = report
-        
-        self.logger.info(f"Technical detailed report generated successfully: {report_id}")
-        return report
+        # Report cache for performance optimization
+        self.report_cache: Dict[str, Any] = {}
+        self.cache_timestamps: Dict[str, datetime] = {}
     
-    def generate_ci_cd_pipeline_report(self,
-                                     test_results: List[PerformanceComparisonResult],
-                                     pipeline_context: Dict[str, Any]) -> BaselineComparisonReport:
+    def generate_baseline_comparison_report(
+        self,
+        flask_metrics: Dict[str, float],
+        report_format: ReportFormat = ReportFormat.HTML,
+        audience: ReportAudience = ReportAudience.TECHNICAL,
+        test_context: Optional[Dict[str, Any]] = None,
+        include_charts: bool = True,
+        output_path: Optional[Path] = None
+    ) -> Union[str, Dict[str, Any]]:
         """
-        Generate CI/CD pipeline integration report with deployment recommendations.
+        Generate comprehensive baseline comparison report in specified format.
         
         Args:
-            test_results: Performance comparison test results
-            pipeline_context: CI/CD pipeline context and metadata
+            flask_metrics: Current Flask implementation performance metrics
+            report_format: Output format (HTML, JSON, Markdown)
+            audience: Target audience for report content and styling
+            test_context: Optional test execution context information
+            include_charts: Whether to include data visualizations
+            output_path: Optional path to save the generated report
             
         Returns:
-            BaselineComparisonReport optimized for CI/CD pipeline integration
-        """
-        report_id = f"ci_cd_pipeline_{uuid.uuid4().hex[:8]}"
-        
-        self.logger.info(f"Generating CI/CD pipeline report: {report_id}")
-        
-        # Pipeline-focused performance analysis
-        performance_metrics = self._analyze_performance_metrics(test_results, pipeline_focus=True)
-        
-        # Pipeline compliance validation with deployment gates
-        compliance_validation = self._validate_pipeline_compliance(test_results, pipeline_context)
-        
-        # Deployment decision analysis
-        deployment_analysis = self._analyze_deployment_readiness(
-            performance_metrics, compliance_validation, pipeline_context
-        )
-        
-        # Create CI/CD focused executive summary
-        executive_summary = self._create_pipeline_executive_summary(
-            performance_metrics, compliance_validation, deployment_analysis
-        )
-        
-        # Pipeline-specific technical details
-        technical_details = self._compile_pipeline_technical_details(
-            test_results, performance_metrics, pipeline_context
-        )
-        
-        # Generate pipeline metadata
-        metadata = self._generate_report_metadata(
-            report_type=ReportType.CI_CD_PIPELINE,
-            test_results_count=len(test_results),
-            pipeline_context=pipeline_context
-        )
-        
-        # Create CI/CD pipeline report
-        report = BaselineComparisonReport(
-            report_id=report_id,
-            report_type=ReportType.CI_CD_PIPELINE,
-            executive_summary=executive_summary,
-            performance_metrics=performance_metrics,
-            regression_analysis=deployment_analysis,
-            trend_analysis={'deployment_readiness': deployment_analysis},
-            compliance_validation=compliance_validation,
-            technical_details=technical_details,
-            metadata=metadata
-        )
-        
-        # Cache report for CI/CD reference
-        self.report_cache[report_id] = report
-        
-        self.logger.info(f"CI/CD pipeline report generated successfully: {report_id}")
-        return report
-    
-    def export_report(self, report: BaselineComparisonReport, 
-                     output_format: str = DEFAULT_REPORT_FORMAT,
-                     filename: Optional[str] = None,
-                     include_charts: bool = True) -> Path:
-        """
-        Export baseline comparison report to specified format.
-        
-        Args:
-            report: BaselineComparisonReport to export
-            output_format: Export format ('json', 'html', 'pdf', 'markdown', 'csv')
-            filename: Optional custom filename (auto-generated if not provided)
-            include_charts: Include performance charts in export
+            Generated report content (string for text formats, dict for JSON)
             
-        Returns:
-            Path to exported report file
+        Raises:
+            ValueError: If flask_metrics is empty or invalid
+            RuntimeError: If report generation fails
         """
-        if output_format not in SUPPORTED_REPORT_FORMATS:
-            raise ValueError(f"Unsupported format: {output_format}. Supported: {SUPPORTED_REPORT_FORMATS}")
-        
-        # Generate filename if not provided
-        if not filename:
-            timestamp = report.generation_timestamp.strftime("%Y%m%d_%H%M%S")
-            filename = f"baseline_comparison_report_{report.report_type.value}_{timestamp}.{output_format}"
-        
-        output_path = self.output_directory / filename
-        
-        self.logger.info(f"Exporting report {report.report_id} to {output_format}: {output_path}")
-        
         try:
-            if output_format == 'json':
-                self._export_json_report(report, output_path)
-            elif output_format == 'html':
-                self._export_html_report(report, output_path, include_charts)
-            elif output_format == 'pdf':
-                self._export_pdf_report(report, output_path, include_charts)
-            elif output_format == 'markdown':
-                self._export_markdown_report(report, output_path)
-            elif output_format == 'csv':
-                self._export_csv_report(report, output_path)
+            # Perform baseline comparison analysis
+            comparison_summary = self.analyzer.analyze_baseline_comparison(
+                flask_metrics=flask_metrics,
+                test_context=test_context,
+                include_trend_analysis=True,
+                include_regression_detection=True
+            )
             
-            self.logger.info(f"Report exported successfully: {output_path}")
-            return output_path
+            self.logger.info(
+                "Generated baseline comparison analysis",
+                overall_compliance=comparison_summary.overall_compliance,
+                compliance_percentage=comparison_summary.compliance_percentage,
+                deployment_recommendation=comparison_summary.deployment_recommendation.value,
+                report_format=report_format.value,
+                audience=audience.value
+            )
+            
+            # Generate report in requested format
+            if report_format == ReportFormat.JSON:
+                report_content = self._generate_json_report(comparison_summary)
+            elif report_format == ReportFormat.HTML:
+                report_content = self._generate_html_report(comparison_summary, audience, include_charts)
+            elif report_format == ReportFormat.MARKDOWN:
+                report_content = self._generate_markdown_report(comparison_summary, audience)
+            else:
+                raise ValueError(f"Unsupported report format: {report_format}")
+            
+            # Save report if output path provided
+            if output_path:
+                self._save_report(report_content, output_path, report_format)
+            
+            return report_content
             
         except Exception as e:
-            self.logger.error(f"Failed to export report: {e}")
-            self.logger.error(traceback.format_exc())
+            self.logger.error(
+                "Baseline comparison report generation failed",
+                error=str(e),
+                traceback=traceback.format_exc()
+            )
+            raise RuntimeError(f"Report generation failed: {str(e)}")
+    
+    def generate_ci_cd_gate_report(
+        self,
+        flask_metrics: Dict[str, float],
+        pipeline_context: Dict[str, Any],
+        variance_threshold: float = PERFORMANCE_VARIANCE_LIMIT
+    ) -> Dict[str, Any]:
+        """
+        Generate CI/CD deployment gate report for automated pipeline integration.
+        
+        Args:
+            flask_metrics: Current Flask implementation performance metrics
+            pipeline_context: CI/CD pipeline context information
+            variance_threshold: Performance variance threshold for gate decisions
+            
+        Returns:
+            CI/CD gate report with deployment approval/blocking recommendation
+        """
+        try:
+            # Perform baseline comparison analysis
+            test_context = {
+                "environment": pipeline_context.get("environment", "ci"),
+                "pipeline_id": pipeline_context.get("pipeline_id"),
+                "commit_sha": pipeline_context.get("commit_sha"),
+                "branch": pipeline_context.get("branch"),
+                "variance_threshold": variance_threshold
+            }
+            
+            comparison_summary = self.analyzer.analyze_baseline_comparison(
+                flask_metrics=flask_metrics,
+                test_context=test_context,
+                include_trend_analysis=False,  # Skip for CI/CD speed
+                include_regression_detection=True
+            )
+            
+            # Generate CI/CD specific report
+            gate_report = {
+                "pipeline_context": pipeline_context,
+                "performance_gate_decision": {
+                    "deployment_approved": comparison_summary.deployment_recommendation == DeploymentRecommendation.APPROVE,
+                    "recommendation": comparison_summary.deployment_recommendation.value,
+                    "confidence_level": comparison_summary.statistical_confidence,
+                    "blocking_issues": comparison_summary.deployment_blockers,
+                    "requires_manual_review": comparison_summary.deployment_recommendation == DeploymentRecommendation.REVIEW
+                },
+                "performance_summary": {
+                    "overall_compliance": comparison_summary.overall_compliance,
+                    "compliance_percentage": comparison_summary.compliance_percentage,
+                    "variance_threshold": variance_threshold,
+                    "critical_issues_count": len(comparison_summary.critical_issues),
+                    "warning_issues_count": len(comparison_summary.warning_issues),
+                    "regression_detected": comparison_summary.regression_detected
+                },
+                "detailed_variance_analysis": [
+                    {
+                        "metric": metric.metric_name,
+                        "category": metric.metric_category.value,
+                        "variance_percent": metric.variance_percent,
+                        "within_threshold": metric.within_threshold,
+                        "status": metric.comparison_status.value,
+                        "severity": metric.severity_level.value
+                    }
+                    for metric in comparison_summary.variance_metrics
+                ],
+                "deployment_recommendations": {
+                    "critical_actions": comparison_summary.critical_issues,
+                    "warning_actions": comparison_summary.warning_issues,
+                    "technical_recommendations": comparison_summary.technical_recommendations,
+                    "rollback_triggers": comparison_summary.deployment_blockers
+                },
+                "report_metadata": {
+                    "generation_timestamp": comparison_summary.generation_timestamp.isoformat(),
+                    "analyzer_version": "1.0.0",
+                    "baseline_version": self.analyzer.nodejs_baseline.baseline_version,
+                    "statistical_confidence": comparison_summary.statistical_confidence
+                }
+            }
+            
+            self.logger.info(
+                "Generated CI/CD gate report",
+                deployment_approved=gate_report["performance_gate_decision"]["deployment_approved"],
+                recommendation=gate_report["performance_gate_decision"]["recommendation"],
+                compliance_percentage=gate_report["performance_summary"]["compliance_percentage"],
+                pipeline_id=pipeline_context.get("pipeline_id")
+            )
+            
+            return gate_report
+            
+        except Exception as e:
+            self.logger.error(
+                "CI/CD gate report generation failed",
+                error=str(e),
+                pipeline_context=pipeline_context
+            )
             raise
     
-    def _analyze_performance_metrics(self, test_results: List[PerformanceComparisonResult],
-                                   detailed: bool = False,
-                                   pipeline_focus: bool = False) -> List[PerformanceMetricSummary]:
-        """
-        Analyze performance test results and create metric summaries.
+    def _generate_json_report(self, summary: BaselineComparisonSummary) -> str:
+        """Generate JSON format baseline comparison report."""
         
-        Args:
-            test_results: Performance comparison test results
-            detailed: Include detailed statistical analysis
-            pipeline_focus: Focus on pipeline-relevant metrics
-            
-        Returns:
-            List of PerformanceMetricSummary objects
-        """
-        metric_summaries = []
-        
-        # Group results by metric name for analysis
-        metrics_by_name = defaultdict(list)
-        for result in test_results:
-            metrics_by_name[result.metric_name].append(result)
-        
-        for metric_name, results in metrics_by_name.items():
-            if not results:
-                continue
-            
-            # Use most recent result as primary
-            latest_result = max(results, key=lambda x: x.timestamp)
-            
-            # Calculate variance severity
-            variance_severity = self._classify_variance_severity(abs(latest_result.variance_percent))
-            
-            # Determine trend direction
-            trend_direction = self._analyze_metric_trend(results)
-            
-            # Calculate confidence score
-            confidence_score = self._calculate_confidence_score(results, detailed)
-            
-            # Generate recommendation
-            recommendation = self._generate_metric_recommendation(
-                latest_result, variance_severity, trend_direction, pipeline_focus
-            )
-            
-            # Create metric summary
-            summary = PerformanceMetricSummary(
-                metric_name=metric_name,
-                baseline_value=latest_result.baseline_value,
-                current_value=latest_result.current_value,
-                variance_percent=latest_result.variance_percent,
-                variance_severity=variance_severity,
-                within_threshold=latest_result.within_threshold,
-                trend_direction=trend_direction,
-                sample_count=len(results),
-                measurement_period=self._calculate_measurement_period(results),
-                confidence_score=confidence_score,
-                recommendation=recommendation,
-                timestamp=latest_result.timestamp
-            )
-            
-            metric_summaries.append(summary)
-        
-        # Sort by severity and variance magnitude
-        metric_summaries.sort(key=lambda x: (
-            self._get_severity_priority(x.variance_severity),
-            abs(x.variance_percent)
-        ), reverse=True)
-        
-        return metric_summaries
-    
-    def _validate_compliance_requirements(self, test_results: List[PerformanceComparisonResult],
-                                        include_technical_details: bool = False) -> Dict[str, Any]:
-        """
-        Validate compliance with ≤10% variance requirement and other thresholds.
-        
-        Args:
-            test_results: Performance comparison test results
-            include_technical_details: Include detailed compliance analysis
-            
-        Returns:
-            Dictionary containing compliance validation results
-        """
-        compliance_data = {
-            'overall_compliant': True,
-            'compliance_rate': 0.0,
-            'variance_threshold_compliance': {},
-            'critical_failures': [],
-            'compliance_summary': {},
-            'regulatory_compliance': {
-                'sox_compliant': True,
-                'gdpr_compliant': True,
-                'enterprise_standards': True
-            }
-        }
-        
-        if not test_results:
-            compliance_data['overall_compliant'] = False
-            compliance_data['critical_failures'].append('No performance test results available')
-            return compliance_data
-        
-        # Analyze variance threshold compliance
-        total_results = len(test_results)
-        compliant_results = sum(1 for result in test_results if result.within_threshold)
-        compliance_rate = (compliant_results / total_results) * 100.0
-        
-        compliance_data['compliance_rate'] = compliance_rate
-        compliance_data['overall_compliant'] = compliance_rate >= 95.0  # 95% compliance threshold
-        
-        # Analyze variance threshold compliance by severity
-        variance_compliance = {
-            'excellent': 0,     # 0-5% variance
-            'good': 0,          # 5-8% variance  
-            'warning': 0,       # 8-10% variance
-            'critical': 0,      # 10-15% variance
-            'failure': 0        # >15% variance
-        }
-        
-        critical_failures = []
-        
-        for result in test_results:
-            variance_severity = self._classify_variance_severity(abs(result.variance_percent))
-            variance_compliance[variance_severity] += 1
-            
-            # Track critical failures (>10% variance)
-            if not result.within_threshold and abs(result.variance_percent) > PERFORMANCE_VARIANCE_THRESHOLD:
-                critical_failures.append({
-                    'metric_name': result.metric_name,
-                    'variance_percent': result.variance_percent,
-                    'severity': variance_severity,
-                    'timestamp': result.timestamp.isoformat()
-                })
-        
-        compliance_data['variance_threshold_compliance'] = variance_compliance
-        compliance_data['critical_failures'] = critical_failures
-        
-        # Generate compliance summary
-        compliance_summary = {
-            'total_metrics_tested': total_results,
-            'compliant_metrics': compliant_results,
-            'non_compliant_metrics': total_results - compliant_results,
-            'critical_failures_count': len(critical_failures),
-            'variance_distribution': variance_compliance,
-            'performance_gate_status': 'PASSED' if compliance_data['overall_compliant'] else 'FAILED'
-        }
-        
-        compliance_data['compliance_summary'] = compliance_summary
-        
-        # Check critical performance metrics compliance
-        critical_metric_failures = [
-            failure for failure in critical_failures
-            if any(critical_metric in failure['metric_name'] 
-                  for critical_metric in CRITICAL_PERFORMANCE_METRICS)
-        ]
-        
-        if critical_metric_failures:
-            compliance_data['overall_compliant'] = False
-            compliance_data['regulatory_compliance']['enterprise_standards'] = False
-        
-        # Include technical details if requested
-        if include_technical_details:
-            compliance_data['technical_details'] = {
-                'variance_threshold': f"{PERFORMANCE_VARIANCE_THRESHOLD}%",
-                'memory_variance_threshold': f"±{MEMORY_VARIANCE_THRESHOLD}%",
-                'warning_threshold': f"{WARNING_VARIANCE_THRESHOLD}%",
-                'critical_threshold': f"{CRITICAL_VARIANCE_THRESHOLD}%",
-                'compliance_calculation': 'compliant_results / total_results >= 0.95',
-                'critical_metrics_analyzed': CRITICAL_PERFORMANCE_METRICS,
-                'test_categories_covered': PERFORMANCE_TEST_CATEGORIES
-            }
-        
-        return compliance_data
-    
-    def _create_executive_summary(self, performance_metrics: List[PerformanceMetricSummary],
-                                compliance_validation: Dict[str, Any],
-                                regression_analysis: Dict[str, Any],
-                                additional_context: Dict[str, Any]) -> ExecutiveSummary:
-        """
-        Create executive summary for stakeholder communication.
-        
-        Args:
-            performance_metrics: Analyzed performance metrics
-            compliance_validation: Compliance validation results
-            regression_analysis: Regression analysis results
-            additional_context: Additional context for summary generation
-            
-        Returns:
-            ExecutiveSummary object for stakeholder review
-        """
-        # Determine overall status
-        overall_compliant = compliance_validation.get('overall_compliant', False)
-        critical_failures_count = len(compliance_validation.get('critical_failures', []))
-        compliance_rate = compliance_validation.get('compliance_rate', 0.0)
-        
-        if overall_compliant and compliance_rate >= 98.0:
-            overall_status = 'PASSED'
-            deployment_recommendation = DeploymentRecommendation.APPROVED
-        elif overall_compliant and compliance_rate >= 95.0:
-            overall_status = 'PASSED'
-            deployment_recommendation = DeploymentRecommendation.APPROVED_WITH_MONITORING
-        elif compliance_rate >= 90.0 and critical_failures_count == 0:
-            overall_status = 'WARNING'
-            deployment_recommendation = DeploymentRecommendation.CONDITIONAL_APPROVAL
-        elif compliance_rate >= 80.0:
-            overall_status = 'WARNING'
-            deployment_recommendation = DeploymentRecommendation.BLOCKED
-        else:
-            overall_status = 'FAILED'
-            deployment_recommendation = DeploymentRecommendation.ROLLBACK_REQUIRED
-        
-        # Generate performance variance summary
-        variance_summary = self._generate_variance_summary(performance_metrics)
-        
-        # Identify key achievements
-        key_achievements = self._identify_key_achievements(
-            performance_metrics, compliance_validation, additional_context
-        )
-        
-        # Identify critical issues
-        critical_issues = self._identify_critical_issues(
-            performance_metrics, compliance_validation, regression_analysis
-        )
-        
-        # Generate recommendations
-        recommendations = self._generate_executive_recommendations(
-            performance_metrics, compliance_validation, deployment_recommendation
-        )
-        
-        # Generate next steps
-        next_steps = self._generate_next_steps(deployment_recommendation, critical_issues)
-        
-        # Assess business impact
-        business_impact = self._assess_business_impact(
-            deployment_recommendation, compliance_rate, critical_failures_count
-        )
-        
-        # Conduct risk assessment
-        risk_assessment = self._conduct_risk_assessment(
-            compliance_validation, regression_analysis, performance_metrics
-        )
-        
-        # Determine confidence level
-        confidence_level = self._determine_confidence_level(
-            performance_metrics, compliance_rate, regression_analysis
-        )
-        
-        # Calculate test coverage
-        test_coverage = self._calculate_test_coverage(performance_metrics, additional_context)
-        
-        return ExecutiveSummary(
-            overall_status=overall_status,
-            deployment_recommendation=deployment_recommendation,
-            compliance_rate=compliance_rate,
-            total_metrics_tested=len(performance_metrics),
-            critical_issues_count=critical_failures_count,
-            performance_variance_summary=variance_summary,
-            key_achievements=key_achievements,
-            critical_issues=critical_issues,
-            recommendations=recommendations,
-            next_steps=next_steps,
-            business_impact=business_impact,
-            risk_assessment=risk_assessment,
-            confidence_level=confidence_level,
-            test_coverage=test_coverage
-        )
-    
-    def _generate_regression_analysis(self, trend_analyzer: PerformanceTrendAnalyzer,
-                                    test_results: List[PerformanceComparisonResult]) -> Dict[str, Any]:
-        """
-        Generate regression analysis using trend analyzer.
-        
-        Args:
-            trend_analyzer: Performance trend analyzer
-            test_results: Performance comparison test results
-            
-        Returns:
-            Dictionary containing regression analysis results
-        """
-        regression_data = {
-            'regressions_detected': 0,
-            'regression_details': [],
-            'trend_summary': {},
-            'statistical_analysis': {},
-            'confidence_scores': {}
-        }
-        
-        # Analyze each unique metric for regressions
-        unique_metrics = set(result.metric_name for result in test_results)
-        
-        for metric_name in unique_metrics:
-            regression_result = trend_analyzer.detect_regression(metric_name)
-            
-            if regression_result.get('regression_detected', False):
-                regression_data['regressions_detected'] += 1
-                regression_data['regression_details'].append({
-                    'metric_name': metric_name,
-                    'confidence': regression_result.get('confidence', 0.0),
-                    'z_score': regression_result.get('z_score', 0.0),
-                    'trend_slope': regression_result.get('trend_slope', 0.0),
-                    'message': regression_result.get('message', 'Regression detected'),
-                    'sample_size': regression_result.get('sample_size', 0)
-                })
-            
-            # Generate trend report for metric
-            trend_report = trend_analyzer.generate_trend_report(metric_name)
-            regression_data['trend_summary'][metric_name] = trend_report
-        
-        # Generate overall statistical analysis
-        regression_data['statistical_analysis'] = {
-            'total_metrics_analyzed': len(unique_metrics),
-            'regression_rate': (regression_data['regressions_detected'] / len(unique_metrics)) * 100.0 if unique_metrics else 0.0,
-            'high_confidence_regressions': len([
-                r for r in regression_data['regression_details'] 
-                if r['confidence'] > 0.8
-            ]),
-            'analysis_timestamp': datetime.now(timezone.utc).isoformat()
-        }
-        
-        return regression_data
-    
-    def _generate_trend_analysis(self, test_results: List[PerformanceComparisonResult],
-                               trend_analyzer: Optional[PerformanceTrendAnalyzer]) -> Dict[str, Any]:
-        """
-        Generate trend analysis from test results.
-        
-        Args:
-            test_results: Performance comparison test results
-            trend_analyzer: Optional trend analyzer for detailed analysis
-            
-        Returns:
-            Dictionary containing trend analysis results
-        """
-        trend_data = {
-            'overall_trend': 'stable',
-            'trend_by_metric': {},
-            'performance_trajectory': {},
-            'prediction_confidence': 0.0
-        }
-        
-        if not test_results:
-            return trend_data
-        
-        # Group results by metric for trend analysis
-        metrics_by_name = defaultdict(list)
-        for result in test_results:
-            metrics_by_name[result.metric_name].append(result)
-        
-        # Analyze trend for each metric
-        improving_metrics = 0
-        degrading_metrics = 0
-        stable_metrics = 0
-        
-        for metric_name, results in metrics_by_name.items():
-            trend_direction = self._analyze_metric_trend(results)
-            trend_data['trend_by_metric'][metric_name] = trend_direction
-            
-            if trend_direction == 'improving':
-                improving_metrics += 1
-            elif trend_direction == 'degrading':
-                degrading_metrics += 1
-            else:
-                stable_metrics += 1
-        
-        # Determine overall trend
-        total_metrics = len(metrics_by_name)
-        if total_metrics > 0:
-            if degrading_metrics > total_metrics * 0.3:
-                trend_data['overall_trend'] = 'degrading'
-            elif improving_metrics > total_metrics * 0.6:
-                trend_data['overall_trend'] = 'improving'
-            else:
-                trend_data['overall_trend'] = 'stable'
-        
-        # Generate performance trajectory
-        trend_data['performance_trajectory'] = {
-            'improving_metrics': improving_metrics,
-            'degrading_metrics': degrading_metrics,
-            'stable_metrics': stable_metrics,
-            'total_metrics': total_metrics,
-            'improvement_rate': (improving_metrics / total_metrics) * 100.0 if total_metrics > 0 else 0.0,
-            'degradation_rate': (degrading_metrics / total_metrics) * 100.0 if total_metrics > 0 else 0.0
-        }
-        
-        # Calculate prediction confidence based on data quality
-        trend_data['prediction_confidence'] = self._calculate_trend_confidence(test_results)
-        
-        return trend_data
-    
-    def _compile_technical_details(self, test_results: List[PerformanceComparisonResult],
-                                 performance_metrics: List[PerformanceMetricSummary]) -> Dict[str, Any]:
-        """
-        Compile technical details for engineering teams.
-        
-        Args:
-            test_results: Performance comparison test results
-            performance_metrics: Analyzed performance metrics
-            
-        Returns:
-            Dictionary containing technical details and optimization guidance
-        """
-        technical_details = {
-            'performance_statistics': {},
-            'variance_analysis': {},
-            'optimization_recommendations': {},
-            'test_execution_details': {},
-            'system_configuration': {}
-        }
-        
-        # Performance statistics
-        if test_results:
-            variances = [abs(result.variance_percent) for result in test_results]
-            technical_details['performance_statistics'] = {
-                'mean_variance': statistics.mean(variances),
-                'median_variance': statistics.median(variances),
-                'max_variance': max(variances),
-                'min_variance': min(variances),
-                'variance_std_dev': statistics.stdev(variances) if len(variances) > 1 else 0.0,
-                'total_measurements': len(test_results),
-                'measurement_period': self._calculate_measurement_period(test_results)
-            }
-        
-        # Variance analysis by category
-        variance_by_category = defaultdict(list)
-        for result in test_results:
-            category = self._categorize_metric(result.metric_name)
-            variance_by_category[category].append(abs(result.variance_percent))
-        
-        technical_details['variance_analysis'] = {}
-        for category, variances in variance_by_category.items():
-            if variances:
-                technical_details['variance_analysis'][category] = {
-                    'mean_variance': statistics.mean(variances),
-                    'max_variance': max(variances),
-                    'measurement_count': len(variances),
-                    'compliance_rate': sum(1 for v in variances if v <= PERFORMANCE_VARIANCE_THRESHOLD) / len(variances) * 100.0
+        # Convert summary to dictionary
+        report_data = {
+            "report_metadata": {
+                "report_id": summary.report_id,
+                "title": summary.report_title,
+                "generation_timestamp": summary.generation_timestamp.isoformat(),
+                "report_version": summary.report_version,
+                "analyzer_version": "1.0.0"
+            },
+            "test_context": {
+                "environment": summary.test_environment,
+                "duration_seconds": summary.test_duration_seconds,
+                "sample_size": summary.total_sample_size,
+                "statistical_confidence": summary.statistical_confidence
+            },
+            "baseline_comparison": {
+                "overall_compliance": summary.overall_compliance,
+                "compliance_percentage": summary.compliance_percentage,
+                "deployment_recommendation": summary.deployment_recommendation.value,
+                "overall_status": summary.calculate_overall_status().value
+            },
+            "variance_metrics": [
+                {
+                    "metric_name": metric.metric_name,
+                    "category": metric.metric_category.value,
+                    "nodejs_baseline": metric.nodejs_baseline_value,
+                    "flask_current": metric.flask_current_value,
+                    "variance_percent": metric.variance_percent,
+                    "comparison_status": metric.comparison_status.value,
+                    "within_threshold": metric.within_threshold,
+                    "measurement_unit": metric.measurement_unit,
+                    "sample_size": metric.sample_size,
+                    "confidence_level": metric.confidence_level
                 }
-        
-        # Generate optimization recommendations
-        technical_details['optimization_recommendations'] = self._generate_optimization_recommendations(
-            performance_metrics, technical_details['variance_analysis']
-        )
-        
-        # Test execution details
-        technical_details['test_execution_details'] = {
-            'test_categories_executed': list(set(self._categorize_metric(r.metric_name) for r in test_results)),
-            'environments_tested': list(set(r.environment for r in test_results)),
-            'execution_timespan': self._calculate_execution_timespan(test_results),
-            'data_quality_score': self._calculate_data_quality_score(test_results)
+                for metric in summary.variance_metrics
+            ],
+            "performance_analysis": {
+                "response_time": summary.response_time_analysis,
+                "throughput": summary.throughput_analysis,
+                "memory_usage": summary.memory_usage_analysis,
+                "cpu_utilization": summary.cpu_utilization_analysis,
+                "database_performance": summary.database_performance_analysis
+            },
+            "trend_analysis": summary.trend_analysis,
+            "issues_and_recommendations": {
+                "critical_issues": summary.critical_issues,
+                "warning_issues": summary.warning_issues,
+                "deployment_blockers": summary.deployment_blockers,
+                "improvement_opportunities": summary.improvement_opportunities,
+                "technical_recommendations": summary.technical_recommendations
+            },
+            "executive_summary": summary.executive_summary
         }
         
-        # System configuration
-        technical_details['system_configuration'] = {
-            'performance_thresholds': {
-                'variance_threshold': f"{PERFORMANCE_VARIANCE_THRESHOLD}%",
-                'memory_threshold': f"±{MEMORY_VARIANCE_THRESHOLD}%",
-                'warning_threshold': f"{WARNING_VARIANCE_THRESHOLD}%",
-                'critical_threshold': f"{CRITICAL_VARIANCE_THRESHOLD}%"
-            },
-            'baseline_reference': 'Node.js production implementation',
-            'measurement_methodology': 'Statistical p95 response time comparison',
-            'compliance_requirements': '≤10% variance per Section 0.1.1'
-        }
-        
-        return technical_details
+        return json.dumps(report_data, indent=2, default=str, ensure_ascii=False)
     
-    def _generate_report_metadata(self, report_type: ReportType,
-                                test_results_count: int,
-                                **kwargs) -> Dict[str, Any]:
-        """
-        Generate comprehensive report metadata.
+    def _generate_html_report(
+        self,
+        summary: BaselineComparisonSummary,
+        audience: ReportAudience,
+        include_charts: bool
+    ) -> str:
+        """Generate HTML format baseline comparison report."""
         
-        Args:
-            report_type: Type of report being generated
-            test_results_count: Number of test results analyzed
-            **kwargs: Additional metadata context
-            
-        Returns:
-            Dictionary containing report metadata
-        """
-        metadata = {
-            'report_version': REPORT_VERSION,
-            'generation_timestamp': datetime.now(timezone.utc).isoformat(),
-            'report_type': report_type.value,
-            'generator_version': self.__class__.__name__ + " v1.0.0",
-            'test_data_summary': {
-                'test_results_count': test_results_count,
-                'baseline_reference': 'Node.js production implementation',
-                'compliance_framework': 'Section 0.1.1 ≤10% variance requirement'
-            },
-            'environment_info': {
-                'python_version': f"Python {'.'.join(map(str, __import__('sys').version_info[:3]))}",
-                'dependencies': {
-                    'jinja2_available': JINJA2_AVAILABLE,
-                    'matplotlib_available': MATPLOTLIB_AVAILABLE,
-                    'pandas_available': PANDAS_AVAILABLE
-                }
-            },
-            'report_configuration': {
-                'variance_thresholds': {
-                    'performance_variance': f"{PERFORMANCE_VARIANCE_THRESHOLD}%",
-                    'memory_variance': f"±{MEMORY_VARIANCE_THRESHOLD}%",
-                    'warning_threshold': f"{WARNING_VARIANCE_THRESHOLD}%",
-                    'critical_threshold': f"{CRITICAL_VARIANCE_THRESHOLD}%"
-                },
-                'supported_formats': SUPPORTED_REPORT_FORMATS,
-                'chart_generation': MATPLOTLIB_AVAILABLE,
-                'template_rendering': JINJA2_AVAILABLE
-            }
-        }
-        
-        # Add context-specific metadata
-        for key, value in kwargs.items():
-            if key not in metadata:
-                metadata[key] = value
-        
-        return metadata
-    
-    def _export_json_report(self, report: BaselineComparisonReport, output_path: Path) -> None:
-        """Export report as JSON format."""
-        with open(output_path, 'w', encoding=REPORT_CHARSET) as f:
-            json.dump(report.to_dict(), f, indent=2, ensure_ascii=False)
-    
-    def _export_html_report(self, report: BaselineComparisonReport, output_path: Path,
-                          include_charts: bool) -> None:
-        """Export report as HTML format with optional charts."""
-        # Generate charts if requested and matplotlib available
-        charts = {}
-        if include_charts and MATPLOTLIB_AVAILABLE:
-            charts = self._generate_performance_charts(report)
+        # Generate charts if requested and available
+        charts_html = ""
+        if include_charts and self.visualization_engine:
+            charts_html = self._generate_charts_html(summary)
         
         # Use template if available, otherwise generate basic HTML
         if self.template_env:
             try:
-                template = self.template_env.get_template('baseline_comparison_report.html')
-                html_content = template.render(report=report, charts=charts)
-            except:
-                # Fallback to basic HTML generation
-                html_content = self._generate_basic_html_report(report, charts)
-        else:
-            html_content = self._generate_basic_html_report(report, charts)
+                template_name = f"baseline_comparison_{audience.value}.html"
+                template = self.template_env.get_template(template_name)
+                return template.render(
+                    summary=summary,
+                    charts=charts_html,
+                    performance_colors=PERFORMANCE_COLORS,
+                    format_timestamp=lambda ts: ts.strftime("%Y-%m-%d %H:%M:%S UTC") if ts else "Unknown",
+                    format_percentage=lambda x: f"{x:.1f}%" if x is not None else "N/A",
+                    format_number=lambda x: f"{x:.2f}" if x is not None else "N/A"
+                )
+            except Exception as template_error:
+                self.logger.warning(f"Template {template_name} not found, using basic HTML", error=str(template_error))
         
-        with open(output_path, 'w', encoding=REPORT_CHARSET) as f:
-            f.write(html_content)
+        # Generate basic HTML report
+        return self._generate_basic_html_report(summary, audience, charts_html)
     
-    def _export_markdown_report(self, report: BaselineComparisonReport, output_path: Path) -> None:
-        """Export report as Markdown format."""
-        markdown_content = self._generate_markdown_content(report)
+    def _generate_basic_html_report(
+        self,
+        summary: BaselineComparisonSummary,
+        audience: ReportAudience,
+        charts_html: str
+    ) -> str:
+        """Generate basic HTML report without templates."""
+        
+        # Determine report styling based on overall status
+        overall_status = summary.calculate_overall_status()
+        status_color = PERFORMANCE_COLORS.get(overall_status.value, '#9E9E9E')
         
-        with open(output_path, 'w', encoding=REPORT_CHARSET) as f:
-            f.write(markdown_content)
-    
-    def _export_csv_report(self, report: BaselineComparisonReport, output_path: Path) -> None:
-        """Export performance metrics as CSV format."""
-        import csv
-        
-        with open(output_path, 'w', newline='', encoding=REPORT_CHARSET) as f:
-            writer = csv.writer(f)
-            
-            # Write header
-            writer.writerow([
-                'Metric Name', 'Baseline Value', 'Current Value', 'Variance (%)',
-                'Severity', 'Within Threshold', 'Trend Direction', 'Sample Count',
-                'Confidence Score', 'Recommendation', 'Timestamp'
-            ])
-            
-            # Write metric data
-            for metric in report.performance_metrics:
-                writer.writerow([
-                    metric.metric_name,
-                    metric.baseline_value,
-                    metric.current_value,
-                    round(metric.variance_percent, 2),
-                    metric.variance_severity,
-                    metric.within_threshold,
-                    metric.trend_direction,
-                    metric.sample_count,
-                    round(metric.confidence_score, 3),
-                    metric.recommendation,
-                    metric.timestamp.isoformat()
-                ])
-    
-    def _export_pdf_report(self, report: BaselineComparisonReport, output_path: Path,
-                         include_charts: bool) -> None:
-        """Export report as PDF format (requires matplotlib)."""
-        if not MATPLOTLIB_AVAILABLE:
-            raise ImportError("matplotlib is required for PDF export")
-        
-        # Generate charts for PDF
-        charts = {}
-        if include_charts:
-            charts = self._generate_performance_charts(report)
-        
-        # Create PDF report
-        with PdfPages(output_path) as pdf:
-            # Title page
-            fig = plt.figure(figsize=(8.5, 11))
-            fig.suptitle('Node.js Baseline Comparison Report', fontsize=16, fontweight='bold')
-            
-            # Add executive summary text
-            executive_text = self._format_executive_summary_for_pdf(report.executive_summary)
-            plt.text(0.1, 0.8, executive_text, transform=fig.transFigure, fontsize=10,
-                    verticalalignment='top', wrap=True)
-            
-            plt.axis('off')
-            pdf.savefig(fig, bbox_inches='tight')
-            plt.close(fig)
-            
-            # Add charts if available
-            for chart_name, chart_data in charts.items():
-                # Create figure from chart data (implementation depends on chart format)
-                # This is a simplified implementation
-                fig = plt.figure(figsize=(8.5, 11))
-                plt.title(chart_name)
-                plt.text(0.5, 0.5, f"Chart: {chart_name}", ha='center', va='center')
-                plt.axis('off')
-                pdf.savefig(fig, bbox_inches='tight')
-                plt.close(fig)
-    
-    # Helper methods for analysis and generation
-    
-    def _classify_variance_severity(self, variance_percent: float) -> str:
-        """Classify variance severity based on percentage."""
-        for severity, (min_val, max_val) in VARIANCE_SEVERITY_LEVELS.items():
-            if min_val <= variance_percent < max_val:
-                return severity
-        return 'failure'  # Default for values outside ranges
-    
-    def _analyze_metric_trend(self, results: List[PerformanceComparisonResult]) -> str:
-        """Analyze trend direction for a metric based on results over time."""
-        if len(results) < 2:
-            return 'stable'
-        
-        # Sort by timestamp
-        sorted_results = sorted(results, key=lambda x: x.timestamp)
-        
-        # Calculate trend using linear regression on variance percentages
-        variances = [result.variance_percent for result in sorted_results]
-        n = len(variances)
-        x = list(range(n))
-        
-        # Simple linear regression
-        x_mean = statistics.mean(x)
-        y_mean = statistics.mean(variances)
-        
-        numerator = sum((x[i] - x_mean) * (variances[i] - y_mean) for i in range(n))
-        denominator = sum((x[i] - x_mean) ** 2 for i in range(n))
-        
-        if denominator == 0:
-            return 'stable'
-        
-        slope = numerator / denominator
-        
-        # Classify trend based on slope
-        if slope < -0.1:  # Improving (variance decreasing)
-            return 'improving'
-        elif slope > 0.1:  # Degrading (variance increasing)
-            return 'degrading'
-        else:
-            return 'stable'
-    
-    def _calculate_confidence_score(self, results: List[PerformanceComparisonResult],
-                                  detailed: bool = False) -> float:
-        """Calculate confidence score based on data quality and consistency."""
-        if not results:
-            return 0.0
-        
-        # Base confidence on sample size
-        sample_confidence = min(len(results) / 50.0, 1.0)  # Max confidence at 50+ samples
-        
-        # Factor in variance consistency
-        variances = [abs(result.variance_percent) for result in results]
-        if len(variances) > 1:
-            variance_std = statistics.stdev(variances)
-            variance_consistency = max(0.0, 1.0 - (variance_std / 10.0))  # Lower std = higher confidence
-        else:
-            variance_consistency = 0.5
-        
-        # Factor in temporal consistency (results spread over time)
-        if len(results) > 1:
-            timestamps = [result.timestamp for result in results]
-            time_span = (max(timestamps) - min(timestamps)).total_seconds()
-            temporal_confidence = min(time_span / 3600.0, 1.0)  # Max confidence at 1+ hour span
-        else:
-            temporal_confidence = 0.5
-        
-        # Weighted average of confidence factors
-        confidence = (
-            sample_confidence * 0.4 +
-            variance_consistency * 0.4 +
-            temporal_confidence * 0.2
-        )
-        
-        return max(0.0, min(1.0, confidence))
-    
-    def _generate_metric_recommendation(self, result: PerformanceComparisonResult,
-                                      variance_severity: str, trend_direction: str,
-                                      pipeline_focus: bool = False) -> str:
-        """Generate recommendation for a specific metric."""
-        recommendations = []
-        
-        if variance_severity == 'excellent':
-            recommendations.append("Performance excellent - continue current approach")
-        elif variance_severity == 'good':
-            recommendations.append("Performance good - monitor for stability")
-        elif variance_severity == 'warning':
-            recommendations.append("Performance approaching threshold - investigate optimization opportunities")
-        elif variance_severity == 'critical':
-            recommendations.append("Performance exceeds ≤10% threshold - immediate optimization required")
-        else:  # failure
-            recommendations.append("Critical performance failure - consider rollback to Node.js baseline")
-        
-        # Add trend-based recommendations
-        if trend_direction == 'degrading':
-            recommendations.append("Degrading trend detected - proactive optimization recommended")
-        elif trend_direction == 'improving':
-            recommendations.append("Positive trend - maintain current optimization efforts")
-        
-        # Add pipeline-specific recommendations
-        if pipeline_focus:
-            if not result.within_threshold:
-                recommendations.append("PIPELINE: Block deployment until performance issues resolved")
-            else:
-                recommendations.append("PIPELINE: Approve deployment with continued monitoring")
-        
-        return "; ".join(recommendations)
-    
-    def _calculate_measurement_period(self, results: List[PerformanceComparisonResult]) -> str:
-        """Calculate measurement period from results."""
-        if not results:
-            return "No data"
-        
-        timestamps = [result.timestamp for result in results]
-        start_time = min(timestamps)
-        end_time = max(timestamps)
-        duration = end_time - start_time
-        
-        if duration.total_seconds() < 3600:
-            return f"{duration.total_seconds():.0f} seconds"
-        elif duration.total_seconds() < 86400:
-            return f"{duration.total_seconds() / 3600:.1f} hours"
-        else:
-            return f"{duration.days} days"
-    
-    def _get_severity_priority(self, severity: str) -> int:
-        """Get priority number for severity (higher = more severe)."""
-        priorities = {
-            'failure': 5,
-            'critical': 4,
-            'warning': 3,
-            'good': 2,
-            'excellent': 1
-        }
-        return priorities.get(severity, 0)
-    
-    def _generate_variance_summary(self, performance_metrics: List[PerformanceMetricSummary]) -> str:
-        """Generate concise variance summary for executive review."""
-        if not performance_metrics:
-            return "No performance metrics available for analysis"
-        
-        # Count metrics by severity
-        severity_counts = defaultdict(int)
-        for metric in performance_metrics:
-            severity_counts[metric.variance_severity] += 1
-        
-        total_metrics = len(performance_metrics)
-        compliant_metrics = sum(1 for metric in performance_metrics if metric.within_threshold)
-        compliance_rate = (compliant_metrics / total_metrics) * 100.0
-        
-        # Generate summary based on overall performance
-        if compliance_rate >= 95.0:
-            return f"Excellent performance compliance ({compliance_rate:.1f}%) - {severity_counts['excellent']} excellent, {severity_counts['good']} good metrics"
-        elif compliance_rate >= 90.0:
-            return f"Good performance compliance ({compliance_rate:.1f}%) - {severity_counts['warning']} metrics approaching threshold"
-        elif compliance_rate >= 80.0:
-            return f"Performance concerns identified ({compliance_rate:.1f}% compliance) - {severity_counts['critical']} critical issues require attention"
-        else:
-            return f"Significant performance issues ({compliance_rate:.1f}% compliance) - {severity_counts['failure']} failures require immediate action"
-    
-    def _identify_key_achievements(self, performance_metrics: List[PerformanceMetricSummary],
-                                 compliance_validation: Dict[str, Any],
-                                 additional_context: Dict[str, Any]) -> List[str]:
-        """Identify key achievements for executive summary."""
-        achievements = []
-        
-        # Performance achievements
-        excellent_metrics = sum(1 for metric in performance_metrics if metric.variance_severity == 'excellent')
-        if excellent_metrics > 0:
-            achievements.append(f"{excellent_metrics} metrics showing excellent performance (≤5% variance)")
-        
-        improving_metrics = sum(1 for metric in performance_metrics if metric.trend_direction == 'improving')
-        if improving_metrics > 0:
-            achievements.append(f"{improving_metrics} metrics showing performance improvements")
-        
-        # Compliance achievements
-        compliance_rate = compliance_validation.get('compliance_rate', 0.0)
-        if compliance_rate >= 95.0:
-            achievements.append(f"High compliance rate achieved ({compliance_rate:.1f}%)")
-        
-        # Test coverage achievements
-        total_metrics = len(performance_metrics)
-        if total_metrics >= 20:
-            achievements.append(f"Comprehensive testing coverage ({total_metrics} metrics analyzed)")
-        
-        # Migration milestone achievements
-        if additional_context.get('migration_phase') == 'complete':
-            achievements.append("Node.js to Flask migration successfully completed")
-        
-        # Default achievement if none identified
-        if not achievements:
-            achievements.append("Baseline comparison analysis completed successfully")
-        
-        return achievements[:5]  # Limit to top 5 achievements
-    
-    def _identify_critical_issues(self, performance_metrics: List[PerformanceMetricSummary],
-                                compliance_validation: Dict[str, Any],
-                                regression_analysis: Dict[str, Any]) -> List[str]:
-        """Identify critical issues for executive attention."""
-        issues = []
-        
-        # Performance threshold violations
-        critical_metrics = [
-            metric for metric in performance_metrics 
-            if metric.variance_severity in ['critical', 'failure']
-        ]
-        
-        for metric in critical_metrics[:EXECUTIVE_SUMMARY_MAX_ISSUES]:
-            issues.append(
-                f"{metric.metric_name}: {metric.variance_percent:.1f}% variance exceeds ≤10% threshold"
-            )
-        
-        # Regression issues
-        regressions_detected = regression_analysis.get('regressions_detected', 0)
-        if regressions_detected > 0:
-            issues.append(f"{regressions_detected} performance regressions detected")
-        
-        # Compliance issues
-        if not compliance_validation.get('overall_compliant', False):
-            compliance_rate = compliance_validation.get('compliance_rate', 0.0)
-            issues.append(f"Overall compliance below 95% threshold ({compliance_rate:.1f}%)")
-        
-        # Critical metric failures
-        critical_failures = compliance_validation.get('critical_failures', [])
-        critical_metric_failures = [
-            failure for failure in critical_failures
-            if any(critical_metric in failure['metric_name'] 
-                  for critical_metric in CRITICAL_PERFORMANCE_METRICS)
-        ]
-        
-        if critical_metric_failures:
-            issues.append(f"{len(critical_metric_failures)} critical metrics failing performance requirements")
-        
-        return issues[:EXECUTIVE_SUMMARY_MAX_ISSUES]
-    
-    def _generate_executive_recommendations(self, performance_metrics: List[PerformanceMetricSummary],
-                                          compliance_validation: Dict[str, Any],
-                                          deployment_recommendation: DeploymentRecommendation) -> List[str]:
-        """Generate executive-level recommendations."""
-        recommendations = []
-        
-        # Deployment recommendations
-        if deployment_recommendation == DeploymentRecommendation.APPROVED:
-            recommendations.append("Approve production deployment - all performance requirements met")
-        elif deployment_recommendation == DeploymentRecommendation.APPROVED_WITH_MONITORING:
-            recommendations.append("Approve deployment with enhanced performance monitoring")
-        elif deployment_recommendation == DeploymentRecommendation.CONDITIONAL_APPROVAL:
-            recommendations.append("Conditional approval - address warning-level issues within 30 days")
-        elif deployment_recommendation == DeploymentRecommendation.BLOCKED:
-            recommendations.append("Block deployment until critical performance issues resolved")
-        else:  # ROLLBACK_REQUIRED
-            recommendations.append("Immediate rollback to Node.js baseline recommended")
-        
-        # Performance improvement recommendations
-        critical_metrics = [
-            metric for metric in performance_metrics 
-            if metric.variance_severity in ['critical', 'failure']
-        ]
-        
-        if critical_metrics:
-            categories = set(self._categorize_metric(metric.metric_name) for metric in critical_metrics)
-            for category in categories:
-                recommendations.append(f"Prioritize {category} performance optimization")
-        
-        # Monitoring recommendations
-        degrading_metrics = sum(1 for metric in performance_metrics if metric.trend_direction == 'degrading')
-        if degrading_metrics > 0:
-            recommendations.append(f"Implement enhanced monitoring for {degrading_metrics} degrading metrics")
-        
-        # Resource allocation recommendations
-        if len(critical_metrics) > 5:
-            recommendations.append("Allocate additional engineering resources for performance optimization")
-        
-        return recommendations[:5]  # Limit to top 5 recommendations
-    
-    def _generate_next_steps(self, deployment_recommendation: DeploymentRecommendation,
-                           critical_issues: List[str]) -> List[str]:
-        """Generate next steps based on deployment recommendation."""
-        next_steps = []
-        
-        if deployment_recommendation == DeploymentRecommendation.APPROVED:
-            next_steps.extend([
-                "Proceed with production deployment",
-                "Maintain standard performance monitoring",
-                "Schedule post-deployment performance review in 30 days"
-            ])
-        elif deployment_recommendation == DeploymentRecommendation.APPROVED_WITH_MONITORING:
-            next_steps.extend([
-                "Deploy with enhanced monitoring configuration",
-                "Implement real-time performance alerting",
-                "Conduct weekly performance review for first month"
-            ])
-        elif deployment_recommendation == DeploymentRecommendation.CONDITIONAL_APPROVAL:
-            next_steps.extend([
-                "Address identified warning-level performance issues",
-                "Re-run comprehensive performance testing",
-                "Schedule deployment review meeting with stakeholders"
-            ])
-        elif deployment_recommendation == DeploymentRecommendation.BLOCKED:
-            next_steps.extend([
-                "Halt deployment process immediately",
-                "Prioritize resolution of critical performance issues",
-                "Conduct root cause analysis for performance failures"
-            ])
-        else:  # ROLLBACK_REQUIRED
-            next_steps.extend([
-                "Execute immediate rollback to Node.js baseline",
-                "Conduct emergency performance incident review",
-                "Reassess migration strategy and timeline"
-            ])
-        
-        # Add issue-specific next steps
-        if critical_issues:
-            next_steps.append("Create action plan for each critical issue identified")
-            next_steps.append("Assign dedicated engineering resources to performance optimization")
-        
-        return next_steps[:5]  # Limit to top 5 next steps
-    
-    def _assess_business_impact(self, deployment_recommendation: DeploymentRecommendation,
-                              compliance_rate: float, critical_failures_count: int) -> str:
-        """Assess business impact of performance analysis results."""
-        if deployment_recommendation == DeploymentRecommendation.APPROVED:
-            return "Positive business impact - Migration delivers performance parity with potential for future optimizations"
-        elif deployment_recommendation == DeploymentRecommendation.APPROVED_WITH_MONITORING:
-            return "Acceptable business impact - Migration meets minimum requirements with monitoring for optimization opportunities"
-        elif deployment_recommendation == DeploymentRecommendation.CONDITIONAL_APPROVAL:
-            return "Limited business impact - Migration requires performance improvements before full value realization"
-        elif deployment_recommendation == DeploymentRecommendation.BLOCKED:
-            return "Negative business impact - Performance issues prevent successful migration and may affect user experience"
-        else:  # ROLLBACK_REQUIRED
-            return "Critical business impact - Immediate rollback required to prevent service degradation and customer impact"
-    
-    def _conduct_risk_assessment(self, compliance_validation: Dict[str, Any],
-                               regression_analysis: Dict[str, Any],
-                               performance_metrics: List[PerformanceMetricSummary]) -> str:
-        """Conduct risk assessment for migration deployment."""
-        risk_factors = []
-        
-        # Compliance risk
-        compliance_rate = compliance_validation.get('compliance_rate', 0.0)
-        if compliance_rate < 90.0:
-            risk_factors.append("HIGH: Low compliance rate increases production failure risk")
-        elif compliance_rate < 95.0:
-            risk_factors.append("MEDIUM: Moderate compliance rate requires monitoring")
-        
-        # Regression risk
-        regressions_detected = regression_analysis.get('regressions_detected', 0)
-        if regressions_detected > 3:
-            risk_factors.append("HIGH: Multiple regressions indicate systemic performance issues")
-        elif regressions_detected > 0:
-            risk_factors.append("MEDIUM: Performance regressions require attention")
-        
-        # Critical metric risk
-        critical_metrics = sum(1 for metric in performance_metrics 
-                             if metric.variance_severity in ['critical', 'failure'])
-        if critical_metrics > 5:
-            risk_factors.append("HIGH: Multiple critical metrics exceed acceptable thresholds")
-        elif critical_metrics > 0:
-            risk_factors.append("MEDIUM: Critical metrics require optimization")
-        
-        # Trend risk
-        degrading_metrics = sum(1 for metric in performance_metrics 
-                              if metric.trend_direction == 'degrading')
-        if degrading_metrics > len(performance_metrics) * 0.3:
-            risk_factors.append("MEDIUM: Significant proportion of metrics showing degrading trends")
-        
-        # Overall risk assessment
-        if any("HIGH:" in factor for factor in risk_factors):
-            return "HIGH RISK: " + "; ".join(risk_factors)
-        elif risk_factors:
-            return "MEDIUM RISK: " + "; ".join(risk_factors)
-        else:
-            return "LOW RISK: Performance metrics within acceptable parameters"
-    
-    def _determine_confidence_level(self, performance_metrics: List[PerformanceMetricSummary],
-                                  compliance_rate: float,
-                                  regression_analysis: Dict[str, Any]) -> str:
-        """Determine confidence level in performance analysis results."""
-        confidence_factors = []
-        
-        # Sample size confidence
-        total_samples = sum(metric.sample_count for metric in performance_metrics)
-        if total_samples >= 1000:
-            confidence_factors.append("HIGH")
-        elif total_samples >= 500:
-            confidence_factors.append("MEDIUM")
-        else:
-            confidence_factors.append("LOW")
-        
-        # Measurement quality confidence
-        avg_confidence = statistics.mean([metric.confidence_score for metric in performance_metrics]) if performance_metrics else 0.0
-        if avg_confidence >= 0.8:
-            confidence_factors.append("HIGH")
-        elif avg_confidence >= 0.6:
-            confidence_factors.append("MEDIUM")
-        else:
-            confidence_factors.append("LOW")
-        
-        # Regression analysis confidence
-        regression_confidence = regression_analysis.get('statistical_analysis', {}).get('total_metrics_analyzed', 0)
-        if regression_confidence >= 20:
-            confidence_factors.append("HIGH")
-        elif regression_confidence >= 10:
-            confidence_factors.append("MEDIUM")
-        else:
-            confidence_factors.append("LOW")
-        
-        # Overall confidence determination
-        high_count = confidence_factors.count("HIGH")
-        medium_count = confidence_factors.count("MEDIUM")
-        
-        if high_count >= 2:
-            return "HIGH"
-        elif high_count >= 1 or medium_count >= 2:
-            return "MEDIUM"
-        else:
-            return "LOW"
-    
-    def _calculate_test_coverage(self, performance_metrics: List[PerformanceMetricSummary],
-                               additional_context: Dict[str, Any]) -> float:
-        """Calculate test coverage percentage."""
-        # Categories of metrics that should be tested
-        expected_categories = {
-            'response_time', 'resource_utilization', 'database_performance',
-            'throughput', 'network_io', 'authentication', 'business_logic'
-        }
-        
-        # Categories actually tested
-        tested_categories = set()
-        for metric in performance_metrics:
-            category = self._categorize_metric(metric.metric_name)
-            tested_categories.add(category)
-        
-        # Calculate coverage
-        coverage = (len(tested_categories) / len(expected_categories)) * 100.0
-        
-        # Adjust based on additional context
-        if additional_context.get('comprehensive_testing', False):
-            coverage = min(100.0, coverage * 1.1)  # Boost for comprehensive testing
-        
-        return coverage
-    
-    def _categorize_metric(self, metric_name: str) -> str:
-        """Categorize metric based on name."""
-        metric_name_lower = metric_name.lower()
-        
-        if 'response_time' in metric_name_lower or 'latency' in metric_name_lower:
-            return 'response_time'
-        elif 'cpu' in metric_name_lower or 'memory' in metric_name_lower:
-            return 'resource_utilization'
-        elif 'database' in metric_name_lower or 'query' in metric_name_lower:
-            return 'database_performance'
-        elif 'throughput' in metric_name_lower or 'requests_per_second' in metric_name_lower:
-            return 'throughput'
-        elif 'network' in metric_name_lower or 'bandwidth' in metric_name_lower:
-            return 'network_io'
-        elif 'auth' in metric_name_lower or 'login' in metric_name_lower:
-            return 'authentication'
-        elif 'business' in metric_name_lower or 'logic' in metric_name_lower:
-            return 'business_logic'
-        else:
-            return 'other'
-    
-    def _generate_performance_charts(self, report: BaselineComparisonReport) -> Dict[str, str]:
-        """Generate performance charts and return as base64 encoded strings."""
-        charts = {}
-        
-        if not MATPLOTLIB_AVAILABLE:
-            return charts
-        
-        try:
-            # Variance distribution chart
-            charts['variance_distribution'] = self._create_variance_distribution_chart(report.performance_metrics)
-            
-            # Performance trend chart
-            charts['performance_trend'] = self._create_performance_trend_chart(report.performance_metrics)
-            
-            # Compliance summary chart
-            charts['compliance_summary'] = self._create_compliance_summary_chart(report.compliance_validation)
-            
-        except Exception as e:
-            self.logger.warning(f"Failed to generate charts: {e}")
-        
-        return charts
-    
-    def _create_variance_distribution_chart(self, metrics: List[PerformanceMetricSummary]) -> str:
-        """Create variance distribution chart."""
-        if not metrics:
-            return ""
-        
-        # Count metrics by severity
-        severity_counts = defaultdict(int)
-        for metric in metrics:
-            severity_counts[metric.variance_severity] += 1
-        
-        # Create pie chart
-        fig, ax = plt.subplots(figsize=(8, 6))
-        labels = list(severity_counts.keys())
-        sizes = list(severity_counts.values())
-        colors = [VARIANCE_SEVERITY_LEVELS[label][0] if label in VARIANCE_SEVERITY_LEVELS else '#9E9E9E' for label in labels]
-        
-        ax.pie(sizes, labels=labels, colors=colors, autopct='%1.1f%%', startangle=90)
-        ax.set_title('Performance Variance Distribution')
-        
-        # Convert to base64
-        buffer = io.BytesIO()
-        plt.savefig(buffer, format='png', bbox_inches='tight')
-        buffer.seek(0)
-        chart_data = base64.b64encode(buffer.getvalue()).decode()
-        plt.close(fig)
-        
-        return chart_data
-    
-    def _create_performance_trend_chart(self, metrics: List[PerformanceMetricSummary]) -> str:
-        """Create performance trend chart."""
-        if not metrics:
-            return ""
-        
-        # Sort metrics by timestamp
-        sorted_metrics = sorted(metrics, key=lambda x: x.timestamp)
-        
-        # Create line chart
-        fig, ax = plt.subplots(figsize=(12, 6))
-        
-        timestamps = [metric.timestamp for metric in sorted_metrics]
-        variances = [abs(metric.variance_percent) for metric in sorted_metrics]
-        
-        ax.plot(timestamps, variances, marker='o', linewidth=2, markersize=4)
-        ax.axhline(y=PERFORMANCE_VARIANCE_THRESHOLD, color='r', linestyle='--', 
-                  label=f'{PERFORMANCE_VARIANCE_THRESHOLD}% Threshold')
-        ax.axhline(y=WARNING_VARIANCE_THRESHOLD, color='orange', linestyle='--', 
-                  label=f'{WARNING_VARIANCE_THRESHOLD}% Warning')
-        
-        ax.set_xlabel('Time')
-        ax.set_ylabel('Variance Percentage')
-        ax.set_title('Performance Variance Trend Over Time')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
-        # Format x-axis
-        fig.autofmt_xdate()
-        
-        # Convert to base64
-        buffer = io.BytesIO()
-        plt.savefig(buffer, format='png', bbox_inches='tight')
-        buffer.seek(0)
-        chart_data = base64.b64encode(buffer.getvalue()).decode()
-        plt.close(fig)
-        
-        return chart_data
-    
-    def _create_compliance_summary_chart(self, compliance_validation: Dict[str, Any]) -> str:
-        """Create compliance summary chart."""
-        compliance_summary = compliance_validation.get('compliance_summary', {})
-        
-        # Create bar chart
-        fig, ax = plt.subplots(figsize=(10, 6))
-        
-        categories = ['Compliant', 'Non-Compliant', 'Critical Failures']
-        values = [
-            compliance_summary.get('compliant_metrics', 0),
-            compliance_summary.get('non_compliant_metrics', 0),
-            compliance_summary.get('critical_failures_count', 0)
-        ]
-        colors = ['#4CAF50', '#FF9800', '#F44336']
-        
-        bars = ax.bar(categories, values, color=colors)
-        ax.set_ylabel('Number of Metrics')
-        ax.set_title('Performance Compliance Summary')
-        
-        # Add value labels on bars
-        for bar, value in zip(bars, values):
-            height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width()/2., height + 0.1,
-                   f'{value}', ha='center', va='bottom')
-        
-        # Convert to base64
-        buffer = io.BytesIO()
-        plt.savefig(buffer, format='png', bbox_inches='tight')
-        buffer.seek(0)
-        chart_data = base64.b64encode(buffer.getvalue()).decode()
-        plt.close(fig)
-        
-        return chart_data
-    
-    def _generate_basic_html_report(self, report: BaselineComparisonReport, 
-                                  charts: Dict[str, str]) -> str:
-        """Generate basic HTML report without template engine."""
         html_content = f"""
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Node.js Baseline Comparison Report</title>
+    <title>{summary.report_title}</title>
     <style>
-        body {{ font-family: Arial, sans-serif; margin: 20px; line-height: 1.6; }}
-        .header {{ background-color: #f4f4f4; padding: 20px; border-radius: 5px; }}
-        .section {{ margin: 20px 0; padding: 15px; border-left: 4px solid #007acc; }}
-        .metric {{ background-color: #f9f9f9; padding: 10px; margin: 10px 0; border-radius: 3px; }}
-        .status-passed {{ color: #4CAF50; font-weight: bold; }}
-        .status-warning {{ color: #FF9800; font-weight: bold; }}
-        .status-failed {{ color: #F44336; font-weight: bold; }}
-        .chart {{ text-align: center; margin: 20px 0; }}
-        table {{ border-collapse: collapse; width: 100%; }}
-        th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
-        th {{ background-color: #f2f2f2; }}
+        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; background-color: #f5f5f5; line-height: 1.6; }}
+        .container {{ max-width: 1200px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
+        .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; margin: -30px -30px 30px -30px; border-radius: 8px 8px 0 0; }}
+        .header h1 {{ margin: 0; font-size: 2.2em; font-weight: 300; }}
+        .header .meta {{ margin-top: 10px; opacity: 0.9; font-size: 0.9em; }}
+        .status-banner {{ background-color: {status_color}; color: white; padding: 15px; margin: 20px 0; border-radius: 5px; text-align: center; font-weight: bold; }}
+        .metrics-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; margin: 20px 0; }}
+        .metric-card {{ background: #f8f9fa; border: 1px solid #e9ecef; padding: 20px; border-radius: 8px; }}
+        .metric-card h3 {{ margin-top: 0; color: #495057; border-bottom: 2px solid #dee2e6; padding-bottom: 10px; }}
+        .compliance-excellent {{ border-left: 4px solid {PERFORMANCE_COLORS['excellent']}; }}
+        .compliance-warning {{ border-left: 4px solid {PERFORMANCE_COLORS['warning']}; }}
+        .compliance-critical {{ border-left: 4px solid {PERFORMANCE_COLORS['critical']}; }}
+        .compliance-failure {{ border-left: 4px solid {PERFORMANCE_COLORS['failure']}; }}
+        .variance-table {{ width: 100%; border-collapse: collapse; margin: 15px 0; }}
+        .variance-table th, .variance-table td {{ border: 1px solid #dee2e6; padding: 12px; text-align: left; }}
+        .variance-table th {{ background-color: #e9ecef; font-weight: 600; }}
+        .variance-positive {{ color: {PERFORMANCE_COLORS['failure']}; font-weight: bold; }}
+        .variance-negative {{ color: {PERFORMANCE_COLORS['improvement']}; font-weight: bold; }}
+        .variance-neutral {{ color: #6c757d; }}
+        .section {{ margin: 30px 0; }}
+        .section h2 {{ color: #343a40; border-bottom: 3px solid #007bff; padding-bottom: 10px; }}
+        .recommendations {{ background: #e7f3ff; border: 1px solid #b8daff; padding: 20px; border-radius: 5px; margin: 15px 0; }}
+        .recommendations h4 {{ color: #004085; margin-top: 0; }}
+        .recommendations ul {{ margin: 10px 0; padding-left: 20px; }}
+        .recommendations li {{ margin: 5px 0; }}
+        .issue-list {{ list-style: none; padding: 0; }}
+        .issue-list li {{ padding: 10px; margin: 5px 0; border-radius: 5px; }}
+        .issue-critical {{ background: #f8d7da; border-left: 4px solid {PERFORMANCE_COLORS['failure']}; }}
+        .issue-warning {{ background: #fff3cd; border-left: 4px solid {PERFORMANCE_COLORS['warning']}; }}
+        .issue-improvement {{ background: #d4edda; border-left: 4px solid {PERFORMANCE_COLORS['improvement']}; }}
+        .chart-container {{ margin: 20px 0; text-align: center; }}
+        .footer {{ margin-top: 40px; padding-top: 20px; border-top: 1px solid #dee2e6; text-align: center; color: #6c757d; font-size: 0.9em; }}
     </style>
 </head>
 <body>
-    <div class="header">
-        <h1>Node.js Baseline Comparison Report</h1>
-        <p><strong>Report ID:</strong> {report.report_id}</p>
-        <p><strong>Generated:</strong> {report.generation_timestamp.strftime(TIMESTAMP_FORMAT)}</p>
-        <p><strong>Report Type:</strong> {report.report_type.value}</p>
-    </div>
-
-    <div class="section">
-        <h2>Executive Summary</h2>
-        <p><strong>Overall Status:</strong> 
-            <span class="status-{report.executive_summary.overall_status.lower()}">{report.executive_summary.overall_status}</span>
-        </p>
-        <p><strong>Deployment Recommendation:</strong> {report.executive_summary.deployment_recommendation.value}</p>
-        <p><strong>Compliance Rate:</strong> {report.executive_summary.compliance_rate:.1f}%</p>
-        <p><strong>Total Metrics Tested:</strong> {report.executive_summary.total_metrics_tested}</p>
-        <p><strong>Critical Issues:</strong> {report.executive_summary.critical_issues_count}</p>
+    <div class="container">
+        <div class="header">
+            <h1>{summary.report_title}</h1>
+            <div class="meta">
+                <strong>Environment:</strong> {summary.test_environment} | 
+                <strong>Generated:</strong> {summary.generation_timestamp.strftime('%Y-%m-%d %H:%M:%S UTC')} |
+                <strong>Audience:</strong> {audience.value.title()}
+            </div>
+        </div>
         
-        <h3>Key Achievements</h3>
-        <ul>
-            {''.join(f'<li>{achievement}</li>' for achievement in report.executive_summary.key_achievements)}
-        </ul>
+        <div class="status-banner">
+            Overall Status: {overall_status.value.upper()} | 
+            Compliance: {summary.compliance_percentage:.1f}% | 
+            Deployment: {summary.deployment_recommendation.value.upper()}
+        </div>
         
-        <h3>Critical Issues</h3>
-        <ul>
-            {''.join(f'<li>{issue}</li>' for issue in report.executive_summary.critical_issues)}
-        </ul>
+        <div class="section">
+            <h2>📊 Executive Summary</h2>
+            <div class="metrics-grid">
+                <div class="metric-card">
+                    <h3>Performance Compliance</h3>
+                    <p><strong>Overall Compliance:</strong> {summary.compliance_percentage:.1f}%</p>
+                    <p><strong>≤10% Variance Requirement:</strong> {'✅ Met' if summary.overall_compliance else '❌ Not Met'}</p>
+                    <p><strong>Statistical Confidence:</strong> {summary.statistical_confidence:.0f}%</p>
+                    <p><strong>Sample Size:</strong> {summary.total_sample_size:,} measurements</p>
+                </div>
+                
+                <div class="metric-card">
+                    <h3>Deployment Recommendation</h3>
+                    <p><strong>Decision:</strong> {summary.deployment_recommendation.value.upper()}</p>
+                    <p><strong>Critical Issues:</strong> {len(summary.critical_issues)}</p>
+                    <p><strong>Warning Issues:</strong> {len(summary.warning_issues)}</p>
+                    <p><strong>Blocking Issues:</strong> {len(summary.deployment_blockers)}</p>
+                </div>
+            </div>
+            
+            <div class="recommendations">
+                <h4>🎯 Key Findings</h4>
+                <ul>
+                    {''.join(f'<li>{finding}</li>' for finding in summary.key_findings)}
+                </ul>
+            </div>
+        </div>
         
-        <h3>Recommendations</h3>
-        <ul>
-            {''.join(f'<li>{rec}</li>' for rec in report.executive_summary.recommendations)}
-        </ul>
-    </div>
-
-    <div class="section">
-        <h2>Performance Metrics</h2>
-        <table>
-            <tr>
-                <th>Metric Name</th>
-                <th>Baseline</th>
-                <th>Current</th>
-                <th>Variance (%)</th>
-                <th>Severity</th>
-                <th>Trend</th>
-                <th>Recommendation</th>
-            </tr>
-            {''.join(f"""
-            <tr>
-                <td>{metric.metric_name}</td>
-                <td>{metric.baseline_value:.2f}</td>
-                <td>{metric.current_value:.2f}</td>
-                <td>{metric.variance_percent:.2f}%</td>
-                <td>{metric.severity_icon} {metric.variance_severity}</td>
-                <td>{metric.trend_direction}</td>
-                <td>{metric.recommendation}</td>
-            </tr>
-            """ for metric in report.performance_metrics)}
-        </table>
-    </div>
-
-    {self._generate_charts_html(charts)}
-
-    <div class="section">
-        <h2>Technical Details</h2>
-        <h3>Performance Statistics</h3>
-        <pre>{json.dumps(report.technical_details.get('performance_statistics', {}), indent=2)}</pre>
+        <div class="section">
+            <h2>📈 Variance Analysis</h2>
+            <table class="variance-table">
+                <thead>
+                    <tr>
+                        <th>Metric</th>
+                        <th>Category</th>
+                        <th>Node.js Baseline</th>
+                        <th>Flask Current</th>
+                        <th>Variance</th>
+                        <th>Status</th>
+                        <th>Compliant</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {''.join(self._format_variance_table_row(metric) for metric in summary.variance_metrics)}
+                </tbody>
+            </table>
+        </div>
         
-        <h3>Compliance Validation</h3>
-        <pre>{json.dumps(report.compliance_validation, indent=2)}</pre>
-    </div>
-
-    <div class="section">
-        <h2>Report Metadata</h2>
-        <pre>{json.dumps(report.metadata, indent=2)}</pre>
+        {self._format_performance_analysis_html(summary)}
+        
+        {charts_html}
+        
+        <div class="section">
+            <h2>🚨 Issues and Recommendations</h2>
+            
+            {self._format_issues_html('Critical Issues', summary.critical_issues, 'critical')}
+            {self._format_issues_html('Warning Issues', summary.warning_issues, 'warning')}
+            {self._format_issues_html('Performance Improvements', summary.improvement_opportunities, 'improvement')}
+            
+            <div class="recommendations">
+                <h4>🔧 Technical Recommendations</h4>
+                <ul>
+                    {''.join(f'<li>{rec}</li>' for rec in summary.technical_recommendations)}
+                </ul>
+            </div>
+        </div>
+        
+        <div class="footer">
+            <p>Report generated by Flask Migration Baseline Comparison Engine v1.0.0</p>
+            <p>Baseline: Node.js {self.analyzer.nodejs_baseline.nodejs_version} | 
+               Express.js {self.analyzer.nodejs_baseline.express_version}</p>
+        </div>
     </div>
 </body>
 </html>
         """
+        
         return html_content
     
-    def _generate_charts_html(self, charts: Dict[str, str]) -> str:
-        """Generate HTML for charts section."""
-        if not charts:
-            return ""
+    def _format_variance_table_row(self, metric: BaselineVarianceMetric) -> str:
+        """Format individual variance metric as HTML table row."""
         
-        charts_html = '<div class="section"><h2>Performance Charts</h2>'
+        # Determine variance styling
+        if metric.variance_percent > 0:
+            variance_class = "variance-positive"
+            variance_symbol = "+"
+        elif metric.variance_percent < 0:
+            variance_class = "variance-negative"
+            variance_symbol = ""
+        else:
+            variance_class = "variance-neutral"
+            variance_symbol = ""
         
-        for chart_name, chart_data in charts.items():
-            if chart_data:
-                charts_html += f'''
-                <div class="chart">
-                    <h3>{chart_name.replace('_', ' ').title()}</h3>
-                    <img src="data:image/png;base64,{chart_data}" alt="{chart_name}" style="max-width: 100%;">
-                </div>
-                '''
+        # Format values
+        baseline_str = f"{metric.nodejs_baseline_value:.2f} {metric.measurement_unit}"
+        current_str = f"{metric.flask_current_value:.2f} {metric.measurement_unit}"
+        variance_str = f"{variance_symbol}{metric.variance_percent:.1f}%"
+        status_str = metric.comparison_status.value.title()
+        compliant_str = "✅" if metric.within_threshold else "❌"
         
-        charts_html += '</div>'
-        return charts_html
-    
-    def _generate_markdown_content(self, report: BaselineComparisonReport) -> str:
-        """Generate Markdown content for report."""
-        markdown_content = f"""# Node.js Baseline Comparison Report
-
-**Report ID:** {report.report_id}  
-**Generated:** {report.generation_timestamp.strftime(TIMESTAMP_FORMAT)}  
-**Report Type:** {report.report_type.value}
-
-## Executive Summary
-
-- **Overall Status:** {report.executive_summary.overall_status}
-- **Deployment Recommendation:** {report.executive_summary.deployment_recommendation.value}
-- **Compliance Rate:** {report.executive_summary.compliance_rate:.1f}%
-- **Total Metrics Tested:** {report.executive_summary.total_metrics_tested}
-- **Critical Issues:** {report.executive_summary.critical_issues_count}
-
-### Key Achievements
-{chr(10).join(f"- {achievement}" for achievement in report.executive_summary.key_achievements)}
-
-### Critical Issues
-{chr(10).join(f"- {issue}" for issue in report.executive_summary.critical_issues)}
-
-### Recommendations
-{chr(10).join(f"- {rec}" for rec in report.executive_summary.recommendations)}
-
-## Performance Metrics
-
-| Metric Name | Baseline | Current | Variance (%) | Severity | Trend | Within Threshold |
-|-------------|----------|---------|--------------|----------|-------|------------------|
-"""
-        
-        for metric in report.performance_metrics:
-            markdown_content += f"| {metric.metric_name} | {metric.baseline_value:.2f} | {metric.current_value:.2f} | {metric.variance_percent:.2f}% | {metric.variance_severity} | {metric.trend_direction} | {metric.within_threshold} |\n"
-        
-        markdown_content += f"""
-## Compliance Validation
-
-- **Overall Compliant:** {report.compliance_validation.get('overall_compliant', False)}
-- **Compliance Rate:** {report.compliance_validation.get('compliance_rate', 0.0):.1f}%
-- **Critical Failures:** {len(report.compliance_validation.get('critical_failures', []))}
-
-## Technical Details
-
-### Performance Statistics
-```json
-{json.dumps(report.technical_details.get('performance_statistics', {}), indent=2)}
-```
-
-### Regression Analysis
-```json
-{json.dumps(report.regression_analysis, indent=2)}
-```
-
-### Trend Analysis
-```json
-{json.dumps(report.trend_analysis, indent=2)}
-```
-
-## Report Metadata
-
-```json
-{json.dumps(report.metadata, indent=2)}
-```
-"""
-        
-        return markdown_content
-    
-    def _format_executive_summary_for_pdf(self, executive_summary: ExecutiveSummary) -> str:
-        """Format executive summary text for PDF generation."""
         return f"""
-EXECUTIVE SUMMARY
-
-Overall Status: {executive_summary.overall_status}
-Deployment Recommendation: {executive_summary.deployment_recommendation.value}
-Compliance Rate: {executive_summary.compliance_rate:.1f}%
-Total Metrics Tested: {executive_summary.total_metrics_tested}
-Critical Issues: {executive_summary.critical_issues_count}
-
-KEY ACHIEVEMENTS:
-{chr(10).join(f"• {achievement}" for achievement in executive_summary.key_achievements)}
-
-CRITICAL ISSUES:
-{chr(10).join(f"• {issue}" for issue in executive_summary.critical_issues)}
-
-RECOMMENDATIONS:
-{chr(10).join(f"• {rec}" for rec in executive_summary.recommendations)}
-
-Business Impact: {executive_summary.business_impact}
-Risk Assessment: {executive_summary.risk_assessment}
-Confidence Level: {executive_summary.confidence_level}
+        <tr class="compliance-{metric.comparison_status.value}">
+            <td><strong>{metric.metric_name}</strong></td>
+            <td>{metric.metric_category.value.replace('_', ' ').title()}</td>
+            <td>{baseline_str}</td>
+            <td>{current_str}</td>
+            <td class="{variance_class}">{variance_str}</td>
+            <td>{status_str}</td>
+            <td>{compliant_str}</td>
+        </tr>
         """
     
-    # Additional helper methods for pipeline integration and specialized reporting
+    def _format_performance_analysis_html(self, summary: BaselineComparisonSummary) -> str:
+        """Format performance analysis sections as HTML."""
+        
+        sections = []
+        
+        # Response Time Analysis
+        if summary.response_time_analysis:
+            analysis = summary.response_time_analysis
+            sections.append(f"""
+            <div class="section">
+                <h2>⚡ Response Time Analysis</h2>
+                <div class="metric-card compliance-{analysis.get('status', 'unknown')}">
+                    <h3>Response Time Performance</h3>
+                    <p><strong>Status:</strong> {analysis.get('message', 'No data')}</p>
+                    <p><strong>Compliance Rate:</strong> {analysis.get('compliance_rate', 0):.1f}%</p>
+                    <p><strong>Mean Variance:</strong> {analysis.get('mean_variance_percent', 0):+.1f}%</p>
+                    <p><strong>P95 Variance:</strong> {analysis.get('p95_variance_percent', 0):+.1f}%</p>
+                    <p><strong>Current P95:</strong> {analysis.get('current_p95_ms', 0):.1f}ms</p>
+                    <p><strong>SLA Threshold:</strong> {'❌ Exceeded' if analysis.get('exceeds_sla_threshold') else '✅ Met'} ({analysis.get('sla_threshold_ms', 0)}ms)</p>
+                </div>
+            </div>
+            """)
+        
+        # Throughput Analysis
+        if summary.throughput_analysis:
+            analysis = summary.throughput_analysis
+            sections.append(f"""
+            <div class="section">
+                <h2>🚀 Throughput Analysis</h2>
+                <div class="metric-card compliance-{analysis.get('status', 'unknown')}">
+                    <h3>Throughput Performance</h3>
+                    <p><strong>Status:</strong> {analysis.get('message', 'No data')}</p>
+                    <p><strong>Compliance Rate:</strong> {analysis.get('compliance_rate', 0):.1f}%</p>
+                    <p><strong>Sustained RPS Variance:</strong> {analysis.get('sustained_rps_variance_percent', 0):+.1f}%</p>
+                    <p><strong>Current RPS:</strong> {analysis.get('current_sustained_rps', 0):.1f} req/s</p>
+                    <p><strong>Minimum Threshold:</strong> {'✅ Met' if analysis.get('meets_minimum_threshold') else '❌ Not Met'} ({analysis.get('minimum_threshold_rps', 0)} req/s)</p>
+                </div>
+            </div>
+            """)
+        
+        # Memory Analysis
+        if summary.memory_usage_analysis:
+            analysis = summary.memory_usage_analysis
+            sections.append(f"""
+            <div class="section">
+                <h2>💾 Memory Usage Analysis</h2>
+                <div class="metric-card compliance-{analysis.get('status', 'unknown')}">
+                    <h3>Memory Performance</h3>
+                    <p><strong>Status:</strong> {analysis.get('message', 'No data')}</p>
+                    <p><strong>Compliance Rate:</strong> {analysis.get('compliance_rate', 0):.1f}%</p>
+                    <p><strong>Memory Variance:</strong> {analysis.get('baseline_variance_percent', 0):+.1f}%</p>
+                    <p><strong>Current Memory:</strong> {analysis.get('current_memory_mb', 0):.1f} MB</p>
+                    <p><strong>Memory Efficiency:</strong> {analysis.get('memory_efficiency_percent', 0):.1f}%</p>
+                    <p><strong>Leak Risk:</strong> {'⚠️ Detected' if analysis.get('leak_risk_detected') else '✅ None'}</p>
+                </div>
+            </div>
+            """)
+        
+        return ''.join(sections)
     
-    def _validate_pipeline_compliance(self, test_results: List[PerformanceComparisonResult],
-                                    pipeline_context: Dict[str, Any]) -> Dict[str, Any]:
-        """Validate compliance specifically for CI/CD pipeline gates."""
-        compliance_data = self._validate_compliance_requirements(test_results, include_technical_details=True)
+    def _format_issues_html(self, title: str, issues: List[str], issue_type: str) -> str:
+        """Format issues list as HTML."""
         
-        # Add pipeline-specific validation
-        pipeline_validation = {
-            'deployment_gate_status': 'PASSED' if compliance_data['overall_compliant'] else 'FAILED',
-            'pipeline_stage': pipeline_context.get('stage', 'unknown'),
-            'commit_hash': pipeline_context.get('commit_hash', 'unknown'),
-            'branch': pipeline_context.get('branch', 'unknown'),
-            'build_number': pipeline_context.get('build_number', 'unknown'),
-            'pipeline_specific_checks': {}
-        }
+        if not issues:
+            return ""
         
-        # Critical metrics must all pass for pipeline approval
-        critical_failures = [
-            failure for failure in compliance_data.get('critical_failures', [])
-            if any(critical_metric in failure['metric_name'] 
-                  for critical_metric in CRITICAL_PERFORMANCE_METRICS)
-        ]
-        
-        pipeline_validation['pipeline_specific_checks']['critical_metrics_gate'] = {
-            'status': 'PASSED' if not critical_failures else 'FAILED',
-            'critical_failures_count': len(critical_failures),
-            'gate_description': 'All critical performance metrics must be within ≤10% variance threshold'
-        }
-        
-        # Overall variance threshold gate
-        compliance_rate = compliance_data.get('compliance_rate', 0.0)
-        pipeline_validation['pipeline_specific_checks']['variance_threshold_gate'] = {
-            'status': 'PASSED' if compliance_rate >= 95.0 else 'FAILED',
-            'compliance_rate': compliance_rate,
-            'gate_description': 'Overall compliance rate must be ≥95% for deployment approval'
-        }
-        
-        # Update compliance data with pipeline specifics
-        compliance_data.update(pipeline_validation)
-        
-        return compliance_data
+        return f"""
+        <h3>{title} ({len(issues)})</h3>
+        <ul class="issue-list">
+            {''.join(f'<li class="issue-{issue_type}">{issue}</li>' for issue in issues)}
+        </ul>
+        """
     
-    def _analyze_deployment_readiness(self, performance_metrics: List[PerformanceMetricSummary],
-                                    compliance_validation: Dict[str, Any],
-                                    pipeline_context: Dict[str, Any]) -> Dict[str, Any]:
-        """Analyze deployment readiness with detailed gate analysis."""
-        deployment_analysis = {
-            'deployment_ready': False,
-            'gate_analysis': {},
-            'risk_factors': [],
-            'mitigation_strategies': [],
-            'rollback_plan': {},
-            'monitoring_recommendations': []
-        }
+    def _generate_charts_html(self, summary: BaselineComparisonSummary) -> str:
+        """Generate interactive charts HTML using Plotly."""
         
-        # Analyze each deployment gate
-        gates = {
-            'performance_variance_gate': self._analyze_performance_variance_gate(performance_metrics),
-            'critical_metrics_gate': self._analyze_critical_metrics_gate(performance_metrics),
-            'regression_detection_gate': self._analyze_regression_detection_gate(performance_metrics),
-            'compliance_threshold_gate': self._analyze_compliance_threshold_gate(compliance_validation)
-        }
+        if not self.visualization_engine:
+            return '<div class="section"><h2>📊 Charts</h2><p>Charts not available - Plotly not installed</p></div>'
         
-        deployment_analysis['gate_analysis'] = gates
+        try:
+            charts_html = '<div class="section"><h2>📊 Performance Visualizations</h2>'
+            
+            # Variance comparison chart
+            charts_html += self._create_variance_chart(summary)
+            
+            # Compliance trend chart if historical data available
+            if len(self.analyzer.historical_comparisons) > 1:
+                charts_html += self._create_compliance_trend_chart()
+            
+            charts_html += '</div>'
+            
+            return charts_html
+            
+        except Exception as e:
+            self.logger.warning(f"Chart generation failed: {e}")
+            return '<div class="section"><h2>📊 Charts</h2><p>Chart generation temporarily unavailable</p></div>'
+    
+    def _create_variance_chart(self, summary: BaselineComparisonSummary) -> str:
+        """Create variance comparison chart."""
         
-        # Overall deployment readiness
-        all_gates_passed = all(gate['status'] == 'PASSED' for gate in gates.values())
-        deployment_analysis['deployment_ready'] = all_gates_passed
+        if not summary.variance_metrics:
+            return ""
         
-        # Risk factor analysis
-        if not all_gates_passed:
-            failed_gates = [name for name, gate in gates.items() if gate['status'] == 'FAILED']
-            deployment_analysis['risk_factors'].extend([
-                f"Deployment gate failure: {gate}" for gate in failed_gates
-            ])
+        # Prepare data for chart
+        metric_names = [m.metric_name for m in summary.variance_metrics]
+        variance_values = [m.variance_percent for m in summary.variance_metrics]
+        colors = [PERFORMANCE_COLORS.get(m.comparison_status.value, '#9E9E9E') for m in summary.variance_metrics]
         
-        # Generate mitigation strategies
-        deployment_analysis['mitigation_strategies'] = self._generate_mitigation_strategies(gates)
+        # Create bar chart
+        fig = go.Figure(data=[
+            go.Bar(
+                x=metric_names,
+                y=variance_values,
+                marker_color=colors,
+                text=[f"{v:+.1f}%" for v in variance_values],
+                textposition='auto',
+                hovertemplate='<b>%{x}</b><br>Variance: %{y:.2f}%<br>Status: %{customdata}<extra></extra>',
+                customdata=[m.comparison_status.value.title() for m in summary.variance_metrics]
+            )
+        ])
         
-        # Rollback plan
-        deployment_analysis['rollback_plan'] = self._generate_rollback_plan(pipeline_context, gates)
+        # Add threshold reference lines
+        fig.add_hline(y=CRITICAL_VARIANCE_LIMIT, line_dash="dash", line_color="red", 
+                     annotation_text="Critical Threshold (10%)")
+        fig.add_hline(y=-CRITICAL_VARIANCE_LIMIT, line_dash="dash", line_color="red")
+        fig.add_hline(y=WARNING_VARIANCE_LIMIT, line_dash="dot", line_color="orange", 
+                     annotation_text="Warning Threshold (5%)")
+        fig.add_hline(y=-WARNING_VARIANCE_LIMIT, line_dash="dot", line_color="orange")
         
-        # Monitoring recommendations
-        deployment_analysis['monitoring_recommendations'] = self._generate_monitoring_recommendations(
-            performance_metrics, gates
+        # Update layout
+        fig.update_layout(
+            title="Performance Variance vs Node.js Baseline",
+            xaxis_title="Performance Metrics",
+            yaxis_title="Variance Percentage (%)",
+            width=CHART_WIDTH,
+            height=CHART_HEIGHT,
+            showlegend=False,
+            plot_bgcolor='white',
+            paper_bgcolor='white'
         )
         
-        return deployment_analysis
+        # Rotate x-axis labels for readability
+        fig.update_xaxes(tickangle=45)
+        
+        chart_html = fig.to_html(include_plotlyjs='cdn', div_id=f"variance_chart_{uuid.uuid4().hex[:8]}")
+        
+        return f'<div class="chart-container">{chart_html}</div>'
     
-    def _analyze_performance_variance_gate(self, performance_metrics: List[PerformanceMetricSummary]) -> Dict[str, Any]:
-        """Analyze performance variance gate for deployment."""
-        if not performance_metrics:
-            return {'status': 'FAILED', 'reason': 'No performance metrics available'}
+    def _create_compliance_trend_chart(self) -> str:
+        """Create compliance trend chart from historical data."""
         
-        # Check ≤10% variance requirement
-        exceeding_threshold = [
-            metric for metric in performance_metrics 
-            if abs(metric.variance_percent) > PERFORMANCE_VARIANCE_THRESHOLD
-        ]
+        if len(self.analyzer.historical_comparisons) < 2:
+            return ""
         
-        gate_status = 'PASSED' if not exceeding_threshold else 'FAILED'
+        # Extract trend data
+        timestamps = [comp.generation_timestamp for comp in self.analyzer.historical_comparisons]
+        compliance_rates = [comp.compliance_percentage for comp in self.analyzer.historical_comparisons]
         
-        return {
-            'status': gate_status,
-            'threshold': f"{PERFORMANCE_VARIANCE_THRESHOLD}%",
-            'exceeding_threshold_count': len(exceeding_threshold),
-            'worst_variance': max(abs(metric.variance_percent) for metric in performance_metrics),
-            'exceeding_metrics': [metric.metric_name for metric in exceeding_threshold]
-        }
+        # Create line chart
+        fig = go.Figure(data=[
+            go.Scatter(
+                x=timestamps,
+                y=compliance_rates,
+                mode='lines+markers',
+                name='Compliance Rate',
+                line=dict(color=PERFORMANCE_COLORS['baseline'], width=3),
+                marker=dict(size=8)
+            )
+        ])
+        
+        # Add threshold reference line
+        fig.add_hline(y=90.0, line_dash="dash", line_color="orange", 
+                     annotation_text="Target Compliance (90%)")
+        
+        # Update layout
+        fig.update_layout(
+            title="Performance Compliance Trend",
+            xaxis_title="Time",
+            yaxis_title="Compliance Percentage (%)",
+            width=CHART_WIDTH,
+            height=CHART_HEIGHT//2,
+            showlegend=False,
+            plot_bgcolor='white',
+            paper_bgcolor='white'
+        )
+        
+        chart_html = fig.to_html(include_plotlyjs='cdn', div_id=f"trend_chart_{uuid.uuid4().hex[:8]}")
+        
+        return f'<div class="chart-container">{chart_html}</div>'
     
-    def _analyze_critical_metrics_gate(self, performance_metrics: List[PerformanceMetricSummary]) -> Dict[str, Any]:
-        """Analyze critical metrics gate for deployment."""
-        critical_metric_results = [
-            metric for metric in performance_metrics
-            if any(critical_metric in metric.metric_name for critical_metric in CRITICAL_PERFORMANCE_METRICS)
-        ]
+    def _generate_markdown_report(
+        self,
+        summary: BaselineComparisonSummary,
+        audience: ReportAudience
+    ) -> str:
+        """Generate Markdown format baseline comparison report."""
         
-        failing_critical_metrics = [
-            metric for metric in critical_metric_results
-            if not metric.within_threshold
-        ]
+        overall_status = summary.calculate_overall_status()
         
-        gate_status = 'PASSED' if not failing_critical_metrics else 'FAILED'
+        md_content = f"""# {summary.report_title}
+
+**Report ID:** {summary.report_id}  
+**Generated:** {summary.generation_timestamp.strftime('%Y-%m-%d %H:%M:%S UTC')}  
+**Environment:** {summary.test_environment}  
+**Audience:** {audience.value.title()}  
+**Analyzer Version:** 1.0.0
+
+## 📊 Executive Summary
+
+**Overall Status:** {overall_status.value.upper()}  
+**Compliance:** {summary.compliance_percentage:.1f}% of metrics within ≤10% variance threshold  
+**Deployment Recommendation:** {summary.deployment_recommendation.value.upper()}  
+**Statistical Confidence:** {summary.statistical_confidence:.0f}%
+
+### Key Findings
+
+{chr(10).join(f'- {finding}' for finding in summary.key_findings)}
+
+### Business Impact
+
+{summary.business_impact}
+
+## 📈 Performance Analysis
+
+### Variance Summary
+
+| Metric | Category | Node.js Baseline | Flask Current | Variance | Status | Compliant |
+|--------|----------|------------------|---------------|----------|--------|-----------|
+{chr(10).join(self._format_markdown_variance_row(metric) for metric in summary.variance_metrics)}
+
+### Response Time Analysis
+
+{self._format_markdown_analysis(summary.response_time_analysis)}
+
+### Throughput Analysis
+
+{self._format_markdown_analysis(summary.throughput_analysis)}
+
+### Memory Usage Analysis
+
+{self._format_markdown_analysis(summary.memory_usage_analysis)}
+
+### CPU Utilization Analysis
+
+{self._format_markdown_analysis(summary.cpu_utilization_analysis)}
+
+### Database Performance Analysis
+
+{self._format_markdown_analysis(summary.database_performance_analysis)}
+
+## 🚨 Issues and Recommendations
+
+### Critical Issues ({len(summary.critical_issues)})
+
+{chr(10).join(f'- ❌ {issue}' for issue in summary.critical_issues) if summary.critical_issues else 'None'}
+
+### Warning Issues ({len(summary.warning_issues)})
+
+{chr(10).join(f'- ⚠️ {issue}' for issue in summary.warning_issues) if summary.warning_issues else 'None'}
+
+### Performance Improvements ({len(summary.improvement_opportunities)})
+
+{chr(10).join(f'- ✅ {improvement}' for improvement in summary.improvement_opportunities) if summary.improvement_opportunities else 'None'}
+
+### Technical Recommendations
+
+{chr(10).join(f'- {rec}' for rec in summary.technical_recommendations)}
+
+## 📋 Deployment Assessment
+
+**Recommendation:** {summary.deployment_recommendation.value.upper()}
+
+**Deployment Blockers:** {len(summary.deployment_blockers)}
+{chr(10).join(f'- 🚫 {blocker}' for blocker in summary.deployment_blockers) if summary.deployment_blockers else 'None'}
+
+## 📊 Trend Analysis
+
+{self._format_markdown_trend_analysis(summary.trend_analysis)}
+
+---
+
+*Report generated by Flask Migration Baseline Comparison Engine v1.0.0*  
+*Node.js Baseline: {self.analyzer.nodejs_baseline.nodejs_version} | Express.js: {self.analyzer.nodejs_baseline.express_version}*
+"""
         
-        return {
-            'status': gate_status,
-            'critical_metrics_tested': len(critical_metric_results),
-            'critical_metrics_failing': len(failing_critical_metrics),
-            'failing_metrics': [metric.metric_name for metric in failing_critical_metrics],
-            'gate_description': 'All critical performance metrics must pass ≤10% variance threshold'
-        }
+        return md_content
     
-    def _analyze_regression_detection_gate(self, performance_metrics: List[PerformanceMetricSummary]) -> Dict[str, Any]:
-        """Analyze regression detection gate for deployment."""
-        degrading_metrics = [
-            metric for metric in performance_metrics
-            if metric.trend_direction == 'degrading'
-        ]
+    def _format_markdown_variance_row(self, metric: BaselineVarianceMetric) -> str:
+        """Format variance metric as Markdown table row."""
         
-        # Gate passes if <30% of metrics are degrading
-        degradation_rate = (len(degrading_metrics) / len(performance_metrics)) * 100.0 if performance_metrics else 0.0
-        gate_status = 'PASSED' if degradation_rate < 30.0 else 'FAILED'
+        compliant_emoji = "✅" if metric.within_threshold else "❌"
+        variance_sign = "+" if metric.variance_percent > 0 else ""
         
-        return {
-            'status': gate_status,
-            'degrading_metrics_count': len(degrading_metrics),
-            'degradation_rate': degradation_rate,
-            'threshold': '30% degradation rate limit',
-            'degrading_metrics': [metric.metric_name for metric in degrading_metrics]
-        }
+        return f"| {metric.metric_name} | {metric.metric_category.value.replace('_', ' ').title()} | {metric.nodejs_baseline_value:.2f} {metric.measurement_unit} | {metric.flask_current_value:.2f} {metric.measurement_unit} | {variance_sign}{metric.variance_percent:.1f}% | {metric.comparison_status.value.title()} | {compliant_emoji} |"
     
-    def _analyze_compliance_threshold_gate(self, compliance_validation: Dict[str, Any]) -> Dict[str, Any]:
-        """Analyze compliance threshold gate for deployment."""
-        compliance_rate = compliance_validation.get('compliance_rate', 0.0)
-        gate_status = 'PASSED' if compliance_rate >= 95.0 else 'FAILED'
+    def _format_markdown_analysis(self, analysis: Dict[str, Any]) -> str:
+        """Format performance analysis as Markdown."""
         
-        return {
-            'status': gate_status,
-            'compliance_rate': compliance_rate,
-            'threshold': '95% compliance rate required',
-            'total_metrics': compliance_validation.get('compliance_summary', {}).get('total_metrics_tested', 0),
-            'compliant_metrics': compliance_validation.get('compliance_summary', {}).get('compliant_metrics', 0)
-        }
+        if not analysis:
+            return "No data available."
+        
+        status = analysis.get('status', 'unknown')
+        message = analysis.get('message', 'No message')
+        compliance_rate = analysis.get('compliance_rate', 0)
+        
+        return f"""
+**Status:** {status.title()}  
+**Message:** {message}  
+**Compliance Rate:** {compliance_rate:.1f}%
+"""
     
-    def _generate_mitigation_strategies(self, gates: Dict[str, Dict[str, Any]]) -> List[str]:
-        """Generate mitigation strategies based on gate failures."""
-        strategies = []
+    def _format_markdown_trend_analysis(self, trend_analysis: Dict[str, Any]) -> str:
+        """Format trend analysis as Markdown."""
         
-        for gate_name, gate_result in gates.items():
-            if gate_result['status'] == 'FAILED':
-                if gate_name == 'performance_variance_gate':
-                    strategies.append("Implement performance optimization for metrics exceeding ≤10% variance threshold")
-                elif gate_name == 'critical_metrics_gate':
-                    strategies.append("Prioritize optimization of critical performance metrics before deployment")
-                elif gate_name == 'regression_detection_gate':
-                    strategies.append("Investigate and address performance regression root causes")
-                elif gate_name == 'compliance_threshold_gate':
-                    strategies.append("Increase performance testing coverage and address non-compliant metrics")
+        if not trend_analysis or trend_analysis.get('status') == 'insufficient_data':
+            return "Insufficient historical data for trend analysis."
         
-        if not strategies:
-            strategies.append("All deployment gates passed - proceed with standard deployment monitoring")
+        overall_trend = trend_analysis.get('overall_trend', 'unknown')
+        data_points = trend_analysis.get('data_points', 0)
         
-        return strategies
+        return f"""
+**Overall Trend:** {overall_trend.title()}  
+**Historical Data Points:** {data_points}  
+**Status:** {trend_analysis.get('message', 'No trend data')}
+"""
     
-    def _generate_rollback_plan(self, pipeline_context: Dict[str, Any], 
-                              gates: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-        """Generate rollback plan based on gate failures and pipeline context."""
-        failed_gates = [name for name, gate in gates.items() if gate['status'] == 'FAILED']
+    def _save_report(self, content: Union[str, Dict[str, Any]], output_path: Path, format_type: ReportFormat) -> None:
+        """Save generated report to file."""
         
-        rollback_plan = {
-            'rollback_required': len(failed_gates) > 0,
-            'rollback_triggers': failed_gates,
-            'rollback_procedure': [],
-            'rollback_validation': [],
-            'recovery_time_estimate': '5-15 minutes'
-        }
-        
-        if rollback_plan['rollback_required']:
-            rollback_plan['rollback_procedure'] = [
-                "1. Activate circuit breaker to divert traffic to Node.js baseline",
-                "2. Disable Flask application deployment in load balancer",
-                "3. Verify Node.js baseline performance restoration",
-                "4. Update feature flags to disable migration features",
-                "5. Notify stakeholders of rollback completion"
-            ]
+        try:
+            output_path = Path(output_path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
             
-            rollback_plan['rollback_validation'] = [
-                "Verify response time returns to baseline levels",
-                "Confirm error rate <0.1% threshold",
-                "Validate all critical endpoints operational",
-                "Check system resource utilization normalized"
-            ]
-        else:
-            rollback_plan['rollback_procedure'] = [
-                "Standard deployment monitoring - no rollback required"
-            ]
-        
-        return rollback_plan
-    
-    def _generate_monitoring_recommendations(self, performance_metrics: List[PerformanceMetricSummary],
-                                           gates: Dict[str, Dict[str, Any]]) -> List[str]:
-        """Generate monitoring recommendations based on performance analysis."""
-        recommendations = []
-        
-        # Critical metrics monitoring
-        critical_metrics = [
-            metric for metric in performance_metrics
-            if any(critical_metric in metric.metric_name for critical_metric in CRITICAL_PERFORMANCE_METRICS)
-        ]
-        
-        if critical_metrics:
-            recommendations.append(f"Implement enhanced monitoring for {len(critical_metrics)} critical performance metrics")
-        
-        # Variance monitoring
-        warning_metrics = [
-            metric for metric in performance_metrics
-            if metric.variance_severity in ['warning', 'critical']
-        ]
-        
-        if warning_metrics:
-            recommendations.append(f"Set up real-time alerting for {len(warning_metrics)} metrics approaching variance thresholds")
-        
-        # Trend monitoring
-        degrading_metrics = [
-            metric for metric in performance_metrics
-            if metric.trend_direction == 'degrading'
-        ]
-        
-        if degrading_metrics:
-            recommendations.append(f"Configure trend analysis monitoring for {len(degrading_metrics)} degrading metrics")
-        
-        # Gate-specific monitoring
-        failed_gates = [name for name, gate in gates.items() if gate['status'] == 'FAILED']
-        if failed_gates:
-            recommendations.append(f"Implement specialized monitoring for failed deployment gates: {', '.join(failed_gates)}")
-        
-        # Default monitoring recommendation
-        if not recommendations:
-            recommendations.append("Continue standard performance monitoring with current baseline comparison")
-        
-        return recommendations
+            with open(output_path, 'w', encoding='utf-8') as f:
+                if isinstance(content, dict):
+                    json.dump(content, f, indent=2, default=str)
+                else:
+                    f.write(content)
+            
+            self.logger.info("Saved baseline comparison report", path=str(output_path), format=format_type.value)
+            
+        except Exception as e:
+            self.logger.error("Failed to save report", path=str(output_path), error=str(e))
+            raise
 
 
-# Factory functions for easy report generation
+# Convenience functions for external integration
 
-def generate_executive_summary_report(test_results: List[PerformanceComparisonResult],
-                                    trend_analyzer: Optional[PerformanceTrendAnalyzer] = None,
-                                    output_format: str = 'html',
-                                    output_directory: Optional[str] = None) -> Path:
+def create_baseline_comparison_analyzer(
+    baseline_data_file: Optional[str] = None
+) -> BaselineComparisonAnalyzer:
     """
-    Generate and export executive summary report.
+    Create a baseline comparison analyzer instance with optional baseline data.
     
     Args:
-        test_results: Performance comparison test results
-        trend_analyzer: Optional trend analyzer for regression detection
-        output_format: Export format ('json', 'html', 'pdf', 'markdown', 'csv')
-        output_directory: Optional output directory
+        baseline_data_file: Optional path to custom baseline data file
         
     Returns:
-        Path to exported report file
+        Configured BaselineComparisonAnalyzer instance
     """
-    generator = BaselineComparisonReportGenerator(output_directory=output_directory)
-    report = generator.generate_executive_summary_report(test_results, trend_analyzer)
-    return generator.export_report(report, output_format)
+    if baseline_data_file:
+        from tests.performance.baseline_data import BaselineDataManager
+        baseline_manager = BaselineDataManager(Path(baseline_data_file))
+    else:
+        baseline_manager = get_baseline_manager()
+    
+    return BaselineComparisonAnalyzer(baseline_manager)
 
 
-def generate_technical_detailed_report(test_results: List[PerformanceComparisonResult],
-                                     trend_analyzer: Optional[PerformanceTrendAnalyzer] = None,
-                                     output_format: str = 'html',
-                                     output_directory: Optional[str] = None,
-                                     include_raw_data: bool = True) -> Path:
+def generate_baseline_comparison_report(
+    flask_metrics: Dict[str, float],
+    report_format: ReportFormat = ReportFormat.HTML,
+    audience: ReportAudience = ReportAudience.TECHNICAL,
+    output_path: Optional[Path] = None,
+    test_context: Optional[Dict[str, Any]] = None
+) -> Union[str, Dict[str, Any]]:
     """
-    Generate and export technical detailed report.
+    Generate baseline comparison report with Flask performance metrics.
     
     Args:
-        test_results: Performance comparison test results
-        trend_analyzer: Optional trend analyzer for comprehensive analysis
-        output_format: Export format ('json', 'html', 'pdf', 'markdown', 'csv')
-        output_directory: Optional output directory
-        include_raw_data: Include raw measurement data in report
+        flask_metrics: Current Flask implementation performance metrics
+        report_format: Output format (HTML, JSON, Markdown)
+        audience: Target audience for report content
+        output_path: Optional path to save the generated report
+        test_context: Optional test execution context
         
     Returns:
-        Path to exported report file
+        Generated report content
+        
+    Example:
+        >>> flask_metrics = {
+        ...     "api_response_time_mean": 135.0,
+        ...     "api_response_time_p95": 310.0,
+        ...     "requests_per_second": 118.0,
+        ...     "memory_usage_mb": 268.0,
+        ...     "cpu_utilization_average": 22.5
+        ... }
+        >>> report = generate_baseline_comparison_report(
+        ...     flask_metrics,
+        ...     ReportFormat.HTML,
+        ...     ReportAudience.EXECUTIVE
+        ... )
     """
-    generator = BaselineComparisonReportGenerator(output_directory=output_directory)
-    report = generator.generate_technical_detailed_report(test_results, trend_analyzer, include_raw_data)
-    return generator.export_report(report, output_format)
+    generator = BaselineComparisonReportGenerator()
+    return generator.generate_baseline_comparison_report(
+        flask_metrics=flask_metrics,
+        report_format=report_format,
+        audience=audience,
+        test_context=test_context,
+        output_path=output_path
+    )
 
 
-def generate_ci_cd_pipeline_report(test_results: List[PerformanceComparisonResult],
-                                 pipeline_context: Dict[str, Any],
-                                 output_format: str = 'json',
-                                 output_directory: Optional[str] = None) -> Path:
+def validate_performance_compliance(
+    flask_metrics: Dict[str, float],
+    variance_threshold: float = PERFORMANCE_VARIANCE_LIMIT
+) -> Dict[str, Any]:
     """
-    Generate and export CI/CD pipeline integration report.
+    Validate Flask performance compliance against ≤10% variance requirement.
     
     Args:
-        test_results: Performance comparison test results
-        pipeline_context: CI/CD pipeline context and metadata
-        output_format: Export format ('json', 'html', 'pdf', 'markdown', 'csv')
-        output_directory: Optional output directory
+        flask_metrics: Current Flask implementation performance metrics
+        variance_threshold: Performance variance threshold (default: 10%)
         
     Returns:
-        Path to exported report file
+        Compliance validation results with deployment recommendation
+        
+    Example:
+        >>> compliance = validate_performance_compliance({
+        ...     "api_response_time_p95": 295.0,
+        ...     "requests_per_second": 118.0
+        ... })
+        >>> print(f"Compliant: {compliance['overall_compliance']}")
+        >>> print(f"Recommendation: {compliance['deployment_recommendation']}")
     """
-    generator = BaselineComparisonReportGenerator(output_directory=output_directory)
-    report = generator.generate_ci_cd_pipeline_report(test_results, pipeline_context)
-    return generator.export_report(report, output_format)
+    analyzer = BaselineComparisonAnalyzer()
+    
+    test_context = {
+        "environment": "validation",
+        "variance_threshold": variance_threshold,
+        "validation_timestamp": datetime.now(timezone.utc).isoformat()
+    }
+    
+    summary = analyzer.analyze_baseline_comparison(
+        flask_metrics=flask_metrics,
+        test_context=test_context,
+        include_trend_analysis=False,
+        include_regression_detection=True
+    )
+    
+    return {
+        "overall_compliance": summary.overall_compliance,
+        "compliance_percentage": summary.compliance_percentage,
+        "deployment_recommendation": summary.deployment_recommendation.value,
+        "critical_issues": summary.critical_issues,
+        "warning_issues": summary.warning_issues,
+        "deployment_blockers": summary.deployment_blockers,
+        "variance_metrics": [
+            {
+                "metric": metric.metric_name,
+                "variance_percent": metric.variance_percent,
+                "within_threshold": metric.within_threshold,
+                "status": metric.comparison_status.value
+            }
+            for metric in summary.variance_metrics
+        ],
+        "statistical_confidence": summary.statistical_confidence,
+        "validation_timestamp": summary.generation_timestamp.isoformat()
+    }
+
+
+def create_ci_cd_performance_gate(
+    flask_metrics: Dict[str, float],
+    pipeline_context: Dict[str, Any],
+    variance_threshold: float = PERFORMANCE_VARIANCE_LIMIT
+) -> Dict[str, Any]:
+    """
+    Create CI/CD performance gate report for automated deployment decisions.
+    
+    Args:
+        flask_metrics: Current Flask implementation performance metrics
+        pipeline_context: CI/CD pipeline context information
+        variance_threshold: Performance variance threshold for gate decisions
+        
+    Returns:
+        CI/CD gate report with deployment approval/blocking recommendation
+        
+    Example:
+        >>> gate_report = create_ci_cd_performance_gate(
+        ...     flask_metrics={
+        ...         "api_response_time_p95": 295.0,
+        ...         "requests_per_second": 118.0
+        ...     },
+        ...     pipeline_context={
+        ...         "pipeline_id": "12345",
+        ...         "environment": "staging",
+        ...         "branch": "main",
+        ...         "commit_sha": "abc123"
+        ...     }
+        ... )
+        >>> approved = gate_report["performance_gate_decision"]["deployment_approved"]
+    """
+    generator = BaselineComparisonReportGenerator()
+    return generator.generate_ci_cd_gate_report(
+        flask_metrics=flask_metrics,
+        pipeline_context=pipeline_context,
+        variance_threshold=variance_threshold
+    )
 
 
 # Export public interface
 __all__ = [
+    # Core classes
+    'BaselineComparisonAnalyzer',
     'BaselineComparisonReportGenerator',
-    'BaselineComparisonReport',
-    'ExecutiveSummary',
-    'PerformanceMetricSummary',
-    'ReportType',
+    'BaselineComparisonSummary',
+    'BaselineVarianceMetric',
+    
+    # Enumerations
+    'ComparisonStatus',
+    'ReportSeverity',
     'DeploymentRecommendation',
-    'generate_executive_summary_report',
-    'generate_technical_detailed_report',
-    'generate_ci_cd_pipeline_report',
-    'SUPPORTED_REPORT_FORMATS',
-    'VARIANCE_SEVERITY_LEVELS'
+    
+    # Convenience functions
+    'create_baseline_comparison_analyzer',
+    'generate_baseline_comparison_report',
+    'validate_performance_compliance',
+    'create_ci_cd_performance_gate',
+    
+    # Constants
+    'PERFORMANCE_VARIANCE_LIMIT',
+    'MEMORY_VARIANCE_LIMIT',
+    'WARNING_VARIANCE_LIMIT',
+    'CRITICAL_VARIANCE_LIMIT'
 ]
