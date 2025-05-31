@@ -1,1492 +1,2827 @@
 """
-Performance Testing Fixtures
+Performance Testing Fixtures for Node.js to Python Flask Migration
 
-Comprehensive performance testing fixtures providing baseline data generation, load testing utilities,
-performance monitoring setup, and benchmark comparison tools for validating ≤10% variance requirement
-from Node.js implementation per Section 0.1.1 primary objective.
+This module provides comprehensive performance testing fixtures including baseline data generation,
+load testing utilities, performance monitoring setup, and benchmark comparison tools for validating
+the ≤10% variance requirement from the Node.js implementation per Section 0.1.1 performance 
+optimization requirements.
 
-This module serves as the central performance validation infrastructure ensuring compliance with
-the critical ≤10% performance variance requirement through comprehensive baseline comparison,
-load testing integration, and continuous performance monitoring.
-
-Key Features:
-- Node.js baseline data generation and comparison testing per Section 0.1.1
-- Load testing data generation for locust integration per Section 6.6.1
-- Performance monitoring fixtures with Prometheus metrics per Section 6.6.1
-- Concurrent request testing fixtures per Section 6.6.3
+Key Components:
+- Performance baseline data generators with Node.js comparison metrics per Section 6.6.3
+- Load testing data generation and utilities for locust integration per Section 6.6.1
+- Performance monitoring fixtures with Prometheus metrics collection per Section 6.6.1
+- Concurrent request testing fixtures for throughput validation per Section 6.6.3
 - Database performance fixtures with PyMongo and Motor timing per Section 6.2.4
 - Cache performance fixtures for Redis hit/miss ratio testing per Section 3.4.5
-- Response time variance validation fixtures per Section 6.6.3
+- Response time variance validation fixtures per Section 6.6.3 performance requirements
 
-Dependencies:
-- locust (≥2.x) for performance validation per Section 6.6.1
-- apache-bench for HTTP server performance measurement per Section 6.6.1
-- prometheus-client for metrics collection per Section 6.2.4
-- pytest performance testing framework integration per Section 6.6.1
+Performance Requirements Compliance:
+- Response Time Variance: ≤10% from Node.js baseline (project-critical requirement)
+- Load Testing Framework: locust (≥2.x) for performance validation
+- HTTP Performance Measurement: apache-bench for server performance testing
+- Database Performance: PyMongo/Motor operation timing and optimization
+- Cache Performance: Redis operation latency and hit/miss ratio optimization
+- Monitoring Integration: Prometheus metrics collection and APM integration
 
-Compliance:
+Architecture Integration:
+- Flask application factory pattern integration per Section 6.1.1
+- Database testing with Testcontainers MongoDB/Redis per Section 6.6.1 enhanced mocking
+- Authentication testing with Auth0 service mocking per Section 6.6.1
+- External service mocking for performance isolation per Section 6.6.1
+- Performance monitoring with enterprise APM integration per Section 6.5.1
+
+Testing Strategy Integration:
+- pytest 7.4+ framework integration with performance-specific markers
+- Performance test organization structure per Section 6.6.1
+- Parallel test execution optimization with pytest-xdist per Section 6.6.1
+- CI/CD integration with GitHub Actions performance validation
+- Performance baseline comparison with automated variance detection
+
+Usage Examples:
+    # Basic performance baseline testing
+    def test_api_performance_baseline(performance_baseline_fixture):
+        baseline = performance_baseline_fixture['api_endpoints']['user_profile']
+        # Test implementation with baseline comparison
+    
+    # Load testing with locust integration
+    def test_concurrent_load_performance(locust_load_generator):
+        load_test_result = locust_load_generator.run_load_test(
+            endpoint='/api/users',
+            concurrent_users=100,
+            duration_seconds=60
+        )
+        assert load_test_result['response_time_variance'] <= 0.10
+    
+    # Database performance validation
+    def test_database_performance(database_performance_fixture):
+        async_timing = database_performance_fixture.measure_async_operation(
+            collection='users',
+            operation='find_many',
+            query_size=1000
+        )
+        assert async_timing['variance_from_baseline'] <= 0.10
+
+References:
 - Section 0.1.1: Performance optimization to ensure ≤10% variance from Node.js baseline
-- Section 6.6.1: Load testing framework locust (≥2.x) for performance validation
-- Section 6.6.3: Response Time Variance: ≤10% from Node.js baseline (project-critical requirement)
-- Section 6.2.4: Database performance metrics instrumentation and monitoring
+- Section 6.6.1: Load testing framework locust (≥2.x) and apache-bench requirements
+- Section 6.6.3: Performance test thresholds and variance validation requirements
+- Section 6.2.4: Database performance optimization with connection pooling
+- Section 3.4.5: Redis caching layer performance requirements and monitoring
+- Section 6.5.1: Monitoring and observability integration with Prometheus metrics
+
+Author: Flask Migration Team
+Version: 1.0.0
+Compliance: ≤10% performance variance requirement, enterprise monitoring integration
 """
 
-import os
-import time
 import asyncio
-import statistics
 import json
-from typing import Dict, List, Optional, Any, Callable, Tuple, Union
+import os
+import random
+import statistics
+import subprocess
+import threading
+import time
+import uuid
+from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union, Callable, Generator, AsyncGenerator, Tuple
+from unittest.mock import Mock, patch, MagicMock
+
 import pytest
-from unittest.mock import Mock, patch
-import logging
-
-# Performance testing imports
-import psutil
-from locust import HttpUser, task, between
-from locust.env import Environment
-from locust.stats import stats_printer
-from locust.runners import LocalRunner
-
-# Prometheus metrics collection
-from prometheus_client import Counter, Histogram, Gauge, Summary, CollectorRegistry
-from prometheus_client.exposition import generate_latest
-
-# HTTP client for performance testing
-import requests
-import httpx
-
-# Database performance testing
-import pymongo
-import motor.motor_asyncio
-import redis
-from bson import ObjectId
-
-# Flask application testing
+import pytest_asyncio
 from flask import Flask
 from flask.testing import FlaskClient
 
-# Structured logging
-import structlog
+# Performance monitoring and metrics imports
+try:
+    import prometheus_client
+    from prometheus_client import CollectorRegistry, Counter, Histogram, Gauge, Summary
+    PROMETHEUS_AVAILABLE = True
+except ImportError:
+    PROMETHEUS_AVAILABLE = False
 
-# Configuration for performance testing
-logger = structlog.get_logger(__name__)
+# Load testing framework imports
+try:
+    import locust
+    from locust import HttpUser, task, between
+    from locust.env import Environment
+    from locust.stats import stats_printer, stats_history
+    from locust.log import setup_logging
+    LOCUST_AVAILABLE = True
+except ImportError:
+    LOCUST_AVAILABLE = False
 
-# Performance testing constants
-DEFAULT_PERFORMANCE_VARIANCE_THRESHOLD = 0.10  # 10% variance threshold
-DEFAULT_LOAD_TEST_DURATION = 60  # seconds
-DEFAULT_CONCURRENT_USERS = 50
-DEFAULT_SPAWN_RATE = 5  # users per second
-DEFAULT_DATABASE_OPERATION_TIMEOUT = 30.0  # seconds
-DEFAULT_CACHE_OPERATION_TIMEOUT = 5.0  # seconds
+# Database and cache imports with fallback handling
+try:
+    import pymongo
+    from pymongo import MongoClient
+    from pymongo.collection import Collection
+    from pymongo.database import Database
+    PYMONGO_AVAILABLE = True
+except ImportError:
+    PYMONGO_AVAILABLE = False
 
-# Node.js baseline performance data (milliseconds)
-NODEJS_BASELINE_METRICS = {
-    'api_endpoints': {
-        'GET /health': 25.0,
-        'GET /health/ready': 45.0,
-        'GET /health/live': 15.0,
-        'POST /api/auth/login': 180.0,
-        'POST /api/auth/logout': 95.0,
-        'GET /api/users': 125.0,
-        'POST /api/users': 210.0,
-        'GET /api/users/{id}': 85.0,
-        'PUT /api/users/{id}': 165.0,
-        'DELETE /api/users/{id}': 115.0,
-        'GET /api/data/query': 320.0,
-        'POST /api/data/create': 285.0,
-    },
-    'database_operations': {
-        'user_find_one': 35.0,
-        'user_find_many': 85.0,
-        'user_insert_one': 65.0,
-        'user_update_one': 55.0,
-        'user_delete_one': 40.0,
-        'data_aggregate': 145.0,
-        'transaction_commit': 95.0,
-        'connection_acquire': 15.0,
-    },
-    'cache_operations': {
-        'redis_get_hit': 3.5,
-        'redis_get_miss': 8.0,
-        'redis_set': 6.5,
-        'redis_delete': 4.0,
-        'redis_exists': 2.5,
-        'session_create': 12.0,
-        'session_retrieve': 8.5,
-        'session_update': 10.0,
-    },
-    'system_metrics': {
-        'memory_usage_mb': 256.0,
-        'cpu_usage_percent': 25.0,
-        'concurrent_connections': 100,
-        'throughput_rps': 250.0,
-    }
-}
+try:
+    from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase, AsyncIOMotorCollection
+    MOTOR_AVAILABLE = True
+except ImportError:
+    MOTOR_AVAILABLE = False
 
+try:
+    import redis
+    from redis import Redis
+    REDIS_AVAILABLE = True
+except ImportError:
+    REDIS_AVAILABLE = False
+
+# Application dependencies with fallback
+try:
+    from src.app import create_app
+    from src.monitoring import get_monitoring_manager, get_metrics_collector
+    from src.cache import get_default_redis_client, get_cache_health
+    from src.data import get_database_services, get_mongodb_client, get_motor_client
+    from tests.conftest import (
+        comprehensive_test_environment,
+        performance_monitoring,
+        test_metrics_collector
+    )
+    APP_DEPENDENCIES_AVAILABLE = True
+except ImportError:
+    APP_DEPENDENCIES_AVAILABLE = False
+
+# Configure performance testing logger
+import logging
+logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Performance Baseline Data Structures
+# =============================================================================
 
 @dataclass
-class PerformanceBaseline:
+class NodeJSPerformanceBaseline:
     """
-    Performance baseline data structure for Node.js comparison testing.
+    Node.js performance baseline data structure for comparison testing.
     
-    Stores baseline metrics from Node.js implementation for comprehensive
-    performance validation ensuring ≤10% variance compliance.
+    Contains comprehensive performance metrics from the original Node.js
+    implementation for validating ≤10% variance requirement per Section 0.1.1.
     """
-    endpoint: str
-    baseline_ms: float
-    variance_threshold: float = DEFAULT_PERFORMANCE_VARIANCE_THRESHOLD
-    method: str = 'GET'
-    payload: Optional[Dict[str, Any]] = None
-    headers: Optional[Dict[str, str]] = None
     
-    def validate_performance(self, actual_ms: float) -> Dict[str, Any]:
+    # API endpoint performance baselines (milliseconds)
+    api_response_times: Dict[str, float] = field(default_factory=lambda: {
+        'auth_login': 120.0,           # Authentication endpoint
+        'auth_refresh': 85.0,          # Token refresh endpoint
+        'user_profile': 95.0,          # User profile retrieval
+        'user_update': 140.0,          # User profile update
+        'project_list': 180.0,         # Project listing with pagination
+        'project_create': 220.0,       # Project creation
+        'project_update': 190.0,       # Project modification
+        'project_delete': 110.0,       # Project deletion
+        'file_upload': 850.0,          # File upload to S3
+        'file_download': 450.0,        # File download from S3
+        'search_users': 160.0,         # User search with filters
+        'search_projects': 210.0,      # Project search with pagination
+        'analytics_dashboard': 380.0,  # Dashboard data aggregation
+        'admin_users': 240.0,          # Admin user management
+        'admin_analytics': 420.0       # Admin analytics queries
+    })
+    
+    # Database operation baselines (milliseconds)
+    database_operations: Dict[str, float] = field(default_factory=lambda: {
+        'find_one': 8.5,               # Single document retrieval
+        'find_many': 45.0,             # Multiple document query
+        'insert_one': 12.0,            # Single document insertion
+        'insert_many': 85.0,           # Bulk document insertion
+        'update_one': 15.0,            # Single document update
+        'update_many': 120.0,          # Bulk document update
+        'delete_one': 10.0,            # Single document deletion
+        'delete_many': 95.0,           # Bulk document deletion
+        'aggregate_simple': 35.0,      # Simple aggregation pipeline
+        'aggregate_complex': 180.0,    # Complex aggregation with joins
+        'transaction': 45.0,           # Transaction operation
+        'index_query': 18.0,           # Indexed query performance
+        'full_text_search': 85.0,      # Text search operation
+        'geospatial_query': 120.0,     # Geospatial query performance
+        'count_documents': 25.0        # Document counting operation
+    })
+    
+    # Cache operation baselines (milliseconds)
+    cache_operations: Dict[str, float] = field(default_factory=lambda: {
+        'get': 1.2,                    # Cache retrieval
+        'set': 1.8,                    # Cache storage
+        'delete': 1.5,                 # Cache deletion
+        'exists': 0.9,                 # Cache key existence check
+        'expire': 1.1,                 # TTL setting
+        'incr': 1.4,                   # Increment operation
+        'decr': 1.3,                   # Decrement operation
+        'hget': 1.6,                   # Hash field retrieval
+        'hset': 2.1,                   # Hash field storage
+        'lpush': 1.7,                  # List push operation
+        'rpop': 1.8,                   # List pop operation
+        'sadd': 1.9,                   # Set addition
+        'smembers': 3.2,               # Set members retrieval
+        'pipeline': 4.5,               # Pipeline operation
+        'transaction': 5.8             # Redis transaction
+    })
+    
+    # Concurrent load performance baselines
+    load_performance: Dict[str, Dict[str, float]] = field(default_factory=lambda: {
+        '10_users': {
+            'avg_response_time': 125.0,
+            'max_response_time': 280.0,
+            'requests_per_second': 78.5,
+            'error_rate': 0.002,           # 0.2% error rate
+            'cpu_usage': 0.25,             # 25% CPU usage
+            'memory_usage': 0.35           # 35% memory usage
+        },
+        '50_users': {
+            'avg_response_time': 165.0,
+            'max_response_time': 420.0,
+            'requests_per_second': 285.2,
+            'error_rate': 0.008,           # 0.8% error rate
+            'cpu_usage': 0.48,             # 48% CPU usage
+            'memory_usage': 0.52           # 52% memory usage
+        },
+        '100_users': {
+            'avg_response_time': 210.0,
+            'max_response_time': 580.0,
+            'requests_per_second': 445.8,
+            'error_rate': 0.015,           # 1.5% error rate
+            'cpu_usage': 0.72,             # 72% CPU usage
+            'memory_usage': 0.68           # 68% memory usage
+        },
+        '200_users': {
+            'avg_response_time': 285.0,
+            'max_response_time': 820.0,
+            'requests_per_second': 650.4,
+            'error_rate': 0.025,           # 2.5% error rate
+            'cpu_usage': 0.85,             # 85% CPU usage
+            'memory_usage': 0.78           # 78% memory usage
+        }
+    })
+    
+    # Performance variance thresholds
+    variance_thresholds: Dict[str, float] = field(default_factory=lambda: {
+        'acceptable_variance': 0.10,    # ≤10% variance requirement
+        'warning_variance': 0.08,       # Warning threshold at 8%
+        'critical_variance': 0.12,      # Critical threshold at 12%
+        'memory_variance': 0.15,        # Memory usage variance threshold
+        'cpu_variance': 0.20,           # CPU usage variance threshold
+        'error_rate_variance': 0.05     # Error rate variance threshold
+    })
+    
+    def get_baseline_value(self, category: str, operation: str) -> Optional[float]:
         """
-        Validate actual performance against baseline with variance calculation.
+        Get baseline value for specific operation category.
         
         Args:
-            actual_ms: Actual response time in milliseconds
+            category: Performance category (api, database, cache, load)
+            operation: Specific operation name
             
         Returns:
-            Dict containing validation results and variance analysis
+            Baseline value in milliseconds or None if not found
         """
-        variance = abs(actual_ms - self.baseline_ms) / self.baseline_ms
-        variance_percent = variance * 100
-        is_within_threshold = variance <= self.variance_threshold
+        category_map = {
+            'api': self.api_response_times,
+            'database': self.database_operations,
+            'cache': self.cache_operations,
+            'load': self.load_performance
+        }
         
+        if category in category_map:
+            return category_map[category].get(operation)
+        return None
+    
+    def calculate_variance(self, measured_value: float, baseline_value: float) -> float:
+        """
+        Calculate performance variance from baseline.
+        
+        Args:
+            measured_value: Measured performance value
+            baseline_value: Baseline performance value
+            
+        Returns:
+            Variance as decimal (0.10 = 10% variance)
+        """
+        if baseline_value == 0:
+            return float('inf')
+        
+        return abs(measured_value - baseline_value) / baseline_value
+    
+    def is_within_threshold(self, measured_value: float, baseline_value: float, 
+                          threshold_type: str = 'acceptable_variance') -> bool:
+        """
+        Check if measured value is within acceptable variance threshold.
+        
+        Args:
+            measured_value: Measured performance value
+            baseline_value: Baseline performance value
+            threshold_type: Type of threshold to check against
+            
+        Returns:
+            True if within threshold, False otherwise
+        """
+        variance = self.calculate_variance(measured_value, baseline_value)
+        threshold = self.variance_thresholds.get(threshold_type, 0.10)
+        
+        return variance <= threshold
+
+
+@dataclass
+class PerformanceMeasurement:
+    """
+    Individual performance measurement data structure.
+    
+    Captures comprehensive performance metrics for a single operation
+    including timing, resource usage, and context information.
+    """
+    
+    operation_name: str
+    category: str                      # api, database, cache, load
+    measured_value: float              # Primary metric (response time, etc.)
+    baseline_value: Optional[float] = None
+    variance: Optional[float] = None
+    timestamp: datetime = field(default_factory=datetime.utcnow)
+    
+    # Extended metrics
+    cpu_usage: Optional[float] = None
+    memory_usage: Optional[float] = None
+    error_count: int = 0
+    request_count: int = 1
+    
+    # Context information
+    endpoint: Optional[str] = None
+    http_method: Optional[str] = None
+    status_code: Optional[int] = None
+    user_agent: Optional[str] = None
+    
+    # Database-specific metrics
+    collection_name: Optional[str] = None
+    query_type: Optional[str] = None
+    document_count: Optional[int] = None
+    
+    # Cache-specific metrics
+    cache_key: Optional[str] = None
+    cache_hit: Optional[bool] = None
+    ttl: Optional[int] = None
+    
+    # Load testing metrics
+    concurrent_users: Optional[int] = None
+    requests_per_second: Optional[float] = None
+    error_rate: Optional[float] = None
+    
+    def calculate_variance(self, baseline: NodeJSPerformanceBaseline) -> float:
+        """Calculate variance from Node.js baseline."""
+        if self.baseline_value is None:
+            self.baseline_value = baseline.get_baseline_value(self.category, self.operation_name)
+        
+        if self.baseline_value is not None:
+            self.variance = baseline.calculate_variance(self.measured_value, self.baseline_value)
+            return self.variance
+        
+        return float('inf')
+    
+    def is_compliant(self, baseline: NodeJSPerformanceBaseline) -> bool:
+        """Check if measurement is compliant with ≤10% variance requirement."""
+        if self.variance is None:
+            self.calculate_variance(baseline)
+        
+        return baseline.is_within_threshold(
+            self.measured_value, 
+            self.baseline_value or 0.0
+        )
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert measurement to dictionary for serialization."""
         return {
+            'operation_name': self.operation_name,
+            'category': self.category,
+            'measured_value': self.measured_value,
+            'baseline_value': self.baseline_value,
+            'variance': self.variance,
+            'timestamp': self.timestamp.isoformat(),
+            'cpu_usage': self.cpu_usage,
+            'memory_usage': self.memory_usage,
+            'error_count': self.error_count,
+            'request_count': self.request_count,
             'endpoint': self.endpoint,
-            'method': self.method,
-            'baseline_ms': self.baseline_ms,
-            'actual_ms': actual_ms,
-            'variance_percent': round(variance_percent, 2),
-            'variance_threshold_percent': round(self.variance_threshold * 100, 2),
-            'is_within_threshold': is_within_threshold,
-            'performance_status': 'PASS' if is_within_threshold else 'FAIL',
-            'timestamp': datetime.utcnow().isoformat()
+            'http_method': self.http_method,
+            'status_code': self.status_code,
+            'collection_name': self.collection_name,
+            'query_type': self.query_type,
+            'document_count': self.document_count,
+            'cache_key': self.cache_key,
+            'cache_hit': self.cache_hit,
+            'ttl': self.ttl,
+            'concurrent_users': self.concurrent_users,
+            'requests_per_second': self.requests_per_second,
+            'error_rate': self.error_rate,
+            'compliant': self.is_compliant(NodeJSPerformanceBaseline())
         }
 
 
-@dataclass
-class LoadTestConfiguration:
-    """
-    Load testing configuration for locust integration.
-    
-    Comprehensive configuration for load testing scenarios ensuring
-    realistic performance validation under concurrent load conditions.
-    """
-    users: int = DEFAULT_CONCURRENT_USERS
-    spawn_rate: float = DEFAULT_SPAWN_RATE
-    duration: int = DEFAULT_LOAD_TEST_DURATION
-    host: str = 'http://localhost:5000'
-    test_data: Optional[Dict[str, Any]] = None
-    headers: Optional[Dict[str, str]] = None
-    stop_on_failure: bool = False
-    catch_exceptions: bool = True
-    
-    def to_locust_env(self) -> Dict[str, Any]:
-        """Convert configuration to locust environment parameters."""
-        return {
-            'host': self.host,
-            'stop_timeout': 30,
-            'catch_exceptions': self.catch_exceptions,
-        }
+# =============================================================================
+# Performance Monitoring and Measurement Infrastructure
+# =============================================================================
 
-
-@dataclass
-class DatabasePerformanceMetrics:
+class PerformanceMonitor:
     """
-    Database performance metrics for PyMongo and Motor operations.
+    Comprehensive performance monitoring system for Flask migration testing.
     
-    Comprehensive database performance tracking ensuring ≤10% variance
-    from Node.js baseline database operation performance.
-    """
-    operation_type: str
-    collection_name: str
-    duration_ms: float
-    success: bool
-    error_message: Optional[str] = None
-    document_count: int = 0
-    query_filter: Optional[Dict[str, Any]] = None
-    connection_pool_size: int = 0
-    timestamp: datetime = field(default_factory=datetime.utcnow)
-    
-    def to_prometheus_labels(self) -> Dict[str, str]:
-        """Convert metrics to Prometheus label format."""
-        return {
-            'operation': self.operation_type,
-            'collection': self.collection_name,
-            'status': 'success' if self.success else 'error'
-        }
-
-
-@dataclass
-class CachePerformanceMetrics:
-    """
-    Cache performance metrics for Redis operations.
-    
-    Redis cache performance tracking with hit/miss ratio analysis
-    and operation timing for performance baseline compliance.
-    """
-    operation_type: str
-    cache_key: str
-    duration_ms: float
-    hit: bool
-    success: bool
-    error_message: Optional[str] = None
-    value_size_bytes: int = 0
-    ttl_seconds: Optional[int] = None
-    timestamp: datetime = field(default_factory=datetime.utcnow)
-    
-    def to_prometheus_labels(self) -> Dict[str, str]:
-        """Convert cache metrics to Prometheus label format."""
-        return {
-            'operation': self.operation_type,
-            'hit_status': 'hit' if self.hit else 'miss',
-            'status': 'success' if self.success else 'error'
-        }
-
-
-class PerformanceMetricsCollector:
-    """
-    Comprehensive performance metrics collector with Prometheus integration.
-    
-    Centralized metrics collection for all performance testing scenarios
-    with real-time Prometheus metrics exposition and baseline comparison.
+    Provides performance measurement, baseline comparison, and variance tracking
+    with integration to Prometheus metrics and enterprise APM systems per
+    Section 6.5.1 monitoring and observability requirements.
     """
     
-    def __init__(self, registry: Optional[CollectorRegistry] = None):
+    def __init__(self, baseline: Optional[NodeJSPerformanceBaseline] = None,
+                 enable_prometheus: bool = True, enable_apm: bool = False):
         """
-        Initialize performance metrics collector with Prometheus registry.
+        Initialize performance monitor with comprehensive measurement capabilities.
         
         Args:
-            registry: Optional Prometheus registry (creates new if not provided)
+            baseline: Node.js performance baseline for comparison
+            enable_prometheus: Enable Prometheus metrics collection
+            enable_apm: Enable APM integration (requires APM configuration)
         """
-        self.registry = registry or CollectorRegistry()
+        self.baseline = baseline or NodeJSPerformanceBaseline()
+        self.measurements: List[PerformanceMeasurement] = []
+        self.measurement_history: deque = deque(maxlen=10000)
+        self.enable_prometheus = enable_prometheus and PROMETHEUS_AVAILABLE
+        self.enable_apm = enable_apm
         
-        # HTTP request performance metrics
-        self.http_request_duration = Histogram(
-            'http_request_duration_seconds',
-            'HTTP request duration in seconds',
-            ['method', 'endpoint', 'status'],
-            registry=self.registry
-        )
+        # Performance tracking collections
+        self.api_measurements = defaultdict(list)
+        self.database_measurements = defaultdict(list)
+        self.cache_measurements = defaultdict(list)
+        self.load_measurements = defaultdict(list)
         
-        self.http_request_count = Counter(
-            'http_requests_total',
-            'Total HTTP requests',
-            ['method', 'endpoint', 'status'],
-            registry=self.registry
-        )
-        
-        # Database performance metrics
-        self.database_operation_duration = Histogram(
-            'database_operation_duration_seconds',
-            'Database operation duration in seconds',
-            ['operation', 'collection', 'status'],
-            registry=self.registry
-        )
-        
-        self.database_operation_count = Counter(
-            'database_operations_total',
-            'Total database operations',
-            ['operation', 'collection', 'status'],
-            registry=self.registry
-        )
-        
-        self.database_connection_pool_size = Gauge(
-            'database_connection_pool_size',
-            'Database connection pool size',
-            ['pool_type'],
-            registry=self.registry
-        )
-        
-        # Cache performance metrics
-        self.cache_operation_duration = Histogram(
-            'cache_operation_duration_seconds',
-            'Cache operation duration in seconds',
-            ['operation', 'hit_status', 'status'],
-            registry=self.registry
-        )
-        
-        self.cache_operation_count = Counter(
-            'cache_operations_total',
-            'Total cache operations',
-            ['operation', 'hit_status', 'status'],
-            registry=self.registry
-        )
-        
-        self.cache_hit_ratio = Gauge(
-            'cache_hit_ratio',
-            'Cache hit ratio',
-            ['operation'],
-            registry=self.registry
-        )
-        
-        # Performance variance metrics
-        self.performance_variance = Gauge(
-            'performance_variance_percent',
-            'Performance variance from Node.js baseline',
-            ['endpoint', 'method'],
-            registry=self.registry
-        )
-        
-        self.baseline_compliance = Gauge(
-            'baseline_compliance_status',
-            'Baseline compliance status (1=pass, 0=fail)',
-            ['endpoint', 'method'],
-            registry=self.registry
-        )
-        
-        # System resource metrics
-        self.memory_usage = Gauge(
-            'memory_usage_bytes',
-            'Memory usage in bytes',
-            registry=self.registry
-        )
-        
-        self.cpu_usage = Gauge(
-            'cpu_usage_percent',
-            'CPU usage percentage',
-            registry=self.registry
-        )
-        
-        logger.info("Performance metrics collector initialized with Prometheus registry")
-    
-    def record_http_request(self, method: str, endpoint: str, duration_seconds: float, 
-                           status_code: int) -> None:
-        """Record HTTP request performance metrics."""
-        status = str(status_code)
-        
-        self.http_request_duration.labels(
-            method=method,
-            endpoint=endpoint,
-            status=status
-        ).observe(duration_seconds)
-        
-        self.http_request_count.labels(
-            method=method,
-            endpoint=endpoint,
-            status=status
-        ).inc()
-    
-    def record_database_operation(self, metrics: DatabasePerformanceMetrics) -> None:
-        """Record database operation performance metrics."""
-        labels = metrics.to_prometheus_labels()
-        duration_seconds = metrics.duration_ms / 1000.0
-        
-        self.database_operation_duration.labels(**labels).observe(duration_seconds)
-        self.database_operation_count.labels(**labels).inc()
-        
-        if metrics.connection_pool_size > 0:
-            self.database_connection_pool_size.labels(pool_type='pymongo').set(
-                metrics.connection_pool_size
-            )
-    
-    def record_cache_operation(self, metrics: CachePerformanceMetrics) -> None:
-        """Record cache operation performance metrics."""
-        labels = metrics.to_prometheus_labels()
-        duration_seconds = metrics.duration_ms / 1000.0
-        
-        self.cache_operation_duration.labels(**labels).observe(duration_seconds)
-        self.cache_operation_count.labels(**labels).inc()
-    
-    def record_performance_variance(self, endpoint: str, method: str, 
-                                  variance_percent: float, is_compliant: bool) -> None:
-        """Record performance variance from Node.js baseline."""
-        self.performance_variance.labels(
-            endpoint=endpoint,
-            method=method
-        ).set(variance_percent)
-        
-        self.baseline_compliance.labels(
-            endpoint=endpoint,
-            method=method
-        ).set(1.0 if is_compliant else 0.0)
-    
-    def update_system_metrics(self) -> None:
-        """Update system resource metrics."""
-        process = psutil.Process()
-        
-        # Memory usage
-        memory_info = process.memory_info()
-        self.memory_usage.set(memory_info.rss)
-        
-        # CPU usage
-        cpu_percent = process.cpu_percent()
-        self.cpu_usage.set(cpu_percent)
-    
-    def get_metrics_exposition(self) -> str:
-        """Get Prometheus metrics in exposition format."""
-        return generate_latest(self.registry).decode('utf-8')
-
-
-class FlaskPerformanceTestUser(HttpUser):
-    """
-    Locust user class for Flask application performance testing.
-    
-    Comprehensive load testing user simulation with realistic request
-    patterns and performance baseline validation integration.
-    """
-    
-    wait_time = between(1, 3)  # Realistic user behavior simulation
-    
-    def __init__(self, environment):
-        """Initialize performance test user with metrics collection."""
-        super().__init__(environment)
-        self.metrics_collector = PerformanceMetricsCollector()
-        self.baselines = self._load_performance_baselines()
-        
-        logger.info("Flask performance test user initialized")
-    
-    def _load_performance_baselines(self) -> Dict[str, PerformanceBaseline]:
-        """Load Node.js performance baselines for comparison."""
-        baselines = {}
-        
-        for endpoint, baseline_ms in NODEJS_BASELINE_METRICS['api_endpoints'].items():
-            method, path = endpoint.split(' ', 1)
-            baselines[endpoint] = PerformanceBaseline(
-                endpoint=path,
-                baseline_ms=baseline_ms,
-                method=method
-            )
-        
-        return baselines
-    
-    @task(3)
-    def test_health_endpoint(self):
-        """Load test health check endpoint with baseline validation."""
-        self._perform_request_with_validation('GET', '/health')
-    
-    @task(2)
-    def test_readiness_endpoint(self):
-        """Load test readiness check endpoint with baseline validation."""
-        self._perform_request_with_validation('GET', '/health/ready')
-    
-    @task(1)
-    def test_liveness_endpoint(self):
-        """Load test liveness check endpoint with baseline validation."""
-        self._perform_request_with_validation('GET', '/health/live')
-    
-    @task(5)
-    def test_user_list_endpoint(self):
-        """Load test user list endpoint with baseline validation."""
-        self._perform_request_with_validation('GET', '/api/users')
-    
-    @task(2)
-    def test_user_create_endpoint(self):
-        """Load test user creation endpoint with baseline validation."""
-        payload = {
-            'email': f'test_{int(time.time())}@example.com',
-            'name': 'Load Test User',
-            'password': 'test_password_123'
+        # Variance violation tracking
+        self.variance_violations: List[PerformanceMeasurement] = []
+        self.compliance_stats = {
+            'total_measurements': 0,
+            'compliant_measurements': 0,
+            'violation_count': 0,
+            'compliance_rate': 1.0
         }
-        self._perform_request_with_validation(
-            'POST', '/api/users', json=payload
+        
+        # Prometheus metrics setup
+        if self.enable_prometheus:
+            self._setup_prometheus_metrics()
+        
+        # Thread safety for concurrent testing
+        self._lock = threading.Lock()
+        
+        logger.info(
+            "Performance monitor initialized",
+            prometheus_enabled=self.enable_prometheus,
+            apm_enabled=self.enable_apm,
+            baseline_endpoints=len(self.baseline.api_response_times)
         )
     
-    def _perform_request_with_validation(self, method: str, endpoint: str, 
-                                       **kwargs) -> None:
-        """
-        Perform HTTP request with performance baseline validation.
-        
-        Args:
-            method: HTTP method
-            endpoint: API endpoint
-            **kwargs: Additional request parameters
-        """
-        start_time = time.time()
-        
+    def _setup_prometheus_metrics(self):
+        """Setup Prometheus metrics for performance monitoring."""
         try:
-            # Execute HTTP request
-            if method == 'GET':
-                response = self.client.get(endpoint, **kwargs)
-            elif method == 'POST':
-                response = self.client.post(endpoint, **kwargs)
-            elif method == 'PUT':
-                response = self.client.put(endpoint, **kwargs)
-            elif method == 'DELETE':
-                response = self.client.delete(endpoint, **kwargs)
-            else:
-                raise ValueError(f"Unsupported HTTP method: {method}")
+            self.registry = CollectorRegistry()
             
-            duration_seconds = time.time() - start_time
-            duration_ms = duration_seconds * 1000
-            
-            # Record metrics
-            self.metrics_collector.record_http_request(
-                method, endpoint, duration_seconds, response.status_code
+            # Response time metrics
+            self.response_time_histogram = Histogram(
+                'flask_request_duration_seconds',
+                'Flask request duration in seconds',
+                ['method', 'endpoint', 'status_code'],
+                registry=self.registry,
+                buckets=(0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0)
             )
             
-            # Validate against baseline
-            baseline_key = f"{method} {endpoint}"
-            if baseline_key in self.baselines:
-                baseline = self.baselines[baseline_key]
-                validation_result = baseline.validate_performance(duration_ms)
-                
-                self.metrics_collector.record_performance_variance(
-                    endpoint, method,
-                    validation_result['variance_percent'],
-                    validation_result['is_within_threshold']
-                )
-                
-                # Log performance validation results
-                if not validation_result['is_within_threshold']:
-                    logger.warning(
-                        "Performance baseline exceeded",
-                        endpoint=endpoint,
-                        method=method,
-                        baseline_ms=validation_result['baseline_ms'],
-                        actual_ms=validation_result['actual_ms'],
-                        variance_percent=validation_result['variance_percent']
-                    )
+            # Performance variance metrics
+            self.variance_gauge = Gauge(
+                'flask_performance_variance_ratio',
+                'Performance variance from Node.js baseline',
+                ['operation', 'category'],
+                registry=self.registry
+            )
+            
+            # Compliance metrics
+            self.compliance_gauge = Gauge(
+                'flask_performance_compliance_rate',
+                'Performance compliance rate (≤10% variance)',
+                registry=self.registry
+            )
+            
+            # Database operation metrics
+            self.database_operation_histogram = Histogram(
+                'flask_database_operation_duration_seconds',
+                'Database operation duration in seconds',
+                ['operation_type', 'collection'],
+                registry=self.registry
+            )
+            
+            # Cache operation metrics
+            self.cache_operation_histogram = Histogram(
+                'flask_cache_operation_duration_seconds',
+                'Cache operation duration in seconds',
+                ['operation_type', 'cache_hit'],
+                registry=self.registry
+            )
+            
+            # Load testing metrics
+            self.load_test_summary = Summary(
+                'flask_load_test_response_time_seconds',
+                'Load test response time summary',
+                ['concurrent_users'],
+                registry=self.registry
+            )
+            
+            logger.info("Prometheus metrics configured successfully")
             
         except Exception as e:
-            duration_seconds = time.time() - start_time
-            self.metrics_collector.record_http_request(
-                method, endpoint, duration_seconds, 500
-            )
-            logger.error(f"Load test request failed: {e}")
+            logger.warning(f"Failed to setup Prometheus metrics: {e}")
+            self.enable_prometheus = False
+    
+    @contextmanager
+    def measure_operation(self, operation_name: str, category: str, **kwargs):
+        """
+        Context manager for measuring operation performance.
+        
+        Args:
+            operation_name: Name of the operation being measured
+            category: Performance category (api, database, cache, load)
+            **kwargs: Additional context information
+            
+        Yields:
+            Performance measurement context
+        """
+        start_time = time.perf_counter()
+        start_cpu = self._get_cpu_usage()
+        start_memory = self._get_memory_usage()
+        
+        measurement = PerformanceMeasurement(
+            operation_name=operation_name,
+            category=category,
+            measured_value=0.0,
+            **kwargs
+        )
+        
+        try:
+            yield measurement
+            
+        except Exception as e:
+            measurement.error_count += 1
+            logger.error(f"Error during performance measurement: {e}")
             raise
+            
+        finally:
+            end_time = time.perf_counter()
+            end_cpu = self._get_cpu_usage()
+            end_memory = self._get_memory_usage()
+            
+            # Calculate performance metrics
+            duration_seconds = end_time - start_time
+            measurement.measured_value = duration_seconds * 1000  # Convert to milliseconds
+            measurement.cpu_usage = end_cpu - start_cpu if start_cpu and end_cpu else None
+            measurement.memory_usage = end_memory - start_memory if start_memory and end_memory else None
+            
+            # Calculate variance and compliance
+            measurement.calculate_variance(self.baseline)
+            
+            # Record measurement
+            self._record_measurement(measurement)
+    
+    def _record_measurement(self, measurement: PerformanceMeasurement):
+        """Record performance measurement with comprehensive tracking."""
+        with self._lock:
+            # Add to measurement collections
+            self.measurements.append(measurement)
+            self.measurement_history.append(measurement)
+            
+            # Categorize measurements
+            if measurement.category == 'api':
+                self.api_measurements[measurement.operation_name].append(measurement)
+            elif measurement.category == 'database':
+                self.database_measurements[measurement.operation_name].append(measurement)
+            elif measurement.category == 'cache':
+                self.cache_measurements[measurement.operation_name].append(measurement)
+            elif measurement.category == 'load':
+                self.load_measurements[measurement.operation_name].append(measurement)
+            
+            # Track compliance statistics
+            self.compliance_stats['total_measurements'] += 1
+            
+            if measurement.is_compliant(self.baseline):
+                self.compliance_stats['compliant_measurements'] += 1
+            else:
+                self.variance_violations.append(measurement)
+                self.compliance_stats['violation_count'] += 1
+                
+                logger.warning(
+                    "Performance variance violation detected",
+                    operation=measurement.operation_name,
+                    category=measurement.category,
+                    measured_value=measurement.measured_value,
+                    baseline_value=measurement.baseline_value,
+                    variance=measurement.variance,
+                    threshold=self.baseline.variance_thresholds['acceptable_variance']
+                )
+            
+            # Update compliance rate
+            self.compliance_stats['compliance_rate'] = (
+                self.compliance_stats['compliant_measurements'] / 
+                self.compliance_stats['total_measurements']
+            )
+            
+            # Update Prometheus metrics
+            if self.enable_prometheus:
+                self._update_prometheus_metrics(measurement)
+    
+    def _update_prometheus_metrics(self, measurement: PerformanceMeasurement):
+        """Update Prometheus metrics with measurement data."""
+        try:
+            duration_seconds = measurement.measured_value / 1000.0
+            
+            # Update response time metrics
+            if measurement.category == 'api' and measurement.endpoint:
+                self.response_time_histogram.labels(
+                    method=measurement.http_method or 'GET',
+                    endpoint=measurement.endpoint,
+                    status_code=measurement.status_code or 200
+                ).observe(duration_seconds)
+            
+            # Update variance metrics
+            if measurement.variance is not None:
+                self.variance_gauge.labels(
+                    operation=measurement.operation_name,
+                    category=measurement.category
+                ).set(measurement.variance)
+            
+            # Update compliance rate
+            self.compliance_gauge.set(self.compliance_stats['compliance_rate'])
+            
+            # Update database metrics
+            if measurement.category == 'database':
+                self.database_operation_histogram.labels(
+                    operation_type=measurement.query_type or measurement.operation_name,
+                    collection=measurement.collection_name or 'unknown'
+                ).observe(duration_seconds)
+            
+            # Update cache metrics
+            if measurement.category == 'cache':
+                self.cache_operation_histogram.labels(
+                    operation_type=measurement.operation_name,
+                    cache_hit=str(measurement.cache_hit) if measurement.cache_hit is not None else 'unknown'
+                ).observe(duration_seconds)
+            
+            # Update load test metrics
+            if measurement.category == 'load' and measurement.concurrent_users:
+                self.load_test_summary.labels(
+                    concurrent_users=str(measurement.concurrent_users)
+                ).observe(duration_seconds)
+                
+        except Exception as e:
+            logger.warning(f"Failed to update Prometheus metrics: {e}")
+    
+    def _get_cpu_usage(self) -> Optional[float]:
+        """Get current CPU usage percentage."""
+        try:
+            import psutil
+            return psutil.cpu_percent(interval=0.1)
+        except ImportError:
+            return None
+    
+    def _get_memory_usage(self) -> Optional[float]:
+        """Get current memory usage percentage."""
+        try:
+            import psutil
+            return psutil.virtual_memory().percent
+        except ImportError:
+            return None
+    
+    def get_performance_summary(self) -> Dict[str, Any]:
+        """
+        Get comprehensive performance summary with variance analysis.
+        
+        Returns:
+            Dictionary containing performance statistics and compliance metrics
+        """
+        with self._lock:
+            summary = {
+                'measurement_summary': {
+                    'total_measurements': len(self.measurements),
+                    'api_measurements': len(self.api_measurements),
+                    'database_measurements': len(self.database_measurements),
+                    'cache_measurements': len(self.cache_measurements),
+                    'load_measurements': len(self.load_measurements)
+                },
+                'compliance_summary': self.compliance_stats.copy(),
+                'variance_violations': len(self.variance_violations),
+                'category_performance': {},
+                'top_violations': [],
+                'performance_trends': {}
+            }
+            
+            # Category-specific performance analysis
+            for category in ['api', 'database', 'cache', 'load']:
+                measurements = getattr(self, f'{category}_measurements')
+                if measurements:
+                    category_stats = self._calculate_category_stats(measurements)
+                    summary['category_performance'][category] = category_stats
+            
+            # Top variance violations
+            sorted_violations = sorted(
+                self.variance_violations,
+                key=lambda x: x.variance or 0,
+                reverse=True
+            )
+            summary['top_violations'] = [
+                {
+                    'operation': v.operation_name,
+                    'category': v.category,
+                    'variance': v.variance,
+                    'measured_value': v.measured_value,
+                    'baseline_value': v.baseline_value
+                }
+                for v in sorted_violations[:10]
+            ]
+            
+            # Performance trends (last 100 measurements)
+            recent_measurements = list(self.measurement_history)[-100:]
+            if recent_measurements:
+                summary['performance_trends'] = self._calculate_performance_trends(recent_measurements)
+            
+            return summary
+    
+    def _calculate_category_stats(self, measurements_dict: Dict[str, List[PerformanceMeasurement]]) -> Dict[str, Any]:
+        """Calculate statistics for a performance category."""
+        all_measurements = []
+        for operation_measurements in measurements_dict.values():
+            all_measurements.extend(operation_measurements)
+        
+        if not all_measurements:
+            return {}
+        
+        measured_values = [m.measured_value for m in all_measurements]
+        variances = [m.variance for m in all_measurements if m.variance is not None]
+        compliant_count = sum(1 for m in all_measurements if m.is_compliant(self.baseline))
+        
+        stats = {
+            'measurement_count': len(all_measurements),
+            'avg_response_time': statistics.mean(measured_values),
+            'median_response_time': statistics.median(measured_values),
+            'min_response_time': min(measured_values),
+            'max_response_time': max(measured_values),
+            'compliance_rate': compliant_count / len(all_measurements) if all_measurements else 0,
+            'avg_variance': statistics.mean(variances) if variances else None,
+            'max_variance': max(variances) if variances else None
+        }
+        
+        # Add standard deviation if enough measurements
+        if len(measured_values) > 1:
+            stats['std_deviation'] = statistics.stdev(measured_values)
+        
+        return stats
+    
+    def _calculate_performance_trends(self, measurements: List[PerformanceMeasurement]) -> Dict[str, Any]:
+        """Calculate performance trends from recent measurements."""
+        if len(measurements) < 2:
+            return {}
+        
+        # Group measurements by time windows
+        time_windows = {}
+        for measurement in measurements:
+            # 5-minute time windows
+            window_key = measurement.timestamp.replace(second=0, microsecond=0)
+            window_key = window_key.replace(minute=window_key.minute // 5 * 5)
+            
+            if window_key not in time_windows:
+                time_windows[window_key] = []
+            time_windows[window_key].append(measurement)
+        
+        # Calculate trend statistics
+        window_stats = []
+        for window_time, window_measurements in sorted(time_windows.items()):
+            measured_values = [m.measured_value for m in window_measurements]
+            compliance_count = sum(1 for m in window_measurements if m.is_compliant(self.baseline))
+            
+            window_stats.append({
+                'timestamp': window_time.isoformat(),
+                'measurement_count': len(window_measurements),
+                'avg_response_time': statistics.mean(measured_values),
+                'compliance_rate': compliance_count / len(window_measurements)
+            })
+        
+        # Calculate trend direction
+        if len(window_stats) >= 2:
+            recent_avg = window_stats[-1]['avg_response_time']
+            previous_avg = window_stats[-2]['avg_response_time']
+            trend_direction = 'improving' if recent_avg < previous_avg else 'degrading'
+        else:
+            trend_direction = 'stable'
+        
+        return {
+            'window_stats': window_stats,
+            'trend_direction': trend_direction,
+            'window_count': len(window_stats)
+        }
+    
+    def export_prometheus_metrics(self) -> str:
+        """Export Prometheus metrics in text format."""
+        if not self.enable_prometheus:
+            return "# Prometheus metrics not enabled"
+        
+        try:
+            from prometheus_client import generate_latest
+            return generate_latest(self.registry).decode('utf-8')
+        except Exception as e:
+            logger.error(f"Failed to export Prometheus metrics: {e}")
+            return f"# Error exporting metrics: {e}"
+    
+    def reset_measurements(self):
+        """Reset all performance measurements and statistics."""
+        with self._lock:
+            self.measurements.clear()
+            self.measurement_history.clear()
+            self.api_measurements.clear()
+            self.database_measurements.clear()
+            self.cache_measurements.clear()
+            self.load_measurements.clear()
+            self.variance_violations.clear()
+            
+            self.compliance_stats = {
+                'total_measurements': 0,
+                'compliant_measurements': 0,
+                'violation_count': 0,
+                'compliance_rate': 1.0
+            }
+            
+            logger.info("Performance measurements reset")
 
+
+# =============================================================================
+# Load Testing Utilities with Locust Integration
+# =============================================================================
+
+if LOCUST_AVAILABLE:
+    
+    class FlaskLoadTestUser(HttpUser):
+        """
+        Locust user class for Flask application load testing.
+        
+        Implements comprehensive load testing scenarios for API endpoints,
+        authentication flows, and database operations per Section 6.6.1
+        load testing framework requirements.
+        """
+        
+        wait_time = between(1, 3)  # Wait 1-3 seconds between requests
+        
+        def on_start(self):
+            """Initialize user session with authentication."""
+            # Authenticate user for load testing
+            response = self.client.post("/auth/login", json={
+                "email": f"loadtest_{uuid.uuid4().hex[:8]}@example.com",
+                "password": "loadtest_password"
+            })
+            
+            if response.status_code == 200:
+                self.auth_token = response.json().get("access_token")
+                self.client.headers.update({
+                    "Authorization": f"Bearer {self.auth_token}"
+                })
+        
+        @task(3)
+        def get_user_profile(self):
+            """Test user profile retrieval performance."""
+            self.client.get("/api/users/profile")
+        
+        @task(2)
+        def list_projects(self):
+            """Test project listing performance."""
+            self.client.get("/api/projects?page=1&limit=20")
+        
+        @task(1)
+        def search_users(self):
+            """Test user search performance."""
+            search_term = random.choice(['john', 'admin', 'test', 'user'])
+            self.client.get(f"/api/users/search?q={search_term}")
+        
+        @task(1)
+        def update_profile(self):
+            """Test profile update performance."""
+            self.client.put("/api/users/profile", json={
+                "display_name": f"Load Test User {random.randint(1, 1000)}"
+            })
+        
+        @task(1)
+        def create_project(self):
+            """Test project creation performance."""
+            self.client.post("/api/projects", json={
+                "name": f"Load Test Project {uuid.uuid4().hex[:8]}",
+                "description": "Project created during load testing"
+            })
+
+
+class LoadTestGenerator:
+    """
+    Comprehensive load testing generator using Locust framework.
+    
+    Provides programmatic load testing capabilities with performance
+    measurement and baseline comparison per Section 6.6.1 requirements.
+    """
+    
+    def __init__(self, performance_monitor: PerformanceMonitor,
+                 base_url: str = "http://localhost:5000"):
+        """
+        Initialize load test generator.
+        
+        Args:
+            performance_monitor: Performance monitoring instance
+            base_url: Base URL for Flask application
+        """
+        self.performance_monitor = performance_monitor
+        self.base_url = base_url
+        self.test_results: List[Dict[str, Any]] = []
+        
+        if not LOCUST_AVAILABLE:
+            logger.warning("Locust not available, load testing disabled")
+        
+        logger.info(f"Load test generator initialized for {base_url}")
+    
+    def run_load_test(self, concurrent_users: int = 10, duration_seconds: int = 60,
+                     spawn_rate: int = 1, endpoints: Optional[List[str]] = None) -> Dict[str, Any]:
+        """
+        Run comprehensive load test with performance measurement.
+        
+        Args:
+            concurrent_users: Number of concurrent users to simulate
+            duration_seconds: Duration of load test in seconds
+            spawn_rate: Rate of spawning new users per second
+            endpoints: Specific endpoints to test (None for all)
+            
+        Returns:
+            Load test results with performance metrics
+        """
+        if not LOCUST_AVAILABLE:
+            return {
+                'error': 'Locust not available for load testing',
+                'concurrent_users': concurrent_users,
+                'duration_seconds': duration_seconds
+            }
+        
+        try:
+            # Setup Locust environment
+            env = Environment(user_classes=[FlaskLoadTestUser])
+            env.create_local_runner()
+            
+            # Configure test parameters
+            env.runner.start(concurrent_users, spawn_rate=spawn_rate)
+            
+            # Measure load test performance
+            start_time = time.time()
+            
+            with self.performance_monitor.measure_operation(
+                operation_name=f"load_test_{concurrent_users}_users",
+                category="load",
+                concurrent_users=concurrent_users,
+                endpoint="load_test"
+            ) as measurement:
+                
+                # Run load test
+                time.sleep(duration_seconds)
+                
+                # Stop test and collect results
+                env.runner.stop()
+                
+                # Calculate performance metrics
+                stats = env.runner.stats.total
+                
+                measurement.requests_per_second = stats.total_rps
+                measurement.error_rate = stats.fail_ratio
+                measurement.measured_value = stats.avg_response_time
+                
+                # Collect detailed results
+                results = {
+                    'test_parameters': {
+                        'concurrent_users': concurrent_users,
+                        'duration_seconds': duration_seconds,
+                        'spawn_rate': spawn_rate,
+                        'base_url': self.base_url
+                    },
+                    'performance_metrics': {
+                        'total_requests': stats.num_requests,
+                        'failed_requests': stats.num_failures,
+                        'requests_per_second': stats.total_rps,
+                        'avg_response_time': stats.avg_response_time,
+                        'min_response_time': stats.min_response_time,
+                        'max_response_time': stats.max_response_time,
+                        'median_response_time': stats.median_response_time,
+                        'error_rate': stats.fail_ratio,
+                        'total_content_length': stats.total_content_length
+                    },
+                    'baseline_comparison': {},
+                    'compliance_status': {}
+                }
+                
+                # Compare with Node.js baseline
+                baseline_key = f"{concurrent_users}_users"
+                if baseline_key in self.performance_monitor.baseline.load_performance:
+                    baseline_data = self.performance_monitor.baseline.load_performance[baseline_key]
+                    
+                    response_time_variance = self.performance_monitor.baseline.calculate_variance(
+                        stats.avg_response_time, baseline_data['avg_response_time']
+                    )
+                    
+                    rps_variance = self.performance_monitor.baseline.calculate_variance(
+                        stats.total_rps, baseline_data['requests_per_second']
+                    )
+                    
+                    error_rate_variance = self.performance_monitor.baseline.calculate_variance(
+                        stats.fail_ratio, baseline_data['error_rate']
+                    )
+                    
+                    results['baseline_comparison'] = {
+                        'response_time_baseline': baseline_data['avg_response_time'],
+                        'response_time_variance': response_time_variance,
+                        'rps_baseline': baseline_data['requests_per_second'],
+                        'rps_variance': rps_variance,
+                        'error_rate_baseline': baseline_data['error_rate'],
+                        'error_rate_variance': error_rate_variance
+                    }
+                    
+                    # Determine compliance status
+                    results['compliance_status'] = {
+                        'response_time_compliant': response_time_variance <= 0.10,
+                        'rps_compliant': rps_variance <= 0.15,  # Slightly higher tolerance for RPS
+                        'error_rate_compliant': error_rate_variance <= 0.05,
+                        'overall_compliant': (
+                            response_time_variance <= 0.10 and
+                            rps_variance <= 0.15 and
+                            error_rate_variance <= 0.05
+                        )
+                    }
+                
+                # Record test results
+                self.test_results.append(results)
+                
+                logger.info(
+                    "Load test completed",
+                    concurrent_users=concurrent_users,
+                    duration=duration_seconds,
+                    total_requests=stats.num_requests,
+                    avg_response_time=stats.avg_response_time,
+                    requests_per_second=stats.total_rps,
+                    error_rate=stats.fail_ratio,
+                    compliant=results['compliance_status'].get('overall_compliant', False)
+                )
+                
+                return results
+                
+        except Exception as e:
+            logger.error(f"Load test failed: {e}")
+            return {
+                'error': str(e),
+                'concurrent_users': concurrent_users,
+                'duration_seconds': duration_seconds
+            }
+    
+    def run_stress_test(self, max_users: int = 200, step_duration: int = 30) -> List[Dict[str, Any]]:
+        """
+        Run progressive stress test with increasing user load.
+        
+        Args:
+            max_users: Maximum number of concurrent users
+            step_duration: Duration of each load step in seconds
+            
+        Returns:
+            List of load test results for each step
+        """
+        user_steps = [10, 25, 50, 75, 100, 150, 200]
+        user_steps = [step for step in user_steps if step <= max_users]
+        
+        stress_test_results = []
+        
+        for user_count in user_steps:
+            logger.info(f"Running stress test step: {user_count} users")
+            
+            step_result = self.run_load_test(
+                concurrent_users=user_count,
+                duration_seconds=step_duration,
+                spawn_rate=min(user_count // 5, 10)  # Gradual spawn rate
+            )
+            
+            step_result['stress_test_step'] = user_count
+            stress_test_results.append(step_result)
+            
+            # Brief pause between steps
+            time.sleep(5)
+        
+        return stress_test_results
+    
+    def analyze_load_test_trends(self) -> Dict[str, Any]:
+        """Analyze trends across multiple load test runs."""
+        if not self.test_results:
+            return {'error': 'No load test results available for analysis'}
+        
+        # Extract trend data
+        user_counts = []
+        response_times = []
+        rps_values = []
+        error_rates = []
+        compliance_rates = []
+        
+        for result in self.test_results:
+            params = result['test_parameters']
+            metrics = result['performance_metrics']
+            compliance = result.get('compliance_status', {})
+            
+            user_counts.append(params['concurrent_users'])
+            response_times.append(metrics['avg_response_time'])
+            rps_values.append(metrics['requests_per_second'])
+            error_rates.append(metrics['error_rate'])
+            compliance_rates.append(1.0 if compliance.get('overall_compliant', False) else 0.0)
+        
+        # Calculate trend analysis
+        analysis = {
+            'test_count': len(self.test_results),
+            'user_range': {'min': min(user_counts), 'max': max(user_counts)},
+            'response_time_trend': {
+                'values': response_times,
+                'avg': statistics.mean(response_times),
+                'min': min(response_times),
+                'max': max(response_times)
+            },
+            'throughput_trend': {
+                'values': rps_values,
+                'avg': statistics.mean(rps_values),
+                'min': min(rps_values),
+                'max': max(rps_values)
+            },
+            'error_rate_trend': {
+                'values': error_rates,
+                'avg': statistics.mean(error_rates),
+                'min': min(error_rates),
+                'max': max(error_rates)
+            },
+            'compliance_trend': {
+                'overall_compliance_rate': statistics.mean(compliance_rates),
+                'compliant_tests': sum(compliance_rates),
+                'total_tests': len(compliance_rates)
+            }
+        }
+        
+        return analysis
+
+
+# =============================================================================
+# Database Performance Testing Fixtures
+# =============================================================================
 
 class DatabasePerformanceTester:
     """
-    Database performance testing utilities for PyMongo and Motor operations.
+    Comprehensive database performance testing for PyMongo and Motor operations.
     
-    Comprehensive database performance validation ensuring ≤10% variance
-    from Node.js baseline with PyMongo sync and Motor async operations.
+    Provides performance measurement for MongoDB operations with baseline
+    comparison and variance tracking per Section 6.2.4 database performance
+    optimization requirements.
     """
     
-    def __init__(self, mongodb_uri: str, database_name: str = 'test_performance'):
+    def __init__(self, performance_monitor: PerformanceMonitor,
+                 mongodb_client: Optional[MongoClient] = None,
+                 motor_client: Optional['AsyncIOMotorClient'] = None):
         """
         Initialize database performance tester.
         
         Args:
-            mongodb_uri: MongoDB connection URI
-            database_name: Test database name
+            performance_monitor: Performance monitoring instance
+            mongodb_client: PyMongo synchronous client
+            motor_client: Motor asynchronous client
         """
-        self.mongodb_uri = mongodb_uri
-        self.database_name = database_name
-        self.sync_client = None
-        self.async_client = None
-        self.metrics_collector = PerformanceMetricsCollector()
-        self.baselines = NODEJS_BASELINE_METRICS['database_operations']
+        self.performance_monitor = performance_monitor
+        self.mongodb_client = mongodb_client
+        self.motor_client = motor_client
+        
+        # Test data generators
+        self.test_collections = ['users', 'projects', 'sessions', 'analytics']
+        self.sample_data = self._generate_sample_data()
         
         logger.info(
             "Database performance tester initialized",
-            mongodb_uri=mongodb_uri.split('@')[-1] if '@' in mongodb_uri else mongodb_uri,
-            database_name=database_name
+            pymongo_available=self.mongodb_client is not None,
+            motor_available=self.motor_client is not None
         )
     
-    def setup_sync_client(self) -> pymongo.MongoClient:
-        """Setup PyMongo synchronous client for performance testing."""
-        if not self.sync_client:
-            self.sync_client = pymongo.MongoClient(
-                self.mongodb_uri,
-                maxPoolSize=50,
-                serverSelectionTimeoutMS=10000,
-                connectTimeoutMS=10000,
-                socketTimeoutMS=60000
-            )
-        return self.sync_client
-    
-    async def setup_async_client(self) -> motor.motor_asyncio.AsyncIOMotorClient:
-        """Setup Motor async client for performance testing."""
-        if not self.async_client:
-            self.async_client = motor.motor_asyncio.AsyncIOMotorClient(
-                self.mongodb_uri,
-                maxPoolSize=100,
-                serverSelectionTimeoutMS=10000,
-                connectTimeoutMS=10000,
-                socketTimeoutMS=60000
-            )
-        return self.async_client
-    
-    def test_sync_operations(self, collection_name: str = 'test_users',
-                           operation_count: int = 100) -> List[DatabasePerformanceMetrics]:
-        """
-        Test PyMongo synchronous operations with performance measurement.
+    def _generate_sample_data(self) -> Dict[str, List[Dict[str, Any]]]:
+        """Generate sample data for database performance testing."""
+        sample_data = {}
         
-        Args:
-            collection_name: MongoDB collection name
-            operation_count: Number of operations to perform
-            
-        Returns:
-            List of database performance metrics
-        """
-        client = self.setup_sync_client()
-        db = client[self.database_name]
-        collection = db[collection_name]
-        
-        metrics = []
-        
-        # Test insert operations
-        for i in range(operation_count):
-            start_time = time.time()
-            try:
-                document = {
-                    '_id': ObjectId(),
-                    'name': f'Test User {i}',
-                    'email': f'user{i}@test.com',
-                    'created_at': datetime.utcnow(),
-                    'test_data': {'index': i, 'batch': 'performance_test'}
+        # User documents
+        sample_data['users'] = [
+            {
+                '_id': f"user_{i}",
+                'email': f"user{i}@example.com",
+                'username': f"user{i}",
+                'display_name': f"User {i}",
+                'created_at': datetime.utcnow() - timedelta(days=random.randint(1, 365)),
+                'profile': {
+                    'bio': f"Bio for user {i}",
+                    'location': random.choice(['NYC', 'SF', 'LA', 'Chicago', 'Boston']),
+                    'preferences': {
+                        'theme': random.choice(['light', 'dark']),
+                        'notifications': random.choice([True, False])
+                    }
+                },
+                'metrics': {
+                    'login_count': random.randint(1, 100),
+                    'last_login': datetime.utcnow() - timedelta(days=random.randint(1, 30))
                 }
-                
-                result = collection.insert_one(document)
-                duration_ms = (time.time() - start_time) * 1000
-                
-                metric = DatabasePerformanceMetrics(
-                    operation_type='insert_one',
-                    collection_name=collection_name,
-                    duration_ms=duration_ms,
-                    success=True,
-                    document_count=1,
-                    connection_pool_size=client.options.pool_options.max_pool_size
+            }
+            for i in range(1000)
+        ]
+        
+        # Project documents
+        sample_data['projects'] = [
+            {
+                '_id': f"project_{i}",
+                'name': f"Project {i}",
+                'description': f"Description for project {i}",
+                'owner_id': f"user_{random.randint(1, 100)}",
+                'created_at': datetime.utcnow() - timedelta(days=random.randint(1, 180)),
+                'status': random.choice(['active', 'inactive', 'archived']),
+                'tags': random.sample(['python', 'flask', 'mongodb', 'testing', 'api', 'web'], 3),
+                'metrics': {
+                    'views': random.randint(1, 1000),
+                    'collaborators': random.randint(1, 10)
+                }
+            }
+            for i in range(500)
+        ]
+        
+        # Session documents
+        sample_data['sessions'] = [
+            {
+                '_id': f"session_{i}",
+                'user_id': f"user_{random.randint(1, 100)}",
+                'session_token': f"token_{uuid.uuid4().hex}",
+                'created_at': datetime.utcnow() - timedelta(hours=random.randint(1, 24)),
+                'expires_at': datetime.utcnow() + timedelta(hours=24),
+                'ip_address': f"192.168.1.{random.randint(1, 254)}",
+                'user_agent': 'Mozilla/5.0 (Test Browser)'
+            }
+            for i in range(200)
+        ]
+        
+        return sample_data
+    
+    def measure_find_operations(self, collection_name: str = 'users') -> Dict[str, PerformanceMeasurement]:
+        """Measure find operation performance."""
+        results = {}
+        
+        if self.mongodb_client:
+            collection = self.mongodb_client.get_default_database()[collection_name]
+            
+            # Find one operation
+            with self.performance_monitor.measure_operation(
+                operation_name='find_one',
+                category='database',
+                collection_name=collection_name,
+                query_type='find_one'
+            ) as measurement:
+                document = collection.find_one({'_id': 'user_1'})
+                measurement.document_count = 1 if document else 0
+                results['find_one'] = measurement
+            
+            # Find many operation
+            with self.performance_monitor.measure_operation(
+                operation_name='find_many',
+                category='database',
+                collection_name=collection_name,
+                query_type='find_many'
+            ) as measurement:
+                documents = list(collection.find().limit(100))
+                measurement.document_count = len(documents)
+                results['find_many'] = measurement
+            
+            # Indexed query
+            with self.performance_monitor.measure_operation(
+                operation_name='index_query',
+                category='database',
+                collection_name=collection_name,
+                query_type='indexed_query'
+            ) as measurement:
+                documents = list(collection.find({'email': 'user1@example.com'}))
+                measurement.document_count = len(documents)
+                results['index_query'] = measurement
+            
+            # Aggregation query
+            with self.performance_monitor.measure_operation(
+                operation_name='aggregate_simple',
+                category='database',
+                collection_name=collection_name,
+                query_type='aggregation'
+            ) as measurement:
+                pipeline = [
+                    {'$match': {'profile.location': 'NYC'}},
+                    {'$group': {'_id': '$profile.location', 'count': {'$sum': 1}}}
+                ]
+                documents = list(collection.aggregate(pipeline))
+                measurement.document_count = len(documents)
+                results['aggregate_simple'] = measurement
+        
+        return results
+    
+    def measure_write_operations(self, collection_name: str = 'test_performance') -> Dict[str, PerformanceMeasurement]:
+        """Measure write operation performance."""
+        results = {}
+        
+        if self.mongodb_client:
+            collection = self.mongodb_client.get_default_database()[collection_name]
+            
+            # Insert one operation
+            with self.performance_monitor.measure_operation(
+                operation_name='insert_one',
+                category='database',
+                collection_name=collection_name,
+                query_type='insert_one'
+            ) as measurement:
+                test_doc = {
+                    '_id': f"test_{uuid.uuid4().hex}",
+                    'created_at': datetime.utcnow(),
+                    'test_data': 'performance_test'
+                }
+                result = collection.insert_one(test_doc)
+                measurement.document_count = 1 if result.inserted_id else 0
+                results['insert_one'] = measurement
+            
+            # Insert many operation
+            with self.performance_monitor.measure_operation(
+                operation_name='insert_many',
+                category='database',
+                collection_name=collection_name,
+                query_type='insert_many'
+            ) as measurement:
+                test_docs = [
+                    {
+                        '_id': f"bulk_{i}_{uuid.uuid4().hex[:8]}",
+                        'created_at': datetime.utcnow(),
+                        'bulk_index': i
+                    }
+                    for i in range(100)
+                ]
+                result = collection.insert_many(test_docs)
+                measurement.document_count = len(result.inserted_ids)
+                results['insert_many'] = measurement
+            
+            # Update one operation
+            with self.performance_monitor.measure_operation(
+                operation_name='update_one',
+                category='database',
+                collection_name=collection_name,
+                query_type='update_one'
+            ) as measurement:
+                result = collection.update_one(
+                    {'test_data': 'performance_test'},
+                    {'$set': {'updated_at': datetime.utcnow()}}
                 )
+                measurement.document_count = result.modified_count
+                results['update_one'] = measurement
+            
+            # Delete operations (cleanup)
+            collection.delete_many({'_id': {'$regex': '^(test_|bulk_)'}})
+        
+        return results
+    
+    async def measure_async_operations(self, collection_name: str = 'users') -> Dict[str, PerformanceMeasurement]:
+        """Measure Motor async operation performance."""
+        results = {}
+        
+        if not self.motor_client:
+            logger.warning("Motor client not available for async operations")
+            return results
+        
+        try:
+            collection = self.motor_client.get_default_database()[collection_name]
+            
+            # Async find one operation
+            with self.performance_monitor.measure_operation(
+                operation_name='async_find_one',
+                category='database',
+                collection_name=collection_name,
+                query_type='async_find_one'
+            ) as measurement:
+                document = await collection.find_one({'_id': 'user_1'})
+                measurement.document_count = 1 if document else 0
+                results['async_find_one'] = measurement
+            
+            # Async find many operation
+            with self.performance_monitor.measure_operation(
+                operation_name='async_find_many',
+                category='database',
+                collection_name=collection_name,
+                query_type='async_find_many'
+            ) as measurement:
+                cursor = collection.find().limit(100)
+                documents = await cursor.to_list(length=100)
+                measurement.document_count = len(documents)
+                results['async_find_many'] = measurement
+            
+            # Async aggregation
+            with self.performance_monitor.measure_operation(
+                operation_name='async_aggregate',
+                category='database',
+                collection_name=collection_name,
+                query_type='async_aggregation'
+            ) as measurement:
+                pipeline = [
+                    {'$match': {'profile.location': 'SF'}},
+                    {'$group': {'_id': '$profile.location', 'count': {'$sum': 1}}}
+                ]
+                cursor = collection.aggregate(pipeline)
+                documents = await cursor.to_list(length=None)
+                measurement.document_count = len(documents)
+                results['async_aggregate'] = measurement
                 
-                metrics.append(metric)
-                self.metrics_collector.record_database_operation(metric)
-                
-                # Validate against baseline
-                if duration_ms > self.baselines.get('user_insert_one', 0) * 1.1:
-                    logger.warning(
-                        "Database insert operation exceeded baseline",
-                        operation='insert_one',
-                        duration_ms=duration_ms,
-                        baseline_ms=self.baselines.get('user_insert_one')
+        except Exception as e:
+            logger.error(f"Async database operations failed: {e}")
+        
+        return results
+    
+    def run_comprehensive_database_performance_test(self) -> Dict[str, Any]:
+        """Run comprehensive database performance test suite."""
+        logger.info("Starting comprehensive database performance test")
+        
+        test_results = {
+            'sync_operations': {},
+            'async_operations': {},
+            'performance_summary': {},
+            'compliance_status': {}
+        }
+        
+        # Test synchronous operations
+        for collection_name in ['users', 'projects']:
+            find_results = self.measure_find_operations(collection_name)
+            write_results = self.measure_write_operations(f"test_{collection_name}")
+            
+            test_results['sync_operations'][collection_name] = {
+                'find_operations': find_results,
+                'write_operations': write_results
+            }
+        
+        # Test asynchronous operations
+        if self.motor_client:
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            try:
+                for collection_name in ['users', 'projects']:
+                    async_results = loop.run_until_complete(
+                        self.measure_async_operations(collection_name)
                     )
-                
-            except Exception as e:
-                duration_ms = (time.time() - start_time) * 1000
-                metric = DatabasePerformanceMetrics(
-                    operation_type='insert_one',
-                    collection_name=collection_name,
-                    duration_ms=duration_ms,
-                    success=False,
-                    error_message=str(e)
-                )
-                metrics.append(metric)
-                self.metrics_collector.record_database_operation(metric)
+                    test_results['async_operations'][collection_name] = async_results
+            finally:
+                loop.close()
         
-        # Test find operations
-        start_time = time.time()
-        try:
-            cursor = collection.find({'test_data.batch': 'performance_test'})
-            documents = list(cursor)
-            duration_ms = (time.time() - start_time) * 1000
-            
-            metric = DatabasePerformanceMetrics(
-                operation_type='find_many',
-                collection_name=collection_name,
-                duration_ms=duration_ms,
-                success=True,
-                document_count=len(documents),
-                connection_pool_size=client.options.pool_options.max_pool_size
-            )
-            
-            metrics.append(metric)
-            self.metrics_collector.record_database_operation(metric)
-            
-        except Exception as e:
-            duration_ms = (time.time() - start_time) * 1000
-            metric = DatabasePerformanceMetrics(
-                operation_type='find_many',
-                collection_name=collection_name,
-                duration_ms=duration_ms,
-                success=False,
-                error_message=str(e)
-            )
-            metrics.append(metric)
-            self.metrics_collector.record_database_operation(metric)
+        # Calculate performance summary
+        test_results['performance_summary'] = self._calculate_database_performance_summary()
         
-        return metrics
+        # Check compliance status
+        test_results['compliance_status'] = self._check_database_compliance()
+        
+        logger.info("Comprehensive database performance test completed")
+        return test_results
     
-    async def test_async_operations(self, collection_name: str = 'test_users_async',
-                                  operation_count: int = 100) -> List[DatabasePerformanceMetrics]:
-        """
-        Test Motor async operations with performance measurement.
+    def _calculate_database_performance_summary(self) -> Dict[str, Any]:
+        """Calculate database performance summary from measurements."""
+        db_measurements = self.performance_monitor.database_measurements
         
-        Args:
-            collection_name: MongoDB collection name
-            operation_count: Number of operations to perform
-            
-        Returns:
-            List of database performance metrics
-        """
-        client = await self.setup_async_client()
-        db = client[self.database_name]
-        collection = db[collection_name]
+        if not db_measurements:
+            return {'error': 'No database measurements available'}
         
-        metrics = []
+        operation_stats = {}
         
-        # Test async insert operations
-        for i in range(operation_count):
-            start_time = time.time()
-            try:
-                document = {
-                    '_id': ObjectId(),
-                    'name': f'Test Async User {i}',
-                    'email': f'async_user{i}@test.com',
-                    'created_at': datetime.utcnow(),
-                    'test_data': {'index': i, 'batch': 'async_performance_test'}
+        for operation_name, measurements in db_measurements.items():
+            if measurements:
+                measured_values = [m.measured_value for m in measurements]
+                variances = [m.variance for m in measurements if m.variance is not None]
+                
+                operation_stats[operation_name] = {
+                    'measurement_count': len(measurements),
+                    'avg_response_time': statistics.mean(measured_values),
+                    'min_response_time': min(measured_values),
+                    'max_response_time': max(measured_values),
+                    'avg_variance': statistics.mean(variances) if variances else None,
+                    'compliance_rate': sum(
+                        1 for m in measurements 
+                        if m.is_compliant(self.performance_monitor.baseline)
+                    ) / len(measurements)
                 }
-                
-                result = await collection.insert_one(document)
-                duration_ms = (time.time() - start_time) * 1000
-                
-                metric = DatabasePerformanceMetrics(
-                    operation_type='async_insert_one',
-                    collection_name=collection_name,
-                    duration_ms=duration_ms,
-                    success=True,
-                    document_count=1
-                )
-                
-                metrics.append(metric)
-                self.metrics_collector.record_database_operation(metric)
-                
-            except Exception as e:
-                duration_ms = (time.time() - start_time) * 1000
-                metric = DatabasePerformanceMetrics(
-                    operation_type='async_insert_one',
-                    collection_name=collection_name,
-                    duration_ms=duration_ms,
-                    success=False,
-                    error_message=str(e)
-                )
-                metrics.append(metric)
-                self.metrics_collector.record_database_operation(metric)
         
-        # Test async find operations
-        start_time = time.time()
-        try:
-            cursor = collection.find({'test_data.batch': 'async_performance_test'})
-            documents = await cursor.to_list(length=None)
-            duration_ms = (time.time() - start_time) * 1000
-            
-            metric = DatabasePerformanceMetrics(
-                operation_type='async_find_many',
-                collection_name=collection_name,
-                duration_ms=duration_ms,
-                success=True,
-                document_count=len(documents)
-            )
-            
-            metrics.append(metric)
-            self.metrics_collector.record_database_operation(metric)
-            
-        except Exception as e:
-            duration_ms = (time.time() - start_time) * 1000
-            metric = DatabasePerformanceMetrics(
-                operation_type='async_find_many',
-                collection_name=collection_name,
-                duration_ms=duration_ms,
-                success=False,
-                error_message=str(e)
-            )
-            metrics.append(metric)
-            self.metrics_collector.record_database_operation(metric)
+        return operation_stats
+    
+    def _check_database_compliance(self) -> Dict[str, Any]:
+        """Check database operation compliance with performance requirements."""
+        db_measurements = self.performance_monitor.database_measurements
         
-        return metrics
-    
-    def cleanup_test_data(self, collection_name: str = None) -> None:
-        """Clean up test data after performance testing."""
-        if self.sync_client:
-            db = self.sync_client[self.database_name]
-            if collection_name:
-                db[collection_name].delete_many({'test_data.batch': {'$regex': 'performance_test'}})
-            else:
-                # Clean up all test collections
-                for coll_name in db.list_collection_names():
-                    if 'test_' in coll_name:
-                        db[coll_name].delete_many({'test_data.batch': {'$regex': 'performance_test'}})
-    
-    def close_connections(self) -> None:
-        """Close database connections."""
-        if self.sync_client:
-            self.sync_client.close()
-        if self.async_client:
-            self.async_client.close()
+        compliance_status = {
+            'total_operations': 0,
+            'compliant_operations': 0,
+            'violation_count': 0,
+            'compliance_rate': 0.0,
+            'violations': []
+        }
+        
+        for operation_name, measurements in db_measurements.items():
+            for measurement in measurements:
+                compliance_status['total_operations'] += 1
+                
+                if measurement.is_compliant(self.performance_monitor.baseline):
+                    compliance_status['compliant_operations'] += 1
+                else:
+                    compliance_status['violation_count'] += 1
+                    compliance_status['violations'].append({
+                        'operation': operation_name,
+                        'measured_value': measurement.measured_value,
+                        'baseline_value': measurement.baseline_value,
+                        'variance': measurement.variance,
+                        'collection': measurement.collection_name
+                    })
+        
+        if compliance_status['total_operations'] > 0:
+            compliance_status['compliance_rate'] = (
+                compliance_status['compliant_operations'] / 
+                compliance_status['total_operations']
+            )
+        
+        return compliance_status
 
+
+# =============================================================================
+# Cache Performance Testing Fixtures
+# =============================================================================
 
 class CachePerformanceTester:
     """
-    Cache performance testing utilities for Redis operations.
+    Comprehensive Redis cache performance testing with hit/miss ratio analysis.
     
-    Comprehensive Redis cache performance validation with hit/miss ratio
-    analysis and operation timing for baseline compliance testing.
+    Provides cache operation performance measurement with baseline comparison
+    and Redis-specific metrics per Section 3.4.5 caching requirements.
     """
     
-    def __init__(self, redis_uri: str = 'redis://localhost:6379/0'):
+    def __init__(self, performance_monitor: PerformanceMonitor,
+                 redis_client: Optional[Redis] = None):
         """
         Initialize cache performance tester.
         
         Args:
-            redis_uri: Redis connection URI
+            performance_monitor: Performance monitoring instance
+            redis_client: Redis client instance
         """
-        self.redis_uri = redis_uri
-        self.redis_client = None
-        self.metrics_collector = PerformanceMetricsCollector()
-        self.baselines = NODEJS_BASELINE_METRICS['cache_operations']
-        self.hit_count = 0
-        self.miss_count = 0
+        self.performance_monitor = performance_monitor
+        self.redis_client = redis_client
         
-        logger.info("Cache performance tester initialized", redis_uri=redis_uri)
-    
-    def setup_redis_client(self) -> redis.Redis:
-        """Setup Redis client for performance testing."""
-        if not self.redis_client:
-            self.redis_client = redis.from_url(
-                self.redis_uri,
-                decode_responses=True,
-                socket_timeout=DEFAULT_CACHE_OPERATION_TIMEOUT,
-                socket_connect_timeout=10.0,
-                health_check_interval=30
-            )
-        return self.redis_client
-    
-    def test_cache_operations(self, operation_count: int = 1000) -> List[CachePerformanceMetrics]:
-        """
-        Test Redis cache operations with performance measurement.
+        # Cache testing configuration
+        self.test_keys = [f"perf_test:{i}" for i in range(1000)]
+        self.test_data = {
+            'small': 'small_value',
+            'medium': 'medium_value_' + 'x' * 100,
+            'large': 'large_value_' + 'x' * 1000
+        }
         
-        Args:
-            operation_count: Number of cache operations to perform
-            
-        Returns:
-            List of cache performance metrics
-        """
-        client = self.setup_redis_client()
-        metrics = []
-        
-        # Pre-populate cache with some data for hit testing
-        for i in range(operation_count // 2):
-            key = f'perf_test_key_{i}'
-            value = f'test_value_{i}_' + 'x' * 100  # 100+ character value
-            client.set(key, value, ex=3600)
-        
-        # Test cache GET operations (mix of hits and misses)
-        for i in range(operation_count):
-            # 70% hits, 30% misses for realistic testing
-            if i % 10 < 7 and i < operation_count // 2:
-                key = f'perf_test_key_{i}'  # Hit
-            else:
-                key = f'perf_test_miss_key_{i}'  # Miss
-            
-            start_time = time.time()
-            try:
-                value = client.get(key)
-                duration_ms = (time.time() - start_time) * 1000
-                hit = value is not None
-                
-                if hit:
-                    self.hit_count += 1
-                else:
-                    self.miss_count += 1
-                
-                metric = CachePerformanceMetrics(
-                    operation_type='get',
-                    cache_key=key,
-                    duration_ms=duration_ms,
-                    hit=hit,
-                    success=True,
-                    value_size_bytes=len(value.encode('utf-8')) if value else 0
-                )
-                
-                metrics.append(metric)
-                self.metrics_collector.record_cache_operation(metric)
-                
-                # Validate against baseline
-                baseline_key = 'redis_get_hit' if hit else 'redis_get_miss'
-                if duration_ms > self.baselines.get(baseline_key, 0) * 1.1:
-                    logger.warning(
-                        "Cache operation exceeded baseline",
-                        operation='get',
-                        hit_status='hit' if hit else 'miss',
-                        duration_ms=duration_ms,
-                        baseline_ms=self.baselines.get(baseline_key)
-                    )
-                
-            except Exception as e:
-                duration_ms = (time.time() - start_time) * 1000
-                metric = CachePerformanceMetrics(
-                    operation_type='get',
-                    cache_key=key,
-                    duration_ms=duration_ms,
-                    hit=False,
-                    success=False,
-                    error_message=str(e)
-                )
-                metrics.append(metric)
-                self.metrics_collector.record_cache_operation(metric)
-        
-        # Test cache SET operations
-        for i in range(operation_count // 4):
-            key = f'perf_test_set_key_{i}'
-            value = f'set_test_value_{i}_' + 'y' * 200
-            
-            start_time = time.time()
-            try:
-                client.set(key, value, ex=1800)  # 30 minute TTL
-                duration_ms = (time.time() - start_time) * 1000
-                
-                metric = CachePerformanceMetrics(
-                    operation_type='set',
-                    cache_key=key,
-                    duration_ms=duration_ms,
-                    hit=False,  # Not applicable for SET
-                    success=True,
-                    value_size_bytes=len(value.encode('utf-8')),
-                    ttl_seconds=1800
-                )
-                
-                metrics.append(metric)
-                self.metrics_collector.record_cache_operation(metric)
-                
-                # Validate against baseline
-                if duration_ms > self.baselines.get('redis_set', 0) * 1.1:
-                    logger.warning(
-                        "Cache SET operation exceeded baseline",
-                        duration_ms=duration_ms,
-                        baseline_ms=self.baselines.get('redis_set')
-                    )
-                
-            except Exception as e:
-                duration_ms = (time.time() - start_time) * 1000
-                metric = CachePerformanceMetrics(
-                    operation_type='set',
-                    cache_key=key,
-                    duration_ms=duration_ms,
-                    hit=False,
-                    success=False,
-                    error_message=str(e)
-                )
-                metrics.append(metric)
-                self.metrics_collector.record_cache_operation(metric)
-        
-        # Update hit ratio metrics
-        total_gets = self.hit_count + self.miss_count
-        if total_gets > 0:
-            hit_ratio = self.hit_count / total_gets
-            self.metrics_collector.cache_hit_ratio.labels(operation='get').set(hit_ratio)
-            
-            logger.info(
-                "Cache performance test completed",
-                total_operations=len(metrics),
-                hit_count=self.hit_count,
-                miss_count=self.miss_count,
-                hit_ratio=round(hit_ratio, 3)
-            )
-        
-        return metrics
-    
-    def cleanup_test_data(self) -> None:
-        """Clean up test cache data."""
-        if self.redis_client:
-            # Delete test keys
-            pattern_keys = [
-                'perf_test_key_*',
-                'perf_test_miss_key_*',
-                'perf_test_set_key_*'
-            ]
-            
-            for pattern in pattern_keys:
-                keys = self.redis_client.keys(pattern)
-                if keys:
-                    self.redis_client.delete(*keys)
-    
-    def close_connection(self) -> None:
-        """Close Redis connection."""
-        if self.redis_client:
-            self.redis_client.close()
-
-
-class ResponseTimeValidator:
-    """
-    Response time variance validation for ≤10% compliance testing.
-    
-    Comprehensive response time analysis and variance calculation ensuring
-    compliance with project-critical ≤10% variance requirement.
-    """
-    
-    def __init__(self, variance_threshold: float = DEFAULT_PERFORMANCE_VARIANCE_THRESHOLD):
-        """
-        Initialize response time validator.
-        
-        Args:
-            variance_threshold: Maximum allowed variance (default 10%)
-        """
-        self.variance_threshold = variance_threshold
-        self.measurements = []
-        self.baseline_violations = []
+        # Hit/miss tracking
+        self.cache_hit_count = 0
+        self.cache_miss_count = 0
         
         logger.info(
-            "Response time validator initialized",
-            variance_threshold_percent=variance_threshold * 100
+            "Cache performance tester initialized",
+            redis_available=self.redis_client is not None,
+            test_keys=len(self.test_keys)
         )
     
-    def validate_response_time(self, endpoint: str, method: str, 
-                             actual_ms: float, baseline_ms: float) -> Dict[str, Any]:
-        """
-        Validate response time against baseline with comprehensive analysis.
+    def measure_basic_operations(self) -> Dict[str, PerformanceMeasurement]:
+        """Measure basic Redis operation performance."""
+        results = {}
         
-        Args:
-            endpoint: API endpoint
-            method: HTTP method
-            actual_ms: Actual response time in milliseconds
-            baseline_ms: Baseline response time in milliseconds
+        if not self.redis_client:
+            logger.warning("Redis client not available for cache testing")
+            return results
+        
+        try:
+            # Set operation
+            with self.performance_monitor.measure_operation(
+                operation_name='set',
+                category='cache',
+                cache_key='test_key'
+            ) as measurement:
+                self.redis_client.set('test_key', self.test_data['medium'], ex=300)
+                measurement.cache_hit = None  # Set operation doesn't have hit/miss
+                measurement.ttl = 300
+                results['set'] = measurement
             
-        Returns:
-            Dictionary containing validation results
-        """
-        variance = abs(actual_ms - baseline_ms) / baseline_ms
-        variance_percent = variance * 100
-        is_compliant = variance <= self.variance_threshold
-        
-        measurement = {
-            'endpoint': endpoint,
-            'method': method,
-            'actual_ms': actual_ms,
-            'baseline_ms': baseline_ms,
-            'variance': variance,
-            'variance_percent': variance_percent,
-            'is_compliant': is_compliant,
-            'timestamp': datetime.utcnow().isoformat(),
-            'performance_impact': self._calculate_performance_impact(variance)
-        }
-        
-        self.measurements.append(measurement)
-        
-        if not is_compliant:
-            self.baseline_violations.append(measurement)
-            logger.warning(
-                "Performance baseline violation detected",
-                endpoint=endpoint,
-                method=method,
-                actual_ms=actual_ms,
-                baseline_ms=baseline_ms,
-                variance_percent=round(variance_percent, 2),
-                threshold_percent=round(self.variance_threshold * 100, 2)
-            )
-        
-        return measurement
-    
-    def _calculate_performance_impact(self, variance: float) -> str:
-        """Calculate performance impact category based on variance."""
-        if variance <= 0.05:  # ≤5%
-            return 'MINIMAL'
-        elif variance <= 0.10:  # ≤10%
-            return 'ACCEPTABLE'
-        elif variance <= 0.20:  # ≤20%
-            return 'MODERATE'
-        else:  # >20%
-            return 'SIGNIFICANT'
-    
-    def get_compliance_summary(self) -> Dict[str, Any]:
-        """
-        Get comprehensive compliance summary and statistics.
-        
-        Returns:
-            Dictionary containing compliance analysis results
-        """
-        if not self.measurements:
-            return {
-                'total_measurements': 0,
-                'compliance_rate': 0.0,
-                'overall_status': 'NO_DATA'
-            }
-        
-        total_measurements = len(self.measurements)
-        compliant_measurements = len([m for m in self.measurements if m['is_compliant']])
-        compliance_rate = compliant_measurements / total_measurements
-        
-        variances = [m['variance_percent'] for m in self.measurements]
-        
-        summary = {
-            'total_measurements': total_measurements,
-            'compliant_measurements': compliant_measurements,
-            'violation_count': len(self.baseline_violations),
-            'compliance_rate': round(compliance_rate, 3),
-            'overall_status': 'PASS' if compliance_rate >= 0.95 else 'FAIL',
-            'variance_statistics': {
-                'mean_variance_percent': round(statistics.mean(variances), 2),
-                'median_variance_percent': round(statistics.median(variances), 2),
-                'max_variance_percent': round(max(variances), 2),
-                'min_variance_percent': round(min(variances), 2),
-                'std_deviation': round(statistics.stdev(variances) if len(variances) > 1 else 0, 2)
-            },
-            'threshold_analysis': {
-                'variance_threshold_percent': round(self.variance_threshold * 100, 2),
-                'measurements_within_5_percent': len([v for v in variances if v <= 5.0]),
-                'measurements_within_10_percent': len([v for v in variances if v <= 10.0]),
-                'measurements_above_threshold': len(self.baseline_violations)
-            },
-            'worst_violations': sorted(
-                self.baseline_violations,
-                key=lambda x: x['variance_percent'],
-                reverse=True
-            )[:5]  # Top 5 worst violations
-        }
-        
-        return summary
-
-
-# Pytest fixtures for performance testing
-@pytest.fixture(scope="session")
-def performance_metrics_collector():
-    """
-    Performance metrics collector fixture for Prometheus integration.
-    
-    Provides centralized metrics collection across all performance tests
-    with Prometheus exposition for external monitoring integration.
-    """
-    collector = PerformanceMetricsCollector()
-    yield collector
-    
-    # Export final metrics for analysis
-    logger.info("Final performance metrics collected", 
-                metrics_exposition=collector.get_metrics_exposition())
-
-
-@pytest.fixture(scope="function")
-def nodejs_baselines():
-    """
-    Node.js baseline performance data fixture.
-    
-    Provides comprehensive baseline metrics for performance comparison
-    ensuring ≤10% variance validation across all test scenarios.
-    """
-    baselines = {}
-    
-    # Convert baseline data to PerformanceBaseline objects
-    for endpoint_key, baseline_ms in NODEJS_BASELINE_METRICS['api_endpoints'].items():
-        method, path = endpoint_key.split(' ', 1)
-        baselines[endpoint_key] = PerformanceBaseline(
-            endpoint=path,
-            baseline_ms=baseline_ms,
-            method=method,
-            variance_threshold=DEFAULT_PERFORMANCE_VARIANCE_THRESHOLD
-        )
-    
-    return baselines
-
-
-@pytest.fixture(scope="function")
-def load_test_config():
-    """
-    Load testing configuration fixture for locust integration.
-    
-    Provides configurable load testing parameters for comprehensive
-    performance validation under realistic traffic conditions.
-    """
-    config = LoadTestConfiguration(
-        users=int(os.getenv('LOAD_TEST_USERS', DEFAULT_CONCURRENT_USERS)),
-        spawn_rate=float(os.getenv('LOAD_TEST_SPAWN_RATE', DEFAULT_SPAWN_RATE)),
-        duration=int(os.getenv('LOAD_TEST_DURATION', DEFAULT_LOAD_TEST_DURATION)),
-        host=os.getenv('LOAD_TEST_HOST', 'http://localhost:5000')
-    )
-    
-    return config
-
-
-@pytest.fixture(scope="function")
-def database_performance_tester(mongodb_uri):
-    """
-    Database performance tester fixture for PyMongo and Motor operations.
-    
-    Provides comprehensive database performance testing utilities with
-    baseline validation and Prometheus metrics integration.
-    """
-    tester = DatabasePerformanceTester(mongodb_uri, 'test_performance_db')
-    yield tester
-    
-    # Cleanup after test
-    tester.cleanup_test_data()
-    tester.close_connections()
-
-
-@pytest.fixture(scope="function")
-def cache_performance_tester(redis_uri):
-    """
-    Cache performance tester fixture for Redis operations.
-    
-    Provides comprehensive Redis cache performance testing with hit/miss
-    ratio analysis and operation timing baseline validation.
-    """
-    tester = CachePerformanceTester(redis_uri)
-    yield tester
-    
-    # Cleanup after test
-    tester.cleanup_test_data()
-    tester.close_connection()
-
-
-@pytest.fixture(scope="function")
-def response_time_validator():
-    """
-    Response time variance validator fixture.
-    
-    Provides comprehensive response time analysis and variance calculation
-    for ≤10% compliance validation across all performance tests.
-    """
-    validator = ResponseTimeValidator(DEFAULT_PERFORMANCE_VARIANCE_THRESHOLD)
-    yield validator
-    
-    # Log final compliance summary
-    summary = validator.get_compliance_summary()
-    logger.info("Performance validation summary", **summary)
-
-
-@pytest.fixture(scope="function")
-async def concurrent_request_tester(app):
-    """
-    Concurrent request testing fixture for load simulation.
-    
-    Provides utilities for testing concurrent request handling capacity
-    and performance under realistic multi-user scenarios.
-    """
-    async def execute_concurrent_requests(endpoints: List[Tuple[str, str]], 
-                                        concurrent_users: int = 10,
-                                        requests_per_user: int = 5) -> List[Dict[str, Any]]:
-        """
-        Execute concurrent requests to test application performance.
-        
-        Args:
-            endpoints: List of (method, endpoint) tuples
-            concurrent_users: Number of concurrent users
-            requests_per_user: Requests per user
+            # Get operation (cache hit)
+            with self.performance_monitor.measure_operation(
+                operation_name='get',
+                category='cache',
+                cache_key='test_key'
+            ) as measurement:
+                value = self.redis_client.get('test_key')
+                measurement.cache_hit = value is not None
+                if measurement.cache_hit:
+                    self.cache_hit_count += 1
+                else:
+                    self.cache_miss_count += 1
+                results['get_hit'] = measurement
             
-        Returns:
-            List of response timing results
-        """
-        results = []
-        
-        async def user_session(user_id: int):
-            """Simulate a single user session with multiple requests."""
-            async with httpx.AsyncClient(base_url='http://localhost:5000') as client:
-                for request_id in range(requests_per_user):
-                    for method, endpoint in endpoints:
-                        start_time = time.time()
-                        try:
-                            if method.upper() == 'GET':
-                                response = await client.get(endpoint)
-                            elif method.upper() == 'POST':
-                                response = await client.post(endpoint, json={})
-                            else:
-                                continue
-                            
-                            duration_ms = (time.time() - start_time) * 1000
-                            
-                            results.append({
-                                'user_id': user_id,
-                                'request_id': request_id,
-                                'method': method,
-                                'endpoint': endpoint,
-                                'status_code': response.status_code,
-                                'duration_ms': duration_ms,
-                                'timestamp': datetime.utcnow().isoformat()
-                            })
-                            
-                        except Exception as e:
-                            duration_ms = (time.time() - start_time) * 1000
-                            results.append({
-                                'user_id': user_id,
-                                'request_id': request_id,
-                                'method': method,
-                                'endpoint': endpoint,
-                                'status_code': 500,
-                                'duration_ms': duration_ms,
-                                'error': str(e),
-                                'timestamp': datetime.utcnow().isoformat()
-                            })
-        
-        # Execute concurrent user sessions
-        tasks = [user_session(user_id) for user_id in range(concurrent_users)]
-        await asyncio.gather(*tasks)
+            # Get operation (cache miss)
+            with self.performance_monitor.measure_operation(
+                operation_name='get',
+                category='cache',
+                cache_key='nonexistent_key'
+            ) as measurement:
+                value = self.redis_client.get('nonexistent_key')
+                measurement.cache_hit = value is not None
+                if measurement.cache_hit:
+                    self.cache_hit_count += 1
+                else:
+                    self.cache_miss_count += 1
+                results['get_miss'] = measurement
+            
+            # Delete operation
+            with self.performance_monitor.measure_operation(
+                operation_name='delete',
+                category='cache',
+                cache_key='test_key'
+            ) as measurement:
+                deleted_count = self.redis_client.delete('test_key')
+                measurement.cache_hit = deleted_count > 0
+                results['delete'] = measurement
+            
+            # Exists operation
+            with self.performance_monitor.measure_operation(
+                operation_name='exists',
+                category='cache',
+                cache_key='test_key'
+            ) as measurement:
+                exists = self.redis_client.exists('test_key')
+                measurement.cache_hit = exists > 0
+                results['exists'] = measurement
+            
+        except Exception as e:
+            logger.error(f"Basic cache operations failed: {e}")
         
         return results
     
-    return execute_concurrent_requests
-
-
-def run_locust_load_test(host: str = 'http://localhost:5000',
-                        users: int = DEFAULT_CONCURRENT_USERS,
-                        spawn_rate: float = DEFAULT_SPAWN_RATE,
-                        duration: int = DEFAULT_LOAD_TEST_DURATION) -> Dict[str, Any]:
-    """
-    Execute locust load test with comprehensive performance analysis.
-    
-    Args:
-        host: Target host URL
-        users: Number of concurrent users
-        spawn_rate: User spawn rate per second
-        duration: Test duration in seconds
+    def measure_advanced_operations(self) -> Dict[str, PerformanceMeasurement]:
+        """Measure advanced Redis operation performance."""
+        results = {}
         
-    Returns:
-        Dictionary containing load test results and performance analysis
-    """
-    # Setup locust environment
-    env = Environment(user_classes=[FlaskPerformanceTestUser])
-    env.create_local_runner()
-    
-    # Configure test parameters
-    env.host = host
-    
-    logger.info(
-        "Starting locust load test",
-        host=host,
-        users=users,
-        spawn_rate=spawn_rate,
-        duration=duration
-    )
-    
-    try:
-        # Start load test
-        env.runner.start(user_count=users, spawn_rate=spawn_rate)
+        if not self.redis_client:
+            return results
         
-        # Run for specified duration
-        start_time = time.time()
-        while time.time() - start_time < duration:
-            time.sleep(1)
+        try:
+            # Hash operations
+            with self.performance_monitor.measure_operation(
+                operation_name='hset',
+                category='cache',
+                cache_key='test_hash'
+            ) as measurement:
+                self.redis_client.hset('test_hash', 'field1', 'value1')
+                results['hset'] = measurement
+            
+            with self.performance_monitor.measure_operation(
+                operation_name='hget',
+                category='cache',
+                cache_key='test_hash'
+            ) as measurement:
+                value = self.redis_client.hget('test_hash', 'field1')
+                measurement.cache_hit = value is not None
+                results['hget'] = measurement
+            
+            # List operations
+            with self.performance_monitor.measure_operation(
+                operation_name='lpush',
+                category='cache',
+                cache_key='test_list'
+            ) as measurement:
+                self.redis_client.lpush('test_list', 'item1', 'item2', 'item3')
+                results['lpush'] = measurement
+            
+            with self.performance_monitor.measure_operation(
+                operation_name='rpop',
+                category='cache',
+                cache_key='test_list'
+            ) as measurement:
+                item = self.redis_client.rpop('test_list')
+                measurement.cache_hit = item is not None
+                results['rpop'] = measurement
+            
+            # Set operations
+            with self.performance_monitor.measure_operation(
+                operation_name='sadd',
+                category='cache',
+                cache_key='test_set'
+            ) as measurement:
+                self.redis_client.sadd('test_set', 'member1', 'member2', 'member3')
+                results['sadd'] = measurement
+            
+            with self.performance_monitor.measure_operation(
+                operation_name='smembers',
+                category='cache',
+                cache_key='test_set'
+            ) as measurement:
+                members = self.redis_client.smembers('test_set')
+                measurement.cache_hit = len(members) > 0
+                results['smembers'] = measurement
+            
+            # Pipeline operation
+            with self.performance_monitor.measure_operation(
+                operation_name='pipeline',
+                category='cache',
+                cache_key='pipeline_test'
+            ) as measurement:
+                pipe = self.redis_client.pipeline()
+                for i in range(10):
+                    pipe.set(f'pipe_key_{i}', f'value_{i}')
+                pipe.execute()
+                results['pipeline'] = measurement
+            
+            # Cleanup
+            cleanup_keys = ['test_hash', 'test_list', 'test_set'] + [f'pipe_key_{i}' for i in range(10)]
+            self.redis_client.delete(*cleanup_keys)
+            
+        except Exception as e:
+            logger.error(f"Advanced cache operations failed: {e}")
         
-        # Stop load test
-        env.runner.stop()
+        return results
+    
+    def measure_cache_hit_miss_ratio(self, test_keys_count: int = 1000) -> Dict[str, Any]:
+        """Measure cache hit/miss ratio under various scenarios."""
+        if not self.redis_client:
+            return {'error': 'Redis client not available'}
         
-        # Collect results
-        stats = env.runner.stats
         results = {
-            'test_duration': duration,
-            'total_requests': stats.total.num_requests,
-            'total_failures': stats.total.num_failures,
-            'average_response_time': stats.total.avg_response_time,
-            'median_response_time': stats.total.median_response_time,
-            'min_response_time': stats.total.min_response_time,
-            'max_response_time': stats.total.max_response_time,
-            'requests_per_second': stats.total.total_rps,
-            'failure_rate': stats.total.fail_ratio,
-            'endpoint_stats': {}
+            'scenario_results': {},
+            'overall_metrics': {}
         }
         
-        # Collect per-endpoint statistics
-        for name, endpoint_stats in stats.entries.items():
-            if name != 'Aggregated':
-                results['endpoint_stats'][name] = {
-                    'request_count': endpoint_stats.num_requests,
-                    'failure_count': endpoint_stats.num_failures,
-                    'average_response_time': endpoint_stats.avg_response_time,
-                    'median_response_time': endpoint_stats.median_response_time,
-                    'requests_per_second': endpoint_stats.total_rps
+        try:
+            # Scenario 1: Cold cache (all misses)
+            scenario1_results = self._test_cache_scenario(
+                'cold_cache',
+                test_keys_count,
+                pre_populate=False
+            )
+            results['scenario_results']['cold_cache'] = scenario1_results
+            
+            # Scenario 2: Warm cache (all hits)
+            scenario2_results = self._test_cache_scenario(
+                'warm_cache',
+                test_keys_count,
+                pre_populate=True
+            )
+            results['scenario_results']['warm_cache'] = scenario2_results
+            
+            # Scenario 3: Mixed cache (50% hit rate)
+            scenario3_results = self._test_cache_scenario(
+                'mixed_cache',
+                test_keys_count,
+                pre_populate=True,
+                hit_rate=0.5
+            )
+            results['scenario_results']['mixed_cache'] = scenario3_results
+            
+            # Calculate overall metrics
+            total_hits = sum(s['cache_hits'] for s in results['scenario_results'].values())
+            total_requests = sum(s['total_requests'] for s in results['scenario_results'].values())
+            
+            results['overall_metrics'] = {
+                'total_cache_hits': total_hits,
+                'total_cache_requests': total_requests,
+                'overall_hit_rate': total_hits / total_requests if total_requests > 0 else 0,
+                'cache_efficiency': self._calculate_cache_efficiency()
+            }
+            
+        except Exception as e:
+            logger.error(f"Cache hit/miss ratio testing failed: {e}")
+            results['error'] = str(e)
+        
+        return results
+    
+    def _test_cache_scenario(self, scenario_name: str, key_count: int,
+                           pre_populate: bool = False, hit_rate: float = 1.0) -> Dict[str, Any]:
+        """Test specific cache scenario."""
+        scenario_results = {
+            'scenario_name': scenario_name,
+            'total_requests': 0,
+            'cache_hits': 0,
+            'cache_misses': 0,
+            'avg_response_time': 0.0,
+            'response_times': []
+        }
+        
+        test_keys = [f"scenario_{scenario_name}:{i}" for i in range(key_count)]
+        
+        # Pre-populate cache if required
+        if pre_populate:
+            for key in test_keys:
+                self.redis_client.set(key, f"value_for_{key}", ex=300)
+        
+        # Determine which keys to test based on hit rate
+        if hit_rate < 1.0:
+            hit_keys = random.sample(test_keys, int(len(test_keys) * hit_rate))
+            miss_keys = [key + "_miss" for key in test_keys if key not in hit_keys]
+            test_keys = hit_keys + miss_keys[:len(test_keys) - len(hit_keys)]
+        
+        # Perform cache operations
+        response_times = []
+        
+        for key in test_keys:
+            with self.performance_monitor.measure_operation(
+                operation_name='get',
+                category='cache',
+                cache_key=key
+            ) as measurement:
+                start_time = time.perf_counter()
+                value = self.redis_client.get(key)
+                end_time = time.perf_counter()
+                
+                response_time = (end_time - start_time) * 1000  # Convert to milliseconds
+                response_times.append(response_time)
+                
+                scenario_results['total_requests'] += 1
+                
+                if value is not None:
+                    scenario_results['cache_hits'] += 1
+                    measurement.cache_hit = True
+                else:
+                    scenario_results['cache_misses'] += 1
+                    measurement.cache_hit = False
+        
+        # Calculate scenario metrics
+        scenario_results['response_times'] = response_times
+        scenario_results['avg_response_time'] = statistics.mean(response_times) if response_times else 0
+        scenario_results['hit_rate'] = (
+            scenario_results['cache_hits'] / scenario_results['total_requests']
+            if scenario_results['total_requests'] > 0 else 0
+        )
+        
+        # Cleanup test keys
+        if pre_populate:
+            cleanup_keys = [key for key in test_keys if not key.endswith('_miss')]
+            if cleanup_keys:
+                self.redis_client.delete(*cleanup_keys)
+        
+        return scenario_results
+    
+    def _calculate_cache_efficiency(self) -> Dict[str, float]:
+        """Calculate cache efficiency metrics."""
+        cache_measurements = self.performance_monitor.cache_measurements.get('get', [])
+        
+        if not cache_measurements:
+            return {'error': 'No cache measurements available'}
+        
+        hit_times = []
+        miss_times = []
+        
+        for measurement in cache_measurements:
+            if measurement.cache_hit is True:
+                hit_times.append(measurement.measured_value)
+            elif measurement.cache_hit is False:
+                miss_times.append(measurement.measured_value)
+        
+        efficiency_metrics = {
+            'hit_count': len(hit_times),
+            'miss_count': len(miss_times),
+            'hit_rate': len(hit_times) / (len(hit_times) + len(miss_times)) if (len(hit_times) + len(miss_times)) > 0 else 0
+        }
+        
+        if hit_times:
+            efficiency_metrics['avg_hit_time'] = statistics.mean(hit_times)
+        
+        if miss_times:
+            efficiency_metrics['avg_miss_time'] = statistics.mean(miss_times)
+        
+        if hit_times and miss_times:
+            efficiency_metrics['hit_miss_ratio'] = statistics.mean(hit_times) / statistics.mean(miss_times)
+        
+        return efficiency_metrics
+    
+    def run_comprehensive_cache_performance_test(self) -> Dict[str, Any]:
+        """Run comprehensive cache performance test suite."""
+        logger.info("Starting comprehensive cache performance test")
+        
+        test_results = {
+            'basic_operations': {},
+            'advanced_operations': {},
+            'hit_miss_analysis': {},
+            'performance_summary': {},
+            'compliance_status': {}
+        }
+        
+        # Test basic operations
+        test_results['basic_operations'] = self.measure_basic_operations()
+        
+        # Test advanced operations
+        test_results['advanced_operations'] = self.measure_advanced_operations()
+        
+        # Test hit/miss ratio scenarios
+        test_results['hit_miss_analysis'] = self.measure_cache_hit_miss_ratio()
+        
+        # Calculate performance summary
+        test_results['performance_summary'] = self._calculate_cache_performance_summary()
+        
+        # Check compliance status
+        test_results['compliance_status'] = self._check_cache_compliance()
+        
+        logger.info("Comprehensive cache performance test completed")
+        return test_results
+    
+    def _calculate_cache_performance_summary(self) -> Dict[str, Any]:
+        """Calculate cache performance summary from measurements."""
+        cache_measurements = self.performance_monitor.cache_measurements
+        
+        if not cache_measurements:
+            return {'error': 'No cache measurements available'}
+        
+        operation_stats = {}
+        
+        for operation_name, measurements in cache_measurements.items():
+            if measurements:
+                measured_values = [m.measured_value for m in measurements]
+                variances = [m.variance for m in measurements if m.variance is not None]
+                hit_rate = sum(1 for m in measurements if m.cache_hit is True) / len(measurements)
+                
+                operation_stats[operation_name] = {
+                    'measurement_count': len(measurements),
+                    'avg_response_time': statistics.mean(measured_values),
+                    'min_response_time': min(measured_values),
+                    'max_response_time': max(measured_values),
+                    'avg_variance': statistics.mean(variances) if variances else None,
+                    'cache_hit_rate': hit_rate,
+                    'compliance_rate': sum(
+                        1 for m in measurements 
+                        if m.is_compliant(self.performance_monitor.baseline)
+                    ) / len(measurements)
                 }
         
-        logger.info("Locust load test completed", **results)
-        return results
-        
-    except Exception as e:
-        logger.error(f"Locust load test failed: {e}")
-        return {'error': str(e)}
+        return operation_stats
     
-    finally:
-        env.runner.quit()
+    def _check_cache_compliance(self) -> Dict[str, Any]:
+        """Check cache operation compliance with performance requirements."""
+        cache_measurements = self.performance_monitor.cache_measurements
+        
+        compliance_status = {
+            'total_operations': 0,
+            'compliant_operations': 0,
+            'violation_count': 0,
+            'compliance_rate': 0.0,
+            'violations': []
+        }
+        
+        for operation_name, measurements in cache_measurements.items():
+            for measurement in measurements:
+                compliance_status['total_operations'] += 1
+                
+                if measurement.is_compliant(self.performance_monitor.baseline):
+                    compliance_status['compliant_operations'] += 1
+                else:
+                    compliance_status['violation_count'] += 1
+                    compliance_status['violations'].append({
+                        'operation': operation_name,
+                        'measured_value': measurement.measured_value,
+                        'baseline_value': measurement.baseline_value,
+                        'variance': measurement.variance,
+                        'cache_hit': measurement.cache_hit
+                    })
+        
+        if compliance_status['total_operations'] > 0:
+            compliance_status['compliance_rate'] = (
+                compliance_status['compliant_operations'] / 
+                compliance_status['total_operations']
+            )
+        
+        return compliance_status
 
 
-# Utility functions for performance analysis
-def calculate_performance_variance(actual_ms: float, baseline_ms: float) -> Dict[str, float]:
+# =============================================================================
+# Apache Bench Integration for HTTP Performance Testing
+# =============================================================================
+
+class ApacheBenchTester:
     """
-    Calculate performance variance with comprehensive analysis.
+    Apache Bench (ab) integration for HTTP server performance measurement.
+    
+    Provides HTTP performance testing with apache-bench integration per
+    Section 6.6.1 performance testing tool requirements.
+    """
+    
+    def __init__(self, performance_monitor: PerformanceMonitor,
+                 base_url: str = "http://localhost:5000"):
+        """
+        Initialize Apache Bench tester.
+        
+        Args:
+            performance_monitor: Performance monitoring instance
+            base_url: Base URL for HTTP testing
+        """
+        self.performance_monitor = performance_monitor
+        self.base_url = base_url.rstrip('/')
+        self.ab_available = self._check_ab_availability()
+        
+        logger.info(
+            "Apache Bench tester initialized",
+            base_url=self.base_url,
+            ab_available=self.ab_available
+        )
+    
+    def _check_ab_availability(self) -> bool:
+        """Check if Apache Bench (ab) is available."""
+        try:
+            result = subprocess.run(['ab', '-V'], capture_output=True, text=True, timeout=10)
+            return result.returncode == 0
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            logger.warning("Apache Bench (ab) not available")
+            return False
+    
+    def run_ab_test(self, endpoint: str, requests: int = 1000, concurrency: int = 10,
+                   timeout: int = 30, headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+        """
+        Run Apache Bench performance test.
+        
+        Args:
+            endpoint: API endpoint to test (e.g., '/api/users')
+            requests: Total number of requests to perform
+            concurrency: Number of concurrent requests
+            timeout: Request timeout in seconds
+            headers: Optional HTTP headers
+            
+        Returns:
+            Apache Bench test results with performance metrics
+        """
+        if not self.ab_available:
+            return {
+                'error': 'Apache Bench (ab) not available',
+                'endpoint': endpoint,
+                'requests': requests,
+                'concurrency': concurrency
+            }
+        
+        url = f"{self.base_url}{endpoint}"
+        
+        # Build ab command
+        ab_command = [
+            'ab',
+            '-n', str(requests),
+            '-c', str(concurrency),
+            '-s', str(timeout),
+            '-g', '/tmp/ab_gnuplot.tsv',  # Gnuplot output
+            '-e', '/tmp/ab_csv.csv'      # CSV output
+        ]
+        
+        # Add headers if provided
+        if headers:
+            for header_name, header_value in headers.items():
+                ab_command.extend(['-H', f'{header_name}: {header_value}'])
+        
+        ab_command.append(url)
+        
+        try:
+            with self.performance_monitor.measure_operation(
+                operation_name='ab_test',
+                category='api',
+                endpoint=endpoint,
+                concurrent_users=concurrency
+            ) as measurement:
+                
+                logger.info(f"Running Apache Bench test: {' '.join(ab_command)}")
+                
+                # Run Apache Bench
+                start_time = time.time()
+                result = subprocess.run(
+                    ab_command,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout + 60  # Extra time for ab to complete
+                )
+                end_time = time.time()
+                
+                if result.returncode != 0:
+                    return {
+                        'error': f'Apache Bench failed with return code {result.returncode}',
+                        'stderr': result.stderr,
+                        'command': ' '.join(ab_command)
+                    }
+                
+                # Parse ab output
+                ab_results = self._parse_ab_output(result.stdout)
+                
+                # Update measurement with results
+                measurement.measured_value = ab_results.get('mean_response_time', 0)
+                measurement.requests_per_second = ab_results.get('requests_per_second', 0)
+                measurement.error_rate = ab_results.get('failed_requests', 0) / requests if requests > 0 else 0
+                
+                # Add test parameters and results
+                ab_results.update({
+                    'test_parameters': {
+                        'endpoint': endpoint,
+                        'url': url,
+                        'total_requests': requests,
+                        'concurrency': concurrency,
+                        'timeout': timeout,
+                        'headers': headers
+                    },
+                    'test_duration': end_time - start_time,
+                    'baseline_comparison': {},
+                    'compliance_status': {}
+                })
+                
+                # Compare with baseline
+                baseline_value = self.performance_monitor.baseline.get_baseline_value('api', 'ab_test')
+                if baseline_value:
+                    variance = self.performance_monitor.baseline.calculate_variance(
+                        ab_results['mean_response_time'], baseline_value
+                    )
+                    
+                    ab_results['baseline_comparison'] = {
+                        'baseline_response_time': baseline_value,
+                        'measured_response_time': ab_results['mean_response_time'],
+                        'variance': variance,
+                        'variance_percentage': variance * 100
+                    }
+                    
+                    ab_results['compliance_status'] = {
+                        'compliant': variance <= 0.10,
+                        'variance_threshold': 0.10,
+                        'within_threshold': variance <= 0.10
+                    }
+                
+                return ab_results
+                
+        except subprocess.TimeoutExpired:
+            logger.error(f"Apache Bench test timeout after {timeout + 60} seconds")
+            return {
+                'error': 'Test timeout',
+                'timeout_seconds': timeout + 60,
+                'endpoint': endpoint
+            }
+        except Exception as e:
+            logger.error(f"Apache Bench test failed: {e}")
+            return {
+                'error': str(e),
+                'endpoint': endpoint
+            }
+    
+    def _parse_ab_output(self, ab_output: str) -> Dict[str, Any]:
+        """Parse Apache Bench output to extract performance metrics."""
+        results = {}
+        
+        lines = ab_output.split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            
+            # Parse key metrics
+            if 'Complete requests:' in line:
+                results['complete_requests'] = int(line.split(':')[1].strip())
+            elif 'Failed requests:' in line:
+                results['failed_requests'] = int(line.split(':')[1].strip())
+            elif 'Requests per second:' in line:
+                # Format: "Requests per second:    X.XX [#/sec] (mean)"
+                rps_part = line.split(':')[1].strip()
+                results['requests_per_second'] = float(rps_part.split()[0])
+            elif 'Time per request:' in line and 'mean' in line:
+                # Format: "Time per request:       X.XXX [ms] (mean)"
+                time_part = line.split(':')[1].strip()
+                results['mean_response_time'] = float(time_part.split()[0])
+            elif 'Time per request:' in line and 'across all concurrent requests' in line:
+                # Format: "Time per request:       X.XXX [ms] (mean, across all concurrent requests)"
+                time_part = line.split(':')[1].strip()
+                results['mean_response_time_concurrent'] = float(time_part.split()[0])
+            elif 'Transfer rate:' in line:
+                # Format: "Transfer rate:          X.XX [Kbytes/sec] received"
+                transfer_part = line.split(':')[1].strip()
+                results['transfer_rate_kbps'] = float(transfer_part.split()[0])
+            elif 'Connection Times (ms)' in line:
+                # Start parsing connection times section
+                continue
+            elif line.startswith('              min  mean[+/-sd] median   max'):
+                # Header for connection times table
+                continue
+            elif line.startswith('Connect:'):
+                connect_times = line.split()[1:]
+                results['connect_times'] = {
+                    'min': float(connect_times[0]),
+                    'mean': float(connect_times[1]),
+                    'median': float(connect_times[2]),
+                    'max': float(connect_times[3])
+                }
+            elif line.startswith('Processing:'):
+                processing_times = line.split()[1:]
+                results['processing_times'] = {
+                    'min': float(processing_times[0]),
+                    'mean': float(processing_times[1]),
+                    'median': float(processing_times[2]),
+                    'max': float(processing_times[3])
+                }
+            elif line.startswith('Waiting:'):
+                waiting_times = line.split()[1:]
+                results['waiting_times'] = {
+                    'min': float(waiting_times[0]),
+                    'mean': float(waiting_times[1]),
+                    'median': float(waiting_times[2]),
+                    'max': float(waiting_times[3])
+                }
+            elif line.startswith('Total:'):
+                total_times = line.split()[1:]
+                results['total_times'] = {
+                    'min': float(total_times[0]),
+                    'mean': float(total_times[1]),
+                    'median': float(total_times[2]),
+                    'max': float(total_times[3])
+                }
+            elif 'Percentage of the requests served within a certain time (ms)' in line:
+                # Start parsing percentile data
+                continue
+            elif '%' in line and 'ms' in line.replace('%', ''):
+                # Parse percentile lines like "  50%     XX"
+                parts = line.split()
+                if len(parts) >= 2:
+                    percentile = parts[0].replace('%', '')
+                    time_ms = parts[1]
+                    if 'percentiles' not in results:
+                        results['percentiles'] = {}
+                    try:
+                        results['percentiles'][f'p{percentile}'] = float(time_ms)
+                    except ValueError:
+                        continue
+        
+        return results
+    
+    def run_endpoint_performance_suite(self, endpoints: List[str],
+                                     requests_per_endpoint: int = 1000,
+                                     concurrency_levels: List[int] = None) -> Dict[str, Any]:
+        """
+        Run comprehensive performance test suite across multiple endpoints.
+        
+        Args:
+            endpoints: List of API endpoints to test
+            requests_per_endpoint: Number of requests per endpoint
+            concurrency_levels: List of concurrency levels to test
+            
+        Returns:
+            Comprehensive performance test results
+        """
+        if concurrency_levels is None:
+            concurrency_levels = [1, 5, 10, 20]
+        
+        suite_results = {
+            'test_parameters': {
+                'endpoints': endpoints,
+                'requests_per_endpoint': requests_per_endpoint,
+                'concurrency_levels': concurrency_levels
+            },
+            'endpoint_results': {},
+            'performance_summary': {},
+            'compliance_summary': {}
+        }
+        
+        total_tests = len(endpoints) * len(concurrency_levels)
+        completed_tests = 0
+        
+        logger.info(f"Starting endpoint performance suite: {total_tests} tests")
+        
+        for endpoint in endpoints:
+            suite_results['endpoint_results'][endpoint] = {}
+            
+            for concurrency in concurrency_levels:
+                logger.info(f"Testing {endpoint} with concurrency {concurrency}")
+                
+                test_result = self.run_ab_test(
+                    endpoint=endpoint,
+                    requests=requests_per_endpoint,
+                    concurrency=concurrency
+                )
+                
+                suite_results['endpoint_results'][endpoint][f'concurrency_{concurrency}'] = test_result
+                
+                completed_tests += 1
+                logger.info(f"Completed {completed_tests}/{total_tests} tests")
+        
+        # Calculate suite-level summaries
+        suite_results['performance_summary'] = self._calculate_suite_performance_summary(
+            suite_results['endpoint_results']
+        )
+        
+        suite_results['compliance_summary'] = self._calculate_suite_compliance_summary(
+            suite_results['endpoint_results']
+        )
+        
+        logger.info("Endpoint performance suite completed")
+        return suite_results
+    
+    def _calculate_suite_performance_summary(self, endpoint_results: Dict[str, Any]) -> Dict[str, Any]:
+        """Calculate performance summary across all endpoint tests."""
+        all_response_times = []
+        all_rps_values = []
+        all_error_rates = []
+        compliant_tests = 0
+        total_tests = 0
+        
+        for endpoint, concurrency_results in endpoint_results.items():
+            for concurrency_level, test_result in concurrency_results.items():
+                if 'error' not in test_result:
+                    total_tests += 1
+                    
+                    # Collect metrics
+                    if 'mean_response_time' in test_result:
+                        all_response_times.append(test_result['mean_response_time'])
+                    
+                    if 'requests_per_second' in test_result:
+                        all_rps_values.append(test_result['requests_per_second'])
+                    
+                    if 'failed_requests' in test_result and 'complete_requests' in test_result:
+                        error_rate = (
+                            test_result['failed_requests'] / test_result['complete_requests']
+                            if test_result['complete_requests'] > 0 else 0
+                        )
+                        all_error_rates.append(error_rate)
+                    
+                    # Check compliance
+                    if test_result.get('compliance_status', {}).get('compliant', False):
+                        compliant_tests += 1
+        
+        summary = {
+            'total_tests': total_tests,
+            'compliant_tests': compliant_tests,
+            'compliance_rate': compliant_tests / total_tests if total_tests > 0 else 0
+        }
+        
+        if all_response_times:
+            summary['response_time_stats'] = {
+                'mean': statistics.mean(all_response_times),
+                'median': statistics.median(all_response_times),
+                'min': min(all_response_times),
+                'max': max(all_response_times),
+                'std_dev': statistics.stdev(all_response_times) if len(all_response_times) > 1 else 0
+            }
+        
+        if all_rps_values:
+            summary['throughput_stats'] = {
+                'mean': statistics.mean(all_rps_values),
+                'median': statistics.median(all_rps_values),
+                'min': min(all_rps_values),
+                'max': max(all_rps_values)
+            }
+        
+        if all_error_rates:
+            summary['error_rate_stats'] = {
+                'mean': statistics.mean(all_error_rates),
+                'median': statistics.median(all_error_rates),
+                'min': min(all_error_rates),
+                'max': max(all_error_rates)
+            }
+        
+        return summary
+    
+    def _calculate_suite_compliance_summary(self, endpoint_results: Dict[str, Any]) -> Dict[str, Any]:
+        """Calculate compliance summary across all endpoint tests."""
+        endpoint_compliance = {}
+        
+        for endpoint, concurrency_results in endpoint_results.items():
+            endpoint_compliance[endpoint] = {
+                'total_tests': 0,
+                'compliant_tests': 0,
+                'compliance_rate': 0.0,
+                'violations': []
+            }
+            
+            for concurrency_level, test_result in concurrency_results.items():
+                if 'error' not in test_result:
+                    endpoint_compliance[endpoint]['total_tests'] += 1
+                    
+                    compliance_status = test_result.get('compliance_status', {})
+                    if compliance_status.get('compliant', False):
+                        endpoint_compliance[endpoint]['compliant_tests'] += 1
+                    else:
+                        baseline_comparison = test_result.get('baseline_comparison', {})
+                        endpoint_compliance[endpoint]['violations'].append({
+                            'concurrency_level': concurrency_level,
+                            'variance': baseline_comparison.get('variance'),
+                            'measured_response_time': baseline_comparison.get('measured_response_time'),
+                            'baseline_response_time': baseline_comparison.get('baseline_response_time')
+                        })
+            
+            # Calculate compliance rate
+            if endpoint_compliance[endpoint]['total_tests'] > 0:
+                endpoint_compliance[endpoint]['compliance_rate'] = (
+                    endpoint_compliance[endpoint]['compliant_tests'] / 
+                    endpoint_compliance[endpoint]['total_tests']
+                )
+        
+        return endpoint_compliance
+
+
+# =============================================================================
+# Performance Testing Fixtures for pytest Integration
+# =============================================================================
+
+@pytest.fixture(scope="session")
+def nodejs_performance_baseline():
+    """
+    Session-scoped fixture providing Node.js performance baseline data.
+    
+    Returns:
+        NodeJSPerformanceBaseline instance with comprehensive baseline metrics
+    """
+    baseline = NodeJSPerformanceBaseline()
+    
+    logger.info(
+        "Node.js performance baseline loaded",
+        api_endpoints=len(baseline.api_response_times),
+        database_operations=len(baseline.database_operations),
+        cache_operations=len(baseline.cache_operations),
+        load_scenarios=len(baseline.load_performance)
+    )
+    
+    return baseline
+
+
+@pytest.fixture(scope="function")
+def performance_monitor(nodejs_performance_baseline):
+    """
+    Function-scoped fixture providing performance monitoring capabilities.
     
     Args:
-        actual_ms: Actual response time in milliseconds
-        baseline_ms: Baseline response time in milliseconds
+        nodejs_performance_baseline: Node.js baseline data
         
     Returns:
-        Dictionary containing variance analysis
+        PerformanceMonitor instance configured for comprehensive monitoring
     """
-    if baseline_ms == 0:
-        return {'variance': 0.0, 'variance_percent': 0.0, 'performance_ratio': 1.0}
+    monitor = PerformanceMonitor(
+        baseline=nodejs_performance_baseline,
+        enable_prometheus=PROMETHEUS_AVAILABLE,
+        enable_apm=False  # Disabled for testing
+    )
     
-    variance = abs(actual_ms - baseline_ms) / baseline_ms
-    variance_percent = variance * 100
-    performance_ratio = actual_ms / baseline_ms
+    yield monitor
+    
+    # Log performance summary at end of test
+    summary = monitor.get_performance_summary()
+    logger.info(
+        "Performance test completed",
+        total_measurements=summary['measurement_summary']['total_measurements'],
+        compliance_rate=summary['compliance_summary']['compliance_rate'],
+        violations=summary['variance_violations']
+    )
+
+
+@pytest.fixture(scope="function")
+def load_test_generator(performance_monitor):
+    """
+    Function-scoped fixture providing load testing capabilities.
+    
+    Args:
+        performance_monitor: Performance monitoring instance
+        
+    Returns:
+        LoadTestGenerator configured for Flask application testing
+    """
+    if not LOCUST_AVAILABLE:
+        pytest.skip("Locust not available for load testing")
+    
+    generator = LoadTestGenerator(performance_monitor)
+    return generator
+
+
+@pytest.fixture(scope="function")
+def database_performance_tester(performance_monitor, comprehensive_test_environment):
+    """
+    Function-scoped fixture providing database performance testing.
+    
+    Args:
+        performance_monitor: Performance monitoring instance
+        comprehensive_test_environment: Complete test environment
+        
+    Returns:
+        DatabasePerformanceTester configured with MongoDB clients
+    """
+    db_env = comprehensive_test_environment.get('database', {})
+    
+    tester = DatabasePerformanceTester(
+        performance_monitor=performance_monitor,
+        mongodb_client=db_env.get('pymongo_client'),
+        motor_client=db_env.get('motor_client')
+    )
+    
+    return tester
+
+
+@pytest.fixture(scope="function")
+def cache_performance_tester(performance_monitor, comprehensive_test_environment):
+    """
+    Function-scoped fixture providing cache performance testing.
+    
+    Args:
+        performance_monitor: Performance monitoring instance
+        comprehensive_test_environment: Complete test environment
+        
+    Returns:
+        CachePerformanceTester configured with Redis client
+    """
+    db_env = comprehensive_test_environment.get('database', {})
+    
+    tester = CachePerformanceTester(
+        performance_monitor=performance_monitor,
+        redis_client=db_env.get('redis_client')
+    )
+    
+    return tester
+
+
+@pytest.fixture(scope="function")
+def apache_bench_tester(performance_monitor, flask_app):
+    """
+    Function-scoped fixture providing Apache Bench HTTP performance testing.
+    
+    Args:
+        performance_monitor: Performance monitoring instance
+        flask_app: Flask application instance
+        
+    Returns:
+        ApacheBenchTester configured for HTTP performance testing
+    """
+    # Start Flask test server
+    base_url = "http://localhost:5000"
+    
+    tester = ApacheBenchTester(
+        performance_monitor=performance_monitor,
+        base_url=base_url
+    )
+    
+    if not tester.ab_available:
+        pytest.skip("Apache Bench (ab) not available")
+    
+    return tester
+
+
+@pytest.fixture(scope="function")
+def performance_validation_context(performance_monitor, nodejs_performance_baseline):
+    """
+    Function-scoped fixture providing performance validation context.
+    
+    This fixture provides utilities for validating performance measurements
+    against the ≤10% variance requirement with comprehensive reporting.
+    
+    Args:
+        performance_monitor: Performance monitoring instance
+        nodejs_performance_baseline: Node.js baseline data
+        
+    Returns:
+        Dictionary with performance validation utilities
+    """
+    validation_context = {
+        'monitor': performance_monitor,
+        'baseline': nodejs_performance_baseline,
+        'violations': [],
+        'compliance_rate': 1.0
+    }
+    
+    def validate_measurement(measurement: PerformanceMeasurement) -> bool:
+        """Validate a single performance measurement."""
+        is_compliant = measurement.is_compliant(nodejs_performance_baseline)
+        
+        if not is_compliant:
+            validation_context['violations'].append({
+                'operation': measurement.operation_name,
+                'category': measurement.category,
+                'measured_value': measurement.measured_value,
+                'baseline_value': measurement.baseline_value,
+                'variance': measurement.variance,
+                'timestamp': measurement.timestamp.isoformat()
+            })
+        
+        # Update compliance rate
+        total_measurements = len(performance_monitor.measurements)
+        compliant_measurements = len([
+            m for m in performance_monitor.measurements 
+            if m.is_compliant(nodejs_performance_baseline)
+        ])
+        
+        validation_context['compliance_rate'] = (
+            compliant_measurements / total_measurements if total_measurements > 0 else 1.0
+        )
+        
+        return is_compliant
+    
+    def assert_performance_compliance(min_compliance_rate: float = 0.90):
+        """Assert that performance compliance meets minimum threshold."""
+        current_rate = validation_context['compliance_rate']
+        
+        if current_rate < min_compliance_rate:
+            violation_summary = '\n'.join([
+                f"  - {v['operation']} ({v['category']}): {v['variance']:.2%} variance"
+                for v in validation_context['violations'][:10]  # Show top 10 violations
+            ])
+            
+            pytest.fail(
+                f"Performance compliance rate {current_rate:.2%} below threshold {min_compliance_rate:.2%}\n"
+                f"Violations ({len(validation_context['violations'])}):\n{violation_summary}"
+            )
+    
+    def get_performance_report() -> Dict[str, Any]:
+        """Get comprehensive performance validation report."""
+        return {
+            'compliance_rate': validation_context['compliance_rate'],
+            'total_measurements': len(performance_monitor.measurements),
+            'violations': validation_context['violations'],
+            'summary': performance_monitor.get_performance_summary()
+        }
+    
+    validation_context.update({
+        'validate_measurement': validate_measurement,
+        'assert_performance_compliance': assert_performance_compliance,
+        'get_performance_report': get_performance_report
+    })
+    
+    return validation_context
+
+
+@pytest.fixture(scope="function")
+def concurrent_request_tester(performance_monitor, client):
+    """
+    Function-scoped fixture providing concurrent request testing utilities.
+    
+    Args:
+        performance_monitor: Performance monitoring instance
+        client: Flask test client
+        
+    Returns:
+        Concurrent request testing utilities
+    """
+    
+    def test_concurrent_requests(endpoint: str, concurrent_users: int = 10,
+                                requests_per_user: int = 5,
+                                headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+        """
+        Test concurrent request performance using ThreadPoolExecutor.
+        
+        Args:
+            endpoint: API endpoint to test
+            concurrent_users: Number of concurrent threads
+            requests_per_user: Requests per thread
+            headers: Optional HTTP headers
+            
+        Returns:
+            Concurrent request test results
+        """
+        results = {
+            'test_parameters': {
+                'endpoint': endpoint,
+                'concurrent_users': concurrent_users,
+                'requests_per_user': requests_per_user,
+                'total_requests': concurrent_users * requests_per_user
+            },
+            'response_times': [],
+            'status_codes': [],
+            'errors': [],
+            'performance_metrics': {}
+        }
+        
+        def make_request(user_id: int) -> List[Dict[str, Any]]:
+            """Make requests for a single user."""
+            user_results = []
+            
+            for request_id in range(requests_per_user):
+                with performance_monitor.measure_operation(
+                    operation_name='concurrent_request',
+                    category='api',
+                    endpoint=endpoint,
+                    concurrent_users=concurrent_users
+                ) as measurement:
+                    
+                    start_time = time.perf_counter()
+                    
+                    try:
+                        response = client.get(endpoint, headers=headers)
+                        end_time = time.perf_counter()
+                        
+                        response_time = (end_time - start_time) * 1000
+                        
+                        user_results.append({
+                            'user_id': user_id,
+                            'request_id': request_id,
+                            'response_time': response_time,
+                            'status_code': response.status_code,
+                            'success': 200 <= response.status_code < 300
+                        })
+                        
+                        measurement.status_code = response.status_code
+                        
+                    except Exception as e:
+                        end_time = time.perf_counter()
+                        response_time = (end_time - start_time) * 1000
+                        
+                        user_results.append({
+                            'user_id': user_id,
+                            'request_id': request_id,
+                            'response_time': response_time,
+                            'status_code': 500,
+                            'success': False,
+                            'error': str(e)
+                        })
+                        
+                        measurement.error_count += 1
+            
+            return user_results
+        
+        # Execute concurrent requests
+        with ThreadPoolExecutor(max_workers=concurrent_users) as executor:
+            start_time = time.time()
+            
+            futures = [
+                executor.submit(make_request, user_id)
+                for user_id in range(concurrent_users)
+            ]
+            
+            # Collect results
+            all_request_results = []
+            for future in as_completed(futures):
+                try:
+                    user_results = future.result()
+                    all_request_results.extend(user_results)
+                except Exception as e:
+                    results['errors'].append(str(e))
+            
+            end_time = time.time()
+        
+        # Process results
+        response_times = [r['response_time'] for r in all_request_results]
+        status_codes = [r['status_code'] for r in all_request_results]
+        successful_requests = [r for r in all_request_results if r['success']]
+        
+        results['response_times'] = response_times
+        results['status_codes'] = status_codes
+        
+        # Calculate performance metrics
+        if response_times:
+            results['performance_metrics'] = {
+                'total_duration': end_time - start_time,
+                'requests_per_second': len(all_request_results) / (end_time - start_time),
+                'avg_response_time': statistics.mean(response_times),
+                'median_response_time': statistics.median(response_times),
+                'min_response_time': min(response_times),
+                'max_response_time': max(response_times),
+                'success_rate': len(successful_requests) / len(all_request_results),
+                'error_rate': 1 - (len(successful_requests) / len(all_request_results))
+            }
+            
+            if len(response_times) > 1:
+                results['performance_metrics']['std_deviation'] = statistics.stdev(response_times)
+        
+        return results
     
     return {
-        'variance': round(variance, 4),
-        'variance_percent': round(variance_percent, 2),
-        'performance_ratio': round(performance_ratio, 3),
-        'improvement': actual_ms < baseline_ms,
-        'degradation': actual_ms > baseline_ms * (1 + DEFAULT_PERFORMANCE_VARIANCE_THRESHOLD)
+        'test_concurrent_requests': test_concurrent_requests
     }
 
 
-def generate_performance_report(metrics_collector: PerformanceMetricsCollector,
-                              response_validator: ResponseTimeValidator) -> Dict[str, Any]:
-    """
-    Generate comprehensive performance test report.
-    
-    Args:
-        metrics_collector: Performance metrics collector instance
-        response_validator: Response time validator instance
-        
-    Returns:
-        Dictionary containing comprehensive performance analysis
-    """
-    compliance_summary = response_validator.get_compliance_summary()
-    metrics_exposition = metrics_collector.get_metrics_exposition()
-    
-    report = {
-        'report_timestamp': datetime.utcnow().isoformat(),
-        'performance_compliance': compliance_summary,
-        'prometheus_metrics': metrics_exposition,
-        'baseline_comparison': {
-            'nodejs_baselines_loaded': len(NODEJS_BASELINE_METRICS['api_endpoints']),
-            'variance_threshold_percent': DEFAULT_PERFORMANCE_VARIANCE_THRESHOLD * 100,
-            'critical_requirement': '≤10% variance from Node.js baseline'
-        },
-        'test_environment': {
-            'python_version': os.sys.version,
-            'platform': os.name,
-            'test_timestamp': datetime.utcnow().isoformat()
-        }
-    }
-    
-    logger.info("Performance test report generated", report_summary=report['performance_compliance'])
-    return report
-
-
-# Export all fixtures and utilities for pytest integration
+# Export comprehensive fixtures and utilities
 __all__ = [
     # Core data structures
-    'PerformanceBaseline',
-    'LoadTestConfiguration', 
-    'DatabasePerformanceMetrics',
-    'CachePerformanceMetrics',
+    'NodeJSPerformanceBaseline',
+    'PerformanceMeasurement',
     
-    # Testing classes
-    'PerformanceMetricsCollector',
-    'FlaskPerformanceTestUser',
+    # Performance monitoring
+    'PerformanceMonitor',
+    
+    # Load testing
+    'LoadTestGenerator',
+    'FlaskLoadTestUser',
+    
+    # Database testing
     'DatabasePerformanceTester',
-    'CachePerformanceTester',
-    'ResponseTimeValidator',
     
-    # Pytest fixtures
-    'performance_metrics_collector',
-    'nodejs_baselines',
-    'load_test_config',
+    # Cache testing
+    'CachePerformanceTester',
+    
+    # HTTP performance testing
+    'ApacheBenchTester',
+    
+    # pytest fixtures
+    'nodejs_performance_baseline',
+    'performance_monitor',
+    'load_test_generator',
     'database_performance_tester',
     'cache_performance_tester',
-    'response_time_validator',
+    'apache_bench_tester',
+    'performance_validation_context',
     'concurrent_request_tester',
     
-    # Utility functions
-    'run_locust_load_test',
-    'calculate_performance_variance',
-    'generate_performance_report',
-    
-    # Constants
-    'NODEJS_BASELINE_METRICS',
-    'DEFAULT_PERFORMANCE_VARIANCE_THRESHOLD',
-    'DEFAULT_LOAD_TEST_DURATION',
-    'DEFAULT_CONCURRENT_USERS'
+    # Availability flags
+    'PROMETHEUS_AVAILABLE',
+    'LOCUST_AVAILABLE',
+    'PYMONGO_AVAILABLE',
+    'MOTOR_AVAILABLE',
+    'REDIS_AVAILABLE',
+    'APP_DEPENDENCIES_AVAILABLE'
 ]
