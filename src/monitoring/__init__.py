@@ -1,516 +1,615 @@
 """
-Monitoring Module Initialization
+Monitoring Module Initialization for Flask Migration Application
 
-Central entry point for comprehensive Flask application monitoring providing enterprise-grade
-observability through structured logging, Prometheus metrics collection, health check endpoints,
-and APM integration. Implements Flask application factory pattern for seamless integration.
-
-This module serves as the unified interface for:
-- Structured logging with enterprise SIEM integration (structlog 23.1+)
-- Prometheus metrics collection and WSGI server instrumentation
-- Kubernetes-native health check endpoints (/health/live, /health/ready)
-- Enterprise APM integration (Datadog ddtrace 2.1+, New Relic 9.2+)
-- Performance monitoring for ≤10% variance compliance with Node.js baseline
-- Circuit breaker patterns and dependency health validation
+This module provides comprehensive monitoring initialization and Flask application factory integration
+for enterprise-grade observability. Implements centralized monitoring setup including structured logging,
+Prometheus metrics collection, health check endpoints, and APM integration for complete system visibility.
 
 Key Features:
 - Flask application factory pattern integration per Section 6.1.1
-- Comprehensive observability stack per Section 6.5.1
-- Enterprise APM compatibility per Section 3.6.1  
-- Kubernetes health probe endpoints per Section 6.5.2.1
-- Centralized monitoring configuration and initialization
-- Performance variance tracking for migration quality assurance
+- Comprehensive observability stack: logging, metrics, health checks, APM per Section 6.5.1
+- Enterprise APM integration (Datadog/New Relic) per Section 3.6.1
+- Kubernetes-native health endpoints per Section 6.5.2.1
+- Performance monitoring with ≤10% variance tracking per Section 0.1.1
+- Centralized monitoring configuration and error handling
+- Blueprint registration and Flask extension initialization
+- Graceful degradation and monitoring system fault tolerance
 
-Usage:
-    from src.monitoring import init_monitoring
-    
-    app = Flask(__name__)
-    monitoring = init_monitoring(app)
+Architecture Integration:
+- Flask application factory initialization with monitoring extensions
+- Blueprint registration for health check endpoints (/health/live, /health/ready)
+- WSGI server instrumentation for Gunicorn/uWSGI deployment
+- Enterprise monitoring integration (Splunk, ELK Stack, Prometheus)
+- APM distributed tracing with correlation ID propagation
+- Circuit breaker integration for external service monitoring
+- Container orchestration health probe compatibility
 
-Compliance:
+Performance Requirements:
+- Monitoring overhead: <2% CPU impact per Section 6.5.1.1
+- Health check response time: <100ms per Section 6.5.2.1
+- APM instrumentation latency: <1ms per request per Section 6.5.4.3
+- Metrics collection efficiency: 15-second intervals per Section 6.5.1.1
+- Log processing throughput: >15MB/min per Section 6.5.1.2
+
+References:
 - Section 6.1.1: Flask application factory pattern implementation
-- Section 6.5.1: Comprehensive observability capabilities
-- Section 3.6.1: Enterprise APM integration requirements
-- Section 6.5.2.1: Health check endpoints for container orchestration
-- Section 6.5.4: Monitoring architecture overview and component integration
+- Section 6.5.1: Comprehensive monitoring infrastructure requirements
+- Section 3.6.1: Enterprise APM integration and logging systems
+- Section 6.5.2.1: Kubernetes health probe endpoint specifications
+- Section 6.5.4: Monitoring architecture overview and integration patterns
 """
 
 import os
-import time
 import logging
-from typing import Optional, Dict, Any, Tuple
-from dataclasses import dataclass
+import traceback
+import threading
+from typing import Dict, Any, Optional, Callable, List
+from functools import wraps
 
-from flask import Flask
+from flask import Flask, current_app, g, has_app_context
 import structlog
 
-# Import all monitoring components
-from .logging import (
-    init_logging,
-    configure_structlog,
-    get_logger,
-    RequestLoggingMiddleware,
-    set_correlation_id,
-    set_user_context,
-    set_request_id,
-    clear_request_context,
-    log_security_event,
-    log_performance_metric,
-    log_business_event,
-    log_integration_event
-)
+# Monitoring component imports with graceful fallback handling
+try:
+    from .logging import (
+        setup_structured_logging,
+        create_flask_logging_middleware,
+        get_logger,
+        LoggingConfig,
+        CorrelationManager,
+        RequestContextManager,
+        SecurityAuditLogger,
+        PerformanceLogger
+    )
+    LOGGING_AVAILABLE = True
+except ImportError as e:
+    print(f"Warning: Logging module import failed: {e}")
+    LOGGING_AVAILABLE = False
 
-from .metrics import (
-    init_metrics,
-    start_metrics_server,
-    FlaskMetricsCollector,
-    metrics_collector,
-    track_business_operation,
-    track_external_service_call,
-    track_database_operation,
-    update_cache_metrics,
-    update_auth_metrics,
-    set_nodejs_baseline,
-    get_performance_summary,
-    METRICS_REGISTRY
-)
+try:
+    from .metrics import (
+        setup_metrics_collection,
+        PrometheusMetricsCollector,
+        MetricsMiddleware,
+        create_metrics_endpoint,
+        monitor_performance,
+        monitor_database_operation,
+        monitor_external_service,
+        monitor_cache_operation
+    )
+    METRICS_AVAILABLE = True
+except ImportError as e:
+    print(f"Warning: Metrics module import failed: {e}")
+    METRICS_AVAILABLE = False
 
-from .health import (
-    init_health_monitoring,
-    get_health_status,
-    get_circuit_breaker_states,
-    HealthChecker,
-    health_checker,
-    HealthStatus,
-    DependencyType,
-    HealthCheckResult,
-    SystemHealth,
-    CircuitBreakerState,
-    circuit_breaker
-)
+try:
+    from .health import (
+        init_health_monitoring,
+        health_blueprint,
+        HealthCheckEndpoints,
+        DependencyHealthValidator,
+        HealthState,
+        HealthCheckResult,
+        health_metrics
+    )
+    HEALTH_AVAILABLE = True
+except ImportError as e:
+    print(f"Warning: Health module import failed: {e}")
+    HEALTH_AVAILABLE = False
 
-from .apm import (
-    create_apm_integration,
-    init_apm_with_app,
-    APMIntegration,
-    APMConfiguration,
-    APMProvider
-)
+try:
+    from .apm import (
+        init_apm,
+        APMIntegrationManager,
+        APMConfig,
+        CorrelationIDManager as APMCorrelationManager,
+        trace_business_operation,
+        trace_database_operation,
+        trace_external_service
+    )
+    APM_AVAILABLE = True
+except ImportError as e:
+    print(f"Warning: APM module import failed: {e}")
+    APM_AVAILABLE = False
+
+# Optional configuration imports
+try:
+    from src.config.monitoring import MonitoringConfig
+    CONFIG_AVAILABLE = True
+except ImportError:
+    # Fallback configuration class
+    class MonitoringConfig:
+        def __init__(self):
+            self.MONITORING_ENABLED = os.getenv('MONITORING_ENABLED', 'true').lower() == 'true'
+            self.STRUCTURED_LOGGING_ENABLED = os.getenv('STRUCTURED_LOGGING_ENABLED', 'true').lower() == 'true'
+            self.PROMETHEUS_METRICS_ENABLED = os.getenv('PROMETHEUS_METRICS_ENABLED', 'true').lower() == 'true'
+            self.HEALTH_CHECKS_ENABLED = os.getenv('HEALTH_CHECKS_ENABLED', 'true').lower() == 'true'
+            self.APM_ENABLED = os.getenv('APM_ENABLED', 'false').lower() == 'true'
+    CONFIG_AVAILABLE = False
 
 
-# Initialize module-level logger
-logger = structlog.get_logger(__name__)
+class MonitoringInitializationError(Exception):
+    """Custom exception for monitoring initialization failures."""
+    pass
 
 
-@dataclass
-class MonitoringConfiguration:
+class MonitoringSystemManager:
     """
-    Comprehensive monitoring configuration for enterprise observability stack.
+    Central monitoring system manager coordinating all monitoring components.
     
-    Consolidates configuration for logging, metrics, health checks, and APM
-    with environment-specific settings and performance optimization.
-    """
-    # Core monitoring settings
-    enable_logging: bool = True
-    enable_metrics: bool = True
-    enable_health_checks: bool = True
-    enable_apm: bool = True
-    
-    # Environment and service identification
-    environment: str = "development"
-    service_name: str = "flask-migration-app"
-    service_version: str = "1.0.0"
-    instance_id: str = None
-    
-    # Logging configuration
-    log_level: str = "INFO"
-    log_format: str = "json"
-    enable_correlation_id: bool = True
-    enable_security_audit: bool = True
-    
-    # Metrics configuration
-    metrics_port: int = 8000
-    enable_multiprocess_metrics: bool = True
-    nodejs_baseline_enabled: bool = True
-    performance_variance_threshold: float = 0.10  # 10% variance threshold
-    
-    # Health check configuration
-    health_check_timeout: float = 10.0
-    enable_dependency_checks: bool = True
-    enable_circuit_breakers: bool = True
-    
-    # APM configuration
-    apm_provider: str = "datadog"
-    apm_sample_rate: Optional[float] = None
-    enable_distributed_tracing: bool = True
-    enable_performance_correlation: bool = True
-    
-    # Enterprise integration settings
-    enable_prometheus_multiproc: bool = True
-    enable_kubernetes_probes: bool = True
-    enable_load_balancer_health: bool = True
-    
-    def __post_init__(self):
-        """Initialize derived configuration values."""
-        if self.instance_id is None:
-            self.instance_id = os.environ.get('HOSTNAME', f'flask-{os.getpid()}')
-        
-        # Set environment-specific defaults
-        if self.environment == "production":
-            self.apm_sample_rate = self.apm_sample_rate or 0.1
-            self.log_level = "WARNING"
-        elif self.environment == "staging":
-            self.apm_sample_rate = self.apm_sample_rate or 0.5
-            self.log_level = "INFO"
-        else:  # development
-            self.apm_sample_rate = self.apm_sample_rate or 1.0
-            self.log_level = "DEBUG"
-
-
-class MonitoringStack:
-    """
-    Comprehensive monitoring stack manager providing unified initialization and management
-    of all observability components for Flask applications.
-    
-    Implements enterprise-grade monitoring patterns with Flask application factory
-    integration, comprehensive observability capabilities, and performance tracking.
+    Provides centralized initialization, configuration, and lifecycle management
+    for the complete observability stack including logging, metrics, health checks,
+    and APM integration with enterprise-grade fault tolerance.
     """
     
-    def __init__(self, config: Optional[MonitoringConfiguration] = None):
+    def __init__(self, config: Optional[MonitoringConfig] = None):
         """
-        Initialize monitoring stack with comprehensive configuration.
+        Initialize monitoring system manager.
         
         Args:
-            config: Monitoring configuration (auto-generated if not provided)
+            config: Monitoring configuration instance (optional)
         """
-        self.config = config or self._create_default_config()
-        self.app: Optional[Flask] = None
-        self.is_initialized = False
+        self.config = config or MonitoringConfig()
+        self.logger = None
+        self.metrics_collector = None
+        self.health_endpoints = None
+        self.apm_manager = None
+        self.correlation_manager = None
+        self.request_context_manager = None
         
-        # Component instances
-        self.logging_middleware: Optional[RequestLoggingMiddleware] = None
-        self.metrics_collector: Optional[FlaskMetricsCollector] = None
-        self.health_checker: Optional[HealthChecker] = None
-        self.apm_integration: Optional[APMIntegration] = None
-        
-        # Performance tracking
-        self.start_time = time.time()
-        self.initialization_metrics = {
-            "logging_initialized": False,
-            "metrics_initialized": False,
-            "health_initialized": False,
-            "apm_initialized": False,
-            "total_init_time": 0.0
+        # Component status tracking
+        self.component_status = {
+            'logging': False,
+            'metrics': False,
+            'health': False,
+            'apm': False
         }
         
-        logger.info(
-            "Monitoring stack created",
-            service_name=self.config.service_name,
-            environment=self.config.environment,
-            instance_id=self.config.instance_id
-        )
-    
-    def _create_default_config(self) -> MonitoringConfiguration:
-        """Create default monitoring configuration from environment variables."""
-        return MonitoringConfiguration(
-            environment=os.getenv("FLASK_ENV", "development"),
-            service_name=os.getenv("SERVICE_NAME", "flask-migration-app"),
-            service_version=os.getenv("APP_VERSION", "1.0.0"),
-            log_level=os.getenv("LOG_LEVEL", "INFO"),
-            log_format=os.getenv("LOG_FORMAT", "json"),
-            apm_provider=os.getenv("APM_PROVIDER", "datadog"),
-            enable_correlation_id=os.getenv("ENABLE_CORRELATION_ID", "true").lower() == "true",
-            enable_security_audit=os.getenv("ENABLE_SECURITY_AUDIT", "true").lower() == "true",
-            enable_distributed_tracing=os.getenv("ENABLE_DISTRIBUTED_TRACING", "true").lower() == "true"
-        )
-    
-    def init_app(self, app: Flask) -> 'MonitoringStack':
-        """
-        Initialize comprehensive monitoring for Flask application using factory pattern.
+        # Initialization lock for thread safety
+        self._init_lock = threading.Lock()
+        self._initialized = False
         
-        Implements Section 6.1.1 Flask application factory pattern with centralized
-        monitoring initialization, Section 6.5.1 comprehensive observability capabilities,
-        and Section 6.5.4 monitoring architecture integration.
+        # Error tracking for graceful degradation
+        self._initialization_errors = {}
+    
+    def initialize_monitoring_stack(self, app: Flask) -> Dict[str, Any]:
+        """
+        Initialize complete monitoring stack with Flask application integration.
         
         Args:
-            app: Flask application instance for monitoring integration
+            app: Flask application instance
             
         Returns:
-            MonitoringStack: Self-reference for method chaining
+            Dictionary containing initialization status and component references
         """
-        if self.is_initialized:
-            logger.warning("Monitoring stack already initialized")
-            return self
-        
-        self.app = app
-        init_start_time = time.time()
-        
-        try:
-            # Store monitoring configuration in Flask app config
-            app.config.update({
-                'MONITORING_ENABLED': True,
-                'MONITORING_SERVICE_NAME': self.config.service_name,
-                'MONITORING_ENVIRONMENT': self.config.environment,
-                'MONITORING_INSTANCE_ID': self.config.instance_id
-            })
+        with self._init_lock:
+            if self._initialized:
+                return self._get_status_summary()
             
-            # Initialize logging subsystem
-            if self.config.enable_logging:
-                self._init_logging(app)
+            initialization_summary = {
+                'monitoring_enabled': self.config.MONITORING_ENABLED,
+                'components_initialized': {},
+                'initialization_errors': {},
+                'flask_integration_status': 'pending'
+            }
+            
+            if not self.config.MONITORING_ENABLED:
+                initialization_summary['flask_integration_status'] = 'disabled'
+                self._initialized = True
+                return initialization_summary
+            
+            # Initialize structured logging first (foundation for other components)
+            logging_status = self._initialize_structured_logging(app)
+            initialization_summary['components_initialized']['logging'] = logging_status
             
             # Initialize metrics collection
-            if self.config.enable_metrics:
-                self._init_metrics(app)
+            metrics_status = self._initialize_metrics_collection(app)
+            initialization_summary['components_initialized']['metrics'] = metrics_status
             
             # Initialize health monitoring
-            if self.config.enable_health_checks:
-                self._init_health_monitoring(app)
+            health_status = self._initialize_health_monitoring(app)
+            initialization_summary['components_initialized']['health'] = health_status
             
             # Initialize APM integration
-            if self.config.enable_apm:
-                self._init_apm(app)
+            apm_status = self._initialize_apm_integration(app)
+            initialization_summary['components_initialized']['apm'] = apm_status
             
-            # Store monitoring stack reference in Flask app extensions
-            app.extensions = getattr(app, 'extensions', {})
-            app.extensions['monitoring'] = self
+            # Setup Flask application integration
+            flask_integration_status = self._setup_flask_integration(app)
+            initialization_summary['flask_integration_status'] = flask_integration_status
             
-            # Record initialization completion
-            self.initialization_metrics['total_init_time'] = time.time() - init_start_time
-            self.is_initialized = True
+            # Store initialization errors
+            initialization_summary['initialization_errors'] = self._initialization_errors.copy()
             
-            # Log comprehensive initialization summary
-            logger.info(
-                "Monitoring stack initialized successfully",
-                service_name=self.config.service_name,
-                environment=self.config.environment,
-                instance_id=self.config.instance_id,
-                initialization_time_ms=round(self.initialization_metrics['total_init_time'] * 1000, 2),
-                components_initialized={
-                    'logging': self.initialization_metrics['logging_initialized'],
-                    'metrics': self.initialization_metrics['metrics_initialized'],
-                    'health': self.initialization_metrics['health_initialized'],
-                    'apm': self.initialization_metrics['apm_initialized']
-                },
-                endpoints_registered=[
-                    '/health/live',
-                    '/health/ready', 
-                    '/health',
-                    '/health/dependencies',
-                    '/metrics'
-                ]
-            )
-            
-            return self
-            
-        except Exception as e:
-            logger.error(
-                "Failed to initialize monitoring stack",
-                error=str(e),
-                service_name=self.config.service_name,
-                environment=self.config.environment,
-                initialization_time_ms=round((time.time() - init_start_time) * 1000, 2)
-            )
-            raise
-    
-    def _init_logging(self, app: Flask) -> None:
-        """
-        Initialize structured logging with enterprise integration.
-        
-        Implements comprehensive structured logging per Section 6.5.1.2 with
-        JSON formatting, correlation ID tracking, and enterprise SIEM compatibility.
-        """
-        try:
-            # Configure Flask app logging settings
-            app.config.update({
-                'LOG_LEVEL': self.config.log_level,
-                'LOG_FORMAT': self.config.log_format,
-                'ENABLE_CORRELATION_ID': self.config.enable_correlation_id,
-                'ENABLE_SECURITY_AUDIT': self.config.enable_security_audit
-            })
-            
-            # Initialize comprehensive logging system
-            init_logging(app)
-            
-            # Store logging middleware reference
-            self.logging_middleware = app.request_logging_middleware
-            
-            self.initialization_metrics['logging_initialized'] = True
-            
-            logger.info(
-                "Structured logging initialized",
-                log_level=self.config.log_level,
-                log_format=self.config.log_format,
-                correlation_id_enabled=self.config.enable_correlation_id,
-                security_audit_enabled=self.config.enable_security_audit
-            )
-            
-        except Exception as e:
-            logger.error("Failed to initialize logging", error=str(e))
-            raise
-    
-    def _init_metrics(self, app: Flask) -> None:
-        """
-        Initialize Prometheus metrics collection with WSGI server instrumentation.
-        
-        Implements Section 6.5.1.1 metrics collection and Section 6.5.4.1 WSGI server
-        instrumentation for comprehensive performance monitoring.
-        """
-        try:
-            # Initialize metrics collector with Flask application
-            self.metrics_collector = init_metrics(app)
-            
-            # Configure Node.js baseline tracking if enabled
-            if self.config.nodejs_baseline_enabled:
-                self._setup_nodejs_baseline_tracking()
-            
-            # Start standalone metrics server if configured
-            if self.config.metrics_port and self.config.metrics_port != 0:
-                try:
-                    start_metrics_server(self.config.metrics_port)
-                except Exception as e:
-                    logger.warning(
-                        "Failed to start standalone metrics server",
-                        error=str(e),
-                        port=self.config.metrics_port
-                    )
-            
-            self.initialization_metrics['metrics_initialized'] = True
-            
-            logger.info(
-                "Prometheus metrics collection initialized",
-                multiprocess_enabled=self.config.enable_multiprocess_metrics,
-                nodejs_baseline_enabled=self.config.nodejs_baseline_enabled,
-                variance_threshold_percent=round(self.config.performance_variance_threshold * 100, 1),
-                metrics_port=self.config.metrics_port
-            )
-            
-        except Exception as e:
-            logger.error("Failed to initialize metrics collection", error=str(e))
-            raise
-    
-    def _init_health_monitoring(self, app: Flask) -> None:
-        """
-        Initialize comprehensive health check endpoints.
-        
-        Implements Section 6.5.2.1 Kubernetes probe endpoints and load balancer
-        integration with dependency health validation and circuit breaker monitoring.
-        """
-        try:
-            # Initialize health checker with Flask application
-            self.health_checker = init_health_monitoring(app)
-            
-            self.initialization_metrics['health_initialized'] = True
-            
-            logger.info(
-                "Health monitoring initialized",
-                kubernetes_probes_enabled=self.config.enable_kubernetes_probes,
-                dependency_checks_enabled=self.config.enable_dependency_checks,
-                circuit_breakers_enabled=self.config.enable_circuit_breakers,
-                health_check_timeout=self.config.health_check_timeout
-            )
-            
-        except Exception as e:
-            logger.error("Failed to initialize health monitoring", error=str(e))
-            raise
-    
-    def _init_apm(self, app: Flask) -> None:
-        """
-        Initialize enterprise APM integration.
-        
-        Implements Section 3.6.1 enterprise APM integration with distributed tracing,
-        performance correlation analysis, and environment-specific sampling.
-        """
-        try:
-            # Create APM integration with environment-specific configuration
-            self.apm_integration = init_apm_with_app(
-                app,
-                provider=self.config.apm_provider,
-                environment=self.config.environment,
-                service_name=self.config.service_name,
-                sample_rates={
-                    "production": 0.1,
-                    "staging": 0.5,
-                    "development": 1.0,
-                    "testing": 0.0
-                },
-                distributed_tracing=self.config.enable_distributed_tracing,
-                enable_performance_correlation=self.config.enable_performance_correlation,
-                baseline_variance_threshold=self.config.performance_variance_threshold
-            )
-            
-            self.initialization_metrics['apm_initialized'] = True
-            
-            logger.info(
-                "APM integration initialized",
-                provider=self.config.apm_provider,
-                sample_rate=self.config.apm_sample_rate,
-                distributed_tracing=self.config.enable_distributed_tracing,
-                performance_correlation=self.config.enable_performance_correlation
-            )
-            
-        except Exception as e:
-            logger.warning(
-                "APM integration failed - continuing without APM",
-                error=str(e),
-                provider=self.config.apm_provider
-            )
-            # APM failure is not critical - continue without it
-            self.initialization_metrics['apm_initialized'] = False
-    
-    def _setup_nodejs_baseline_tracking(self) -> None:
-        """
-        Set up Node.js baseline performance tracking for migration compliance.
-        
-        Loads Node.js baseline metrics and configures variance tracking for
-        ≤10% performance compliance monitoring.
-        """
-        try:
-            # Load Node.js baseline metrics from configuration or external source
-            # This would typically be loaded from a configuration file or metrics store
-            nodejs_baselines = self._load_nodejs_baselines()
-            
-            if nodejs_baselines:
-                for endpoint, baseline_ms in nodejs_baselines.items():
-                    baseline_seconds = baseline_ms / 1000.0
-                    set_nodejs_baseline(endpoint, baseline_seconds)
-                
-                logger.info(
-                    "Node.js baseline tracking configured",
-                    baselines_loaded=len(nodejs_baselines),
-                    variance_threshold_percent=round(self.config.performance_variance_threshold * 100, 1)
+            # Log initialization summary
+            if self.logger:
+                self.logger.info(
+                    "Monitoring stack initialization completed",
+                    monitoring_enabled=self.config.MONITORING_ENABLED,
+                    logging_enabled=logging_status['enabled'],
+                    metrics_enabled=metrics_status['enabled'],
+                    health_enabled=health_status['enabled'],
+                    apm_enabled=apm_status['enabled'],
+                    flask_integration=flask_integration_status,
+                    errors=list(self._initialization_errors.keys())
                 )
-            else:
-                logger.warning("No Node.js baseline metrics available for tracking")
-                
-        except Exception as e:
-            logger.error("Failed to setup Node.js baseline tracking", error=str(e))
+            
+            self._initialized = True
+            return initialization_summary
     
-    def _load_nodejs_baselines(self) -> Dict[str, float]:
-        """
-        Load Node.js baseline performance metrics.
+    def _initialize_structured_logging(self, app: Flask) -> Dict[str, Any]:
+        """Initialize structured logging with enterprise integration."""
+        status = {
+            'enabled': False,
+            'component': 'logging',
+            'details': {},
+            'error': None
+        }
         
-        Returns:
-            Dict[str, float]: Mapping of endpoint names to baseline duration in milliseconds
-        """
-        # Placeholder implementation - would load from configuration or external source
-        # In production, this would load from a configuration file, environment variables,
-        # or a metrics store containing the Node.js baseline measurements
+        try:
+            if not LOGGING_AVAILABLE:
+                raise MonitoringInitializationError("Logging module not available")
+            
+            if not self.config.STRUCTURED_LOGGING_ENABLED:
+                status['details']['reason'] = 'disabled_by_configuration'
+                return status
+            
+            # Setup structured logging
+            self.logger = setup_structured_logging(app)
+            
+            # Initialize correlation and context managers
+            self.correlation_manager = CorrelationManager()
+            self.request_context_manager = RequestContextManager()
+            
+            # Setup Flask logging middleware
+            logging_middleware = create_flask_logging_middleware(self.logger)
+            logging_middleware(app)
+            
+            # Store logger in app config for access by other components
+            app.config['MONITORING_LOGGER'] = self.logger
+            
+            self.component_status['logging'] = True
+            status['enabled'] = True
+            status['details'] = {
+                'structured_logging': True,
+                'correlation_tracking': True,
+                'flask_middleware': True,
+                'enterprise_integration': LoggingConfig.ENTERPRISE_LOGGING_ENABLED
+            }
+            
+            # Log successful initialization
+            self.logger.info(
+                "Structured logging initialized successfully",
+                log_level=LoggingConfig.LOG_LEVEL,
+                log_format=LoggingConfig.LOG_FORMAT,
+                enterprise_logging=LoggingConfig.ENTERPRISE_LOGGING_ENABLED,
+                correlation_tracking=LoggingConfig.CORRELATION_ID_ENABLED
+            )
+            
+        except Exception as e:
+            error_message = f"Structured logging initialization failed: {str(e)}"
+            status['error'] = error_message
+            self._initialization_errors['logging'] = error_message
+            
+            # Fallback to basic logging
+            logging.basicConfig(level=logging.INFO)
+            print(f"Warning: {error_message}")
+            print(f"Traceback: {traceback.format_exc()}")
         
-        baselines_env = os.getenv('NODEJS_BASELINES')
-        if baselines_env:
+        return status
+    
+    def _initialize_metrics_collection(self, app: Flask) -> Dict[str, Any]:
+        """Initialize Prometheus metrics collection with WSGI instrumentation."""
+        status = {
+            'enabled': False,
+            'component': 'metrics',
+            'details': {},
+            'error': None
+        }
+        
+        try:
+            if not METRICS_AVAILABLE:
+                raise MonitoringInitializationError("Metrics module not available")
+            
+            if not self.config.PROMETHEUS_METRICS_ENABLED:
+                status['details']['reason'] = 'disabled_by_configuration'
+                return status
+            
+            # Initialize Prometheus metrics collector
+            self.metrics_collector = setup_metrics_collection(app, self.config)
+            
+            # Store metrics collector in app config
+            app.config['MONITORING_METRICS'] = self.metrics_collector
+            
+            self.component_status['metrics'] = True
+            status['enabled'] = True
+            status['details'] = {
+                'prometheus_integration': True,
+                'wsgi_instrumentation': True,
+                'custom_migration_metrics': True,
+                'performance_tracking': True
+            }
+            
+            if self.logger:
+                self.logger.info(
+                    "Prometheus metrics collection initialized",
+                    metrics_endpoint='/metrics',
+                    wsgi_instrumentation=True,
+                    performance_tracking=True
+                )
+            
+        except Exception as e:
+            error_message = f"Metrics collection initialization failed: {str(e)}"
+            status['error'] = error_message
+            self._initialization_errors['metrics'] = error_message
+            
+            if self.logger:
+                self.logger.error("Metrics initialization failed", error=str(e), exc_info=True)
+            else:
+                print(f"Warning: {error_message}")
+                print(f"Traceback: {traceback.format_exc()}")
+        
+        return status
+    
+    def _initialize_health_monitoring(self, app: Flask) -> Dict[str, Any]:
+        """Initialize health check endpoints with Kubernetes probe support."""
+        status = {
+            'enabled': False,
+            'component': 'health',
+            'details': {},
+            'error': None
+        }
+        
+        try:
+            if not HEALTH_AVAILABLE:
+                raise MonitoringInitializationError("Health module not available")
+            
+            if not self.config.HEALTH_CHECKS_ENABLED:
+                status['details']['reason'] = 'disabled_by_configuration'
+                return status
+            
+            # Initialize health monitoring
+            init_health_monitoring(app)
+            
+            # Initialize health endpoints for programmatic access
+            self.health_endpoints = HealthCheckEndpoints()
+            
+            # Store health endpoints in app config
+            app.config['MONITORING_HEALTH'] = self.health_endpoints
+            
+            self.component_status['health'] = True
+            status['enabled'] = True
+            status['details'] = {
+                'kubernetes_probes': True,
+                'dependency_validation': True,
+                'circuit_breaker_integration': True,
+                'load_balancer_compatibility': True,
+                'endpoints': ['/health/live', '/health/ready', '/health', '/health/dependencies']
+            }
+            
+            if self.logger:
+                self.logger.info(
+                    "Health monitoring initialized",
+                    kubernetes_probes=True,
+                    endpoints=status['details']['endpoints'],
+                    dependency_validation=True
+                )
+            
+        except Exception as e:
+            error_message = f"Health monitoring initialization failed: {str(e)}"
+            status['error'] = error_message
+            self._initialization_errors['health'] = error_message
+            
+            if self.logger:
+                self.logger.error("Health monitoring initialization failed", error=str(e), exc_info=True)
+            else:
+                print(f"Warning: {error_message}")
+                print(f"Traceback: {traceback.format_exc()}")
+        
+        return status
+    
+    def _initialize_apm_integration(self, app: Flask) -> Dict[str, Any]:
+        """Initialize APM integration with enterprise monitoring systems."""
+        status = {
+            'enabled': False,
+            'component': 'apm',
+            'details': {},
+            'error': None
+        }
+        
+        try:
+            if not APM_AVAILABLE:
+                raise MonitoringInitializationError("APM module not available")
+            
+            if not self.config.APM_ENABLED:
+                status['details']['reason'] = 'disabled_by_configuration'
+                return status
+            
+            # Initialize APM integration
+            self.apm_manager = init_apm(app, self.config)
+            
+            # Store APM manager in app config
+            app.config['MONITORING_APM'] = self.apm_manager
+            
+            self.component_status['apm'] = True
+            status['enabled'] = True
+            status['details'] = {
+                'distributed_tracing': True,
+                'custom_attributes': self.apm_manager.apm_config.custom_attributes_enabled,
+                'performance_tracking': self.apm_manager.apm_config.track_performance_variance,
+                'datadog_enabled': self.apm_manager.apm_config.datadog_enabled,
+                'newrelic_enabled': self.apm_manager.apm_config.newrelic_enabled,
+                'correlation_id_propagation': True
+            }
+            
+            if self.logger:
+                self.logger.info(
+                    "APM integration initialized",
+                    service_name=self.apm_manager.apm_config.service_name,
+                    environment=self.apm_manager.apm_config.environment,
+                    datadog_enabled=self.apm_manager.apm_config.datadog_enabled,
+                    newrelic_enabled=self.apm_manager.apm_config.newrelic_enabled,
+                    distributed_tracing=True
+                )
+            
+        except Exception as e:
+            error_message = f"APM integration initialization failed: {str(e)}"
+            status['error'] = error_message
+            self._initialization_errors['apm'] = error_message
+            
+            if self.logger:
+                self.logger.warning("APM integration failed, continuing without APM", error=str(e))
+            else:
+                print(f"Warning: {error_message}")
+                print(f"Note: Application will continue without APM integration")
+        
+        return status
+    
+    def _setup_flask_integration(self, app: Flask) -> str:
+        """Setup Flask application integration and configuration."""
+        try:
+            # Store monitoring manager in app config
+            app.config['MONITORING_MANAGER'] = self
+            app.config['MONITORING_CONFIG'] = self.config
+            
+            # Setup monitoring context processors
+            self._setup_context_processors(app)
+            
+            # Setup error handlers for monitoring
+            self._setup_error_handlers(app)
+            
+            # Add monitoring utility functions to app
+            self._setup_utility_functions(app)
+            
+            if self.logger:
+                self.logger.info(
+                    "Flask monitoring integration completed",
+                    components_enabled=list(k for k, v in self.component_status.items() if v),
+                    monitoring_overhead_target="<2% CPU",
+                    performance_variance_tracking="≤10% threshold"
+                )
+            
+            return 'success'
+            
+        except Exception as e:
+            error_message = f"Flask integration setup failed: {str(e)}"
+            self._initialization_errors['flask_integration'] = error_message
+            
+            if self.logger:
+                self.logger.error("Flask integration failed", error=str(e), exc_info=True)
+            else:
+                print(f"Error: {error_message}")
+                print(f"Traceback: {traceback.format_exc()}")
+            
+            return 'failed'
+    
+    def _setup_context_processors(self, app: Flask):
+        """Setup Flask context processors for monitoring integration."""
+        @app.context_processor
+        def inject_monitoring_context():
+            """Inject monitoring context into Flask templates."""
+            context = {}
+            
+            # Add correlation ID if available
+            if self.correlation_manager and has_app_context():
+                try:
+                    correlation_id = self.correlation_manager.get_correlation_id()
+                    if correlation_id:
+                        context['correlation_id'] = correlation_id
+                except Exception:
+                    pass
+            
+            # Add monitoring status
+            context['monitoring_enabled'] = self.config.MONITORING_ENABLED
+            context['monitoring_components'] = {
+                k: v for k, v in self.component_status.items() if v
+            }
+            
+            return context
+    
+    def _setup_error_handlers(self, app: Flask):
+        """Setup error handlers with monitoring integration."""
+        @app.errorhandler(Exception)
+        def handle_monitoring_exception(error):
+            """Handle exceptions with monitoring context."""
             try:
-                import json
-                return json.loads(baselines_env)
-            except (json.JSONDecodeError, TypeError):
-                logger.warning("Invalid NODEJS_BASELINES environment variable format")
+                # Log error with monitoring context
+                if self.logger:
+                    correlation_id = None
+                    if self.correlation_manager:
+                        correlation_id = self.correlation_manager.get_correlation_id()
+                    
+                    self.logger.error(
+                        "Application exception occurred",
+                        exception_type=type(error).__name__,
+                        exception_message=str(error),
+                        correlation_id=correlation_id,
+                        endpoint=getattr(g, 'endpoint', 'unknown'),
+                        method=getattr(g, 'method', 'unknown'),
+                        exc_info=True
+                    )
+                
+                # Record exception in APM if available
+                if self.apm_manager:
+                    self.apm_manager.add_custom_attributes({
+                        'error.type': type(error).__name__,
+                        'error.message': str(error),
+                        'error.handled': True
+                    })
+                
+                # Record exception metrics if available
+                if self.metrics_collector:
+                    # This would be implemented in the metrics collector
+                    pass
+            
+            except Exception as monitoring_error:
+                # Don't let monitoring errors break the application
+                print(f"Monitoring error handling failed: {monitoring_error}")
+            
+            # Re-raise the original exception for normal Flask error handling
+            raise error
+    
+    def _setup_utility_functions(self, app: Flask):
+        """Setup utility functions for easy monitoring access."""
+        # Add monitoring utility functions to app
+        app.get_monitoring_logger = lambda: self.logger
+        app.get_metrics_collector = lambda: self.metrics_collector
+        app.get_health_endpoints = lambda: self.health_endpoints
+        app.get_apm_manager = lambda: self.apm_manager
         
-        # Default baseline values for common endpoints (example data)
+        # Add convenience methods for adding monitoring context
+        def add_user_context(user_id: str, user_role: str = None, **kwargs):
+            """Add user context to monitoring systems."""
+            if self.apm_manager:
+                self.apm_manager.add_user_context(user_id, user_role, kwargs)
+        
+        def add_business_context(operation: str, entity_type: str = None, **kwargs):
+            """Add business context to monitoring systems."""
+            if self.apm_manager:
+                self.apm_manager.add_business_context(operation, entity_type, additional_context=kwargs)
+        
+        def set_performance_baseline(endpoint: str, baseline_time: float):
+            """Set Node.js performance baseline for comparison."""
+            if self.apm_manager:
+                self.apm_manager.set_performance_baseline(endpoint, baseline_time)
+        
+        app.add_user_context = add_user_context
+        app.add_business_context = add_business_context
+        app.set_performance_baseline = set_performance_baseline
+    
+    def _get_status_summary(self) -> Dict[str, Any]:
+        """Get current monitoring system status summary."""
         return {
-            "api.auth.login": 250.0,
-            "api.users.list": 150.0,
-            "api.users.create": 300.0,
-            "api.users.update": 200.0,
-            "api.data.query": 500.0
+            'monitoring_enabled': self.config.MONITORING_ENABLED,
+            'initialized': self._initialized,
+            'components_status': self.component_status.copy(),
+            'initialization_errors': self._initialization_errors.copy(),
+            'available_modules': {
+                'logging': LOGGING_AVAILABLE,
+                'metrics': METRICS_AVAILABLE,
+                'health': HEALTH_AVAILABLE,
+                'apm': APM_AVAILABLE
+            }
         }
     
     def get_monitoring_status(self) -> Dict[str, Any]:
@@ -518,249 +617,221 @@ class MonitoringStack:
         Get comprehensive monitoring system status.
         
         Returns:
-            Dict[str, Any]: Complete monitoring status including all components
+            Dictionary containing detailed monitoring status
         """
-        status = {
-            "service_name": self.config.service_name,
-            "environment": self.config.environment,
-            "instance_id": self.config.instance_id,
-            "uptime_seconds": time.time() - self.start_time,
-            "is_initialized": self.is_initialized,
-            "initialization_metrics": self.initialization_metrics.copy(),
-            "components": {
-                "logging": {
-                    "enabled": self.config.enable_logging,
-                    "initialized": self.initialization_metrics['logging_initialized'],
-                    "log_level": self.config.log_level,
-                    "log_format": self.config.log_format
-                },
-                "metrics": {
-                    "enabled": self.config.enable_metrics,
-                    "initialized": self.initialization_metrics['metrics_initialized'],
-                    "multiprocess": self.config.enable_multiprocess_metrics,
-                    "nodejs_baseline": self.config.nodejs_baseline_enabled
-                },
-                "health_checks": {
-                    "enabled": self.config.enable_health_checks,
-                    "initialized": self.initialization_metrics['health_initialized'],
-                    "dependency_checks": self.config.enable_dependency_checks,
-                    "circuit_breakers": self.config.enable_circuit_breakers
-                },
-                "apm": {
-                    "enabled": self.config.enable_apm,
-                    "initialized": self.initialization_metrics['apm_initialized'],
-                    "provider": self.config.apm_provider,
-                    "sample_rate": self.config.apm_sample_rate,
-                    "distributed_tracing": self.config.enable_distributed_tracing
-                }
+        status = self._get_status_summary()
+        
+        # Add runtime status information
+        if self._initialized:
+            status['runtime_status'] = {
+                'logging_active': bool(self.logger),
+                'metrics_collecting': bool(self.metrics_collector),
+                'health_checks_active': bool(self.health_endpoints),
+                'apm_tracing': bool(self.apm_manager),
+                'correlation_tracking': bool(self.correlation_manager)
             }
-        }
-        
-        # Add component-specific status if available
-        if self.metrics_collector:
-            try:
-                performance_summary = get_performance_summary()
-                status["performance_summary"] = performance_summary
-            except Exception:
-                pass
-        
-        if self.health_checker:
-            try:
-                health_status = get_health_status()
-                status["health_status"] = health_status
-            except Exception:
-                pass
-        
-        if self.apm_integration:
-            try:
-                apm_summary = self.apm_integration.get_performance_summary()
-                status["apm_summary"] = apm_summary
-            except Exception:
-                pass
         
         return status
-    
-    def configure_nodejs_baseline(self, endpoint: str, baseline_ms: float) -> None:
-        """
-        Configure Node.js baseline for specific endpoint.
-        
-        Args:
-            endpoint: API endpoint name
-            baseline_ms: Baseline response time in milliseconds
-        """
-        if self.metrics_collector:
-            baseline_seconds = baseline_ms / 1000.0
-            set_nodejs_baseline(endpoint, baseline_seconds)
-            
-            logger.info(
-                "Node.js baseline configured",
-                endpoint=endpoint,
-                baseline_ms=baseline_ms,
-                variance_threshold_percent=round(self.config.performance_variance_threshold * 100, 1)
-            )
-        else:
-            logger.warning("Cannot configure baseline - metrics collector not initialized")
-    
-    def track_migration_event(self, event_type: str, details: Dict[str, Any] = None) -> None:
-        """
-        Track migration-specific events for quality assurance monitoring.
-        
-        Args:
-            event_type: Migration event type
-            details: Additional event details
-        """
-        event_data = {
-            "migration_event": True,
-            "event_type": event_type,
-            "service_name": self.config.service_name,
-            "environment": self.config.environment,
-            "instance_id": self.config.instance_id
-        }
-        
-        if details:
-            event_data.update(details)
-        
-        log_business_event(f"migration_{event_type}", event_data)
 
 
-# Global monitoring stack instance
-_monitoring_stack: Optional[MonitoringStack] = None
+# Global monitoring manager instance for Flask application factory integration
+_monitoring_manager: Optional[MonitoringSystemManager] = None
+_monitoring_lock = threading.Lock()
 
 
-def init_monitoring(
-    app: Flask,
-    config: Optional[MonitoringConfiguration] = None,
-    **kwargs
-) -> MonitoringStack:
+def init_monitoring(app: Flask, config: Optional[MonitoringConfig] = None) -> MonitoringSystemManager:
     """
-    Initialize comprehensive monitoring for Flask application using factory pattern.
+    Initialize comprehensive monitoring stack for Flask application.
     
-    Primary entry point for monitoring system initialization implementing Section 6.1.1
-    Flask application factory pattern, Section 6.5.1 comprehensive observability capabilities,
-    and Section 6.5.4 monitoring architecture integration.
+    This function provides the main entry point for monitoring system initialization,
+    implementing enterprise-grade observability with graceful degradation and
+    comprehensive error handling.
     
     Args:
-        app: Flask application instance for monitoring integration
-        config: Optional monitoring configuration (auto-generated if not provided)
-        **kwargs: Additional configuration overrides
+        app: Flask application instance
+        config: Monitoring configuration (optional)
         
     Returns:
-        MonitoringStack: Initialized monitoring stack for the application
+        MonitoringSystemManager: Initialized monitoring system manager
         
     Example:
-        app = Flask(__name__)
-        monitoring = init_monitoring(app)
+        ```python
+        from src.monitoring import init_monitoring
         
-        # Configure Node.js baselines for performance tracking
-        monitoring.configure_nodejs_baseline("api.users.list", 150.0)
-        
-        # Track migration events
-        monitoring.track_migration_event("performance_baseline_set")
+        def create_app():
+            app = Flask(__name__)
+            
+            # Initialize monitoring stack
+            monitoring_manager = init_monitoring(app)
+            
+            # Check initialization status
+            status = monitoring_manager.get_monitoring_status()
+            app.logger.info(f"Monitoring status: {status}")
+            
+            return app
+        ```
     """
-    global _monitoring_stack
+    global _monitoring_manager
     
-    # Create configuration with overrides
-    if config is None:
-        config = MonitoringConfiguration(**kwargs)
-    else:
-        # Apply kwargs overrides to provided config
-        for key, value in kwargs.items():
-            if hasattr(config, key):
-                setattr(config, key, value)
-    
-    # Create and initialize monitoring stack
-    _monitoring_stack = MonitoringStack(config)
-    _monitoring_stack.init_app(app)
-    
-    return _monitoring_stack
+    with _monitoring_lock:
+        if _monitoring_manager is None:
+            _monitoring_manager = MonitoringSystemManager(config)
+        
+        # Initialize monitoring stack with Flask application
+        initialization_result = _monitoring_manager.initialize_monitoring_stack(app)
+        
+        # Print initialization summary (before logger might be available)
+        print("=" * 80)
+        print("MONITORING STACK INITIALIZATION SUMMARY")
+        print("=" * 80)
+        print(f"Monitoring Enabled: {initialization_result['monitoring_enabled']}")
+        print(f"Flask Integration: {initialization_result['flask_integration_status']}")
+        print()
+        
+        for component, status in initialization_result['components_initialized'].items():
+            enabled = "✓" if status['enabled'] else "✗"
+            print(f"{component.upper():12} {enabled} {'Enabled' if status['enabled'] else 'Disabled'}")
+            if status.get('error'):
+                print(f"             ⚠ Error: {status['error']}")
+        
+        if initialization_result['initialization_errors']:
+            print("\nInitialization Errors:")
+            for component, error in initialization_result['initialization_errors'].items():
+                print(f"  {component}: {error}")
+        
+        print("=" * 80)
+        
+        return _monitoring_manager
 
 
-def get_monitoring_stack() -> Optional[MonitoringStack]:
+def get_monitoring_manager() -> Optional[MonitoringSystemManager]:
     """
-    Get the global monitoring stack instance.
+    Get the global monitoring manager instance.
     
     Returns:
-        Optional[MonitoringStack]: Global monitoring stack if initialized
+        MonitoringSystemManager or None if not initialized
     """
-    return _monitoring_stack
+    return _monitoring_manager
 
 
-def get_monitoring_status() -> Dict[str, Any]:
-    """
-    Get comprehensive monitoring system status.
-    
-    Returns:
-        Dict[str, Any]: Monitoring status or error information
-    """
-    if _monitoring_stack:
-        return _monitoring_stack.get_monitoring_status()
-    else:
-        return {
-            "status": "not_initialized",
-            "message": "Monitoring stack has not been initialized",
-            "timestamp": time.time()
-        }
+# Convenience functions for direct access to monitoring components
+def get_monitoring_logger() -> Optional[structlog.stdlib.BoundLogger]:
+    """Get the structured monitoring logger."""
+    if _monitoring_manager and _monitoring_manager.logger:
+        return _monitoring_manager.logger
+    return None
 
 
-# Re-export key interfaces for convenient access
-from .logging import logger as monitoring_logger
+def get_metrics_collector() -> Optional[PrometheusMetricsCollector]:
+    """Get the Prometheus metrics collector."""
+    if _monitoring_manager and _monitoring_manager.metrics_collector:
+        return _monitoring_manager.metrics_collector
+    return None
 
 
-# Export comprehensive public interface
+def get_health_endpoints() -> Optional[HealthCheckEndpoints]:
+    """Get the health check endpoints manager."""
+    if _monitoring_manager and _monitoring_manager.health_endpoints:
+        return _monitoring_manager.health_endpoints
+    return None
+
+
+def get_apm_manager() -> Optional[APMIntegrationManager]:
+    """Get the APM integration manager."""
+    if _monitoring_manager and _monitoring_manager.apm_manager:
+        return _monitoring_manager.apm_manager
+    return None
+
+
+# Re-export key monitoring components for convenient access
 __all__ = [
     # Core initialization
     'init_monitoring',
-    'MonitoringConfiguration',
-    'MonitoringStack',
-    'get_monitoring_stack',
-    'get_monitoring_status',
+    'MonitoringSystemManager',
+    'MonitoringInitializationError',
     
-    # Logging components
-    'init_logging',
-    'configure_structlog',
-    'get_logger',
-    'RequestLoggingMiddleware',
-    'set_correlation_id',
-    'set_user_context',
-    'set_request_id',
-    'clear_request_context',
-    'log_security_event',
-    'log_performance_metric',
-    'log_business_event',
-    'log_integration_event',
-    'monitoring_logger',
+    # Access functions
+    'get_monitoring_manager',
+    'get_monitoring_logger',
+    'get_metrics_collector',
+    'get_health_endpoints',
+    'get_apm_manager',
     
-    # Metrics components
-    'init_metrics',
-    'start_metrics_server',
-    'FlaskMetricsCollector',
-    'metrics_collector',
-    'track_business_operation',
-    'track_external_service_call',
-    'track_database_operation',
-    'update_cache_metrics',
-    'update_auth_metrics',
-    'set_nodejs_baseline',
-    'get_performance_summary',
-    'METRICS_REGISTRY',
+    # Logging components (if available)
+    *(
+        [
+            'setup_structured_logging',
+            'create_flask_logging_middleware',
+            'get_logger',
+            'LoggingConfig',
+            'CorrelationManager',
+            'RequestContextManager',
+            'SecurityAuditLogger',
+            'PerformanceLogger'
+        ] if LOGGING_AVAILABLE else []
+    ),
     
-    # Health monitoring components
-    'init_health_monitoring',
-    'get_health_status',
-    'get_circuit_breaker_states',
-    'HealthChecker',
-    'health_checker',
-    'HealthStatus',
-    'DependencyType',
-    'HealthCheckResult',
-    'SystemHealth',
-    'CircuitBreakerState',
-    'circuit_breaker',
+    # Metrics components (if available)
+    *(
+        [
+            'setup_metrics_collection',
+            'PrometheusMetricsCollector',
+            'MetricsMiddleware',
+            'create_metrics_endpoint',
+            'monitor_performance',
+            'monitor_database_operation',
+            'monitor_external_service',
+            'monitor_cache_operation'
+        ] if METRICS_AVAILABLE else []
+    ),
     
-    # APM components
-    'create_apm_integration',
-    'init_apm_with_app',
-    'APMIntegration',
-    'APMConfiguration',
-    'APMProvider'
+    # Health check components (if available)
+    *(
+        [
+            'init_health_monitoring',
+            'health_blueprint',
+            'HealthCheckEndpoints',
+            'DependencyHealthValidator',
+            'HealthState',
+            'HealthCheckResult',
+            'health_metrics'
+        ] if HEALTH_AVAILABLE else []
+    ),
+    
+    # APM components (if available)
+    *(
+        [
+            'init_apm',
+            'APMIntegrationManager',
+            'APMConfig',
+            'trace_business_operation',
+            'trace_database_operation',
+            'trace_external_service'
+        ] if APM_AVAILABLE else []
+    ),
+    
+    # Module availability flags
+    'LOGGING_AVAILABLE',
+    'METRICS_AVAILABLE', 
+    'HEALTH_AVAILABLE',
+    'APM_AVAILABLE',
+    'CONFIG_AVAILABLE'
 ]
+
+
+# Module-level initialization logging
+if __name__ != '__main__':
+    # Print module loading status
+    available_components = []
+    if LOGGING_AVAILABLE:
+        available_components.append('logging')
+    if METRICS_AVAILABLE:
+        available_components.append('metrics')
+    if HEALTH_AVAILABLE:
+        available_components.append('health')
+    if APM_AVAILABLE:
+        available_components.append('apm')
+    
+    print(f"Monitoring module loaded with components: {', '.join(available_components)}")
+    if not available_components:
+        print("Warning: No monitoring components available - check dependencies")
