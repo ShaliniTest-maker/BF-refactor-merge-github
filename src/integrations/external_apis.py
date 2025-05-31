@@ -1,1052 +1,1850 @@
 """
-External API Integration Module
+External API Client Implementations for Third-Party Service Integration
 
-Third-party API client implementations providing standardized interfaces for external 
-service communication beyond Auth0 and AWS. Implements generic API client patterns, 
-webhook handlers, file processing integrations, and enterprise service wrappers with 
-comprehensive error handling and monitoring.
+This module provides comprehensive third-party API client implementations with standardized
+interfaces for external service communication beyond Auth0 and AWS. Implements generic API
+client patterns, webhook handlers, file processing integrations, and enterprise service
+wrappers with comprehensive error handling and monitoring aligned with Section 0.1.2, 6.3.3,
+and migration performance requirements.
 
-This module serves as the central hub for all external service integrations, providing:
-- Generic API client patterns for enterprise service integration
-- Webhook handlers for external service callbacks
-- File processing integrations with external services
-- Enterprise service API wrappers maintaining existing contracts
-- Comprehensive error handling for third-party service failures
+Key Features:
+- Generic API client patterns for enterprise service integration per Section 6.3.3
+- Webhook handlers for external service callbacks per Section 6.3.3
+- File processing integrations with streaming support per Section 6.3.2
+- Enterprise service API wrappers maintaining existing contracts per Section 0.1.4
+- Third-party API clients converted to Python HTTP client implementations per Section 0.1.2
+- Comprehensive error handling for third-party service failures per Section 4.2.3
+- Circuit breaker protection and retry logic with exponential backoff
+- Performance monitoring with prometheus-client integration per Section 6.3.5
 
 Performance Requirements:
-- Maintains ≤10% variance from Node.js baseline performance
-- Implements circuit breaker patterns for service resilience
-- Provides exponential backoff retry strategies for fault tolerance
-- Includes comprehensive monitoring and metrics collection
-
-Author: Blitzy Platform Migration Team
-Version: 1.0.0
-Last Updated: 2024
+- Maintains ≤10% variance from Node.js baseline per Section 0.3.2
+- Enterprise-grade monitoring integration per Section 6.5.1.1
+- Optimized connection pooling for external service calls per Section 6.3.5
 """
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
-import mimetypes
 import time
+import uuid
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Union, Callable, Tuple
-from urllib.parse import urljoin, urlparse
+from typing import Any, Dict, List, Optional, Union, Callable, Iterator, AsyncIterator
+from urllib.parse import urljoin, urlparse, parse_qs
+from functools import wraps
 
-import requests
-import httpx
-from flask import Flask, Blueprint, request, jsonify, current_app
-from prometheus_client import Counter, Histogram, Gauge
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-from pybreaker import CircuitBreaker
 import structlog
+from flask import Request, Response, jsonify, request as flask_request
 
-# Import dependencies (these would be implemented in separate files)
-try:
-    from .base_client import BaseAPIClient, HTTPMethod
-    from .exceptions import (
-        ExternalServiceError, 
-        CircuitBreakerOpenError, 
-        RetryExhaustedError,
-        WebhookValidationError,
-        FileProcessingError
-    )
-    from .monitoring import ExternalServiceMetrics
-except ImportError:
-    # Fallback implementations for missing dependencies
-    class BaseAPIClient:
-        """Fallback base client implementation"""
-        def __init__(self, base_url: str, **kwargs):
-            self.base_url = base_url
-            self.session = requests.Session()
-            
-        def get(self, endpoint: str, **kwargs) -> requests.Response:
-            return self.session.get(urljoin(self.base_url, endpoint), **kwargs)
-            
-        def post(self, endpoint: str, **kwargs) -> requests.Response:
-            return self.session.post(urljoin(self.base_url, endpoint), **kwargs)
-    
-    class ExternalServiceError(Exception): pass
-    class CircuitBreakerOpenError(Exception): pass
-    class RetryExhaustedError(Exception): pass
-    class WebhookValidationError(Exception): pass
-    class FileProcessingError(Exception): pass
-    
-    class ExternalServiceMetrics:
-        """Fallback metrics implementation"""
-        def __init__(self):
-            self.request_counter = Counter('external_api_requests_total', 'Total external API requests')
-            self.response_time = Histogram('external_api_response_time_seconds', 'External API response time')
-            
-        def record_request(self, service: str, endpoint: str): pass
-        def record_response_time(self, service: str, endpoint: str, duration: float): pass
-        def record_error(self, service: str, endpoint: str, error_type: str): pass
+# Core integration dependencies
+from .base_client import (
+    BaseExternalServiceClient,
+    BaseClientConfiguration,
+    create_api_service_client,
+    create_auth_service_client
+)
+from .exceptions import (
+    IntegrationError,
+    HTTPClientError,
+    HTTPResponseError,
+    ConnectionError,
+    TimeoutError,
+    CircuitBreakerOpenError,
+    RetryExhaustedError,
+    ValidationError,
+    IntegrationExceptionFactory
+)
+from .monitoring import (
+    external_service_monitor,
+    ServiceType,
+    CircuitBreakerState,
+    HealthStatus,
+    track_external_service_call,
+    update_service_health
+)
 
-    class HTTPMethod:
-        GET = "GET"
-        POST = "POST"
-        PUT = "PUT"
-        DELETE = "DELETE"
-        PATCH = "PATCH"
-
-
-# Initialize structured logging
+# Initialize structured logger for enterprise integration
 logger = structlog.get_logger(__name__)
 
-# Initialize metrics collection
-metrics = ExternalServiceMetrics()
 
-# Create Flask Blueprint for external API endpoints
-external_api_bp = Blueprint('external_apis', __name__, url_prefix='/api/v1/external')
-
-
-@dataclass
-class APIClientConfig:
-    """Configuration class for external API clients"""
-    base_url: str
-    timeout: int = 30
-    retries: int = 3
-    circuit_breaker_threshold: int = 5
-    circuit_breaker_timeout: int = 60
-    connection_pool_size: int = 20
-    api_key: Optional[str] = None
-    auth_header: Optional[str] = None
-    rate_limit: Optional[int] = None
-    headers: Dict[str, str] = field(default_factory=dict)
-
-
-@dataclass
-class WebhookConfig:
-    """Configuration for webhook endpoints"""
-    endpoint: str
-    secret_key: Optional[str] = None
-    allowed_ips: List[str] = field(default_factory=list)
-    timeout: int = 30
-    retry_attempts: int = 3
+class WebhookValidationError(ValidationError):
+    """Exception for webhook signature validation failures."""
+    
+    def __init__(
+        self,
+        message: str,
+        webhook_source: str,
+        signature_header: Optional[str] = None,
+        **kwargs
+    ):
+        super().__init__(
+            message=message,
+            operation="webhook_validation",
+            validation_errors={'signature_validation': [message]},
+            **kwargs
+        )
+        self.webhook_source = webhook_source
+        self.signature_header = signature_header
 
 
-@dataclass
-class FileProcessingConfig:
-    """Configuration for file processing integrations"""
-    max_file_size: int = 100 * 1024 * 1024  # 100MB
-    allowed_extensions: List[str] = field(default_factory=lambda: ['.jpg', '.png', '.pdf', '.docx'])
-    upload_endpoint: str = ""
-    storage_backend: str = "s3"  # s3, local, etc.
-    chunk_size: int = 8192
+class FileProcessingError(IntegrationError):
+    """Exception for file processing integration failures."""
+    
+    def __init__(
+        self,
+        message: str,
+        operation: str,
+        file_path: Optional[str] = None,
+        file_size: Optional[int] = None,
+        processing_stage: Optional[str] = None,
+        **kwargs
+    ):
+        super().__init__(
+            message=message,
+            service_name="file_processing",
+            operation=operation,
+            **kwargs
+        )
+        self.file_path = file_path
+        self.file_size = file_size
+        self.processing_stage = processing_stage
+        
+        self.error_context.update({
+            'file_path': file_path,
+            'file_size': file_size,
+            'processing_stage': processing_stage
+        })
 
 
-class GenericAPIClient(BaseAPIClient):
+class GenericAPIClient(BaseExternalServiceClient):
     """
-    Generic API client providing standardized interface for external service communication.
+    Generic external API client implementing standardized patterns for third-party integrations.
     
-    Implements enterprise-grade patterns including circuit breaker protection,
-    exponential backoff retry strategies, comprehensive error handling, and 
-    performance monitoring integration.
+    Provides comprehensive foundation for external service communication with enterprise-grade
+    resilience patterns, monitoring, and error handling. Supports both synchronous and
+    asynchronous operations with circuit breaker protection and retry logic.
     
-    Features:
-    - Circuit breaker protection for service resilience
-    - Exponential backoff retry with jitter
-    - Connection pooling for optimal resource utilization
-    - Comprehensive request/response logging
-    - Prometheus metrics integration
-    - Automatic authentication header management
+    Implements requirements from Section 0.1.2, 6.3.3, and 4.2.3 specifications.
     """
     
-    def __init__(self, config: APIClientConfig):
+    def __init__(
+        self,
+        service_name: str,
+        base_url: str,
+        api_key: Optional[str] = None,
+        api_version: Optional[str] = None,
+        timeout: Union[float, tuple] = 30.0,
+        **kwargs
+    ):
         """
-        Initialize generic API client with enterprise configuration.
+        Initialize generic API client with comprehensive configuration.
         
         Args:
-            config: APIClientConfig containing service-specific settings
+            service_name: Unique service identifier for monitoring
+            base_url: Base URL for API service
+            api_key: Optional API key for authentication
+            api_version: Optional API version for versioned endpoints
+            timeout: Request timeout configuration
+            **kwargs: Additional configuration parameters
         """
-        super().__init__(config.base_url)
-        self.config = config
-        self.logger = logger.bind(service=self._get_service_name())
+        # Configure service-specific settings
+        default_headers = kwargs.get('default_headers', {})
+        if api_key:
+            default_headers['Authorization'] = f'Bearer {api_key}'
+        if api_version:
+            default_headers['Accept'] = f'application/vnd.api+json;version={api_version}'
         
-        # Initialize circuit breaker for service protection
-        self.circuit_breaker = CircuitBreaker(
-            fail_max=config.circuit_breaker_threshold,
-            reset_timeout=config.circuit_breaker_timeout,
-            name=f"{self._get_service_name()}_circuit_breaker"
+        # Create configuration with API-specific defaults
+        config = create_api_service_client(
+            service_name=service_name,
+            base_url=base_url,
+            timeout=timeout,
+            default_headers=default_headers,
+            health_check_endpoint='/health',
+            **kwargs
         )
         
-        # Configure HTTP session with connection pooling
-        self.session = requests.Session()
-        adapter = requests.adapters.HTTPAdapter(
-            pool_connections=config.connection_pool_size,
-            pool_maxsize=config.connection_pool_size,
-            max_retries=0  # We handle retries manually
-        )
-        self.session.mount('http://', adapter)
-        self.session.mount('https://', adapter)
+        super().__init__(config)
         
-        # Configure default headers
-        self._setup_headers()
+        self.api_key = api_key
+        self.api_version = api_version
         
-        # Initialize async client for high-performance operations
-        self.async_client = httpx.AsyncClient(
-            timeout=config.timeout,
-            limits=httpx.Limits(
-                max_connections=config.connection_pool_size,
-                max_keepalive_connections=config.connection_pool_size // 2
-            )
+        logger.info(
+            "generic_api_client_initialized",
+            service_name=service_name,
+            base_url=base_url,
+            api_version=api_version,
+            has_api_key=bool(api_key),
+            component="integrations.external_apis"
         )
     
-    def _get_service_name(self) -> str:
-        """Extract service name from base URL for metrics and logging"""
-        parsed = urlparse(self.config.base_url)
-        return parsed.netloc.replace('.', '_').replace(':', '_')
-    
-    def _setup_headers(self) -> None:
-        """Configure default headers including authentication"""
-        headers = {
-            'User-Agent': 'Flask-Migration-Client/1.0',
-            'Content-Type': 'application/json',
-            'Accept': 'application/json',
-            **self.config.headers
-        }
-        
-        # Add authentication header if configured
-        if self.config.api_key and self.config.auth_header:
-            headers[self.config.auth_header] = self.config.api_key
-        elif self.config.api_key:
-            headers['Authorization'] = f'Bearer {self.config.api_key}'
-        
-        self.session.headers.update(headers)
-    
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=30),
-        retry=retry_if_exception_type((requests.RequestException, httpx.RequestError))
-    )
-    def make_request(
-        self, 
-        method: str, 
-        endpoint: str, 
-        data: Optional[Dict] = None,
-        params: Optional[Dict] = None,
-        headers: Optional[Dict] = None,
-        timeout: Optional[int] = None
-    ) -> requests.Response:
+    def authenticate(self, credentials: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Make HTTP request with circuit breaker protection and retry logic.
+        Authenticate with the external API service.
         
         Args:
-            method: HTTP method (GET, POST, PUT, DELETE, PATCH)
-            endpoint: API endpoint relative to base URL
-            data: Request body data
-            params: Query parameters
-            headers: Additional headers
-            timeout: Request timeout override
+            credentials: Authentication credentials (api_key, oauth_token, etc.)
             
         Returns:
-            Response object
-            
-        Raises:
-            CircuitBreakerOpenError: When circuit breaker is open
-            RetryExhaustedError: When all retry attempts are exhausted
-            ExternalServiceError: For other external service failures
+            Authentication result with token and expiration info
         """
-        start_time = time.time()
-        service_name = self._get_service_name()
+        auth_result = {
+            'authenticated': False,
+            'token': None,
+            'expires_at': None,
+            'token_type': 'bearer'
+        }
         
         try:
-            # Record request metrics
-            metrics.record_request(service_name, endpoint)
+            if 'api_key' in credentials:
+                # API key authentication
+                self.api_key = credentials['api_key']
+                self.config.default_headers['Authorization'] = f'Bearer {self.api_key}'
+                auth_result['authenticated'] = True
+                auth_result['token'] = self.api_key
+                
+            elif 'oauth_token' in credentials:
+                # OAuth token authentication
+                oauth_token = credentials['oauth_token']
+                self.config.default_headers['Authorization'] = f'Bearer {oauth_token}'
+                auth_result['authenticated'] = True
+                auth_result['token'] = oauth_token
+                auth_result['expires_at'] = credentials.get('expires_at')
+                
+            else:
+                # Try basic authentication if username/password provided
+                if 'username' in credentials and 'password' in credentials:
+                    auth_response = self.post(
+                        '/auth/login',
+                        json_data={
+                            'username': credentials['username'],
+                            'password': credentials['password']
+                        }
+                    )
+                    
+                    if auth_response.status_code == 200:
+                        auth_data = auth_response.json()
+                        auth_result['authenticated'] = True
+                        auth_result['token'] = auth_data.get('access_token')
+                        auth_result['expires_at'] = auth_data.get('expires_at')
+                        
+                        # Update headers with new token
+                        if auth_result['token']:
+                            self.config.default_headers['Authorization'] = f'Bearer {auth_result["token"]}'
             
-            # Log request details
-            self.logger.info(
-                "Making external API request",
-                method=method,
-                endpoint=endpoint,
-                has_data=data is not None,
-                has_params=params is not None
+            logger.info(
+                "api_authentication_completed",
+                service_name=self.service_name,
+                authenticated=auth_result['authenticated'],
+                token_type=auth_result['token_type'],
+                component="integrations.external_apis"
             )
             
-            # Use circuit breaker to protect against cascading failures
-            response = self.circuit_breaker(self._execute_request)(
-                method, endpoint, data, params, headers, timeout
-            )
-            
-            # Record successful response metrics
-            duration = time.time() - start_time
-            metrics.record_response_time(service_name, endpoint, duration)
-            
-            # Log successful response
-            self.logger.info(
-                "External API request completed",
-                method=method,
-                endpoint=endpoint,
-                status_code=response.status_code,
-                duration=duration
-            )
-            
-            return response
+            return auth_result
             
         except Exception as e:
-            # Record error metrics
-            duration = time.time() - start_time
-            error_type = type(e).__name__
-            metrics.record_error(service_name, endpoint, error_type)
-            
-            # Log error details
-            self.logger.error(
-                "External API request failed",
-                method=method,
-                endpoint=endpoint,
+            logger.error(
+                "api_authentication_failed",
+                service_name=self.service_name,
                 error=str(e),
-                error_type=error_type,
-                duration=duration
+                component="integrations.external_apis",
+                exc_info=e
             )
-            
-            # Re-raise with appropriate error type
-            if "circuit breaker" in str(e).lower():
-                raise CircuitBreakerOpenError(f"Circuit breaker open for {service_name}") from e
-            elif "retry" in str(e).lower():
-                raise RetryExhaustedError(f"Retry attempts exhausted for {endpoint}") from e
-            else:
-                raise ExternalServiceError(f"External service error: {str(e)}") from e
+            raise IntegrationError(
+                message=f"Authentication failed for {self.service_name}: {str(e)}",
+                service_name=self.service_name,
+                operation="authenticate",
+                error_context={'credentials_type': list(credentials.keys())}
+            ) from e
     
-    def _execute_request(
-        self,
-        method: str,
-        endpoint: str,
-        data: Optional[Dict] = None,
-        params: Optional[Dict] = None,
-        headers: Optional[Dict] = None,
-        timeout: Optional[int] = None
-    ) -> requests.Response:
-        """Execute the actual HTTP request"""
-        url = urljoin(self.config.base_url, endpoint)
-        request_timeout = timeout or self.config.timeout
-        
-        # Prepare request kwargs
-        kwargs = {
-            'params': params,
-            'timeout': request_timeout,
-        }
-        
-        if headers:
-            kwargs['headers'] = headers
-        
-        if data:
-            if isinstance(data, dict):
-                kwargs['json'] = data
-            else:
-                kwargs['data'] = data
-        
-        # Execute request
-        response = self.session.request(method, url, **kwargs)
-        response.raise_for_status()
-        
-        return response
-    
-    async def make_async_request(
-        self,
-        method: str,
-        endpoint: str,
-        data: Optional[Dict] = None,
-        params: Optional[Dict] = None,
-        headers: Optional[Dict] = None
-    ) -> httpx.Response:
+    def validate_response(self, response: Any) -> bool:
         """
-        Make asynchronous HTTP request for high-performance operations.
+        Validate external API response format and content.
         
         Args:
-            method: HTTP method
-            endpoint: API endpoint
-            data: Request body data
-            params: Query parameters
-            headers: Additional headers
+            response: Response object from external service
             
         Returns:
-            Async response object
+            True if response is valid, False otherwise
         """
-        start_time = time.time()
-        service_name = self._get_service_name()
-        
         try:
-            url = urljoin(self.config.base_url, endpoint)
+            # Check HTTP status code
+            if not hasattr(response, 'status_code'):
+                return False
             
-            # Record request metrics
-            metrics.record_request(service_name, endpoint)
+            if response.status_code < 200 or response.status_code >= 400:
+                return False
             
-            # Prepare request kwargs
-            kwargs = {'params': params}
-            if headers:
-                kwargs['headers'] = headers
-            if data:
-                kwargs['json'] = data
+            # Check content type for JSON APIs
+            content_type = response.headers.get('content-type', '')
+            if 'application/json' in content_type:
+                try:
+                    response.json()
+                except (ValueError, json.JSONDecodeError):
+                    return False
             
-            # Execute async request
-            response = await self.async_client.request(method, url, **kwargs)
-            response.raise_for_status()
+            # Check for required headers
+            required_headers = ['content-length', 'date']
+            for header in required_headers:
+                if header not in response.headers:
+                    logger.warning(
+                        "response_missing_required_header",
+                        service_name=self.service_name,
+                        header=header,
+                        component="integrations.external_apis"
+                    )
             
-            # Record metrics
-            duration = time.time() - start_time
-            metrics.record_response_time(service_name, endpoint, duration)
-            
-            return response
+            return True
             
         except Exception as e:
-            duration = time.time() - start_time
-            metrics.record_error(service_name, endpoint, type(e).__name__)
-            raise ExternalServiceError(f"Async request failed: {str(e)}") from e
+            logger.error(
+                "response_validation_error",
+                service_name=self.service_name,
+                error=str(e),
+                component="integrations.external_apis"
+            )
+            return False
     
-    def close(self) -> None:
-        """Clean up resources"""
-        self.session.close()
-        if hasattr(self, 'async_client'):
-            asyncio.create_task(self.async_client.aclose())
+    def get_service_endpoints(self) -> List[str]:
+        """
+        Get list of available service endpoints.
+        
+        Returns:
+            List of endpoint paths for the external service
+        """
+        try:
+            # Try to get endpoints from API discovery
+            response = self.get('/endpoints')
+            if response.status_code == 200:
+                endpoints_data = response.json()
+                return endpoints_data.get('endpoints', [])
+                
+        except Exception as e:
+            logger.warning(
+                "endpoints_discovery_failed",
+                service_name=self.service_name,
+                error=str(e),
+                component="integrations.external_apis"
+            )
+        
+        # Return common endpoints as fallback
+        return [
+            '/health',
+            '/version',
+            '/status',
+            '/endpoints'
+        ]
+    
+    def paginated_request(
+        self,
+        endpoint: str,
+        method: str = 'GET',
+        page_size: int = 100,
+        max_pages: Optional[int] = None,
+        **kwargs
+    ) -> Iterator[Dict[str, Any]]:
+        """
+        Handle paginated API requests with automatic page iteration.
+        
+        Args:
+            endpoint: API endpoint path
+            method: HTTP method
+            page_size: Number of items per page
+            max_pages: Maximum number of pages to fetch
+            **kwargs: Additional request parameters
+            
+        Yields:
+            Individual items from paginated response
+        """
+        page = 1
+        pages_fetched = 0
+        
+        while True:
+            # Add pagination parameters
+            params = kwargs.get('params', {})
+            params.update({
+                'page': page,
+                'limit': page_size
+            })
+            kwargs['params'] = params
+            
+            try:
+                response = self.make_request(method, endpoint, **kwargs)
+                
+                if not self.validate_response(response):
+                    logger.error(
+                        "paginated_request_invalid_response",
+                        service_name=self.service_name,
+                        endpoint=endpoint,
+                        page=page,
+                        status_code=response.status_code,
+                        component="integrations.external_apis"
+                    )
+                    break
+                
+                data = response.json()
+                items = data.get('items', data.get('data', []))
+                
+                # Yield individual items
+                for item in items:
+                    yield item
+                
+                # Check if there are more pages
+                has_more = data.get('has_more', False)
+                total_pages = data.get('total_pages')
+                
+                if not has_more or (total_pages and page >= total_pages):
+                    break
+                
+                pages_fetched += 1
+                if max_pages and pages_fetched >= max_pages:
+                    break
+                
+                page += 1
+                
+            except Exception as e:
+                logger.error(
+                    "paginated_request_failed",
+                    service_name=self.service_name,
+                    endpoint=endpoint,
+                    page=page,
+                    error=str(e),
+                    component="integrations.external_apis",
+                    exc_info=e
+                )
+                break
+    
+    async def paginated_request_async(
+        self,
+        endpoint: str,
+        method: str = 'GET',
+        page_size: int = 100,
+        max_pages: Optional[int] = None,
+        **kwargs
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """
+        Handle paginated API requests asynchronously with automatic page iteration.
+        
+        Args:
+            endpoint: API endpoint path
+            method: HTTP method
+            page_size: Number of items per page
+            max_pages: Maximum number of pages to fetch
+            **kwargs: Additional request parameters
+            
+        Yields:
+            Individual items from paginated response
+        """
+        page = 1
+        pages_fetched = 0
+        
+        while True:
+            # Add pagination parameters
+            params = kwargs.get('params', {})
+            params.update({
+                'page': page,
+                'limit': page_size
+            })
+            kwargs['params'] = params
+            
+            try:
+                response = await self.make_request_async(method, endpoint, **kwargs)
+                
+                if not self.validate_response(response):
+                    logger.error(
+                        "async_paginated_request_invalid_response",
+                        service_name=self.service_name,
+                        endpoint=endpoint,
+                        page=page,
+                        status_code=response.status_code,
+                        component="integrations.external_apis"
+                    )
+                    break
+                
+                data = response.json()
+                items = data.get('items', data.get('data', []))
+                
+                # Yield individual items
+                for item in items:
+                    yield item
+                
+                # Check if there are more pages
+                has_more = data.get('has_more', False)
+                total_pages = data.get('total_pages')
+                
+                if not has_more or (total_pages and page >= total_pages):
+                    break
+                
+                pages_fetched += 1
+                if max_pages and pages_fetched >= max_pages:
+                    break
+                
+                page += 1
+                
+            except Exception as e:
+                logger.error(
+                    "async_paginated_request_failed",
+                    service_name=self.service_name,
+                    endpoint=endpoint,
+                    page=page,
+                    error=str(e),
+                    component="integrations.external_apis",
+                    exc_info=e
+                )
+                break
 
 
 class WebhookHandler:
     """
-    Enterprise webhook handler for external service callbacks.
+    Generic webhook handler for external service callbacks with comprehensive validation.
     
-    Provides secure webhook endpoint processing with signature validation,
-    IP allowlisting, request validation, and comprehensive error handling.
-    Maintains API contracts while ensuring security and reliability.
+    Implements secure webhook processing with signature verification, payload validation,
+    and event routing. Supports multiple signature algorithms and provides enterprise-grade
+    security patterns for webhook endpoint protection.
     
-    Features:
-    - HMAC signature validation for security
-    - IP allowlisting for access control
-    - Request validation and sanitization
-    - Asynchronous processing for performance
-    - Comprehensive logging and monitoring
+    Aligned with Section 6.3.3 external service integration requirements.
     """
     
-    def __init__(self, config: WebhookConfig):
+    def __init__(
+        self,
+        service_name: str,
+        secret_key: str,
+        signature_header: str = 'X-Signature',
+        signature_algorithm: str = 'sha256',
+        timestamp_header: str = 'X-Timestamp',
+        timestamp_tolerance: int = 300,  # 5 minutes
+        payload_size_limit: int = 1024 * 1024  # 1MB
+    ):
         """
         Initialize webhook handler with security configuration.
         
         Args:
-            config: WebhookConfig containing security and processing settings
+            service_name: Service identifier for monitoring
+            secret_key: Secret key for signature verification
+            signature_header: Header containing webhook signature
+            signature_algorithm: Algorithm for signature computation (sha256, sha1, md5)
+            timestamp_header: Header containing timestamp for replay protection
+            timestamp_tolerance: Maximum age of webhook in seconds
+            payload_size_limit: Maximum payload size in bytes
         """
-        self.config = config
-        self.logger = logger.bind(webhook_endpoint=config.endpoint)
-        self.processors: Dict[str, Callable] = {}
+        self.service_name = service_name
+        self.secret_key = secret_key.encode('utf-8')
+        self.signature_header = signature_header
+        self.signature_algorithm = signature_algorithm
+        self.timestamp_header = timestamp_header
+        self.timestamp_tolerance = timestamp_tolerance
+        self.payload_size_limit = payload_size_limit
+        
+        # Initialize monitoring
+        external_service_monitor.register_service(
+            service_name=f"{service_name}_webhook",
+            service_type=ServiceType.WEBHOOK,
+            endpoint_url="webhook_handler",
+            metadata={
+                'signature_algorithm': signature_algorithm,
+                'timestamp_tolerance': timestamp_tolerance,
+                'payload_size_limit': payload_size_limit
+            }
+        )
+        
+        logger.info(
+            "webhook_handler_initialized",
+            service_name=service_name,
+            signature_algorithm=signature_algorithm,
+            timestamp_tolerance=timestamp_tolerance,
+            payload_size_limit=payload_size_limit,
+            component="integrations.external_apis"
+        )
     
-    def register_processor(self, event_type: str, processor: Callable) -> None:
+    def verify_signature(self, payload: bytes, signature: str, timestamp: Optional[str] = None) -> bool:
         """
-        Register event processor for specific webhook event types.
+        Verify webhook signature using HMAC.
         
         Args:
-            event_type: Type of webhook event (e.g., 'payment.completed')
-            processor: Callable to process the event
-        """
-        self.processors[event_type] = processor
-        self.logger.info("Registered webhook processor", event_type=event_type)
-    
-    def validate_signature(self, payload: bytes, signature: str) -> bool:
-        """
-        Validate webhook signature using HMAC-SHA256.
-        
-        Args:
-            payload: Raw request payload
-            signature: Signature from webhook header
+            payload: Raw webhook payload
+            signature: Signature from webhook headers
+            timestamp: Optional timestamp for replay protection
             
         Returns:
             True if signature is valid, False otherwise
         """
-        if not self.config.secret_key:
-            return True  # Skip validation if no secret configured
-        
-        import hmac
-        import hashlib
-        
-        expected_signature = hmac.new(
-            self.config.secret_key.encode('utf-8'),
-            payload,
-            hashlib.sha256
-        ).hexdigest()
-        
-        # Compare signatures securely
-        return hmac.compare_digest(f"sha256={expected_signature}", signature)
+        try:
+            # Check timestamp if provided
+            if timestamp and self.timestamp_tolerance > 0:
+                try:
+                    webhook_time = int(timestamp)
+                    current_time = int(time.time())
+                    
+                    if abs(current_time - webhook_time) > self.timestamp_tolerance:
+                        logger.warning(
+                            "webhook_timestamp_expired",
+                            service_name=self.service_name,
+                            webhook_time=webhook_time,
+                            current_time=current_time,
+                            tolerance=self.timestamp_tolerance,
+                            component="integrations.external_apis"
+                        )
+                        return False
+                        
+                except (ValueError, TypeError):
+                    logger.warning(
+                        "webhook_invalid_timestamp",
+                        service_name=self.service_name,
+                        timestamp=timestamp,
+                        component="integrations.external_apis"
+                    )
+                    return False
+            
+            # Compute expected signature
+            if self.signature_algorithm == 'sha256':
+                expected_signature = hmac.new(
+                    self.secret_key,
+                    payload,
+                    hashlib.sha256
+                ).hexdigest()
+            elif self.signature_algorithm == 'sha1':
+                expected_signature = hmac.new(
+                    self.secret_key,
+                    payload,
+                    hashlib.sha1
+                ).hexdigest()
+            elif self.signature_algorithm == 'md5':
+                expected_signature = hmac.new(
+                    self.secret_key,
+                    payload,
+                    hashlib.md5
+                ).hexdigest()
+            else:
+                logger.error(
+                    "webhook_unsupported_signature_algorithm",
+                    service_name=self.service_name,
+                    algorithm=self.signature_algorithm,
+                    component="integrations.external_apis"
+                )
+                return False
+            
+            # Remove algorithm prefix if present (e.g., "sha256=...")
+            if '=' in signature:
+                algorithm_prefix, signature_value = signature.split('=', 1)
+                signature = signature_value
+            
+            # Constant-time comparison to prevent timing attacks
+            return hmac.compare_digest(expected_signature, signature)
+            
+        except Exception as e:
+            logger.error(
+                "webhook_signature_verification_failed",
+                service_name=self.service_name,
+                error=str(e),
+                component="integrations.external_apis",
+                exc_info=e
+            )
+            return False
     
-    def validate_source_ip(self, client_ip: str) -> bool:
+    @track_external_service_call(
+        service_name="webhook_handler",
+        service_type=ServiceType.WEBHOOK
+    )
+    def process_webhook(
+        self,
+        request: Request,
+        event_handlers: Dict[str, Callable]
+    ) -> Response:
         """
-        Validate request source IP against allowlist.
+        Process incoming webhook with comprehensive validation and event routing.
         
         Args:
-            client_ip: Client IP address
+            request: Flask request object
+            event_handlers: Dictionary mapping event types to handler functions
             
         Returns:
-            True if IP is allowed, False otherwise
-        """
-        if not self.config.allowed_ips:
-            return True  # No IP restrictions configured
-        
-        return client_ip in self.config.allowed_ips
-    
-    async def process_webhook(self, payload: Dict[str, Any], headers: Dict[str, str]) -> Dict[str, Any]:
-        """
-        Process incoming webhook with validation and error handling.
-        
-        Args:
-            payload: Webhook payload data
-            headers: Request headers
-            
-        Returns:
-            Processing result
-            
-        Raises:
-            WebhookValidationError: For validation failures
+            Flask response object
         """
         start_time = time.time()
         
         try:
-            # Extract event type from payload
-            event_type = payload.get('type') or payload.get('event_type')
+            # Check payload size
+            content_length = request.content_length or 0
+            if content_length > self.payload_size_limit:
+                logger.warning(
+                    "webhook_payload_too_large",
+                    service_name=self.service_name,
+                    content_length=content_length,
+                    limit=self.payload_size_limit,
+                    component="integrations.external_apis"
+                )
+                return jsonify({'error': 'Payload too large'}), 413
+            
+            # Get payload and headers
+            payload = request.get_data()
+            signature = request.headers.get(self.signature_header)
+            timestamp = request.headers.get(self.timestamp_header)
+            
+            if not signature:
+                logger.warning(
+                    "webhook_missing_signature",
+                    service_name=self.service_name,
+                    headers=dict(request.headers),
+                    component="integrations.external_apis"
+                )
+                return jsonify({'error': 'Missing signature'}), 400
+            
+            # Verify signature
+            if not self.verify_signature(payload, signature, timestamp):
+                logger.warning(
+                    "webhook_invalid_signature",
+                    service_name=self.service_name,
+                    signature_header=self.signature_header,
+                    component="integrations.external_apis"
+                )
+                return jsonify({'error': 'Invalid signature'}), 401
+            
+            # Parse JSON payload
+            try:
+                webhook_data = json.loads(payload.decode('utf-8'))
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                logger.warning(
+                    "webhook_invalid_json",
+                    service_name=self.service_name,
+                    error=str(e),
+                    component="integrations.external_apis"
+                )
+                return jsonify({'error': 'Invalid JSON payload'}), 400
+            
+            # Extract event type
+            event_type = webhook_data.get('type') or webhook_data.get('event_type')
             if not event_type:
-                raise WebhookValidationError("Missing event type in webhook payload")
+                logger.warning(
+                    "webhook_missing_event_type",
+                    service_name=self.service_name,
+                    payload_keys=list(webhook_data.keys()),
+                    component="integrations.external_apis"
+                )
+                return jsonify({'error': 'Missing event type'}), 400
             
-            # Find appropriate processor
-            processor = self.processors.get(event_type)
-            if not processor:
-                self.logger.warning("No processor found for event type", event_type=event_type)
-                return {"status": "ignored", "message": f"No processor for {event_type}"}
+            # Route to appropriate handler
+            handler = event_handlers.get(event_type)
+            if not handler:
+                logger.warning(
+                    "webhook_unhandled_event_type",
+                    service_name=self.service_name,
+                    event_type=event_type,
+                    available_handlers=list(event_handlers.keys()),
+                    component="integrations.external_apis"
+                )
+                return jsonify({'error': f'Unhandled event type: {event_type}'}), 400
             
-            # Process webhook asynchronously
-            result = await self._execute_processor(processor, payload)
-            
-            # Log successful processing
+            # Process event
+            try:
+                result = handler(webhook_data)
+                
+                duration = time.time() - start_time
+                logger.info(
+                    "webhook_processed_successfully",
+                    service_name=self.service_name,
+                    event_type=event_type,
+                    duration_ms=round(duration * 1000, 2),
+                    component="integrations.external_apis"
+                )
+                
+                # Update monitoring
+                update_service_health(
+                    service_name=f"{self.service_name}_webhook",
+                    service_type=ServiceType.WEBHOOK,
+                    status=HealthStatus.HEALTHY,
+                    duration=duration
+                )
+                
+                if isinstance(result, Response):
+                    return result
+                else:
+                    return jsonify({'status': 'success', 'result': result}), 200
+                    
+            except Exception as e:
+                logger.error(
+                    "webhook_handler_failed",
+                    service_name=self.service_name,
+                    event_type=event_type,
+                    error=str(e),
+                    component="integrations.external_apis",
+                    exc_info=e
+                )
+                
+                # Update monitoring
+                update_service_health(
+                    service_name=f"{self.service_name}_webhook",
+                    service_type=ServiceType.WEBHOOK,
+                    status=HealthStatus.UNHEALTHY,
+                    duration=time.time() - start_time
+                )
+                
+                return jsonify({'error': 'Handler failed'}), 500
+                
+        except Exception as e:
             duration = time.time() - start_time
-            self.logger.info(
-                "Webhook processed successfully",
-                event_type=event_type,
+            logger.error(
+                "webhook_processing_failed",
+                service_name=self.service_name,
+                error=str(e),
+                duration_ms=round(duration * 1000, 2),
+                component="integrations.external_apis",
+                exc_info=e
+            )
+            
+            # Update monitoring
+            update_service_health(
+                service_name=f"{self.service_name}_webhook",
+                service_type=ServiceType.WEBHOOK,
+                status=HealthStatus.UNHEALTHY,
+                duration=duration
+            )
+            
+            return jsonify({'error': 'Processing failed'}), 500
+
+
+class FileProcessingIntegration:
+    """
+    File processing integration for external services with streaming support.
+    
+    Implements enterprise-grade file processing patterns with streaming upload/download,
+    progress tracking, and comprehensive error handling. Supports multiple file formats
+    and provides integration with external file processing services.
+    
+    Aligned with Section 6.3.2 stream processing requirements.
+    """
+    
+    def __init__(
+        self,
+        service_name: str,
+        api_client: GenericAPIClient,
+        chunk_size: int = 8192,
+        max_file_size: int = 100 * 1024 * 1024,  # 100MB
+        allowed_extensions: Optional[List[str]] = None,
+        temp_directory: str = '/tmp'
+    ):
+        """
+        Initialize file processing integration.
+        
+        Args:
+            service_name: Service identifier for monitoring
+            api_client: Configured API client for service communication
+            chunk_size: Chunk size for streaming operations
+            max_file_size: Maximum file size in bytes
+            allowed_extensions: List of allowed file extensions
+            temp_directory: Temporary directory for file processing
+        """
+        self.service_name = service_name
+        self.api_client = api_client
+        self.chunk_size = chunk_size
+        self.max_file_size = max_file_size
+        self.allowed_extensions = allowed_extensions or []
+        self.temp_directory = temp_directory
+        
+        # Initialize monitoring
+        external_service_monitor.register_service(
+            service_name=f"{service_name}_files",
+            service_type=ServiceType.FILE_STORAGE,
+            endpoint_url=api_client.base_url,
+            metadata={
+                'chunk_size': chunk_size,
+                'max_file_size': max_file_size,
+                'allowed_extensions': allowed_extensions
+            }
+        )
+        
+        logger.info(
+            "file_processing_integration_initialized",
+            service_name=service_name,
+            chunk_size=chunk_size,
+            max_file_size=max_file_size,
+            allowed_extensions=allowed_extensions,
+            component="integrations.external_apis"
+        )
+    
+    def validate_file(self, file_path: str, file_size: int) -> bool:
+        """
+        Validate file before processing.
+        
+        Args:
+            file_path: Path to file
+            file_size: File size in bytes
+            
+        Returns:
+            True if file is valid, False otherwise
+        """
+        try:
+            # Check file size
+            if file_size > self.max_file_size:
+                logger.warning(
+                    "file_too_large",
+                    service_name=self.service_name,
+                    file_path=file_path,
+                    file_size=file_size,
+                    max_size=self.max_file_size,
+                    component="integrations.external_apis"
+                )
+                return False
+            
+            # Check file extension if restrictions are configured
+            if self.allowed_extensions:
+                file_extension = file_path.split('.')[-1].lower()
+                if file_extension not in self.allowed_extensions:
+                    logger.warning(
+                        "file_extension_not_allowed",
+                        service_name=self.service_name,
+                        file_path=file_path,
+                        extension=file_extension,
+                        allowed_extensions=self.allowed_extensions,
+                        component="integrations.external_apis"
+                    )
+                    return False
+            
+            return True
+            
+        except Exception as e:
+            logger.error(
+                "file_validation_failed",
+                service_name=self.service_name,
+                file_path=file_path,
+                error=str(e),
+                component="integrations.external_apis",
+                exc_info=e
+            )
+            return False
+    
+    @track_external_service_call(
+        service_name="file_processing",
+        service_type=ServiceType.FILE_STORAGE
+    )
+    def upload_file(
+        self,
+        file_path: str,
+        file_data: bytes,
+        metadata: Optional[Dict[str, Any]] = None,
+        progress_callback: Optional[Callable[[int, int], None]] = None
+    ) -> Dict[str, Any]:
+        """
+        Upload file to external service with streaming support.
+        
+        Args:
+            file_path: Target file path in external service
+            file_data: File content as bytes
+            metadata: Optional file metadata
+            progress_callback: Optional progress callback function
+            
+        Returns:
+            Upload result with file ID and metadata
+        """
+        start_time = time.time()
+        file_size = len(file_data)
+        
+        try:
+            # Validate file
+            if not self.validate_file(file_path, file_size):
+                raise FileProcessingError(
+                    message=f"File validation failed: {file_path}",
+                    operation="upload_file",
+                    file_path=file_path,
+                    file_size=file_size,
+                    processing_stage="validation"
+                )
+            
+            # Prepare multipart upload
+            files = {
+                'file': (file_path, file_data, 'application/octet-stream')
+            }
+            
+            data = {
+                'path': file_path,
+                'metadata': json.dumps(metadata or {})
+            }
+            
+            # Upload with progress tracking
+            uploaded_bytes = 0
+            
+            def upload_progress_wrapper(monitor):
+                nonlocal uploaded_bytes
+                uploaded_bytes = monitor.bytes_read
+                if progress_callback:
+                    progress_callback(uploaded_bytes, file_size)
+            
+            response = self.api_client.post(
+                '/files/upload',
+                files=files,
+                data=data,
+                timeout=(30, 300)  # 30s connect, 5min read timeout
+            )
+            
+            if not self.api_client.validate_response(response):
+                raise FileProcessingError(
+                    message=f"Upload failed with status {response.status_code}",
+                    operation="upload_file",
+                    file_path=file_path,
+                    file_size=file_size,
+                    processing_stage="upload",
+                    error_code=response.status_code
+                )
+            
+            result = response.json()
+            duration = time.time() - start_time
+            
+            logger.info(
+                "file_upload_completed",
+                service_name=self.service_name,
+                file_path=file_path,
+                file_size=file_size,
+                file_id=result.get('file_id'),
+                duration_ms=round(duration * 1000, 2),
+                component="integrations.external_apis"
+            )
+            
+            # Update monitoring
+            update_service_health(
+                service_name=f"{self.service_name}_files",
+                service_type=ServiceType.FILE_STORAGE,
+                status=HealthStatus.HEALTHY,
                 duration=duration,
-                result_status=result.get('status', 'unknown')
+                metadata={'operation': 'upload', 'file_size': file_size}
             )
             
             return result
             
         except Exception as e:
             duration = time.time() - start_time
-            self.logger.error(
-                "Webhook processing failed",
-                event_type=event_type,
+            logger.error(
+                "file_upload_failed",
+                service_name=self.service_name,
+                file_path=file_path,
+                file_size=file_size,
                 error=str(e),
-                duration=duration
+                duration_ms=round(duration * 1000, 2),
+                component="integrations.external_apis",
+                exc_info=e
             )
-            raise
-    
-    async def _execute_processor(self, processor: Callable, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute webhook processor with error handling"""
-        try:
-            if asyncio.iscoroutinefunction(processor):
-                return await processor(payload)
+            
+            # Update monitoring
+            update_service_health(
+                service_name=f"{self.service_name}_files",
+                service_type=ServiceType.FILE_STORAGE,
+                status=HealthStatus.UNHEALTHY,
+                duration=duration,
+                metadata={'operation': 'upload', 'error': str(e)}
+            )
+            
+            if isinstance(e, FileProcessingError):
+                raise
             else:
-                # Run synchronous processor in thread pool
-                loop = asyncio.get_event_loop()
-                return await loop.run_in_executor(None, processor, payload)
-        except Exception as e:
-            raise WebhookValidationError(f"Processor execution failed: {str(e)}") from e
-
-
-class FileProcessingIntegration:
-    """
-    File processing integration for external services.
+                raise FileProcessingError(
+                    message=f"File upload failed: {str(e)}",
+                    operation="upload_file",
+                    file_path=file_path,
+                    file_size=file_size,
+                    processing_stage="upload"
+                ) from e
     
-    Handles file upload, download, and processing operations with external
-    services while maintaining performance, security, and reliability standards.
-    Implements streaming for large files and comprehensive error handling.
-    
-    Features:
-    - Streaming file upload/download for memory efficiency
-    - File type validation and size limits
-    - Progress tracking for large file operations
-    - Integration with external storage services
-    - Comprehensive error handling and recovery
-    """
-    
-    def __init__(self, config: FileProcessingConfig, api_client: GenericAPIClient):
+    @track_external_service_call(
+        service_name="file_processing",
+        service_type=ServiceType.FILE_STORAGE
+    )
+    def download_file(
+        self,
+        file_id: str,
+        progress_callback: Optional[Callable[[int, int], None]] = None
+    ) -> bytes:
         """
-        Initialize file processing integration.
+        Download file from external service with streaming support.
         
         Args:
-            config: FileProcessingConfig containing processing settings
-            api_client: Configured API client for external service communication
-        """
-        self.config = config
-        self.client = api_client
-        self.logger = logger.bind(service="file_processing")
-    
-    def validate_file(self, filename: str, file_size: int) -> bool:
-        """
-        Validate file based on extension and size restrictions.
-        
-        Args:
-            filename: Name of the file
-            file_size: Size of the file in bytes
+            file_id: File identifier in external service
+            progress_callback: Optional progress callback function
             
         Returns:
-            True if file is valid, False otherwise
+            File content as bytes
         """
-        # Check file size
-        if file_size > self.config.max_file_size:
-            return False
+        start_time = time.time()
         
-        # Check file extension
-        if self.config.allowed_extensions:
-            file_ext = '.' + filename.split('.')[-1].lower() if '.' in filename else ''
-            return file_ext in self.config.allowed_extensions
-        
-        return True
+        try:
+            response = self.api_client.get(
+                f'/files/{file_id}/download',
+                stream=True,
+                timeout=(30, 300)  # 30s connect, 5min read timeout
+            )
+            
+            if not self.api_client.validate_response(response):
+                raise FileProcessingError(
+                    message=f"Download failed with status {response.status_code}",
+                    operation="download_file",
+                    processing_stage="download",
+                    error_code=response.status_code,
+                    error_context={'file_id': file_id}
+                )
+            
+            # Get file size from headers
+            content_length = response.headers.get('content-length')
+            total_size = int(content_length) if content_length else 0
+            
+            # Stream download with progress tracking
+            downloaded_data = b''
+            downloaded_bytes = 0
+            
+            for chunk in response.iter_content(chunk_size=self.chunk_size):
+                if chunk:
+                    downloaded_data += chunk
+                    downloaded_bytes += len(chunk)
+                    
+                    if progress_callback and total_size > 0:
+                        progress_callback(downloaded_bytes, total_size)
+            
+            duration = time.time() - start_time
+            
+            logger.info(
+                "file_download_completed",
+                service_name=self.service_name,
+                file_id=file_id,
+                file_size=len(downloaded_data),
+                duration_ms=round(duration * 1000, 2),
+                component="integrations.external_apis"
+            )
+            
+            # Update monitoring
+            update_service_health(
+                service_name=f"{self.service_name}_files",
+                service_type=ServiceType.FILE_STORAGE,
+                status=HealthStatus.HEALTHY,
+                duration=duration,
+                metadata={'operation': 'download', 'file_size': len(downloaded_data)}
+            )
+            
+            return downloaded_data
+            
+        except Exception as e:
+            duration = time.time() - start_time
+            logger.error(
+                "file_download_failed",
+                service_name=self.service_name,
+                file_id=file_id,
+                error=str(e),
+                duration_ms=round(duration * 1000, 2),
+                component="integrations.external_apis",
+                exc_info=e
+            )
+            
+            # Update monitoring
+            update_service_health(
+                service_name=f"{self.service_name}_files",
+                service_type=ServiceType.FILE_STORAGE,
+                status=HealthStatus.UNHEALTHY,
+                duration=duration,
+                metadata={'operation': 'download', 'error': str(e)}
+            )
+            
+            if isinstance(e, FileProcessingError):
+                raise
+            else:
+                raise FileProcessingError(
+                    message=f"File download failed: {str(e)}",
+                    operation="download_file",
+                    processing_stage="download",
+                    error_context={'file_id': file_id}
+                ) from e
     
-    async def upload_file(
+    async def upload_file_async(
         self,
         file_path: str,
-        filename: str,
+        file_data: bytes,
         metadata: Optional[Dict[str, Any]] = None,
         progress_callback: Optional[Callable[[int, int], None]] = None
     ) -> Dict[str, Any]:
         """
-        Upload file to external service with streaming and progress tracking.
+        Upload file to external service asynchronously with streaming support.
         
         Args:
-            file_path: Local path to file
-            filename: Name for uploaded file
-            metadata: Additional metadata
-            progress_callback: Optional callback for upload progress
+            file_path: Target file path in external service
+            file_data: File content as bytes
+            metadata: Optional file metadata
+            progress_callback: Optional progress callback function
             
         Returns:
-            Upload result containing file ID and URL
-            
-        Raises:
-            FileProcessingError: For file processing failures
+            Upload result with file ID and metadata
         """
-        import os
+        start_time = time.time()
+        file_size = len(file_data)
         
         try:
             # Validate file
-            file_size = os.path.getsize(file_path)
-            if not self.validate_file(filename, file_size):
-                raise FileProcessingError(f"File validation failed: {filename}")
-            
-            self.logger.info(
-                "Starting file upload",
-                filename=filename,
-                file_size=file_size,
-                metadata=metadata
-            )
+            if not self.validate_file(file_path, file_size):
+                raise FileProcessingError(
+                    message=f"File validation failed: {file_path}",
+                    operation="upload_file_async",
+                    file_path=file_path,
+                    file_size=file_size,
+                    processing_stage="validation"
+                )
             
             # Prepare multipart upload
-            content_type = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+            files = {
+                'file': (file_path, file_data, 'application/octet-stream')
+            }
             
-            # Stream file upload in chunks
-            with open(file_path, 'rb') as file:
-                total_bytes = file_size
-                uploaded_bytes = 0
-                
-                # Create multipart form data
-                files = {'file': (filename, file, content_type)}
-                data = metadata or {}
-                
-                # Make upload request
-                response = self.client.make_request(
-                    method='POST',
-                    endpoint=self.config.upload_endpoint,
-                    data=data,
-                    files=files
-                )
-                
-                # Parse response
-                result = response.json()
-                
-                self.logger.info(
-                    "File upload completed",
-                    filename=filename,
-                    file_id=result.get('file_id'),
-                    file_url=result.get('file_url')
-                )
-                
-                return result
-                
-        except Exception as e:
-            self.logger.error(
-                "File upload failed",
-                filename=filename,
-                error=str(e)
-            )
-            raise FileProcessingError(f"File upload failed: {str(e)}") from e
-    
-    async def download_file(
-        self,
-        file_url: str,
-        local_path: str,
-        progress_callback: Optional[Callable[[int, int], None]] = None
-    ) -> str:
-        """
-        Download file from external service with streaming.
-        
-        Args:
-            file_url: URL of file to download
-            local_path: Local path to save file
-            progress_callback: Optional callback for download progress
+            data = {
+                'path': file_path,
+                'metadata': json.dumps(metadata or {})
+            }
             
-        Returns:
-            Path to downloaded file
-            
-        Raises:
-            FileProcessingError: For download failures
-        """
-        import os
-        
-        try:
-            self.logger.info("Starting file download", file_url=file_url, local_path=local_path)
-            
-            # Create directory if it doesn't exist
-            os.makedirs(os.path.dirname(local_path), exist_ok=True)
-            
-            # Stream download
-            response = self.client.session.get(file_url, stream=True)
-            response.raise_for_status()
-            
-            total_size = int(response.headers.get('content-length', 0))
-            downloaded_size = 0
-            
-            with open(local_path, 'wb') as file:
-                for chunk in response.iter_content(chunk_size=self.config.chunk_size):
-                    if chunk:
-                        file.write(chunk)
-                        downloaded_size += len(chunk)
-                        
-                        # Call progress callback if provided
-                        if progress_callback:
-                            progress_callback(downloaded_size, total_size)
-            
-            self.logger.info(
-                "File download completed",
-                file_url=file_url,
-                local_path=local_path,
-                file_size=downloaded_size
+            response = await self.api_client.post_async(
+                '/files/upload',
+                files=files,
+                data=data,
+                timeout=(30, 300)  # 30s connect, 5min read timeout
             )
             
-            return local_path
+            if not self.api_client.validate_response(response):
+                raise FileProcessingError(
+                    message=f"Async upload failed with status {response.status_code}",
+                    operation="upload_file_async",
+                    file_path=file_path,
+                    file_size=file_size,
+                    processing_stage="upload",
+                    error_code=response.status_code
+                )
+            
+            result = response.json()
+            duration = time.time() - start_time
+            
+            logger.info(
+                "async_file_upload_completed",
+                service_name=self.service_name,
+                file_path=file_path,
+                file_size=file_size,
+                file_id=result.get('file_id'),
+                duration_ms=round(duration * 1000, 2),
+                component="integrations.external_apis"
+            )
+            
+            return result
             
         except Exception as e:
-            self.logger.error(
-                "File download failed",
-                file_url=file_url,
-                error=str(e)
+            duration = time.time() - start_time
+            logger.error(
+                "async_file_upload_failed",
+                service_name=self.service_name,
+                file_path=file_path,
+                file_size=file_size,
+                error=str(e),
+                duration_ms=round(duration * 1000, 2),
+                component="integrations.external_apis",
+                exc_info=e
             )
-            raise FileProcessingError(f"File download failed: {str(e)}") from e
+            
+            if isinstance(e, FileProcessingError):
+                raise
+            else:
+                raise FileProcessingError(
+                    message=f"Async file upload failed: {str(e)}",
+                    operation="upload_file_async",
+                    file_path=file_path,
+                    file_size=file_size,
+                    processing_stage="upload"
+                ) from e
 
 
 class EnterpriseServiceWrapper:
     """
     Enterprise service wrapper maintaining existing API contracts.
     
-    Provides a high-level interface for common enterprise service patterns
-    while maintaining compatibility with existing API contracts. Implements
-    comprehensive monitoring, error handling, and performance optimization.
-    
-    Features:
-    - Unified interface for multiple external services
-    - Contract compatibility preservation
-    - Comprehensive error handling and recovery
-    - Performance monitoring and optimization
-    - Enterprise security patterns
+    Provides standardized interface for enterprise service integration with
+    comprehensive error handling, monitoring, and contract preservation.
+    Implements patterns required by Section 0.1.4 for maintaining API contracts.
     """
     
-    def __init__(self, service_configs: Dict[str, APIClientConfig]):
+    def __init__(
+        self,
+        service_name: str,
+        service_config: Dict[str, Any],
+        contract_version: str = "1.0"
+    ):
         """
-        Initialize enterprise service wrapper with multiple service configurations.
+        Initialize enterprise service wrapper.
         
         Args:
-            service_configs: Dictionary of service name to configuration mappings
+            service_name: Enterprise service identifier
+            service_config: Service configuration including endpoints and auth
+            contract_version: API contract version for compatibility tracking
         """
-        self.services: Dict[str, GenericAPIClient] = {}
-        self.webhooks: Dict[str, WebhookHandler] = {}
-        self.file_processors: Dict[str, FileProcessingIntegration] = {}
-        self.logger = logger.bind(component="enterprise_wrapper")
+        self.service_name = service_name
+        self.service_config = service_config
+        self.contract_version = contract_version
         
-        # Initialize service clients
-        for service_name, config in service_configs.items():
-            self.services[service_name] = GenericAPIClient(config)
-            self.logger.info("Initialized service client", service=service_name)
+        # Initialize API client
+        self.api_client = GenericAPIClient(
+            service_name=service_name,
+            base_url=service_config['base_url'],
+            api_key=service_config.get('api_key'),
+            api_version=contract_version,
+            timeout=service_config.get('timeout', 30),
+            **service_config.get('client_config', {})
+        )
+        
+        # Initialize webhook handler if configured
+        self.webhook_handler = None
+        if 'webhook_config' in service_config:
+            webhook_config = service_config['webhook_config']
+            self.webhook_handler = WebhookHandler(
+                service_name=service_name,
+                secret_key=webhook_config['secret_key'],
+                signature_header=webhook_config.get('signature_header', 'X-Signature'),
+                signature_algorithm=webhook_config.get('signature_algorithm', 'sha256')
+            )
+        
+        # Initialize file processing if configured
+        self.file_processor = None
+        if 'file_processing_config' in service_config:
+            file_config = service_config['file_processing_config']
+            self.file_processor = FileProcessingIntegration(
+                service_name=service_name,
+                api_client=self.api_client,
+                **file_config
+            )
+        
+        logger.info(
+            "enterprise_service_wrapper_initialized",
+            service_name=service_name,
+            contract_version=contract_version,
+            has_webhook_handler=bool(self.webhook_handler),
+            has_file_processor=bool(self.file_processor),
+            component="integrations.external_apis"
+        )
     
-    def get_service(self, service_name: str) -> GenericAPIClient:
+    def get_service_info(self) -> Dict[str, Any]:
         """
-        Get configured service client by name.
+        Get comprehensive service information.
+        
+        Returns:
+            Service information including status and capabilities
+        """
+        try:
+            # Get basic service status
+            health_result = self.api_client.health_check()
+            
+            # Get available endpoints
+            endpoints = self.api_client.get_service_endpoints()
+            
+            # Compile service information
+            service_info = {
+                'service_name': self.service_name,
+                'contract_version': self.contract_version,
+                'base_url': self.api_client.base_url,
+                'health_status': health_result,
+                'available_endpoints': endpoints,
+                'capabilities': {
+                    'webhook_support': bool(self.webhook_handler),
+                    'file_processing': bool(self.file_processor),
+                    'pagination_support': True,
+                    'async_support': True
+                },
+                'last_updated': datetime.utcnow().isoformat()
+            }
+            
+            return service_info
+            
+        except Exception as e:
+            logger.error(
+                "service_info_retrieval_failed",
+                service_name=self.service_name,
+                error=str(e),
+                component="integrations.external_apis",
+                exc_info=e
+            )
+            
+            return {
+                'service_name': self.service_name,
+                'contract_version': self.contract_version,
+                'error': str(e),
+                'last_updated': datetime.utcnow().isoformat()
+            }
+    
+    async def get_service_info_async(self) -> Dict[str, Any]:
+        """
+        Get comprehensive service information asynchronously.
+        
+        Returns:
+            Service information including status and capabilities
+        """
+        try:
+            # Get basic service status
+            health_result = await self.api_client.health_check_async()
+            
+            # Get available endpoints
+            endpoints = self.api_client.get_service_endpoints()
+            
+            # Compile service information
+            service_info = {
+                'service_name': self.service_name,
+                'contract_version': self.contract_version,
+                'base_url': self.api_client.base_url,
+                'health_status': health_result,
+                'available_endpoints': endpoints,
+                'capabilities': {
+                    'webhook_support': bool(self.webhook_handler),
+                    'file_processing': bool(self.file_processor),
+                    'pagination_support': True,
+                    'async_support': True
+                },
+                'last_updated': datetime.utcnow().isoformat()
+            }
+            
+            return service_info
+            
+        except Exception as e:
+            logger.error(
+                "async_service_info_retrieval_failed",
+                service_name=self.service_name,
+                error=str(e),
+                component="integrations.external_apis",
+                exc_info=e
+            )
+            
+            return {
+                'service_name': self.service_name,
+                'contract_version': self.contract_version,
+                'error': str(e),
+                'last_updated': datetime.utcnow().isoformat()
+            }
+
+
+# Factory functions for common service types
+
+def create_analytics_service_client(
+    service_name: str,
+    base_url: str,
+    api_key: str,
+    **kwargs
+) -> GenericAPIClient:
+    """
+    Factory function for creating analytics service clients.
+    
+    Args:
+        service_name: Service identifier
+        base_url: Analytics service base URL
+        api_key: API key for authentication
+        **kwargs: Additional configuration parameters
+        
+    Returns:
+        Configured GenericAPIClient for analytics services
+    """
+    return GenericAPIClient(
+        service_name=service_name,
+        base_url=base_url,
+        api_key=api_key,
+        timeout=(10, 60),  # Analytics may need longer read timeout
+        **kwargs
+    )
+
+
+def create_notification_service_client(
+    service_name: str,
+    base_url: str,
+    api_key: str,
+    **kwargs
+) -> GenericAPIClient:
+    """
+    Factory function for creating notification service clients.
+    
+    Args:
+        service_name: Service identifier
+        base_url: Notification service base URL
+        api_key: API key for authentication
+        **kwargs: Additional configuration parameters
+        
+    Returns:
+        Configured GenericAPIClient for notification services
+    """
+    return GenericAPIClient(
+        service_name=service_name,
+        base_url=base_url,
+        api_key=api_key,
+        timeout=(5, 30),  # Notifications should be fast
+        **kwargs
+    )
+
+
+def create_document_processing_service(
+    service_name: str,
+    base_url: str,
+    api_key: str,
+    **kwargs
+) -> EnterpriseServiceWrapper:
+    """
+    Factory function for creating document processing service wrappers.
+    
+    Args:
+        service_name: Service identifier
+        base_url: Document processing service base URL
+        api_key: API key for authentication
+        **kwargs: Additional configuration parameters
+        
+    Returns:
+        Configured EnterpriseServiceWrapper for document processing
+    """
+    service_config = {
+        'base_url': base_url,
+        'api_key': api_key,
+        'timeout': 120,  # Document processing may be slow
+        'file_processing_config': {
+            'chunk_size': 16384,  # 16KB chunks for documents
+            'max_file_size': 50 * 1024 * 1024,  # 50MB for documents
+            'allowed_extensions': ['pdf', 'doc', 'docx', 'txt', 'rtf']
+        }
+    }
+    service_config.update(kwargs)
+    
+    return EnterpriseServiceWrapper(
+        service_name=service_name,
+        service_config=service_config,
+        contract_version="1.0"
+    )
+
+
+# Real-world service integration examples
+
+class SlackIntegration(GenericAPIClient):
+    """
+    Slack API integration example implementing enterprise messaging capabilities.
+    
+    Demonstrates real-world third-party API integration patterns with webhook
+    support and comprehensive error handling.
+    """
+    
+    def __init__(self, bot_token: str, **kwargs):
+        """Initialize Slack integration with bot token."""
+        super().__init__(
+            service_name="slack",
+            base_url="https://slack.com/api",
+            api_key=bot_token,
+            timeout=(10, 30),
+            **kwargs
+        )
+        
+        # Configure Slack-specific headers
+        self.config.default_headers.update({
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {bot_token}'
+        })
+    
+    def send_message(self, channel: str, text: str, **kwargs) -> Dict[str, Any]:
+        """
+        Send message to Slack channel.
         
         Args:
-            service_name: Name of the service
+            channel: Channel ID or name
+            text: Message text
+            **kwargs: Additional message parameters
             
         Returns:
-            Configured API client
-            
-        Raises:
-            ExternalServiceError: If service is not configured
+            Slack API response
         """
-        if service_name not in self.services:
-            raise ExternalServiceError(f"Service not configured: {service_name}")
+        payload = {
+            'channel': channel,
+            'text': text,
+            **kwargs
+        }
         
-        return self.services[service_name]
+        response = self.post('/chat.postMessage', json_data=payload)
+        return response.json()
     
-    def add_webhook_handler(self, service_name: str, config: WebhookConfig) -> WebhookHandler:
+    def get_service_endpoints(self) -> List[str]:
+        """Get Slack API endpoints."""
+        return [
+            '/api.test',
+            '/auth.test',
+            '/chat.postMessage',
+            '/channels.list',
+            '/users.list'
+        ]
+
+
+class SendGridIntegration(GenericAPIClient):
+    """
+    SendGrid email service integration example.
+    
+    Demonstrates email service integration with comprehensive error handling
+    and monitoring capabilities.
+    """
+    
+    def __init__(self, api_key: str, **kwargs):
+        """Initialize SendGrid integration with API key."""
+        super().__init__(
+            service_name="sendgrid",
+            base_url="https://api.sendgrid.com/v3",
+            api_key=api_key,
+            timeout=(10, 30),
+            **kwargs
+        )
+        
+        # Configure SendGrid-specific headers
+        self.config.default_headers.update({
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {api_key}'
+        })
+    
+    def send_email(
+        self,
+        to_email: str,
+        from_email: str,
+        subject: str,
+        content: str,
+        content_type: str = 'text/plain'
+    ) -> Dict[str, Any]:
         """
-        Add webhook handler for a service.
+        Send email via SendGrid.
         
         Args:
-            service_name: Name of the service
-            config: Webhook configuration
+            to_email: Recipient email address
+            from_email: Sender email address
+            subject: Email subject
+            content: Email content
+            content_type: Content type (text/plain or text/html)
             
         Returns:
-            Configured webhook handler
+            SendGrid API response
         """
-        handler = WebhookHandler(config)
-        self.webhooks[service_name] = handler
-        self.logger.info("Added webhook handler", service=service_name, endpoint=config.endpoint)
-        return handler
+        payload = {
+            'personalizations': [{
+                'to': [{'email': to_email}]
+            }],
+            'from': {'email': from_email},
+            'subject': subject,
+            'content': [{
+                'type': content_type,
+                'value': content
+            }]
+        }
+        
+        response = self.post('/mail/send', json_data=payload)
+        return {'message_id': response.headers.get('X-Message-Id'), 'status': 'sent'}
     
-    def add_file_processor(self, service_name: str, config: FileProcessingConfig) -> FileProcessingIntegration:
+    def get_service_endpoints(self) -> List[str]:
+        """Get SendGrid API endpoints."""
+        return [
+            '/mail/send',
+            '/templates',
+            '/suppression/bounces',
+            '/stats'
+        ]
+
+
+# Global service registry for managing multiple external services
+class ExternalServiceRegistry:
+    """
+    Global registry for managing multiple external service integrations.
+    
+    Provides centralized management of external services with health monitoring,
+    configuration management, and unified access patterns.
+    """
+    
+    def __init__(self):
+        """Initialize the service registry."""
+        self._services: Dict[str, Union[GenericAPIClient, EnterpriseServiceWrapper]] = {}
+        self._configurations: Dict[str, Dict[str, Any]] = {}
+        
+        logger.info(
+            "external_service_registry_initialized",
+            component="integrations.external_apis"
+        )
+    
+    def register_service(
+        self,
+        service_name: str,
+        service_instance: Union[GenericAPIClient, EnterpriseServiceWrapper],
+        configuration: Optional[Dict[str, Any]] = None
+    ) -> None:
         """
-        Add file processing integration for a service.
+        Register external service in the registry.
         
         Args:
-            service_name: Name of the service
-            config: File processing configuration
+            service_name: Unique service identifier
+            service_instance: Configured service instance
+            configuration: Optional service configuration
+        """
+        self._services[service_name] = service_instance
+        self._configurations[service_name] = configuration or {}
+        
+        logger.info(
+            "service_registered",
+            service_name=service_name,
+            service_type=type(service_instance).__name__,
+            component="integrations.external_apis"
+        )
+    
+    def get_service(self, service_name: str) -> Optional[Union[GenericAPIClient, EnterpriseServiceWrapper]]:
+        """
+        Get registered service by name.
+        
+        Args:
+            service_name: Service identifier
             
         Returns:
-            Configured file processor
+            Service instance or None if not found
         """
-        if service_name not in self.services:
-            raise ExternalServiceError(f"Service client required for file processing: {service_name}")
-        
-        processor = FileProcessingIntegration(config, self.services[service_name])
-        self.file_processors[service_name] = processor
-        self.logger.info("Added file processor", service=service_name)
-        return processor
+        return self._services.get(service_name)
     
-    async def health_check(self) -> Dict[str, Dict[str, Any]]:
+    def get_all_services(self) -> Dict[str, Union[GenericAPIClient, EnterpriseServiceWrapper]]:
         """
-        Perform health check on all configured services.
+        Get all registered services.
         
         Returns:
-            Health status for each service
+            Dictionary of all registered services
+        """
+        return dict(self._services)
+    
+    def health_check_all(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Perform health check on all registered services.
+        
+        Returns:
+            Health check results for all services
         """
         health_results = {}
         
-        for service_name, client in self.services.items():
+        for service_name, service_instance in self._services.items():
             try:
-                start_time = time.time()
+                if isinstance(service_instance, GenericAPIClient):
+                    health_result = service_instance.health_check()
+                elif isinstance(service_instance, EnterpriseServiceWrapper):
+                    health_result = service_instance.get_service_info()
+                else:
+                    health_result = {'status': 'unknown', 'error': 'Unsupported service type'}
                 
-                # Attempt a simple request to check service health
-                response = client.make_request('GET', '/health', timeout=5)
-                
-                health_results[service_name] = {
-                    'status': 'healthy',
-                    'response_time': time.time() - start_time,
-                    'status_code': response.status_code
-                }
+                health_results[service_name] = health_result
                 
             except Exception as e:
+                logger.error(
+                    "service_health_check_failed",
+                    service_name=service_name,
+                    error=str(e),
+                    component="integrations.external_apis",
+                    exc_info=e
+                )
+                
                 health_results[service_name] = {
                     'status': 'unhealthy',
                     'error': str(e),
-                    'response_time': time.time() - start_time
+                    'timestamp': datetime.utcnow().isoformat()
                 }
         
         return health_results
     
-    def close_all(self) -> None:
-        """Clean up all service clients"""
-        for client in self.services.values():
-            client.close()
-
-
-# Initialize global enterprise service wrapper
-_enterprise_wrapper: Optional[EnterpriseServiceWrapper] = None
-
-
-def init_external_apis(app: Flask, service_configs: Dict[str, APIClientConfig]) -> EnterpriseServiceWrapper:
-    """
-    Initialize external APIs integration with Flask application.
-    
-    Args:
-        app: Flask application instance
-        service_configs: Dictionary of service configurations
+    async def health_check_all_async(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Perform asynchronous health check on all registered services.
         
-    Returns:
-        Configured enterprise service wrapper
-    """
-    global _enterprise_wrapper
-    
-    # Initialize enterprise wrapper
-    _enterprise_wrapper = EnterpriseServiceWrapper(service_configs)
-    
-    # Register blueprint with Flask app
-    app.register_blueprint(external_api_bp)
-    
-    # Store wrapper in app context
-    app.extensions['external_apis'] = _enterprise_wrapper
-    
-    logger.info("External APIs integration initialized", services=list(service_configs.keys()))
-    
-    return _enterprise_wrapper
-
-
-def get_enterprise_wrapper() -> EnterpriseServiceWrapper:
-    """
-    Get the global enterprise service wrapper.
-    
-    Returns:
-        Enterprise service wrapper instance
+        Returns:
+            Health check results for all services
+        """
+        health_results = {}
         
-    Raises:
-        RuntimeError: If not initialized
-    """
-    if _enterprise_wrapper is None:
-        raise RuntimeError("External APIs not initialized. Call init_external_apis() first.")
-    
-    return _enterprise_wrapper
-
-
-# Flask Blueprint Routes
-
-@external_api_bp.route('/health', methods=['GET'])
-async def health_check():
-    """Health check endpoint for external services"""
-    try:
-        wrapper = get_enterprise_wrapper()
-        health_results = await wrapper.health_check()
+        # Create tasks for all health checks
+        health_check_tasks = []
+        service_names = []
         
-        # Determine overall health status
-        overall_status = 'healthy' if all(
-            result['status'] == 'healthy' for result in health_results.values()
-        ) else 'degraded'
+        for service_name, service_instance in self._services.items():
+            service_names.append(service_name)
+            
+            if isinstance(service_instance, GenericAPIClient):
+                task = service_instance.health_check_async()
+            elif isinstance(service_instance, EnterpriseServiceWrapper):
+                task = service_instance.get_service_info_async()
+            else:
+                # Create a simple coroutine for unsupported types
+                async def unsupported_health_check():
+                    return {'status': 'unknown', 'error': 'Unsupported service type'}
+                task = unsupported_health_check()
+            
+            health_check_tasks.append(task)
         
-        return jsonify({
-            'status': overall_status,
-            'services': health_results,
-            'timestamp': datetime.utcnow().isoformat()
-        }), 200 if overall_status == 'healthy' else 207
+        # Execute all health checks concurrently
+        try:
+            results = await asyncio.gather(*health_check_tasks, return_exceptions=True)
+            
+            for service_name, result in zip(service_names, results):
+                if isinstance(result, Exception):
+                    logger.error(
+                        "async_service_health_check_failed",
+                        service_name=service_name,
+                        error=str(result),
+                        component="integrations.external_apis",
+                        exc_info=result
+                    )
+                    
+                    health_results[service_name] = {
+                        'status': 'unhealthy',
+                        'error': str(result),
+                        'timestamp': datetime.utcnow().isoformat()
+                    }
+                else:
+                    health_results[service_name] = result
+                    
+        except Exception as e:
+            logger.error(
+                "async_health_check_batch_failed",
+                error=str(e),
+                component="integrations.external_apis",
+                exc_info=e
+            )
         
-    except Exception as e:
-        logger.error("Health check failed", error=str(e))
-        return jsonify({
-            'status': 'error',
-            'error': str(e),
-            'timestamp': datetime.utcnow().isoformat()
-        }), 500
+        return health_results
 
 
-@external_api_bp.route('/webhook/<service_name>', methods=['POST'])
-async def handle_webhook(service_name: str):
-    """Generic webhook handler endpoint"""
-    try:
-        wrapper = get_enterprise_wrapper()
-        
-        # Check if webhook handler exists for service
-        if service_name not in wrapper.webhooks:
-            return jsonify({'error': f'No webhook handler for service: {service_name}'}), 404
-        
-        handler = wrapper.webhooks[service_name]
-        
-        # Validate source IP
-        client_ip = request.environ.get('HTTP_X_FORWARDED_FOR', request.remote_addr)
-        if not handler.validate_source_ip(client_ip):
-            logger.warning("Webhook request from unauthorized IP", client_ip=client_ip, service=service_name)
-            return jsonify({'error': 'Unauthorized IP address'}), 403
-        
-        # Validate signature if configured
-        signature = request.headers.get('X-Signature-256') or request.headers.get('X-Hub-Signature-256')
-        if signature and not handler.validate_signature(request.get_data(), signature):
-            logger.warning("Invalid webhook signature", service=service_name)
-            return jsonify({'error': 'Invalid signature'}), 403
-        
-        # Process webhook
-        payload = request.get_json()
-        if not payload:
-            return jsonify({'error': 'Invalid JSON payload'}), 400
-        
-        result = await handler.process_webhook(payload, dict(request.headers))
-        
-        return jsonify(result), 200
-        
-    except WebhookValidationError as e:
-        logger.error("Webhook validation failed", service=service_name, error=str(e))
-        return jsonify({'error': str(e)}), 400
-    except Exception as e:
-        logger.error("Webhook processing failed", service=service_name, error=str(e))
-        return jsonify({'error': 'Internal server error'}), 500
-
-
-@external_api_bp.route('/services', methods=['GET'])
-def list_services():
-    """List all configured external services"""
-    try:
-        wrapper = get_enterprise_wrapper()
-        
-        services_info = {}
-        for service_name, client in wrapper.services.items():
-            services_info[service_name] = {
-                'base_url': client.config.base_url,
-                'circuit_breaker_state': client.circuit_breaker.current_state,
-                'has_webhook': service_name in wrapper.webhooks,
-                'has_file_processor': service_name in wrapper.file_processors
-            }
-        
-        return jsonify({
-            'services': services_info,
-            'total_count': len(services_info)
-        }), 200
-        
-    except Exception as e:
-        logger.error("Failed to list services", error=str(e))
-        return jsonify({'error': str(e)}), 500
-
-
-# Error handlers for Flask integration
-@external_api_bp.errorhandler(ExternalServiceError)
-def handle_external_service_error(error):
-    """Handle external service errors"""
-    logger.error("External service error", error=str(error))
-    return jsonify({'error': 'External service error', 'message': str(error)}), 502
-
-
-@external_api_bp.errorhandler(CircuitBreakerOpenError)
-def handle_circuit_breaker_error(error):
-    """Handle circuit breaker open errors"""
-    logger.warning("Circuit breaker open", error=str(error))
-    return jsonify({'error': 'Service temporarily unavailable', 'message': str(error)}), 503
-
-
-@external_api_bp.errorhandler(RetryExhaustedError)
-def handle_retry_exhausted_error(error):
-    """Handle retry exhausted errors"""
-    logger.error("Retry attempts exhausted", error=str(error))
-    return jsonify({'error': 'Service request failed', 'message': str(error)}), 502
-
-
-@external_api_bp.errorhandler(WebhookValidationError)
-def handle_webhook_validation_error(error):
-    """Handle webhook validation errors"""
-    logger.warning("Webhook validation failed", error=str(error))
-    return jsonify({'error': 'Webhook validation failed', 'message': str(error)}), 400
-
-
-@external_api_bp.errorhandler(FileProcessingError)
-def handle_file_processing_error(error):
-    """Handle file processing errors"""
-    logger.error("File processing failed", error=str(error))
-    return jsonify({'error': 'File processing failed', 'message': str(error)}), 422
+# Global service registry instance
+external_service_registry = ExternalServiceRegistry()
 
 
 # Export public interface
 __all__ = [
+    # Main classes
     'GenericAPIClient',
     'WebhookHandler',
     'FileProcessingIntegration',
     'EnterpriseServiceWrapper',
-    'APIClientConfig',
-    'WebhookConfig',
-    'FileProcessingConfig',
-    'init_external_apis',
-    'get_enterprise_wrapper',
-    'external_api_bp'
+    'ExternalServiceRegistry',
+    
+    # Exception classes
+    'WebhookValidationError',
+    'FileProcessingError',
+    
+    # Factory functions
+    'create_analytics_service_client',
+    'create_notification_service_client',
+    'create_document_processing_service',
+    
+    # Example integrations
+    'SlackIntegration',
+    'SendGridIntegration',
+    
+    # Global instances
+    'external_service_registry',
+    
+    # Monitoring functions from dependencies
+    'track_external_service_call',
+    'ServiceType',
+    'HealthStatus',
 ]
+
+
+# Module initialization logging
+logger.info(
+    "external_apis_module_loaded",
+    component="integrations.external_apis",
+    features=[
+        "generic_api_client",
+        "webhook_handler",
+        "file_processing_integration",
+        "enterprise_service_wrapper",
+        "service_registry",
+        "real_world_integrations"
+    ]
+)
