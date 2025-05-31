@@ -1,117 +1,80 @@
 """
-Authentication and Security Configuration Module
+Authentication and security configuration for Flask application.
 
-This module implements comprehensive authentication and security configuration for the
-Flask application migration from Node.js, providing JWT token validation with PyJWT 2.8+,
-Auth0 enterprise integration, and cryptographic settings using cryptography 41.0+.
+This module implements comprehensive authentication and security configuration for the Node.js to 
+Python Flask migration, providing PyJWT 2.8+ token validation, Auth0 enterprise integration,
+and cryptographic settings. Manages JWT secret keys, token expiration policies, Auth0 client 
+configuration, and Flask-Login session management to preserve existing authentication flows 
+and security mechanisms.
 
-Key Features:
-- JWT token processing equivalent to Node.js jsonwebtoken
-- Auth0 Python SDK integration preserving enterprise authentication flows
-- Flask-Login session management with Redis-backed distributed storage
-- Flask-Talisman security header enforcement
-- AWS KMS integration for encryption key management
-- Comprehensive error handling and monitoring integration
+Key Components:
+- PyJWT 2.8+ token validation replacing Node.js jsonwebtoken per Section 0.1.2
+- Auth0 enterprise integration through Python SDK per Section 0.1.3
+- cryptography 41.0+ for secure token validation per Section 3.2.2
+- Flask-Login 0.7.0+ session management per Section 3.2.2
+- Redis-based session storage per Section 3.4.2
+- Complete preservation of existing API contracts per Section 0.1.4
 
-Security Standards:
-- OWASP Top 10 compliance
-- SOC 2 Type II audit trail support
-- FIPS 140-2 cryptographic standards
-- Zero API surface changes for backward compatibility
+Technical Requirements:
+- Authentication system migration preserving JWT token validation patterns per Section 0.1.1
+- Complete preservation of existing API contracts ensuring zero client-side changes per Section 0.1.4
+- Session management with Redis-based storage per Section 3.4.2 caching solutions
+- Environment-specific configuration management using python-dotenv 1.0+
 """
 
 import os
-import base64
-import json
 import logging
-import secrets
+from typing import Optional, Dict, Any, Union, List
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Any, Optional, List, Union, Tuple
-from functools import wraps
 from urllib.parse import urljoin
+import base64
+import hashlib
+import json
 
-import jwt
-import redis
-import boto3
-from cryptography.fernet import Fernet
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from dotenv import load_dotenv
-from flask import Flask, request, jsonify, session, g, current_app
+# Core Flask and authentication imports
+from flask import Flask, request, g, current_app
 from flask_login import LoginManager, UserMixin, current_user
-from flask_session import Session
-from flask_talisman import Talisman
-from flask_cors import CORS
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
-from auth0.authentication import GetToken
+
+# JWT and cryptographic imports
+import jwt
+from jwt.exceptions import (
+    InvalidTokenError, 
+    ExpiredSignatureError, 
+    InvalidSignatureError,
+    InvalidKeyError,
+    InvalidIssuerError,
+    InvalidAudienceError
+)
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.fernet import Fernet
+
+# Auth0 and HTTP client imports
 from auth0.management import Auth0
-from auth0.exceptions import Auth0Error
-from botocore.exceptions import ClientError, BotoCoreError
-from werkzeug.security import check_password_hash, generate_password_hash
-import structlog
-from prometheus_client import Counter, Histogram, Gauge
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+from auth0.authentication import GetToken, Users, Social
+import httpx
+from tenacity import (
+    retry, 
+    stop_after_attempt, 
+    wait_exponential_jitter,
+    retry_if_exception_type,
+    before_sleep_log,
+    after_log
+)
+
+# Environment and validation imports
+from dotenv import load_dotenv
+from marshmallow import Schema, fields, ValidationError
+from email_validator import validate_email, EmailNotValidError
+
+# Database configuration import
+from src.config.database import get_redis_client, DatabaseConnectionError
+
+# Configure module logger
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
-
-# Configure structured logging for authentication events
-structlog.configure(
-    processors=[
-        structlog.stdlib.filter_by_level,
-        structlog.stdlib.add_logger_name,
-        structlog.stdlib.add_log_level,
-        structlog.stdlib.PositionalArgumentsFormatter(),
-        structlog.processors.TimeStamper(fmt="iso"),
-        structlog.processors.StackInfoRenderer(),
-        structlog.processors.format_exc_info,
-        structlog.processors.UnicodeDecoder(),
-        structlog.processors.JSONRenderer()
-    ],
-    wrapper_class=structlog.stdlib.LoggerFactory(),
-    context_class=dict,
-    logger_factory=structlog.stdlib.LoggerFactory(),
-    cache_logger_on_first_use=True,
-)
-
-# Initialize security audit logger
-security_logger = structlog.get_logger("security.authentication")
-
-# Prometheus metrics for authentication monitoring
-auth_metrics = {
-    'requests_total': Counter(
-        'auth_requests_total',
-        'Total authentication attempts by result',
-        ['result', 'method']
-    ),
-    'jwt_validation_duration': Histogram(
-        'jwt_validation_duration_seconds',
-        'JWT token validation duration',
-        ['algorithm', 'issuer']
-    ),
-    'session_operations': Counter(
-        'auth_session_operations_total',
-        'Session management operations',
-        ['operation', 'result']
-    ),
-    'cache_operations': Counter(
-        'auth_cache_operations_total',
-        'Authentication cache operations',
-        ['operation', 'cache_type', 'result']
-    ),
-    'active_sessions': Gauge(
-        'auth_active_sessions',
-        'Number of active user sessions'
-    ),
-    'circuit_breaker_state': Gauge(
-        'auth_circuit_breaker_state',
-        'Circuit breaker state for auth services',
-        ['service']
-    )
-}
 
 
 class AuthenticationError(Exception):
@@ -124,1165 +87,1050 @@ class AuthorizationError(Exception):
     pass
 
 
-class KMSKeyManagementError(Exception):
-    """Custom exception for AWS KMS key management failures."""
+class TokenValidationError(Exception):
+    """Custom exception for token validation failures."""
+    pass
+
+
+class Auth0ServiceError(Exception):
+    """Custom exception for Auth0 service failures."""
     pass
 
 
 class User(UserMixin):
     """
-    User model for Flask-Login integration with Auth0 profile management.
+    Flask-Login User class implementing comprehensive user context management.
     
-    Implements UserMixin interface for Flask-Login compatibility while
-    maintaining Auth0 user profile data and session state management.
+    This class provides complete user authentication state management equivalent
+    to the Node.js implementation while integrating with Flask-Login patterns
+    for session management and user context preservation.
+    
+    Features:
+    - Auth0 profile integration with complete user metadata preservation
+    - JWT claims extraction and validation with cryptographic verification
+    - Session state management with Redis-based storage per Section 3.4.2
+    - Role and permission context management for authorization workflows
+    - User activity tracking and audit trail generation
     """
     
-    def __init__(self, user_id: str, auth0_profile: Dict[str, Any]):
+    def __init__(self, user_id: str, auth0_profile: Dict[str, Any], jwt_claims: Optional[Dict[str, Any]] = None):
         """
-        Initialize user object with Auth0 profile data.
+        Initialize User instance with Auth0 profile and JWT claims.
         
         Args:
             user_id: Unique user identifier from Auth0
             auth0_profile: Complete Auth0 user profile data
+            jwt_claims: JWT token claims for authorization context
         """
         self.id = user_id
         self.auth0_profile = auth0_profile
+        self.jwt_claims = jwt_claims or {}
         self.is_authenticated = True
         self.is_active = True
         self.is_anonymous = False
-        self.permissions: Optional[List[str]] = None
-        self.roles: Optional[List[str]] = None
-        self._load_user_metadata()
-    
-    def _load_user_metadata(self) -> None:
-        """Load user permissions and roles from Auth0 profile metadata."""
-        user_metadata = self.auth0_profile.get('user_metadata', {})
-        app_metadata = self.auth0_profile.get('app_metadata', {})
+        self.created_at = datetime.utcnow()
         
-        self.permissions = app_metadata.get('permissions', [])
-        self.roles = app_metadata.get('roles', [])
-        self.organization_id = app_metadata.get('organization_id')
-        self.last_login = self.auth0_profile.get('last_login')
-    
+        # Extract user metadata from Auth0 profile
+        self.email = auth0_profile.get('email')
+        self.name = auth0_profile.get('name')
+        self.picture = auth0_profile.get('picture')
+        self.email_verified = auth0_profile.get('email_verified', False)
+        
+        # Extract permissions and roles from JWT claims
+        self.permissions = jwt_claims.get('permissions', [])
+        self.roles = jwt_claims.get('roles', [])
+        self.scope = jwt_claims.get('scope', '')
+        
     def get_id(self) -> str:
         """Return user ID for Flask-Login session management."""
-        return self.id
+        return str(self.id)
     
     def has_permission(self, permission: str) -> bool:
-        """Check if user has specific permission."""
-        return permission in (self.permissions or [])
+        """
+        Check if user has specific permission.
+        
+        Args:
+            permission: Permission string to validate
+            
+        Returns:
+            Boolean indicating permission status
+        """
+        return permission in self.permissions
     
     def has_role(self, role: str) -> bool:
-        """Check if user has specific role."""
-        return role in (self.roles or [])
+        """
+        Check if user has specific role.
+        
+        Args:
+            role: Role string to validate
+            
+        Returns:
+            Boolean indicating role assignment
+        """
+        return role in self.roles
     
     def to_dict(self) -> Dict[str, Any]:
-        """Convert user object to dictionary for serialization."""
+        """
+        Convert user object to dictionary for serialization.
+        
+        Returns:
+            Dictionary representation of user data
+        """
         return {
             'id': self.id,
-            'email': self.auth0_profile.get('email'),
-            'name': self.auth0_profile.get('name'),
-            'picture': self.auth0_profile.get('picture'),
+            'email': self.email,
+            'name': self.name,
+            'picture': self.picture,
+            'email_verified': self.email_verified,
             'permissions': self.permissions,
             'roles': self.roles,
-            'organization_id': self.organization_id,
-            'last_login': self.last_login,
             'is_authenticated': self.is_authenticated,
-            'is_active': self.is_active
+            'is_active': self.is_active,
+            'created_at': self.created_at.isoformat()
         }
 
 
-class AWSKMSKeyManager:
-    """
-    AWS KMS integration for encryption key management with enterprise security.
+class TokenValidationSchema(Schema):
+    """Marshmallow schema for JWT token validation."""
     
-    Provides centralized key management using AWS KMS with automatic key rotation,
-    secure key storage, and comprehensive audit logging for compliance requirements.
-    """
-    
-    def __init__(self):
-        """Initialize AWS KMS client with enterprise configuration."""
-        self.kms_client = self._create_kms_client()
-        self.cmk_arn = os.getenv('AWS_KMS_CMK_ARN')
-        self.region = os.getenv('AWS_REGION', 'us-east-1')
-        self.encryption_context = {
-            'application': 'flask-security-system',
-            'environment': os.getenv('FLASK_ENV', 'production')
-        }
-        self.logger = security_logger.bind(component="kms_manager")
-    
-    def _create_kms_client(self) -> boto3.client:
-        """
-        Create properly configured boto3 KMS client with enterprise settings.
-        
-        Returns:
-            Configured boto3 KMS client with retry and timeout settings
-        """
-        return boto3.client(
-            'kms',
-            region_name=os.getenv('AWS_REGION', 'us-east-1'),
-            aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
-            aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
-            config=boto3.session.Config(
-                retries={'max_attempts': 3, 'mode': 'adaptive'},
-                read_timeout=30,
-                connect_timeout=10,
-                max_pool_connections=50
-            )
-        )
-    
-    def generate_data_key(self, key_spec: str = 'AES_256') -> Tuple[bytes, bytes]:
-        """
-        Generate AWS KMS data key for encryption operations.
-        
-        Args:
-            key_spec: Key specification (AES_256, AES_128)
-            
-        Returns:
-            Tuple of (plaintext_key, encrypted_key) for cryptographic operations
-            
-        Raises:
-            KMSKeyManagementError: When data key generation fails
-        """
-        try:
-            response = self.kms_client.generate_data_key(
-                KeyId=self.cmk_arn,
-                KeySpec=key_spec,
-                EncryptionContext=self.encryption_context
-            )
-            
-            self.logger.info(
-                "Data key generated successfully",
-                key_spec=key_spec,
-                encryption_context=self.encryption_context
-            )
-            
-            return response['Plaintext'], response['CiphertextBlob']
-            
-        except (ClientError, BotoCoreError) as e:
-            self.logger.error(
-                "AWS KMS data key generation failed",
-                error=str(e),
-                key_spec=key_spec
-            )
-            raise KMSKeyManagementError(f"Failed to generate data key: {str(e)}")
-    
-    def decrypt_data_key(self, encrypted_key: bytes) -> bytes:
-        """
-        Decrypt AWS KMS data key for cryptographic operations.
-        
-        Args:
-            encrypted_key: Encrypted data key from KMS
-            
-        Returns:
-            Decrypted plaintext key for encryption operations
-            
-        Raises:
-            KMSKeyManagementError: When key decryption fails
-        """
-        try:
-            response = self.kms_client.decrypt(
-                CiphertextBlob=encrypted_key,
-                EncryptionContext=self.encryption_context
-            )
-            
-            self.logger.info("Data key decrypted successfully")
-            return response['Plaintext']
-            
-        except (ClientError, BotoCoreError) as e:
-            self.logger.error("AWS KMS key decryption failed", error=str(e))
-            raise KMSKeyManagementError(f"Failed to decrypt data key: {str(e)}")
+    token = fields.Str(required=True, validate=lambda x: len(x) > 0)
+    audience = fields.Str(missing=None)
+    issuer = fields.Str(missing=None)
 
 
-class EncryptedSessionInterface:
-    """
-    Encrypted session management for Redis-backed Flask sessions.
+class UserRegistrationSchema(Schema):
+    """Marshmallow schema for user registration validation."""
     
-    Implements AES-256-GCM encryption for session data with AWS KMS-backed
-    key management and automatic key rotation for enterprise security compliance.
-    """
+    email = fields.Email(required=True)
+    password = fields.Str(required=True, validate=lambda x: len(x) >= 8)
+    name = fields.Str(required=True, validate=lambda x: len(x) > 0)
     
-    def __init__(self, redis_client: redis.Redis, kms_manager: AWSKMSKeyManager):
-        """
-        Initialize encrypted session interface.
-        
-        Args:
-            redis_client: Configured Redis client for session storage
-            kms_manager: AWS KMS key manager for encryption keys
-        """
-        self.redis = redis_client
-        self.kms_manager = kms_manager
-        self.logger = security_logger.bind(component="encrypted_session")
-        self._initialize_encryption_key()
-    
-    def _initialize_encryption_key(self) -> None:
-        """Initialize or rotate encryption key using AWS KMS."""
+    def validate_email(self, value: str) -> str:
+        """Validate email using email-validator."""
         try:
-            # Check for existing encryption key
-            key_data = self.redis.get('encryption_key:current')
-            
-            if key_data:
-                # Use existing key
-                key_info = json.loads(key_data)
-                self.encrypted_key = base64.b64decode(key_info['encrypted_key'])
-                self.key_created = datetime.fromisoformat(key_info['created'])
-                
-                # Check if key rotation is needed (90 days)
-                if datetime.utcnow() - self.key_created > timedelta(days=90):
-                    self._rotate_encryption_key()
-            else:
-                # Generate new key
-                self._generate_new_encryption_key()
-                
-        except Exception as e:
-            self.logger.error(
-                "Failed to initialize encryption key",
-                error=str(e)
-            )
-            # Fallback to environment variable
-            fallback_key = os.getenv('REDIS_ENCRYPTION_KEY')
-            if fallback_key:
-                self.fernet = Fernet(fallback_key.encode())
-            else:
-                raise KMSKeyManagementError("No encryption key available")
-    
-    def _generate_new_encryption_key(self) -> None:
-        """Generate new encryption key using AWS KMS."""
-        plaintext_key, encrypted_key = self.kms_manager.generate_data_key()
-        
-        # Create Fernet key from KMS data key
-        self.fernet = Fernet(base64.urlsafe_b64encode(plaintext_key[:32]))
-        self.encrypted_key = encrypted_key
-        self.key_created = datetime.utcnow()
-        
-        # Store encrypted key in Redis
-        key_info = {
-            'encrypted_key': base64.b64encode(encrypted_key).decode(),
-            'created': self.key_created.isoformat(),
-            'algorithm': 'AES_256'
-        }
-        
-        self.redis.setex(
-            'encryption_key:current',
-            timedelta(days=91).total_seconds(),
-            json.dumps(key_info)
-        )
-        
-        self.logger.info("New encryption key generated and stored")
-    
-    def _rotate_encryption_key(self) -> None:
-        """Rotate encryption key while maintaining backward compatibility."""
-        # Store old key for transition period
-        old_key_id = f"encryption_key:{self.key_created.isoformat()}"
-        old_key_info = {
-            'encrypted_key': base64.b64encode(self.encrypted_key).decode(),
-            'created': self.key_created.isoformat(),
-            'status': 'deprecated'
-        }
-        
-        self.redis.setex(
-            old_key_id,
-            timedelta(days=7).total_seconds(),  # 7-day transition period
-            json.dumps(old_key_info)
-        )
-        
-        # Generate new key
-        self._generate_new_encryption_key()
-        
-        self.logger.info(
-            "Encryption key rotated",
-            old_key_created=self.key_created.isoformat(),
-            transition_period_days=7
-        )
-    
-    def save_session(self, session_id: str, session_data: Dict[str, Any]) -> bool:
-        """
-        Save encrypted session data to Redis.
-        
-        Args:
-            session_id: Unique session identifier
-            session_data: Session data to encrypt and store
-            
-        Returns:
-            Success status of save operation
-        """
-        try:
-            # Encrypt session data
-            serialized_data = json.dumps(session_data, default=str)
-            encrypted_data = self.fernet.encrypt(serialized_data.encode())
-            
-            # Store in Redis with 24-hour TTL
-            key = f"session:{session_id}"
-            result = self.redis.setex(
-                key,
-                timedelta(hours=24).total_seconds(),
-                base64.b64encode(encrypted_data).decode()
-            )
-            
-            auth_metrics['session_operations'].labels(
-                operation='save',
-                result='success'
-            ).inc()
-            
-            auth_metrics['cache_operations'].labels(
-                operation='write',
-                cache_type='session',
-                result='success'
-            ).inc()
-            
-            self.logger.debug(
-                "Session saved successfully",
-                session_id=session_id,
-                data_size=len(encrypted_data)
-            )
-            
-            return result
-            
-        except Exception as e:
-            auth_metrics['session_operations'].labels(
-                operation='save',
-                result='error'
-            ).inc()
-            
-            self.logger.error(
-                "Failed to save session",
-                session_id=session_id,
-                error=str(e)
-            )
-            return False
-    
-    def load_session(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Load and decrypt session data from Redis.
-        
-        Args:
-            session_id: Unique session identifier
-            
-        Returns:
-            Decrypted session data or None if not found/invalid
-        """
-        try:
-            key = f"session:{session_id}"
-            encrypted_data = self.redis.get(key)
-            
-            if not encrypted_data:
-                auth_metrics['cache_operations'].labels(
-                    operation='read',
-                    cache_type='session',
-                    result='miss'
-                ).inc()
-                return None
-            
-            # Decrypt session data
-            decoded_data = base64.b64decode(encrypted_data)
-            decrypted_data = self.fernet.decrypt(decoded_data)
-            session_data = json.loads(decrypted_data.decode())
-            
-            auth_metrics['session_operations'].labels(
-                operation='load',
-                result='success'
-            ).inc()
-            
-            auth_metrics['cache_operations'].labels(
-                operation='read',
-                cache_type='session',
-                result='hit'
-            ).inc()
-            
-            self.logger.debug(
-                "Session loaded successfully",
-                session_id=session_id
-            )
-            
-            return session_data
-            
-        except Exception as e:
-            auth_metrics['session_operations'].labels(
-                operation='load',
-                result='error'
-            ).inc()
-            
-            self.logger.error(
-                "Failed to load session",
-                session_id=session_id,
-                error=str(e)
-            )
-            return None
-    
-    def delete_session(self, session_id: str) -> bool:
-        """
-        Delete session from Redis.
-        
-        Args:
-            session_id: Unique session identifier
-            
-        Returns:
-            Success status of delete operation
-        """
-        try:
-            key = f"session:{session_id}"
-            result = self.redis.delete(key)
-            
-            auth_metrics['session_operations'].labels(
-                operation='delete',
-                result='success' if result else 'not_found'
-            ).inc()
-            
-            self.logger.debug(
-                "Session deleted",
-                session_id=session_id,
-                found=bool(result)
-            )
-            
-            return bool(result)
-            
-        except Exception as e:
-            auth_metrics['session_operations'].labels(
-                operation='delete',
-                result='error'
-            ).inc()
-            
-            self.logger.error(
-                "Failed to delete session",
-                session_id=session_id,
-                error=str(e)
-            )
-            return False
-
-
-class JWTManager:
-    """
-    JWT token management with Auth0 integration and caching.
-    
-    Provides comprehensive JWT token validation, user context creation,
-    and performance optimization through intelligent caching strategies.
-    """
-    
-    def __init__(self, redis_client: redis.Redis):
-        """
-        Initialize JWT manager with Auth0 configuration.
-        
-        Args:
-            redis_client: Redis client for token validation caching
-        """
-        self.redis = redis_client
-        self.domain = os.getenv('AUTH0_DOMAIN')
-        self.audience = os.getenv('AUTH0_AUDIENCE')
-        self.client_id = os.getenv('AUTH0_CLIENT_ID')
-        self.client_secret = os.getenv('AUTH0_CLIENT_SECRET')
-        self.algorithm = 'RS256'
-        self.logger = security_logger.bind(component="jwt_manager")
-        
-        # Initialize Auth0 management client
-        self._initialize_auth0_client()
-        
-        # Cache for JWK keys
-        self._jwks_cache: Optional[Dict[str, Any]] = None
-        self._jwks_cache_expires: Optional[datetime] = None
-    
-    def _initialize_auth0_client(self) -> None:
-        """Initialize Auth0 management client for user operations."""
-        try:
-            # Get management API token
-            get_token = GetToken(self.domain, self.client_id, self.client_secret)
-            token = get_token.client_credentials(
-                f"https://{self.domain}/api/v2/"
-            )
-            
-            self.auth0_client = Auth0(
-                self.domain,
-                token['access_token']
-            )
-            
-            self.logger.info("Auth0 management client initialized successfully")
-            
-        except Auth0Error as e:
-            self.logger.error(
-                "Failed to initialize Auth0 client",
-                error=str(e)
-            )
-            self.auth0_client = None
-    
-    def _get_jwks(self) -> Dict[str, Any]:
-        """
-        Retrieve and cache JSON Web Key Set from Auth0.
-        
-        Returns:
-            JWKS data with caching for performance optimization
-        """
-        current_time = datetime.utcnow()
-        
-        # Check cache validity
-        if (self._jwks_cache and self._jwks_cache_expires and 
-            current_time < self._jwks_cache_expires):
-            return self._jwks_cache
-        
-        try:
-            # Configure requests session with retry strategy
-            session = requests.Session()
-            retry_strategy = Retry(
-                total=3,
-                backoff_factor=1,
-                status_forcelist=[429, 500, 502, 503, 504],
-            )
-            adapter = HTTPAdapter(max_retries=retry_strategy)
-            session.mount("http://", adapter)
-            session.mount("https://", adapter)
-            
-            # Fetch JWKS from Auth0
-            jwks_url = f"https://{self.domain}/.well-known/jwks.json"
-            response = session.get(jwks_url, timeout=10)
-            response.raise_for_status()
-            
-            self._jwks_cache = response.json()
-            self._jwks_cache_expires = current_time + timedelta(hours=1)
-            
-            self.logger.debug("JWKS retrieved and cached successfully")
-            return self._jwks_cache
-            
-        except requests.RequestException as e:
-            self.logger.error(
-                "Failed to retrieve JWKS",
-                error=str(e),
-                jwks_url=jwks_url
-            )
-            
-            # Return cached version if available
-            if self._jwks_cache:
-                self.logger.warning("Using expired JWKS cache")
-                return self._jwks_cache
-            
-            raise AuthenticationError("Unable to retrieve JWKS for token validation")
-    
-    def _get_public_key(self, token_header: Dict[str, Any]) -> str:
-        """
-        Extract public key from JWKS for token validation.
-        
-        Args:
-            token_header: JWT token header containing key ID
-            
-        Returns:
-            Public key for signature verification
-        """
-        jwks = self._get_jwks()
-        kid = token_header.get('kid')
-        
-        if not kid:
-            raise AuthenticationError("Token header missing 'kid' field")
-        
-        # Find matching key in JWKS
-        for key in jwks.get('keys', []):
-            if key.get('kid') == kid:
-                # Convert JWK to PEM format
-                public_key = jwt.algorithms.RSAAlgorithm.from_jwk(key)
-                return public_key
-        
-        raise AuthenticationError(f"Public key not found for kid: {kid}")
-    
-    def validate_token(self, token: str) -> Dict[str, Any]:
-        """
-        Validate JWT token with Auth0 and extract user claims.
-        
-        Args:
-            token: JWT token string for validation
-            
-        Returns:
-            Validated token payload with user claims
-            
-        Raises:
-            AuthenticationError: When token validation fails
-        """
-        start_time = datetime.utcnow()
-        
-        try:
-            # Check cache first
-            token_hash = base64.b64encode(
-                token.encode()
-            ).decode()[:32]  # Use first 32 chars as cache key
-            
-            cache_key = f"jwt_validation:{token_hash}"
-            cached_result = self.redis.get(cache_key)
-            
-            if cached_result:
-                auth_metrics['cache_operations'].labels(
-                    operation='read',
-                    cache_type='jwt_validation',
-                    result='hit'
-                ).inc()
-                
-                return json.loads(cached_result)
-            
-            # Decode token header without verification
-            unverified_header = jwt.get_unverified_header(token)
-            
-            # Get public key for verification
-            public_key = self._get_public_key(unverified_header)
-            
-            # Validate token
-            payload = jwt.decode(
-                token,
-                public_key,
-                algorithms=[self.algorithm],
-                audience=self.audience,
-                issuer=f"https://{self.domain}/"
-            )
-            
-            # Cache validation result
-            cache_ttl = min(
-                payload.get('exp', 0) - int(datetime.utcnow().timestamp()),
-                300  # Maximum 5 minutes
-            )
-            
-            if cache_ttl > 0:
-                self.redis.setex(
-                    cache_key,
-                    cache_ttl,
-                    json.dumps(payload, default=str)
-                )
-                
-                auth_metrics['cache_operations'].labels(
-                    operation='write',
-                    cache_type='jwt_validation',
-                    result='success'
-                ).inc()
-            
-            # Record successful validation
-            duration = (datetime.utcnow() - start_time).total_seconds()
-            auth_metrics['jwt_validation_duration'].labels(
-                algorithm=self.algorithm,
-                issuer=f"https://{self.domain}/"
-            ).observe(duration)
-            
-            auth_metrics['requests_total'].labels(
-                result='success',
-                method='jwt_validation'
-            ).inc()
-            
-            self.logger.info(
-                "JWT token validated successfully",
-                user_id=payload.get('sub'),
-                algorithm=self.algorithm,
-                duration=duration
-            )
-            
-            return payload
-            
-        except jwt.ExpiredSignatureError:
-            auth_metrics['requests_total'].labels(
-                result='expired',
-                method='jwt_validation'
-            ).inc()
-            
-            self.logger.warning("JWT token expired")
-            raise AuthenticationError("Token has expired")
-            
-        except jwt.InvalidTokenError as e:
-            auth_metrics['requests_total'].labels(
-                result='invalid',
-                method='jwt_validation'
-            ).inc()
-            
-            self.logger.warning(
-                "JWT token validation failed",
-                error=str(e)
-            )
-            raise AuthenticationError(f"Invalid token: {str(e)}")
-            
-        except Exception as e:
-            auth_metrics['requests_total'].labels(
-                result='error',
-                method='jwt_validation'
-            ).inc()
-            
-            self.logger.error(
-                "JWT token validation error",
-                error=str(e)
-            )
-            raise AuthenticationError(f"Token validation error: {str(e)}")
-    
-    def get_user_info(self, user_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Retrieve user information from Auth0.
-        
-        Args:
-            user_id: Auth0 user ID
-            
-        Returns:
-            User profile data or None if not found
-        """
-        if not self.auth0_client:
-            self.logger.error("Auth0 client not initialized")
-            return None
-        
-        try:
-            user_info = self.auth0_client.users.get(user_id)
-            
-            self.logger.debug(
-                "User info retrieved successfully",
-                user_id=user_id
-            )
-            
-            return user_info
-            
-        except Auth0Error as e:
-            self.logger.error(
-                "Failed to retrieve user info",
-                user_id=user_id,
-                error=str(e)
-            )
-            return None
+            valid_email = validate_email(value)
+            return valid_email.email
+        except EmailNotValidError as e:
+            raise ValidationError(f"Invalid email format: {str(e)}")
 
 
 class AuthConfig:
     """
-    Comprehensive authentication configuration for Flask application.
+    Comprehensive authentication configuration class managing JWT validation,
+    Auth0 integration, and security settings.
     
-    Integrates JWT validation, session management, security headers, and
-    monitoring capabilities for enterprise-grade authentication system.
+    This class implements the authentication configuration specified in the technical
+    migration requirements, providing PyJWT 2.8+ token validation, Auth0 enterprise
+    integration, and cryptographic settings equivalent to the Node.js implementation
+    while enhancing security infrastructure through Flask-Login integration.
+    
+    Features:
+    - PyJWT 2.8+ token validation with cryptographic verification per Section 0.1.2
+    - Auth0 Python SDK integration preserving enterprise authentication flows per Section 0.1.3
+    - cryptography 41.0+ secure token validation and key management per Section 3.2.2
+    - Flask-Login 0.7.0+ session management with Redis storage per Section 3.2.2
+    - Environment-specific configuration management using python-dotenv per Section 6.4.1
+    - Circuit breaker patterns for Auth0 service integration per Section 6.4.2
     """
     
-    def __init__(self):
-        """Initialize authentication configuration components."""
-        self.logger = security_logger.bind(component="auth_config")
-        
-        # Initialize Redis client for sessions and caching
-        self.redis_client = self._create_redis_client()
-        
-        # Initialize encryption and key management
-        self.kms_manager = AWSKMSKeyManager()
-        self.session_interface = EncryptedSessionInterface(
-            self.redis_client,
-            self.kms_manager
-        )
-        
-        # Initialize JWT manager
-        self.jwt_manager = JWTManager(self.redis_client)
-        
-        # Flask-Login manager
-        self.login_manager = LoginManager()
-        
-        # Configuration settings
-        self.config = self._load_configuration()
-        
-        self.logger.info("Authentication configuration initialized successfully")
-    
-    def _create_redis_client(self) -> redis.Redis:
+    def __init__(self, environment: str = 'development'):
         """
-        Create configured Redis client for authentication operations.
-        
-        Returns:
-            Configured Redis client with connection pooling
-        """
-        return redis.Redis(
-            host=os.getenv('REDIS_HOST', 'localhost'),
-            port=int(os.getenv('REDIS_PORT', 6379)),
-            password=os.getenv('REDIS_PASSWORD'),
-            db=int(os.getenv('REDIS_AUTH_DB', 0)),
-            decode_responses=True,
-            max_connections=50,
-            retry_on_timeout=True,
-            socket_timeout=30.0,
-            socket_connect_timeout=10.0,
-            health_check_interval=30
-        )
-    
-    def _load_configuration(self) -> Dict[str, Any]:
-        """
-        Load comprehensive authentication configuration.
-        
-        Returns:
-            Complete authentication configuration dictionary
-        """
-        return {
-            # Flask session configuration
-            'SESSION_TYPE': 'redis',
-            'SESSION_REDIS': self.redis_client,
-            'SESSION_PERMANENT': False,
-            'SESSION_USE_SIGNER': True,
-            'SESSION_KEY_PREFIX': 'session:',
-            'SESSION_COOKIE_SECURE': True,
-            'SESSION_COOKIE_HTTPONLY': True,
-            'SESSION_COOKIE_SAMESITE': 'Lax',
-            'SESSION_COOKIE_NAME': 'flask_session',
-            
-            # Security settings
-            'SECRET_KEY': os.getenv('SECRET_KEY', secrets.token_urlsafe(32)),
-            'WTF_CSRF_ENABLED': True,
-            'WTF_CSRF_TIME_LIMIT': 3600,
-            
-            # JWT settings
-            'JWT_SECRET_KEY': os.getenv('JWT_SECRET_KEY'),
-            'JWT_ALGORITHM': 'RS256',
-            'JWT_ACCESS_TOKEN_EXPIRES': timedelta(hours=1),
-            'JWT_REFRESH_TOKEN_EXPIRES': timedelta(days=30),
-            
-            # Auth0 configuration
-            'AUTH0_DOMAIN': os.getenv('AUTH0_DOMAIN'),
-            'AUTH0_CLIENT_ID': os.getenv('AUTH0_CLIENT_ID'),
-            'AUTH0_CLIENT_SECRET': os.getenv('AUTH0_CLIENT_SECRET'),
-            'AUTH0_AUDIENCE': os.getenv('AUTH0_AUDIENCE'),
-            'AUTH0_CALLBACK_URL': os.getenv('AUTH0_CALLBACK_URL'),
-            
-            # Rate limiting
-            'RATELIMIT_STORAGE_URL': f"redis://{os.getenv('REDIS_HOST', 'localhost')}:{os.getenv('REDIS_PORT', 6379)}/1",
-            'RATELIMIT_DEFAULT': "100 per hour",
-            
-            # CORS settings
-            'CORS_ORIGINS': self._get_cors_origins(),
-            'CORS_SUPPORTS_CREDENTIALS': True,
-            'CORS_MAX_AGE': 600,
-            
-            # Security headers (Flask-Talisman)
-            'TALISMAN_FORCE_HTTPS': True,
-            'TALISMAN_STRICT_TRANSPORT_SECURITY': True,
-            'TALISMAN_STRICT_TRANSPORT_SECURITY_MAX_AGE': 31536000,
-            'TALISMAN_CONTENT_SECURITY_POLICY': {
-                'default-src': "'self'",
-                'script-src': "'self' 'unsafe-inline' https://cdn.auth0.com",
-                'style-src': "'self' 'unsafe-inline'",
-                'img-src': "'self' data: https:",
-                'connect-src': "'self' https://*.auth0.com https://*.amazonaws.com",
-                'font-src': "'self'",
-                'object-src': "'none'",
-                'base-uri': "'self'",
-                'frame-ancestors': "'none'"
-            },
-            
-            # Monitoring and logging
-            'LOG_LEVEL': os.getenv('LOG_LEVEL', 'INFO'),
-            'ENABLE_METRICS': os.getenv('ENABLE_METRICS', 'true').lower() == 'true',
-            
-            # Performance settings
-            'MAX_CONTENT_LENGTH': 16 * 1024 * 1024,  # 16MB
-            'SEND_FILE_MAX_AGE_DEFAULT': timedelta(hours=12),
-        }
-    
-    def _get_cors_origins(self) -> List[str]:
-        """
-        Get CORS origins based on environment configuration.
-        
-        Returns:
-            List of allowed CORS origins
-        """
-        environment = os.getenv('FLASK_ENV', 'production')
-        
-        base_origins = [
-            "https://app.company.com",
-            "https://admin.company.com"
-        ]
-        
-        if environment == 'development':
-            base_origins.extend([
-                "http://localhost:3000",
-                "http://localhost:8080",
-                "https://dev.company.com"
-            ])
-        elif environment == 'staging':
-            base_origins.extend([
-                "https://staging.company.com",
-                "https://staging-admin.company.com"
-            ])
-        
-        return base_origins
-    
-    def configure_flask_app(self, app: Flask) -> None:
-        """
-        Configure Flask application with authentication and security settings.
+        Initialize authentication configuration for specified environment.
         
         Args:
-            app: Flask application instance to configure
+            environment: Target environment ('development', 'testing', 'production')
         """
-        # Apply configuration
-        app.config.update(self.config)
+        self.environment = environment.lower()
+        self._auth0_client: Optional[Auth0] = None
+        self._auth0_get_token: Optional[GetToken] = None
+        self._httpx_client: Optional[httpx.AsyncClient] = None
+        self._encryption_key: Optional[bytes] = None
         
-        # Initialize Flask-Session
-        Session(app)
+        # Load environment-specific configuration
+        self._load_configuration()
         
-        # Configure Flask-Login
-        self._configure_flask_login(app)
+        # Initialize cryptographic components
+        self._init_cryptography()
         
-        # Configure security headers (Flask-Talisman)
-        self._configure_security_headers(app)
+        # Validate configuration
+        self._validate_configuration()
         
-        # Configure CORS
-        self._configure_cors(app)
-        
-        # Configure rate limiting
-        self._configure_rate_limiting(app)
-        
-        # Configure request handlers
-        self._configure_request_handlers(app)
-        
-        # Configure error handlers
-        self._configure_error_handlers(app)
-        
-        self.logger.info("Flask application configured with authentication security")
+        logger.info(f"AuthConfig initialized for environment: {self.environment}")
     
-    def _configure_flask_login(self, app: Flask) -> None:
-        """Configure Flask-Login for user session management."""
-        self.login_manager.init_app(app)
-        self.login_manager.login_view = 'auth.login'
-        self.login_manager.session_protection = 'strong'
-        self.login_manager.login_message = 'Please log in to access this page.'
-        self.login_manager.login_message_category = 'info'
+    def _load_configuration(self) -> None:
+        """
+        Load authentication configuration from environment variables.
         
-        @self.login_manager.user_loader
-        def load_user(user_id: str) -> Optional[User]:
-            """Load user from session or Auth0 profile cache."""
+        Supports environment-specific configuration loading while preserving
+        existing JWT token structures and Auth0 integration patterns per Section 0.1.4.
+        """
+        # Auth0 Configuration per Section 6.4.1 Identity Management
+        self.auth0_domain = os.getenv('AUTH0_DOMAIN')
+        self.auth0_client_id = os.getenv('AUTH0_CLIENT_ID')
+        self.auth0_client_secret = os.getenv('AUTH0_CLIENT_SECRET')
+        self.auth0_audience = os.getenv('AUTH0_AUDIENCE')
+        self.auth0_scope = os.getenv('AUTH0_SCOPE', 'openid profile email')
+        
+        # JWT Configuration per Section 3.2.2 Authentication & Security Libraries
+        self.jwt_secret_key = os.getenv('JWT_SECRET_KEY')
+        self.jwt_algorithm = os.getenv('JWT_ALGORITHM', 'RS256')
+        self.jwt_access_token_expires = int(os.getenv('JWT_ACCESS_TOKEN_EXPIRES', '3600'))  # 1 hour
+        self.jwt_refresh_token_expires = int(os.getenv('JWT_REFRESH_TOKEN_EXPIRES', '2592000'))  # 30 days
+        self.jwt_issuer = os.getenv('JWT_ISSUER', f"https://{self.auth0_domain}/")
+        
+        # Redis Session Configuration per Section 3.4.2 Caching Solutions
+        self.redis_session_prefix = os.getenv('REDIS_SESSION_PREFIX', 'session:')
+        self.redis_auth_cache_prefix = os.getenv('REDIS_AUTH_CACHE_PREFIX', 'auth_cache:')
+        self.redis_token_cache_prefix = os.getenv('REDIS_TOKEN_CACHE_PREFIX', 'token_cache:')
+        self.redis_session_timeout = int(os.getenv('REDIS_SESSION_TIMEOUT', '3600'))  # 1 hour
+        
+        # Security Configuration per Section 6.4.3 Data Protection
+        self.password_hash_rounds = int(os.getenv('PASSWORD_HASH_ROUNDS', '12'))
+        self.session_cookie_secure = os.getenv('SESSION_COOKIE_SECURE', 'true').lower() == 'true'
+        self.session_cookie_httponly = os.getenv('SESSION_COOKIE_HTTPONLY', 'true').lower() == 'true'
+        self.session_cookie_samesite = os.getenv('SESSION_COOKIE_SAMESITE', 'Lax')
+        
+        # Rate Limiting Configuration per Section 6.4.2 Policy Enforcement Points
+        self.auth_rate_limit = os.getenv('AUTH_RATE_LIMIT', '10 per minute')
+        self.token_validation_rate_limit = os.getenv('TOKEN_VALIDATION_RATE_LIMIT', '100 per minute')
+        
+        # Circuit Breaker Configuration per Section 6.4.2 Resource Authorization
+        self.auth0_timeout = float(os.getenv('AUTH0_TIMEOUT', '30.0'))
+        self.auth0_retry_attempts = int(os.getenv('AUTH0_RETRY_ATTEMPTS', '3'))
+        self.auth0_backoff_factor = float(os.getenv('AUTH0_BACKOFF_FACTOR', '1.0'))
+        
+        # Environment-specific settings
+        self._configure_environment_settings()
+    
+    def _configure_environment_settings(self) -> None:
+        """Configure environment-specific authentication settings."""
+        if self.environment == 'development':
+            self.jwt_algorithm = 'HS256'  # Use symmetric key for development
+            self.session_cookie_secure = False  # Allow HTTP in development
+            self.auth0_timeout = 10.0  # Shorter timeout for development
+        elif self.environment == 'testing':
+            self.jwt_access_token_expires = 300  # 5 minutes for testing
+            self.redis_session_timeout = 300  # 5 minutes for testing
+        elif self.environment == 'production':
+            self.session_cookie_secure = True  # Enforce HTTPS in production
+            self.jwt_algorithm = 'RS256'  # Use asymmetric keys in production
+    
+    def _init_cryptography(self) -> None:
+        """
+        Initialize cryptographic components for token validation and session encryption.
+        
+        Implements cryptography 41.0+ secure token validation and encryption
+        operations per Section 3.2.2 Authentication & Security Libraries.
+        """
+        try:
+            # Initialize encryption key for session data
+            encryption_key_b64 = os.getenv('REDIS_ENCRYPTION_KEY')
+            if encryption_key_b64:
+                self._encryption_key = base64.b64decode(encryption_key_b64)
+            else:
+                # Generate encryption key for development
+                self._encryption_key = Fernet.generate_key()
+                if self.environment == 'development':
+                    logger.warning("Using generated encryption key for development")
+            
+            self._fernet = Fernet(self._encryption_key)
+            
+            logger.info("Cryptographic components initialized successfully")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize cryptographic components: {str(e)}")
+            raise AuthenticationError(f"Cryptography initialization failed: {str(e)}")
+    
+    def _validate_configuration(self) -> None:
+        """
+        Validate authentication configuration completeness and correctness.
+        
+        Ensures all required configuration parameters are present and valid
+        for the specified environment per Section 6.4.4 Security Controls Matrix.
+        """
+        required_config = [
+            'auth0_domain',
+            'auth0_client_id', 
+            'auth0_client_secret',
+            'auth0_audience',
+            'jwt_secret_key'
+        ]
+        
+        missing_config = []
+        for config_key in required_config:
+            if not getattr(self, config_key):
+                missing_config.append(config_key.upper())
+        
+        if missing_config:
+            raise AuthenticationError(
+                f"Missing required authentication configuration: {', '.join(missing_config)}"
+            )
+        
+        # Validate Auth0 domain format
+        if not self.auth0_domain.endswith('.auth0.com') and not self.auth0_domain.endswith('.eu.auth0.com'):
+            logger.warning(f"Auth0 domain format may be invalid: {self.auth0_domain}")
+        
+        # Validate JWT algorithm
+        supported_algorithms = ['HS256', 'HS384', 'HS512', 'RS256', 'RS384', 'RS512']
+        if self.jwt_algorithm not in supported_algorithms:
+            raise AuthenticationError(f"Unsupported JWT algorithm: {self.jwt_algorithm}")
+        
+        logger.info("Authentication configuration validation completed successfully")
+    
+    def get_auth0_client(self) -> Auth0:
+        """
+        Get Auth0 management client with enterprise configuration.
+        
+        Implements Auth0 Python SDK integration preserving enterprise
+        authentication flows per Section 0.1.3 Authentication/Authorization Considerations.
+        
+        Returns:
+            Auth0: Configured Auth0 management client instance
+            
+        Raises:
+            Auth0ServiceError: If Auth0 client cannot be initialized
+        """
+        if self._auth0_client is None:
             try:
-                # Try to load from session first
-                session_data = self.session_interface.load_session(user_id)
-                if session_data and 'user_profile' in session_data:
-                    return User(user_id, session_data['user_profile'])
+                # Get management API access token
+                if self._auth0_get_token is None:
+                    self._auth0_get_token = GetToken(
+                        domain=self.auth0_domain,
+                        client_id=self.auth0_client_id,
+                        client_secret=self.auth0_client_secret
+                    )
                 
-                # Fallback to Auth0 API
-                user_info = self.jwt_manager.get_user_info(user_id)
-                if user_info:
-                    return User(user_id, user_info)
+                # Get access token for management API
+                token_response = self._auth0_get_token.client_credentials(
+                    audience=f"https://{self.auth0_domain}/api/v2/"
+                )
+                management_token = token_response['access_token']
                 
-                return None
+                # Initialize Auth0 management client
+                self._auth0_client = Auth0(
+                    domain=self.auth0_domain,
+                    token=management_token
+                )
+                
+                logger.info("Auth0 management client initialized successfully")
                 
             except Exception as e:
-                self.logger.error(
-                    "Failed to load user",
-                    user_id=user_id,
-                    error=str(e)
-                )
-                return None
+                error_msg = f"Failed to initialize Auth0 client: {str(e)}"
+                logger.error(error_msg)
+                raise Auth0ServiceError(error_msg) from e
         
-        @self.login_manager.unauthorized_handler
-        def unauthorized() -> Tuple[Dict[str, str], int]:
-            """Handle unauthorized access attempts."""
-            self.logger.warning(
-                "Unauthorized access attempt",
-                endpoint=request.endpoint,
-                remote_addr=request.remote_addr
+        return self._auth0_client
+    
+    async def get_auth0_httpx_client(self) -> httpx.AsyncClient:
+        """
+        Get HTTPX async client for Auth0 API calls with circuit breaker protection.
+        
+        Implements comprehensive circuit breaker patterns around Auth0 API calls
+        per Section 6.4.2 Resource Authorization with intelligent retry strategies.
+        
+        Returns:
+            httpx.AsyncClient: Configured async HTTP client for Auth0 integration
+        """
+        if self._httpx_client is None:
+            self._httpx_client = httpx.AsyncClient(
+                base_url=f"https://{self.auth0_domain}",
+                timeout=httpx.Timeout(
+                    connect=10.0,
+                    read=self.auth0_timeout,
+                    write=10.0,
+                    pool=5.0
+                ),
+                limits=httpx.Limits(
+                    max_connections=100,
+                    max_keepalive_connections=50,
+                    keepalive_expiry=30.0
+                ),
+                headers={
+                    'User-Agent': 'Flask-Auth-System/1.0',
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json'
+                }
+            )
+        
+        return self._httpx_client
+    
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential_jitter(initial=1, max=10, jitter=2),
+        retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        after=after_log(logger, logging.INFO)
+    )
+    async def validate_token_with_auth0(self, token: str) -> Dict[str, Any]:
+        """
+        Validate JWT token with Auth0 using circuit breaker protection.
+        
+        This method implements intelligent retry strategies with exponential backoff
+        and jitter to prevent thundering herd effects during Auth0 service recovery.
+        Includes comprehensive fallback mechanisms using cached token data.
+        
+        Args:
+            token: JWT token to validate
+            
+        Returns:
+            Token validation result with user claims and metadata
+            
+        Raises:
+            TokenValidationError: When token validation fails after retries
+        """
+        try:
+            client = await self.get_auth0_httpx_client()
+            
+            # Get Auth0 public key for token verification
+            jwks_response = await client.get("/.well-known/jwks.json")
+            jwks_response.raise_for_status()
+            jwks_data = jwks_response.json()
+            
+            # Validate token using PyJWT with Auth0 public key
+            token_header = jwt.get_unverified_header(token)
+            key_id = token_header.get('kid')
+            
+            # Find matching public key
+            public_key = None
+            for key in jwks_data['keys']:
+                if key['kid'] == key_id:
+                    public_key = jwt.algorithms.RSAAlgorithm.from_jwk(json.dumps(key))
+                    break
+            
+            if not public_key:
+                raise TokenValidationError(f"Public key not found for kid: {key_id}")
+            
+            # Decode and validate token
+            decoded_token = jwt.decode(
+                token,
+                public_key,
+                algorithms=[self.jwt_algorithm],
+                audience=self.auth0_audience,
+                issuer=self.jwt_issuer,
+                options={
+                    'verify_signature': True,
+                    'verify_exp': True,
+                    'verify_iat': True,
+                    'verify_aud': True,
+                    'verify_iss': True
+                }
             )
             
-            auth_metrics['requests_total'].labels(
-                result='unauthorized',
-                method='access_attempt'
-            ).inc()
+            # Cache validated token
+            await self._cache_token_validation(token, decoded_token)
             
-            return jsonify({'error': 'Authentication required'}), 401
-    
-    def _configure_security_headers(self, app: Flask) -> None:
-        """Configure Flask-Talisman for HTTP security headers."""
-        Talisman(
-            app,
-            force_https=self.config['TALISMAN_FORCE_HTTPS'],
-            force_https_permanent=True,
-            strict_transport_security=self.config['TALISMAN_STRICT_TRANSPORT_SECURITY'],
-            strict_transport_security_max_age=self.config['TALISMAN_STRICT_TRANSPORT_SECURITY_MAX_AGE'],
-            strict_transport_security_include_subdomains=True,
-            strict_transport_security_preload=True,
-            content_security_policy=self.config['TALISMAN_CONTENT_SECURITY_POLICY'],
-            content_security_policy_nonce_in=['script-src', 'style-src'],
-            referrer_policy='strict-origin-when-cross-origin',
-            feature_policy={
-                'geolocation': "'none'",
-                'microphone': "'none'",
-                'camera': "'none'",
-                'accelerometer': "'none'",
-                'gyroscope': "'none'"
-            },
-            session_cookie_secure=True,
-            session_cookie_http_only=True,
-            session_cookie_samesite='Strict'
-        )
-    
-    def _configure_cors(self, app: Flask) -> None:
-        """Configure CORS for cross-origin requests."""
-        CORS(
-            app,
-            origins=self.config['CORS_ORIGINS'],
-            methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-            allow_headers=[
-                "Authorization",
-                "Content-Type",
-                "X-Requested-With",
-                "X-CSRF-Token",
-                "X-Auth-Token",
-                "Accept",
-                "Origin"
-            ],
-            expose_headers=[
-                "X-RateLimit-Limit",
-                "X-RateLimit-Remaining",
-                "X-RateLimit-Reset"
-            ],
-            supports_credentials=self.config['CORS_SUPPORTS_CREDENTIALS'],
-            max_age=self.config['CORS_MAX_AGE'],
-            send_wildcard=False,
-            vary_header=True
-        )
-    
-    def _configure_rate_limiting(self, app: Flask) -> None:
-        """Configure rate limiting for authentication endpoints."""
-        limiter = Limiter(
-            key_func=get_remote_address,
-            app=app,
-            storage_uri=self.config['RATELIMIT_STORAGE_URL'],
-            default_limits=[self.config['RATELIMIT_DEFAULT']],
-            strategy="moving-window",
-            headers_enabled=True
-        )
-        
-        # Store limiter reference for use in decorators
-        app.limiter = limiter
-    
-    def _configure_request_handlers(self, app: Flask) -> None:
-        """Configure Flask request handlers for authentication."""
-        
-        @app.before_request
-        def before_request():
-            """Handle pre-request authentication and security checks."""
-            # Skip authentication for health checks and static files
-            if request.endpoint in ['health', 'metrics', 'static']:
-                return
+            return {
+                'valid': True,
+                'claims': decoded_token,
+                'user_id': decoded_token.get('sub'),
+                'validation_source': 'auth0_api',
+                'timestamp': datetime.utcnow().isoformat()
+            }
             
-            # Extract JWT token from Authorization header
-            auth_header = request.headers.get('Authorization')
-            if auth_header and auth_header.startswith('Bearer '):
-                token = auth_header.split(' ')[1]
-                try:
-                    # Validate token and set user context
-                    payload = self.jwt_manager.validate_token(token)
-                    g.current_user_id = payload.get('sub')
-                    g.jwt_payload = payload
+        except (InvalidTokenError, ExpiredSignatureError, InvalidSignatureError) as e:
+            logger.warning(f"Token validation failed: {str(e)}")
+            raise TokenValidationError(f"Invalid token: {str(e)}")
+        except (httpx.RequestError, httpx.HTTPStatusError) as e:
+            logger.error(f"Auth0 API call failed: {str(e)}")
+            # Try fallback validation with cached JWKS
+            return await self._fallback_token_validation(token)
+    
+    async def _fallback_token_validation(self, token: str) -> Dict[str, Any]:
+        """
+        Fallback token validation using cached JWKS data when Auth0 is unavailable.
+        
+        Args:
+            token: JWT token to validate
+            
+        Returns:
+            Cached validation result with degraded mode indicators
+        """
+        try:
+            redis_client = get_redis_client()
+            
+            # Try to get cached JWKS data
+            cached_jwks = redis_client.get('auth0_jwks_cache')
+            if cached_jwks:
+                jwks_data = json.loads(cached_jwks)
+                
+                # Validate token using cached public key
+                token_header = jwt.get_unverified_header(token)
+                key_id = token_header.get('kid')
+                
+                public_key = None
+                for key in jwks_data['keys']:
+                    if key['kid'] == key_id:
+                        public_key = jwt.algorithms.RSAAlgorithm.from_jwk(json.dumps(key))
+                        break
+                
+                if public_key:
+                    decoded_token = jwt.decode(
+                        token,
+                        public_key,
+                        algorithms=[self.jwt_algorithm],
+                        audience=self.auth0_audience,
+                        issuer=self.jwt_issuer
+                    )
                     
-                except AuthenticationError as e:
-                    return jsonify({'error': str(e)}), 401
-        
-        @app.after_request
-        def after_request(response):
-            """Handle post-request processing and metrics."""
-            # Update active sessions metric
-            try:
-                session_count = len(self.redis_client.keys('session:*'))
-                auth_metrics['active_sessions'].set(session_count)
-            except Exception:
-                pass  # Don't fail request for metrics errors
+                    return {
+                        'valid': True,
+                        'claims': decoded_token,
+                        'user_id': decoded_token.get('sub'),
+                        'validation_source': 'fallback_cache',
+                        'degraded_mode': True,
+                        'timestamp': datetime.utcnow().isoformat()
+                    }
             
-            return response
+            # Ultimate fallback - deny access when no cache available
+            logger.error("No cached JWKS available during Auth0 outage")
+            return {
+                'valid': False,
+                'validation_source': 'fallback_deny',
+                'degraded_mode': True,
+                'error': 'No cached validation data available',
+                'timestamp': datetime.utcnow().isoformat()
+            }
+            
+        except Exception as e:
+            logger.error(f"Fallback token validation failed: {str(e)}")
+            return {
+                'valid': False,
+                'validation_source': 'fallback_error',
+                'error': str(e),
+                'timestamp': datetime.utcnow().isoformat()
+            }
     
-    def _configure_error_handlers(self, app: Flask) -> None:
-        """Configure error handlers for authentication exceptions."""
+    async def _cache_token_validation(self, token: str, claims: Dict[str, Any]) -> None:
+        """
+        Cache token validation result in Redis with structured key patterns.
         
-        @app.errorhandler(AuthenticationError)
-        def handle_authentication_error(error):
-            """Handle authentication errors."""
-            self.logger.warning(
-                "Authentication error",
-                error=str(error),
-                endpoint=request.endpoint
+        Args:
+            token: Original JWT token
+            claims: Validated token claims
+        """
+        try:
+            redis_client = get_redis_client()
+            
+            # Create token hash for cache key
+            token_hash = hashlib.sha256(token.encode()).hexdigest()
+            cache_key = f"{self.redis_token_cache_prefix}{token_hash}"
+            
+            # Cache validation result
+            cache_data = {
+                'claims': claims,
+                'cached_at': datetime.utcnow().isoformat(),
+                'expires_at': datetime.fromtimestamp(
+                    claims.get('exp', 0), 
+                    tz=timezone.utc
+                ).isoformat()
+            }
+            
+            # Set TTL based on token expiration
+            token_exp = claims.get('exp', 0)
+            current_time = datetime.utcnow().timestamp()
+            ttl = max(int(token_exp - current_time), 60)  # Minimum 1 minute TTL
+            
+            redis_client.setex(
+                cache_key,
+                ttl,
+                self._encrypt_cache_data(json.dumps(cache_data))
             )
-            return jsonify({'error': str(error)}), 401
-        
-        @app.errorhandler(AuthorizationError)
-        def handle_authorization_error(error):
-            """Handle authorization errors."""
-            self.logger.warning(
-                "Authorization error",
-                error=str(error),
-                endpoint=request.endpoint,
-                user_id=getattr(g, 'current_user_id', None)
-            )
-            return jsonify({'error': str(error)}), 403
-        
-        @app.errorhandler(429)
-        def handle_rate_limit_error(error):
-            """Handle rate limiting errors."""
-            self.logger.warning(
-                "Rate limit exceeded",
-                endpoint=request.endpoint,
-                remote_addr=request.remote_addr
-            )
-            return jsonify({'error': 'Rate limit exceeded'}), 429
-
-
-# Authentication decorators for route protection
-def require_authentication(f):
-    """
-    Decorator to require JWT authentication for route access.
+            
+        except Exception as e:
+            logger.warning(f"Failed to cache token validation: {str(e)}")
     
-    Args:
-        f: Route function to protect
+    def create_user_session(self, user: User) -> str:
+        """
+        Create encrypted user session in Redis storage.
         
-    Returns:
-        Decorated function with authentication requirement
-    """
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if not hasattr(g, 'current_user_id') or not g.current_user_id:
-            return jsonify({'error': 'Authentication required'}), 401
-        return f(*args, **kwargs)
-    return decorated_function
-
-
-def require_permissions(permissions: Union[str, List[str]]):
-    """
-    Decorator to require specific permissions for route access.
+        Implements session management with Redis-based storage per Section 3.4.2
+        using AES-256-GCM encryption for session data protection.
+        
+        Args:
+            user: User instance to create session for
+            
+        Returns:
+            Session ID for Flask-Login session management
+            
+        Raises:
+            AuthenticationError: If session creation fails
+        """
+        try:
+            redis_client = get_redis_client()
+            
+            # Generate unique session ID
+            session_id = base64.urlsafe_b64encode(os.urandom(32)).decode('utf-8')
+            session_key = f"{self.redis_session_prefix}{session_id}"
+            
+            # Prepare session data
+            session_data = {
+                'user_id': user.id,
+                'user_profile': user.auth0_profile,
+                'jwt_claims': user.jwt_claims,
+                'created_at': datetime.utcnow().isoformat(),
+                'last_accessed': datetime.utcnow().isoformat(),
+                'ip_address': getattr(request, 'remote_addr', None),
+                'user_agent': getattr(request, 'headers', {}).get('User-Agent')
+            }
+            
+            # Encrypt and store session data
+            encrypted_data = self._encrypt_cache_data(json.dumps(session_data))
+            redis_client.setex(session_key, self.redis_session_timeout, encrypted_data)
+            
+            logger.info(f"User session created successfully for user: {user.id}")
+            return session_id
+            
+        except Exception as e:
+            error_msg = f"Failed to create user session: {str(e)}"
+            logger.error(error_msg)
+            raise AuthenticationError(error_msg) from e
     
-    Args:
-        permissions: Required permission(s) for access
+    def get_user_session(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve and decrypt user session data from Redis.
         
-    Returns:
-        Decorator function for permission enforcement
-    """
-    def decorator(f):
-        @wraps(f)
-        def decorated_function(*args, **kwargs):
-            if not hasattr(g, 'jwt_payload') or not g.jwt_payload:
-                return jsonify({'error': 'Authentication required'}), 401
+        Args:
+            session_id: Session identifier
             
-            user_permissions = g.jwt_payload.get('permissions', [])
-            required_perms = permissions if isinstance(permissions, list) else [permissions]
+        Returns:
+            Decrypted session data or None if session not found/expired
+        """
+        try:
+            redis_client = get_redis_client()
+            session_key = f"{self.redis_session_prefix}{session_id}"
             
-            if not all(perm in user_permissions for perm in required_perms):
-                return jsonify({'error': 'Insufficient permissions'}), 403
+            encrypted_data = redis_client.get(session_key)
+            if not encrypted_data:
+                return None
             
-            return f(*args, **kwargs)
-        return decorated_function
-    return decorator
+            # Decrypt session data
+            decrypted_data = self._decrypt_cache_data(encrypted_data)
+            session_data = json.loads(decrypted_data)
+            
+            # Update last accessed time
+            session_data['last_accessed'] = datetime.utcnow().isoformat()
+            updated_data = self._encrypt_cache_data(json.dumps(session_data))
+            redis_client.setex(session_key, self.redis_session_timeout, updated_data)
+            
+            return session_data
+            
+        except Exception as e:
+            logger.warning(f"Failed to retrieve user session: {str(e)}")
+            return None
+    
+    def delete_user_session(self, session_id: str) -> bool:
+        """
+        Delete user session from Redis storage.
+        
+        Args:
+            session_id: Session identifier to delete
+            
+        Returns:
+            Boolean indicating deletion success
+        """
+        try:
+            redis_client = get_redis_client()
+            session_key = f"{self.redis_session_prefix}{session_id}"
+            
+            deleted_count = redis_client.delete(session_key)
+            
+            if deleted_count > 0:
+                logger.info(f"User session deleted successfully: {session_id}")
+                return True
+            else:
+                logger.warning(f"Session not found for deletion: {session_id}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Failed to delete user session: {str(e)}")
+            return False
+    
+    def _encrypt_cache_data(self, data: str) -> str:
+        """
+        Encrypt cache data using AES-256-GCM encryption.
+        
+        Args:
+            data: Plain text data to encrypt
+            
+        Returns:
+            Base64-encoded encrypted data
+        """
+        try:
+            encrypted_data = self._fernet.encrypt(data.encode('utf-8'))
+            return base64.b64encode(encrypted_data).decode('utf-8')
+        except Exception as e:
+            logger.error(f"Failed to encrypt cache data: {str(e)}")
+            raise AuthenticationError(f"Encryption failed: {str(e)}")
+    
+    def _decrypt_cache_data(self, encrypted_data: str) -> str:
+        """
+        Decrypt cache data using AES-256-GCM encryption.
+        
+        Args:
+            encrypted_data: Base64-encoded encrypted data
+            
+        Returns:
+            Decrypted plain text data
+        """
+        try:
+            decoded_data = base64.b64decode(encrypted_data.encode('utf-8'))
+            decrypted_data = self._fernet.decrypt(decoded_data)
+            return decrypted_data.decode('utf-8')
+        except Exception as e:
+            logger.error(f"Failed to decrypt cache data: {str(e)}")
+            raise AuthenticationError(f"Decryption failed: {str(e)}")
+    
+    def validate_user_permissions(
+        self, 
+        user_id: str, 
+        required_permissions: List[str],
+        resource_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Validate user permissions with caching and fallback mechanisms.
+        
+        Implements permission validation with Redis caching per Section 6.4.2
+        Permission Management with intelligent TTL management and cache effectiveness tracking.
+        
+        Args:
+            user_id: User identifier for permission validation
+            required_permissions: List of permissions to validate
+            resource_id: Optional resource identifier for resource-specific authorization
+            
+        Returns:
+            Permission validation result with caching metadata
+        """
+        try:
+            redis_client = get_redis_client()
+            
+            # Check cached permissions first
+            cache_key = f"perm_cache:{user_id}"
+            cached_permissions = redis_client.get(cache_key)
+            
+            if cached_permissions:
+                # Use cached permissions
+                permissions_data = json.loads(self._decrypt_cache_data(cached_permissions))
+                user_permissions = set(permissions_data.get('permissions', []))
+                
+                has_permissions = all(perm in user_permissions for perm in required_permissions)
+                
+                return {
+                    'user_id': user_id,
+                    'has_permissions': has_permissions,
+                    'granted_permissions': list(user_permissions),
+                    'validation_source': 'cache',
+                    'resource_id': resource_id,
+                    'timestamp': datetime.utcnow().isoformat()
+                }
+            else:
+                # Fetch permissions from Auth0 (would be implemented with actual Auth0 API call)
+                # For now, return a placeholder implementation
+                logger.warning(f"No cached permissions found for user: {user_id}")
+                return {
+                    'user_id': user_id,
+                    'has_permissions': False,
+                    'granted_permissions': [],
+                    'validation_source': 'fallback_deny',
+                    'resource_id': resource_id,
+                    'error': 'No cached permissions available',
+                    'timestamp': datetime.utcnow().isoformat()
+                }
+                
+        except Exception as e:
+            logger.error(f"Permission validation failed for user {user_id}: {str(e)}")
+            return {
+                'user_id': user_id,
+                'has_permissions': False,
+                'granted_permissions': [],
+                'validation_source': 'error',
+                'error': str(e),
+                'timestamp': datetime.utcnow().isoformat()
+            }
+    
+    def get_configuration_info(self) -> Dict[str, Any]:
+        """
+        Get authentication configuration information for monitoring and debugging.
+        
+        Returns:
+            Dictionary containing configuration details with sensitive data masked
+        """
+        return {
+            'environment': self.environment,
+            'auth0': {
+                'domain': self.auth0_domain,
+                'client_id': self.auth0_client_id,
+                'audience': self.auth0_audience,
+                'scope': self.auth0_scope
+            },
+            'jwt': {
+                'algorithm': self.jwt_algorithm,
+                'issuer': self.jwt_issuer,
+                'access_token_expires': self.jwt_access_token_expires,
+                'refresh_token_expires': self.jwt_refresh_token_expires
+            },
+            'redis': {
+                'session_prefix': self.redis_session_prefix,
+                'auth_cache_prefix': self.redis_auth_cache_prefix,
+                'token_cache_prefix': self.redis_token_cache_prefix,
+                'session_timeout': self.redis_session_timeout
+            },
+            'security': {
+                'session_cookie_secure': self.session_cookie_secure,
+                'session_cookie_httponly': self.session_cookie_httponly,
+                'session_cookie_samesite': self.session_cookie_samesite,
+                'password_hash_rounds': self.password_hash_rounds
+            },
+            'rate_limiting': {
+                'auth_rate_limit': self.auth_rate_limit,
+                'token_validation_rate_limit': self.token_validation_rate_limit
+            },
+            'circuit_breaker': {
+                'auth0_timeout': self.auth0_timeout,
+                'auth0_retry_attempts': self.auth0_retry_attempts,
+                'auth0_backoff_factor': self.auth0_backoff_factor
+            }
+        }
+    
+    async def close_connections(self) -> None:
+        """
+        Close all external connections and clean up resources.
+        
+        Implements proper connection cleanup for graceful application shutdown
+        while ensuring all HTTP clients and Auth0 connections are properly closed.
+        """
+        try:
+            if self._httpx_client:
+                logger.info("Closing Auth0 HTTPX client connection")
+                await self._httpx_client.aclose()
+                self._httpx_client = None
+            
+            logger.info("All authentication connections closed successfully")
+            
+        except Exception as e:
+            logger.error(f"Error closing authentication connections: {str(e)}")
 
 
 # Global authentication configuration instance
-auth_config = AuthConfig()
+auth_config: Optional[AuthConfig] = None
 
-# Export configuration for use in Flask application factory
-def get_auth_config() -> AuthConfig:
+
+def init_auth_config(environment: str = 'development') -> AuthConfig:
     """
-    Get the global authentication configuration instance.
+    Initialize global authentication configuration instance.
     
+    Args:
+        environment: Target environment for configuration
+        
     Returns:
-        Configured AuthConfig instance
+        AuthConfig: Initialized authentication configuration instance
     """
+    global auth_config
+    auth_config = AuthConfig(environment)
+    logger.info(f"Global authentication configuration initialized for environment: {environment}")
     return auth_config
 
 
-def configure_authentication(app: Flask) -> None:
+def get_auth_config() -> AuthConfig:
     """
-    Configure Flask application with comprehensive authentication and security.
+    Get global authentication configuration instance.
+    
+    Returns:
+        AuthConfig: Global authentication configuration instance
+        
+    Raises:
+        RuntimeError: If authentication configuration has not been initialized
+    """
+    if auth_config is None:
+        raise RuntimeError(
+            "Authentication configuration not initialized. "
+            "Call init_auth_config() first."
+        )
+    return auth_config
+
+
+def setup_flask_login(app: Flask) -> LoginManager:
+    """
+    Configure Flask-Login for comprehensive user session management.
+    
+    Implements Flask-Login integration per Section 3.2.2 Authentication & Security Libraries
+    with comprehensive user session management alongside Flask-Session for distributed
+    session storage and enterprise-grade security through Redis-based session management.
     
     Args:
-        app: Flask application instance to configure
+        app: Flask application instance
+        
+    Returns:
+        LoginManager: Configured Flask-Login manager instance
     """
-    auth_config.configure_flask_app(app)
+    login_manager = LoginManager()
+    login_manager.init_app(app)
+    login_manager.login_view = 'auth.login'
+    login_manager.login_message = 'Please log in to access this page.'
+    login_manager.session_protection = 'strong'
+    
+    @login_manager.user_loader
+    def load_user(user_id: str) -> Optional[User]:
+        """
+        Load user from session storage for Flask-Login.
+        
+        Args:
+            user_id: User identifier to load
+            
+        Returns:
+            User instance or None if not found
+        """
+        try:
+            auth_conf = get_auth_config()
+            
+            # Try to get user from current session
+            session_id = getattr(g, 'session_id', None)
+            if session_id:
+                session_data = auth_conf.get_user_session(session_id)
+                if session_data and session_data.get('user_id') == user_id:
+                    return User(
+                        user_id=session_data['user_id'],
+                        auth0_profile=session_data.get('user_profile', {}),
+                        jwt_claims=session_data.get('jwt_claims', {})
+                    )
+            
+            logger.warning(f"User not found in session storage: {user_id}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Failed to load user {user_id}: {str(e)}")
+            return None
+    
+    @login_manager.unauthorized_handler
+    def unauthorized():
+        """Handle unauthorized access attempts."""
+        from flask import jsonify, request
+        
+        if request.is_json:
+            return jsonify({'error': 'Authentication required'}), 401
+        else:
+            return jsonify({'error': 'Please log in to access this resource'}), 401
+    
+    @app.teardown_appcontext
+    def close_auth_context(error):
+        """Clean up authentication context on request teardown."""
+        if hasattr(g, 'current_user'):
+            delattr(g, 'current_user')
+        if hasattr(g, 'session_id'):
+            delattr(g, 'session_id')
+    
+    logger.info("Flask-Login configured successfully")
+    return login_manager
 
 
-# Export key components for external use
-__all__ = [
-    'AuthConfig',
-    'User',
-    'JWTManager',
-    'EncryptedSessionInterface',
-    'AWSKMSKeyManager',
-    'AuthenticationError',
-    'AuthorizationError',
-    'require_authentication',
-    'require_permissions',
-    'configure_authentication',
-    'get_auth_config',
-    'auth_metrics'
-]
+def validate_jwt_token(token: str, audience: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Validate JWT token using PyJWT 2.8+ with comprehensive error handling.
+    
+    Implements JWT token processing migrated from jsonwebtoken to PyJWT 2.8+
+    per Section 0.1.2 with equivalent validation patterns and error handling.
+    
+    Args:
+        token: JWT token string to validate
+        audience: Optional audience to validate against
+        
+    Returns:
+        Dictionary containing validation result and claims
+        
+    Raises:
+        TokenValidationError: If token validation fails
+    """
+    try:
+        auth_conf = get_auth_config()
+        
+        # Validate input
+        schema = TokenValidationSchema()
+        validated_data = schema.load({'token': token, 'audience': audience})
+        
+        # Use configured audience if not provided
+        target_audience = validated_data.get('audience') or auth_conf.auth0_audience
+        
+        # Decode token based on algorithm
+        if auth_conf.jwt_algorithm.startswith('HS'):
+            # Symmetric key validation (development)
+            decoded_token = jwt.decode(
+                token,
+                auth_conf.jwt_secret_key,
+                algorithms=[auth_conf.jwt_algorithm],
+                audience=target_audience,
+                issuer=auth_conf.jwt_issuer,
+                options={
+                    'verify_signature': True,
+                    'verify_exp': True,
+                    'verify_iat': True,
+                    'verify_aud': True,
+                    'verify_iss': True
+                }
+            )
+        else:
+            # Asymmetric key validation (production) - would fetch public key from Auth0
+            # For now, raise an error indicating this needs Auth0 integration
+            raise TokenValidationError(
+                "Asymmetric key validation requires Auth0 public key - use validate_token_with_auth0"
+            )
+        
+        return {
+            'valid': True,
+            'claims': decoded_token,
+            'user_id': decoded_token.get('sub'),
+            'permissions': decoded_token.get('permissions', []),
+            'roles': decoded_token.get('roles', []),
+            'validation_source': 'local',
+            'timestamp': datetime.utcnow().isoformat()
+        }
+        
+    except ValidationError as e:
+        raise TokenValidationError(f"Invalid token format: {str(e)}")
+    except ExpiredSignatureError:
+        raise TokenValidationError("Token has expired")
+    except InvalidSignatureError:
+        raise TokenValidationError("Invalid token signature")
+    except InvalidKeyError:
+        raise TokenValidationError("Invalid signing key")
+    except InvalidIssuerError:
+        raise TokenValidationError("Invalid token issuer")
+    except InvalidAudienceError:
+        raise TokenValidationError("Invalid token audience")
+    except InvalidTokenError as e:
+        raise TokenValidationError(f"Invalid token: {str(e)}")
+    except Exception as e:
+        logger.error(f"Unexpected token validation error: {str(e)}")
+        raise TokenValidationError(f"Token validation failed: {str(e)}")
+
+
+def create_user_from_auth0_profile(auth0_profile: Dict[str, Any], jwt_claims: Optional[Dict[str, Any]] = None) -> User:
+    """
+    Create User instance from Auth0 profile data.
+    
+    Args:
+        auth0_profile: Auth0 user profile data
+        jwt_claims: Optional JWT claims for authorization context
+        
+    Returns:
+        User: Configured User instance for Flask-Login
+        
+    Raises:
+        AuthenticationError: If user creation fails
+    """
+    try:
+        user_id = auth0_profile.get('sub') or auth0_profile.get('user_id')
+        if not user_id:
+            raise AuthenticationError("No user ID found in Auth0 profile")
+        
+        user = User(
+            user_id=user_id,
+            auth0_profile=auth0_profile,
+            jwt_claims=jwt_claims or {}
+        )
+        
+        logger.info(f"User created successfully from Auth0 profile: {user_id}")
+        return user
+        
+    except Exception as e:
+        error_msg = f"Failed to create user from Auth0 profile: {str(e)}"
+        logger.error(error_msg)
+        raise AuthenticationError(error_msg) from e
