@@ -1,1344 +1,367 @@
 """
-Motor 3.3+ asynchronous database operations providing high-performance non-blocking MongoDB operations.
+Motor 3.3+ Asynchronous Database Operations Module
 
-This module implements comprehensive async database operations using Motor 3.3+ for high-performance
-concurrent request handling. Provides async CRUD operations, connection pooling optimization,
-transaction management with proper context handling, and monitoring integration while maintaining
-compatibility with existing data patterns from the Node.js implementation.
+This module implements high-performance asynchronous MongoDB operations using Motor 3.3+ driver,
+providing non-blocking database access for concurrent request handling while maintaining compatibility
+with existing data patterns and ensuring ≤10% performance variance from Node.js baseline.
 
-Key features:
-- Motor 3.3+ async MongoDB driver for non-blocking operations
-- Async CRUD operations maintaining existing query patterns
-- Transaction management with commit/rollback support
-- Connection pool optimization for concurrent operations
-- Comprehensive monitoring integration with Prometheus metrics
-- Circuit breaker patterns for fault tolerance
-- Performance optimization ensuring ≤10% variance from Node.js baseline
+Key Features:
+- Motor 3.3+ async MongoDB driver integration for high-performance operations
+- Async CRUD operations maintaining existing PyMongo query patterns and document structures
+- Async transaction management with proper context handling and ACID compliance
+- Optimized async connection pooling for concurrent operations and resource efficiency
+- Comprehensive error handling with circuit breaker patterns and retry logic
+- Performance monitoring integration with Prometheus metrics collection
+- Context managers for transaction lifecycle management and resource cleanup
+- Async bulk operations for high-throughput data processing scenarios
 
-Implements requirements from:
+Technical Compliance:
 - Section 0.1.2: Motor 3.3+ implementation for high-performance async database access
-- Section 5.2.5: Database access layer with async operations for concurrent requests
-- Section 6.2.4: Performance optimization for high-throughput operations
-- Section 4.2.2: Async transaction support for data consistency
-- Section 6.2.2: Performance monitoring with Motor async operation metrics
+- Section 5.2.5: Database access layer async operations for concurrent request handling
+- Section 6.2.4: Performance optimization for high-throughput operations with baseline compliance
+- Section 4.2.2: Async transaction support for data consistency and state management
+- Section 6.2.2: Monitoring integration for async operation metrics and performance tracking
+
+Architecture Integration:
+- Integrates with src/config/database.py for Motor client configuration and connection pooling
+- Uses src/data/exceptions.py for comprehensive async operation error handling
+- Leverages src/data/monitoring.py for async operation performance metrics and observability
+- Supports Flask application factory pattern for async database service initialization
+- Enables seamless integration with PyMongo synchronous operations where appropriate
+
+Performance Requirements:
+- Async operation performance: ≤10% variance from Node.js baseline (critical requirement)
+- Connection pool efficiency: Optimized for high-concurrency async operations
+- Transaction throughput: Support for high-frequency async transaction processing
+- Error recovery: Comprehensive async error handling with circuit breaker integration
+- Monitoring compliance: Real-time async operation metrics for performance validation
+
+References:
+- Section 0.1.2 DATA ACCESS COMPONENTS: Motor 3.3+ async database operations implementation
+- Section 6.2.4 PERFORMANCE OPTIMIZATION: Query optimization patterns and async monitoring
+- Section 4.2.2 STATE MANAGEMENT: Async transaction management and context handling
+- Section 5.2.5 DATABASE ACCESS LAYER: Async query execution and connection pool management
 """
 
 import asyncio
-import logging
 import time
+import uuid
+from collections import defaultdict
 from contextlib import asynccontextmanager
-from typing import (
-    Any, Dict, List, Optional, Union, Tuple, AsyncIterator, 
-    Callable, TypeVar, Generic, Awaitable
-)
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Union, Callable, AsyncGenerator, Tuple
+from functools import wraps
+import weakref
+
+# Async database driver
+try:
+    from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase, AsyncIOMotorCollection
+    from motor.motor_asyncio import AsyncIOMotorClientSession
+    import motor.core
+    MOTOR_AVAILABLE = True
+except ImportError:
+    MOTOR_AVAILABLE = False
+
+# Database operations
+import pymongo
+from pymongo.errors import PyMongoError, ConnectionFailure, OperationFailure, DuplicateKeyError
+from pymongo import ReturnDocument
 from bson import ObjectId
 from bson.errors import InvalidId
-from motor.motor_asyncio import (
-    AsyncIOMotorClient, 
-    AsyncIOMotorDatabase, 
-    AsyncIOMotorCollection,
-    AsyncIOMotorClientSession,
-    AsyncIOMotorCursor
-)
-from pymongo import (
-    ASCENDING, DESCENDING, 
-    IndexModel, 
-    ReturnDocument,
-    ReadPreference,
-    WriteConcern,
-    ReadConcern
-)
-from pymongo.errors import (
-    DuplicateKeyError,
-    BulkWriteError,
-    InvalidOperation,
-    OperationFailure,
-    ConnectionFailure,
-    ServerSelectionTimeoutError,
-    NetworkTimeout,
-    AutoReconnect,
-    ExecutionTimeout,
-    WTimeoutError
-)
-import structlog
 
-# Import local dependencies
-from .exceptions import (
-    DatabaseException,
-    DatabaseConnectionError,
-    DatabaseQueryError,
-    DatabaseTransactionError,
-    DatabaseTimeoutError,
-    DatabaseValidationError,
-    with_database_retry,
-    database_error_context
+# Application imports
+from src.config.database import get_database_config, DatabaseConnectionError
+from src.data.exceptions import (
+    DatabaseException, ConnectionException, TimeoutException, TransactionException,
+    QueryException, with_database_retry, DatabaseOperationType, handle_database_error,
+    mongodb_circuit_breaker, DatabaseErrorRecovery
 )
-from .monitoring import (
-    get_database_monitoring_components,
-    monitor_transaction,
-    MotorMonitoringIntegration,
-    DatabaseMetrics
+from src.data.monitoring import (
+    DatabaseMonitoringManager, MotorAsyncMonitoring, monitor_async_database_operation,
+    monitor_database_transaction
 )
+
+# Monitoring and logging
+import structlog
+from prometheus_client import Counter, Histogram, Gauge, Summary
+
 
 # Configure module logger
 logger = structlog.get_logger(__name__)
 
-# Type variables for generic operations
-T = TypeVar('T')
-DocumentType = Dict[str, Any]
-FilterType = Dict[str, Any]
-UpdateType = Dict[str, Any]
-ProjectionType = Optional[Union[Dict[str, Any], List[str]]]
+# Async operation metrics
+async_operations_total = Counter(
+    'motor_async_operations_total',
+    'Total Motor async database operations',
+    ['database', 'collection', 'operation', 'status']
+)
+
+async_operation_duration_seconds = Histogram(
+    'motor_async_operation_duration_seconds',
+    'Motor async operation duration in seconds',
+    ['database', 'collection', 'operation'],
+    buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0]
+)
+
+async_transaction_duration_seconds = Histogram(
+    'motor_async_transaction_duration_seconds',
+    'Motor async transaction duration in seconds',
+    ['database', 'status'],
+    buckets=[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
+)
+
+async_connection_pool_size = Gauge(
+    'motor_async_connection_pool_size',
+    'Motor async connection pool size',
+    ['address', 'pool_type']
+)
+
+async_concurrent_operations = Gauge(
+    'motor_async_concurrent_operations',
+    'Number of concurrent Motor async operations',
+    ['database', 'operation_type']
+)
+
+async_error_recovery_attempts = Counter(
+    'motor_async_error_recovery_attempts_total',
+    'Motor async error recovery attempts',
+    ['database', 'error_type', 'recovery_strategy']
+)
 
 
-class MotorAsyncDatabase:
+class MotorAsyncDatabaseError(DatabaseException):
     """
-    High-performance async MongoDB operations using Motor 3.3+ driver.
+    Motor-specific async database exception with enhanced error context.
     
-    Provides comprehensive async database operations with connection pooling,
-    transaction management, monitoring integration, and fault tolerance patterns.
-    Maintains compatibility with existing MongoDB query patterns while enabling
-    concurrent request handling for optimal performance.
+    Provides specialized error handling for Motor async operations including
+    operation context, async session information, and recovery recommendations.
     """
     
-    def __init__(
-        self,
-        client: AsyncIOMotorClient,
-        database_name: str,
-        default_write_concern: Optional[WriteConcern] = None,
-        default_read_concern: Optional[ReadConcern] = None,
-        default_read_preference: Optional[ReadPreference] = None
-    ):
+    def __init__(self, message: str, operation_context: Optional[Dict] = None, 
+                 async_session_id: Optional[str] = None, **kwargs):
+        super().__init__(message, **kwargs)
+        self.operation_context = operation_context or {}
+        self.async_session_id = async_session_id
+        
+        # Emit Motor-specific metrics
+        async_error_recovery_attempts.labels(
+            database=kwargs.get('database', 'unknown'),
+            error_type=self.__class__.__name__,
+            recovery_strategy='async_operation'
+        ).inc()
+
+
+class MotorAsyncManager:
+    """
+    Motor 3.3+ asynchronous database operations manager providing high-performance
+    non-blocking MongoDB operations with comprehensive transaction support.
+    
+    This manager implements enterprise-grade async database operations including:
+    - High-performance async CRUD operations with connection pooling
+    - Async transaction management with proper context handling
+    - Concurrent operation optimization for high-throughput scenarios
+    - Comprehensive error handling with circuit breaker integration
+    - Performance monitoring with Prometheus metrics collection
+    - Async bulk operations for efficient batch processing
+    
+    Features:
+    - Motor 3.3+ async driver integration with optimized connection pooling
+    - Async context managers for transaction lifecycle management
+    - Query pattern preservation maintaining PyMongo compatibility
+    - Performance baseline compliance with ≤10% variance requirement
+    - Circuit breaker patterns for async operation resilience
+    - Real-time metrics collection for async operation performance
+    """
+    
+    def __init__(self, database_name: Optional[str] = None, 
+                 monitoring_enabled: bool = True):
         """
-        Initialize Motor async database operations.
+        Initialize Motor async database manager with comprehensive configuration.
         
         Args:
-            client: Motor async client instance with optimized connection pool
-            database_name: Name of the MongoDB database
-            default_write_concern: Default write concern for operations
-            default_read_concern: Default read concern for operations  
-            default_read_preference: Default read preference for operations
+            database_name: Target database name (defaults to configured database)
+            monitoring_enabled: Enable performance monitoring and metrics collection
         """
-        self.client = client
+        if not MOTOR_AVAILABLE:
+            raise ImportError(
+                "Motor is not available. Install motor>=3.3.0 for async operations."
+            )
+        
         self.database_name = database_name
-        self.database: AsyncIOMotorDatabase = client[database_name]
+        self.monitoring_enabled = monitoring_enabled
+        self._client: Optional[AsyncIOMotorClient] = None
+        self._database: Optional[AsyncIOMotorDatabase] = None
+        self._active_sessions = weakref.WeakSet()
+        self._operation_counters = defaultdict(int)
+        self._performance_history = defaultdict(list)
         
-        # Configure default operation concerns
-        self.default_write_concern = default_write_concern or WriteConcern(w="majority", wtimeout=10000)
-        self.default_read_concern = default_read_concern or ReadConcern(level="majority")
-        self.default_read_preference = default_read_preference or ReadPreference.PRIMARY
-        
-        # Initialize monitoring integration
-        self._monitoring_components = get_database_monitoring_components()
-        self._motor_integration: Optional[MotorMonitoringIntegration] = None
-        self._metrics: Optional[DatabaseMetrics] = None
-        
-        if self._monitoring_components:
-            self._motor_integration = self._monitoring_components['motor_integration']
-            self._metrics = self._monitoring_components['metrics']
-        
-        # Connection pool health tracking
-        self._pool_health_cache: Dict[str, Dict[str, Any]] = {}
-        self._pool_health_ttl = 30  # seconds
+        # Initialize monitoring
+        if monitoring_enabled:
+            self.monitoring = MotorAsyncMonitoring(None, logger)
+        else:
+            self.monitoring = None
         
         logger.info(
-            f"Initialized MotorAsyncDatabase for {database_name}",
+            "Motor async manager initialized",
             database_name=database_name,
-            write_concern=str(self.default_write_concern),
-            read_concern=str(self.default_read_concern),
-            read_preference=str(self.default_read_preference)
+            monitoring_enabled=monitoring_enabled
         )
     
-    async def get_collection(
-        self, 
-        collection_name: str,
-        write_concern: Optional[WriteConcern] = None,
-        read_concern: Optional[ReadConcern] = None,
-        read_preference: Optional[ReadPreference] = None
-    ) -> AsyncIOMotorCollection:
+    async def initialize(self) -> None:
         """
-        Get async collection with configured concerns and preferences.
+        Initialize Motor async client and database connections.
         
-        Args:
-            collection_name: Name of the MongoDB collection
-            write_concern: Override default write concern
-            read_concern: Override default read concern
-            read_preference: Override default read preference
-            
-        Returns:
-            Configured AsyncIOMotorCollection instance
-        """
-        collection = self.database[collection_name]
+        Establishes Motor async client with optimized connection pooling
+        and validates database connectivity for high-performance operations.
         
-        # Apply operation concerns if specified
-        if write_concern or read_concern or read_preference:
-            collection = collection.with_options(
-                write_concern=write_concern or self.default_write_concern,
-                read_concern=read_concern or self.default_read_concern,
-                read_preference=read_preference or self.default_read_preference
-            )
-        
-        return collection
-    
-    @with_database_retry(max_attempts=3, min_wait=1.0, max_wait=10.0)
-    async def find_one(
-        self,
-        collection_name: str,
-        filter_doc: FilterType,
-        projection: ProjectionType = None,
-        sort: Optional[List[Tuple[str, int]]] = None,
-        skip: Optional[int] = None,
-        hint: Optional[Union[str, List[Tuple[str, int]]]] = None,
-        max_time_ms: Optional[int] = None,
-        session: Optional[AsyncIOMotorClientSession] = None
-    ) -> Optional[DocumentType]:
-        """
-        Find a single document matching the filter criteria.
-        
-        Provides async single document retrieval with comprehensive query options,
-        monitoring integration, and error handling. Maintains compatibility with
-        existing Node.js query patterns while leveraging Motor async capabilities.
-        
-        Args:
-            collection_name: Name of the MongoDB collection
-            filter_doc: Query filter document
-            projection: Fields to include/exclude in results
-            sort: Sort specification for document selection
-            skip: Number of documents to skip
-            hint: Index hint for query optimization
-            max_time_ms: Maximum execution time in milliseconds
-            session: Client session for transaction context
-            
-        Returns:
-            Document matching filter or None if not found
-            
         Raises:
-            DatabaseQueryError: On query execution failure
-            DatabaseTimeoutError: On operation timeout
-            DatabaseConnectionError: On connection failure
-        """
-        if not self._motor_integration:
-            raise DatabaseException("Motor monitoring integration not initialized")
-        
-        async with self._motor_integration.monitor_operation('find_one', self.database_name, collection_name):
-            try:
-                collection = await self.get_collection(collection_name)
-                
-                # Build query options
-                query_options = {}
-                if projection is not None:
-                    query_options['projection'] = projection
-                if sort is not None:
-                    query_options['sort'] = sort
-                if skip is not None:
-                    query_options['skip'] = skip
-                if hint is not None:
-                    query_options['hint'] = hint
-                if max_time_ms is not None:
-                    query_options['max_time_ms'] = max_time_ms
-                if session is not None:
-                    query_options['session'] = session
-                
-                # Execute async query
-                result = await collection.find_one(filter_doc, **query_options)
-                
-                logger.debug(
-                    f"find_one completed on {collection_name}",
-                    collection_name=collection_name,
-                    filter_keys=list(filter_doc.keys()) if filter_doc else [],
-                    result_found=result is not None,
-                    projection_fields=list(projection.keys()) if isinstance(projection, dict) else projection
-                )
-                
-                return result
-                
-            except (ConnectionFailure, ServerSelectionTimeoutError, NetworkTimeout, AutoReconnect) as e:
-                raise DatabaseConnectionError(
-                    f"Connection failed during find_one on {collection_name}: {str(e)}",
-                    operation='find_one',
-                    database=self.database_name,
-                    collection=collection_name,
-                    original_error=e
-                )
-            except (ExecutionTimeout, WTimeoutError) as e:
-                raise DatabaseTimeoutError(
-                    f"find_one timed out on {collection_name}: {str(e)}",
-                    operation='find_one',
-                    database=self.database_name,
-                    collection=collection_name,
-                    timeout_duration=max_time_ms,
-                    original_error=e
-                )
-            except Exception as e:
-                raise DatabaseQueryError(
-                    f"find_one failed on {collection_name}: {str(e)}",
-                    operation='find_one',
-                    database=self.database_name,
-                    collection=collection_name,
-                    query=filter_doc,
-                    original_error=e
-                )
-    
-    @with_database_retry(max_attempts=3, min_wait=1.0, max_wait=10.0)
-    async def find_many(
-        self,
-        collection_name: str,
-        filter_doc: FilterType,
-        projection: ProjectionType = None,
-        sort: Optional[List[Tuple[str, int]]] = None,
-        limit: Optional[int] = None,
-        skip: Optional[int] = None,
-        hint: Optional[Union[str, List[Tuple[str, int]]]] = None,
-        max_time_ms: Optional[int] = None,
-        batch_size: Optional[int] = None,
-        session: Optional[AsyncIOMotorClientSession] = None
-    ) -> List[DocumentType]:
-        """
-        Find multiple documents matching the filter criteria.
-        
-        Provides async multi-document retrieval with cursor management,
-        batch processing, and comprehensive query options. Optimized for
-        high-throughput operations while maintaining query pattern compatibility.
-        
-        Args:
-            collection_name: Name of the MongoDB collection
-            filter_doc: Query filter document
-            projection: Fields to include/exclude in results
-            sort: Sort specification for results
-            limit: Maximum number of documents to return
-            skip: Number of documents to skip
-            hint: Index hint for query optimization
-            max_time_ms: Maximum execution time in milliseconds
-            batch_size: Cursor batch size for network optimization
-            session: Client session for transaction context
-            
-        Returns:
-            List of documents matching filter criteria
-            
-        Raises:
-            DatabaseQueryError: On query execution failure
-            DatabaseTimeoutError: On operation timeout
-            DatabaseConnectionError: On connection failure
-        """
-        if not self._motor_integration:
-            raise DatabaseException("Motor monitoring integration not initialized")
-        
-        async with self._motor_integration.monitor_operation('find_many', self.database_name, collection_name):
-            try:
-                collection = await self.get_collection(collection_name)
-                
-                # Create cursor with query options
-                cursor = collection.find(filter_doc)
-                
-                if projection is not None:
-                    cursor = cursor.projection(projection)
-                if sort is not None:
-                    cursor = cursor.sort(sort)
-                if limit is not None:
-                    cursor = cursor.limit(limit)
-                if skip is not None:
-                    cursor = cursor.skip(skip)
-                if hint is not None:
-                    cursor = cursor.hint(hint)
-                if max_time_ms is not None:
-                    cursor = cursor.max_time_ms(max_time_ms)
-                if batch_size is not None:
-                    cursor = cursor.batch_size(batch_size)
-                
-                # Convert cursor to list with session context
-                if session is not None:
-                    results = await cursor.session(session).to_list(length=limit)
-                else:
-                    results = await cursor.to_list(length=limit)
-                
-                logger.debug(
-                    f"find_many completed on {collection_name}",
-                    collection_name=collection_name,
-                    filter_keys=list(filter_doc.keys()) if filter_doc else [],
-                    result_count=len(results),
-                    limit=limit,
-                    skip=skip
-                )
-                
-                return results
-                
-            except (ConnectionFailure, ServerSelectionTimeoutError, NetworkTimeout, AutoReconnect) as e:
-                raise DatabaseConnectionError(
-                    f"Connection failed during find_many on {collection_name}: {str(e)}",
-                    operation='find_many',
-                    database=self.database_name,
-                    collection=collection_name,
-                    original_error=e
-                )
-            except (ExecutionTimeout, WTimeoutError) as e:
-                raise DatabaseTimeoutError(
-                    f"find_many timed out on {collection_name}: {str(e)}",
-                    operation='find_many',
-                    database=self.database_name,
-                    collection=collection_name,
-                    timeout_duration=max_time_ms,
-                    original_error=e
-                )
-            except Exception as e:
-                raise DatabaseQueryError(
-                    f"find_many failed on {collection_name}: {str(e)}",
-                    operation='find_many',
-                    database=self.database_name,
-                    collection=collection_name,
-                    query=filter_doc,
-                    original_error=e
-                )
-    
-    async def find_cursor(
-        self,
-        collection_name: str,
-        filter_doc: FilterType,
-        projection: ProjectionType = None,
-        sort: Optional[List[Tuple[str, int]]] = None,
-        limit: Optional[int] = None,
-        skip: Optional[int] = None,
-        hint: Optional[Union[str, List[Tuple[str, int]]]] = None,
-        max_time_ms: Optional[int] = None,
-        batch_size: Optional[int] = None,
-        session: Optional[AsyncIOMotorClientSession] = None
-    ) -> AsyncIOMotorCursor:
-        """
-        Create an async cursor for streaming large result sets.
-        
-        Provides memory-efficient streaming of large document collections
-        using Motor async cursors. Enables processing of large datasets
-        without loading all documents into memory simultaneously.
-        
-        Args:
-            collection_name: Name of the MongoDB collection
-            filter_doc: Query filter document
-            projection: Fields to include/exclude in results
-            sort: Sort specification for results
-            limit: Maximum number of documents to return
-            skip: Number of documents to skip
-            hint: Index hint for query optimization
-            max_time_ms: Maximum execution time in milliseconds
-            batch_size: Cursor batch size for network optimization
-            session: Client session for transaction context
-            
-        Returns:
-            AsyncIOMotorCursor for streaming results
-            
-        Raises:
-            DatabaseQueryError: On cursor creation failure
-            DatabaseConnectionError: On connection failure
+            ConnectionException: If Motor async connection cannot be established
         """
         try:
-            collection = await self.get_collection(collection_name)
+            # Get database configuration
+            config = get_database_config()
             
-            # Create cursor with query options
-            cursor = collection.find(filter_doc)
+            # Initialize Motor async client
+            self._client = config.get_motor_client()
+            self._database = config.get_async_database(self.database_name)
             
-            if projection is not None:
-                cursor = cursor.projection(projection)
-            if sort is not None:
-                cursor = cursor.sort(sort)
-            if limit is not None:
-                cursor = cursor.limit(limit)
-            if skip is not None:
-                cursor = cursor.skip(skip)
-            if hint is not None:
-                cursor = cursor.hint(hint)
-            if max_time_ms is not None:
-                cursor = cursor.max_time_ms(max_time_ms)
-            if batch_size is not None:
-                cursor = cursor.batch_size(batch_size)
-            if session is not None:
-                cursor = cursor.session(session)
+            # Test async connection
+            await self._test_async_connection()
             
-            logger.debug(
-                f"Created async cursor for {collection_name}",
-                collection_name=collection_name,
-                filter_keys=list(filter_doc.keys()) if filter_doc else [],
-                limit=limit,
-                skip=skip,
-                batch_size=batch_size
+            logger.info(
+                "Motor async client initialized successfully",
+                database_name=self.database_name,
+                client_type="motor_async"
             )
             
-            return cursor
-            
         except Exception as e:
-            raise DatabaseQueryError(
-                f"Failed to create cursor for {collection_name}: {str(e)}",
-                operation='find_cursor',
+            error_msg = f"Failed to initialize Motor async client: {str(e)}"
+            logger.error(error_msg, error=str(e))
+            raise ConnectionException(
+                error_msg,
                 database=self.database_name,
-                collection=collection_name,
-                query=filter_doc,
                 original_error=e
             )
     
-    @with_database_retry(max_attempts=3, min_wait=1.0, max_wait=10.0)
-    async def insert_one(
-        self,
-        collection_name: str,
-        document: DocumentType,
-        bypass_document_validation: bool = False,
-        session: Optional[AsyncIOMotorClientSession] = None
-    ) -> ObjectId:
-        """
-        Insert a single document into the collection.
-        
-        Provides async single document insertion with validation bypass options,
-        transaction support, and comprehensive error handling. Returns the inserted
-        document's ObjectId for reference.
-        
-        Args:
-            collection_name: Name of the MongoDB collection
-            document: Document to insert
-            bypass_document_validation: Skip document validation
-            session: Client session for transaction context
-            
-        Returns:
-            ObjectId of the inserted document
-            
-        Raises:
-            DatabaseValidationError: On document validation failure
-            DatabaseConnectionError: On connection failure
-            DatabaseQueryError: On insertion failure
-        """
-        if not self._motor_integration:
-            raise DatabaseException("Motor monitoring integration not initialized")
-        
-        async with self._motor_integration.monitor_operation('insert_one', self.database_name, collection_name):
-            try:
-                collection = await self.get_collection(collection_name)
-                
-                # Execute async insertion
-                insert_options = {
-                    'bypass_document_validation': bypass_document_validation
-                }
-                if session is not None:
-                    insert_options['session'] = session
-                
-                result = await collection.insert_one(document, **insert_options)
-                
-                logger.debug(
-                    f"insert_one completed on {collection_name}",
-                    collection_name=collection_name,
-                    inserted_id=str(result.inserted_id),
-                    document_keys=list(document.keys()) if document else []
-                )
-                
-                return result.inserted_id
-                
-            except DuplicateKeyError as e:
-                raise DatabaseValidationError(
-                    f"Duplicate key error during insert_one on {collection_name}: {str(e)}",
-                    operation='insert_one',
-                    database=self.database_name,
-                    collection=collection_name,
-                    document=document,
-                    original_error=e
-                )
-            except (ConnectionFailure, ServerSelectionTimeoutError, NetworkTimeout, AutoReconnect) as e:
-                raise DatabaseConnectionError(
-                    f"Connection failed during insert_one on {collection_name}: {str(e)}",
-                    operation='insert_one',
-                    database=self.database_name,
-                    collection=collection_name,
-                    original_error=e
-                )
-            except Exception as e:
-                raise DatabaseQueryError(
-                    f"insert_one failed on {collection_name}: {str(e)}",
-                    operation='insert_one',
-                    database=self.database_name,
-                    collection=collection_name,
-                    original_error=e
-                )
+    async def _test_async_connection(self) -> None:
+        """Test Motor async database connection with timeout."""
+        try:
+            # Test connection with ping command
+            await asyncio.wait_for(
+                self._database.command('ping'),
+                timeout=10.0
+            )
+            logger.debug("Motor async connection test successful")
+        except asyncio.TimeoutError:
+            raise TimeoutException(
+                "Motor async connection test timed out",
+                timeout_duration=10.0,
+                database=self.database_name
+            )
+        except Exception as e:
+            raise ConnectionException(
+                f"Motor async connection test failed: {str(e)}",
+                database=self.database_name,
+                original_error=e
+            )
     
-    @with_database_retry(max_attempts=3, min_wait=1.0, max_wait=10.0)
-    async def insert_many(
-        self,
-        collection_name: str,
-        documents: List[DocumentType],
-        ordered: bool = True,
-        bypass_document_validation: bool = False,
-        session: Optional[AsyncIOMotorClientSession] = None
-    ) -> List[ObjectId]:
-        """
-        Insert multiple documents into the collection.
-        
-        Provides async bulk document insertion with ordered/unordered options,
-        validation bypass, and comprehensive error handling. Optimized for
-        high-throughput batch operations.
-        
-        Args:
-            collection_name: Name of the MongoDB collection
-            documents: List of documents to insert
-            ordered: Whether to stop on first error (ordered) or continue (unordered)
-            bypass_document_validation: Skip document validation
-            session: Client session for transaction context
-            
-        Returns:
-            List of ObjectIds of the inserted documents
-            
-        Raises:
-            DatabaseValidationError: On document validation failure
-            DatabaseConnectionError: On connection failure
-            DatabaseQueryError: On insertion failure
-        """
-        if not self._motor_integration:
-            raise DatabaseException("Motor monitoring integration not initialized")
-        
-        async with self._motor_integration.monitor_operation('insert_many', self.database_name, collection_name):
-            try:
-                collection = await self.get_collection(collection_name)
-                
-                # Execute async bulk insertion
-                insert_options = {
-                    'ordered': ordered,
-                    'bypass_document_validation': bypass_document_validation
-                }
-                if session is not None:
-                    insert_options['session'] = session
-                
-                result = await collection.insert_many(documents, **insert_options)
-                
-                logger.debug(
-                    f"insert_many completed on {collection_name}",
-                    collection_name=collection_name,
-                    inserted_count=len(result.inserted_ids),
-                    ordered=ordered
-                )
-                
-                return result.inserted_ids
-                
-            except BulkWriteError as e:
-                # Extract validation errors from bulk write error
-                validation_errors = []
-                for error in e.details.get('writeErrors', []):
-                    validation_errors.append(f"Index {error['index']}: {error['errmsg']}")
-                
-                raise DatabaseValidationError(
-                    f"Bulk validation errors during insert_many on {collection_name}: {str(e)}",
-                    operation='insert_many',
-                    database=self.database_name,
-                    collection=collection_name,
-                    validation_errors=validation_errors,
-                    original_error=e
-                )
-            except (ConnectionFailure, ServerSelectionTimeoutError, NetworkTimeout, AutoReconnect) as e:
-                raise DatabaseConnectionError(
-                    f"Connection failed during insert_many on {collection_name}: {str(e)}",
-                    operation='insert_many',
-                    database=self.database_name,
-                    collection=collection_name,
-                    original_error=e
-                )
-            except Exception as e:
-                raise DatabaseQueryError(
-                    f"insert_many failed on {collection_name}: {str(e)}",
-                    operation='insert_many',
-                    database=self.database_name,
-                    collection=collection_name,
-                    original_error=e
-                )
+    @property
+    def client(self) -> AsyncIOMotorClient:
+        """Get Motor async client instance."""
+        if self._client is None:
+            raise RuntimeError("Motor async client not initialized. Call initialize() first.")
+        return self._client
     
-    @with_database_retry(max_attempts=3, min_wait=1.0, max_wait=10.0)
-    async def update_one(
-        self,
-        collection_name: str,
-        filter_doc: FilterType,
-        update_doc: UpdateType,
-        upsert: bool = False,
-        bypass_document_validation: bool = False,
-        array_filters: Optional[List[Dict[str, Any]]] = None,
-        hint: Optional[Union[str, List[Tuple[str, int]]]] = None,
-        session: Optional[AsyncIOMotorClientSession] = None
-    ) -> Dict[str, Any]:
-        """
-        Update a single document matching the filter criteria.
-        
-        Provides async single document update with upsert support,
-        array filtering, and comprehensive options. Returns detailed
-        update result information for validation.
-        
-        Args:
-            collection_name: Name of the MongoDB collection
-            filter_doc: Query filter for document selection
-            update_doc: Update operations to apply
-            upsert: Create document if no match found
-            bypass_document_validation: Skip document validation
-            array_filters: Filters for array field updates
-            hint: Index hint for query optimization
-            session: Client session for transaction context
-            
-        Returns:
-            Dict containing update result details
-            
-        Raises:
-            DatabaseValidationError: On validation failure
-            DatabaseQueryError: On update failure
-            DatabaseConnectionError: On connection failure
-        """
-        if not self._motor_integration:
-            raise DatabaseException("Motor monitoring integration not initialized")
-        
-        async with self._motor_integration.monitor_operation('update_one', self.database_name, collection_name):
-            try:
-                collection = await self.get_collection(collection_name)
-                
-                # Build update options
-                update_options = {
-                    'upsert': upsert,
-                    'bypass_document_validation': bypass_document_validation
-                }
-                if array_filters is not None:
-                    update_options['array_filters'] = array_filters
-                if hint is not None:
-                    update_options['hint'] = hint
-                if session is not None:
-                    update_options['session'] = session
-                
-                # Execute async update
-                result = await collection.update_one(filter_doc, update_doc, **update_options)
-                
-                update_result = {
-                    'matched_count': result.matched_count,
-                    'modified_count': result.modified_count,
-                    'upserted_id': result.upserted_id,
-                    'acknowledged': result.acknowledged
-                }
-                
-                logger.debug(
-                    f"update_one completed on {collection_name}",
-                    collection_name=collection_name,
-                    matched_count=result.matched_count,
-                    modified_count=result.modified_count,
-                    upserted=result.upserted_id is not None
-                )
-                
-                return update_result
-                
-            except (ConnectionFailure, ServerSelectionTimeoutError, NetworkTimeout, AutoReconnect) as e:
-                raise DatabaseConnectionError(
-                    f"Connection failed during update_one on {collection_name}: {str(e)}",
-                    operation='update_one',
-                    database=self.database_name,
-                    collection=collection_name,
-                    original_error=e
-                )
-            except Exception as e:
-                raise DatabaseQueryError(
-                    f"update_one failed on {collection_name}: {str(e)}",
-                    operation='update_one',
-                    database=self.database_name,
-                    collection=collection_name,
-                    query=filter_doc,
-                    original_error=e
-                )
+    @property 
+    def database(self) -> AsyncIOMotorDatabase:
+        """Get Motor async database instance."""
+        if self._database is None:
+            raise RuntimeError("Motor async database not initialized. Call initialize() first.")
+        return self._database
     
-    @with_database_retry(max_attempts=3, min_wait=1.0, max_wait=10.0)
-    async def update_many(
-        self,
-        collection_name: str,
-        filter_doc: FilterType,
-        update_doc: UpdateType,
-        upsert: bool = False,
-        bypass_document_validation: bool = False,
-        array_filters: Optional[List[Dict[str, Any]]] = None,
-        hint: Optional[Union[str, List[Tuple[str, int]]]] = None,
-        session: Optional[AsyncIOMotorClientSession] = None
-    ) -> Dict[str, Any]:
+    def get_collection(self, collection_name: str) -> AsyncIOMotorCollection:
         """
-        Update multiple documents matching the filter criteria.
-        
-        Provides async multi-document update with comprehensive options
-        and detailed result tracking. Optimized for bulk update operations
-        while maintaining transaction consistency.
+        Get Motor async collection instance.
         
         Args:
             collection_name: Name of the MongoDB collection
-            filter_doc: Query filter for document selection
-            update_doc: Update operations to apply
-            upsert: Create document if no match found
-            bypass_document_validation: Skip document validation
-            array_filters: Filters for array field updates
-            hint: Index hint for query optimization
-            session: Client session for transaction context
             
         Returns:
-            Dict containing update result details
-            
-        Raises:
-            DatabaseValidationError: On validation failure
-            DatabaseQueryError: On update failure
-            DatabaseConnectionError: On connection failure
+            AsyncIOMotorCollection: Motor async collection instance
         """
-        if not self._motor_integration:
-            raise DatabaseException("Motor monitoring integration not initialized")
-        
-        async with self._motor_integration.monitor_operation('update_many', self.database_name, collection_name):
-            try:
-                collection = await self.get_collection(collection_name)
-                
-                # Build update options
-                update_options = {
-                    'upsert': upsert,
-                    'bypass_document_validation': bypass_document_validation
-                }
-                if array_filters is not None:
-                    update_options['array_filters'] = array_filters
-                if hint is not None:
-                    update_options['hint'] = hint
-                if session is not None:
-                    update_options['session'] = session
-                
-                # Execute async update
-                result = await collection.update_many(filter_doc, update_doc, **update_options)
-                
-                update_result = {
-                    'matched_count': result.matched_count,
-                    'modified_count': result.modified_count,
-                    'upserted_id': result.upserted_id,
-                    'acknowledged': result.acknowledged
-                }
-                
-                logger.debug(
-                    f"update_many completed on {collection_name}",
-                    collection_name=collection_name,
-                    matched_count=result.matched_count,
-                    modified_count=result.modified_count,
-                    upserted=result.upserted_id is not None
-                )
-                
-                return update_result
-                
-            except (ConnectionFailure, ServerSelectionTimeoutError, NetworkTimeout, AutoReconnect) as e:
-                raise DatabaseConnectionError(
-                    f"Connection failed during update_many on {collection_name}: {str(e)}",
-                    operation='update_many',
-                    database=self.database_name,
-                    collection=collection_name,
-                    original_error=e
-                )
-            except Exception as e:
-                raise DatabaseQueryError(
-                    f"update_many failed on {collection_name}: {str(e)}",
-                    operation='update_many',
-                    database=self.database_name,
-                    collection=collection_name,
-                    query=filter_doc,
-                    original_error=e
-                )
+        return self.database[collection_name]
     
-    @with_database_retry(max_attempts=3, min_wait=1.0, max_wait=10.0)
-    async def find_one_and_update(
-        self,
-        collection_name: str,
-        filter_doc: FilterType,
-        update_doc: UpdateType,
-        projection: ProjectionType = None,
-        sort: Optional[List[Tuple[str, int]]] = None,
-        upsert: bool = False,
-        return_document: ReturnDocument = ReturnDocument.BEFORE,
-        bypass_document_validation: bool = False,
-        array_filters: Optional[List[Dict[str, Any]]] = None,
-        hint: Optional[Union[str, List[Tuple[str, int]]]] = None,
-        max_time_ms: Optional[int] = None,
-        session: Optional[AsyncIOMotorClientSession] = None
-    ) -> Optional[DocumentType]:
+    async def close(self) -> None:
         """
-        Find a document and update it atomically.
+        Close Motor async client and cleanup resources.
         
-        Provides atomic find-and-modify operations with comprehensive options
-        for document updates. Returns either the original or updated document
-        based on return_document parameter.
-        
-        Args:
-            collection_name: Name of the MongoDB collection
-            filter_doc: Query filter for document selection
-            update_doc: Update operations to apply
-            projection: Fields to include/exclude in result
-            sort: Sort specification for document selection
-            upsert: Create document if no match found
-            return_document: Return original (BEFORE) or updated (AFTER) document
-            bypass_document_validation: Skip document validation
-            array_filters: Filters for array field updates
-            hint: Index hint for query optimization
-            max_time_ms: Maximum execution time in milliseconds
-            session: Client session for transaction context
-            
-        Returns:
-            Updated document or None if no document matched
-            
-        Raises:
-            DatabaseValidationError: On validation failure
-            DatabaseQueryError: On operation failure
-            DatabaseTimeoutError: On operation timeout
-            DatabaseConnectionError: On connection failure
+        Properly closes all active sessions and client connections
+        while ensuring graceful resource cleanup.
         """
-        if not self._motor_integration:
-            raise DatabaseException("Motor monitoring integration not initialized")
-        
-        async with self._motor_integration.monitor_operation('find_one_and_update', self.database_name, collection_name):
-            try:
-                collection = await self.get_collection(collection_name)
-                
-                # Build operation options
-                operation_options = {
-                    'upsert': upsert,
-                    'return_document': return_document,
-                    'bypass_document_validation': bypass_document_validation
-                }
-                if projection is not None:
-                    operation_options['projection'] = projection
-                if sort is not None:
-                    operation_options['sort'] = sort
-                if array_filters is not None:
-                    operation_options['array_filters'] = array_filters
-                if hint is not None:
-                    operation_options['hint'] = hint
-                if max_time_ms is not None:
-                    operation_options['max_time_ms'] = max_time_ms
-                if session is not None:
-                    operation_options['session'] = session
-                
-                # Execute atomic find and update
-                result = await collection.find_one_and_update(filter_doc, update_doc, **operation_options)
-                
-                logger.debug(
-                    f"find_one_and_update completed on {collection_name}",
-                    collection_name=collection_name,
-                    result_found=result is not None,
-                    return_document=return_document.name,
-                    upsert=upsert
-                )
-                
-                return result
-                
-            except (ExecutionTimeout, WTimeoutError) as e:
-                raise DatabaseTimeoutError(
-                    f"find_one_and_update timed out on {collection_name}: {str(e)}",
-                    operation='find_one_and_update',
-                    database=self.database_name,
-                    collection=collection_name,
-                    timeout_duration=max_time_ms,
-                    original_error=e
-                )
-            except (ConnectionFailure, ServerSelectionTimeoutError, NetworkTimeout, AutoReconnect) as e:
-                raise DatabaseConnectionError(
-                    f"Connection failed during find_one_and_update on {collection_name}: {str(e)}",
-                    operation='find_one_and_update',
-                    database=self.database_name,
-                    collection=collection_name,
-                    original_error=e
-                )
-            except Exception as e:
-                raise DatabaseQueryError(
-                    f"find_one_and_update failed on {collection_name}: {str(e)}",
-                    operation='find_one_and_update',
-                    database=self.database_name,
-                    collection=collection_name,
-                    query=filter_doc,
-                    original_error=e
-                )
-    
-    @with_database_retry(max_attempts=3, min_wait=1.0, max_wait=10.0)
-    async def delete_one(
-        self,
-        collection_name: str,
-        filter_doc: FilterType,
-        hint: Optional[Union[str, List[Tuple[str, int]]]] = None,
-        session: Optional[AsyncIOMotorClientSession] = None
-    ) -> Dict[str, Any]:
-        """
-        Delete a single document matching the filter criteria.
-        
-        Provides async single document deletion with index hints
-        and transaction support. Returns deletion result details
-        for validation and monitoring.
-        
-        Args:
-            collection_name: Name of the MongoDB collection
-            filter_doc: Query filter for document selection
-            hint: Index hint for query optimization
-            session: Client session for transaction context
+        try:
+            # Close active sessions
+            for session in list(self._active_sessions):
+                try:
+                    await session.end_session()
+                except Exception as e:
+                    logger.warning(
+                        "Error closing async session",
+                        session_id=getattr(session, '_client_session_id', 'unknown'),
+                        error=str(e)
+                    )
             
-        Returns:
-            Dict containing deletion result details
+            # Close client
+            if self._client:
+                self._client.close()
+                self._client = None
+                self._database = None
             
-        Raises:
-            DatabaseQueryError: On deletion failure
-            DatabaseConnectionError: On connection failure
-        """
-        if not self._motor_integration:
-            raise DatabaseException("Motor monitoring integration not initialized")
-        
-        async with self._motor_integration.monitor_operation('delete_one', self.database_name, collection_name):
-            try:
-                collection = await self.get_collection(collection_name)
-                
-                # Build delete options
-                delete_options = {}
-                if hint is not None:
-                    delete_options['hint'] = hint
-                if session is not None:
-                    delete_options['session'] = session
-                
-                # Execute async deletion
-                result = await collection.delete_one(filter_doc, **delete_options)
-                
-                delete_result = {
-                    'deleted_count': result.deleted_count,
-                    'acknowledged': result.acknowledged
-                }
-                
-                logger.debug(
-                    f"delete_one completed on {collection_name}",
-                    collection_name=collection_name,
-                    deleted_count=result.deleted_count
-                )
-                
-                return delete_result
-                
-            except (ConnectionFailure, ServerSelectionTimeoutError, NetworkTimeout, AutoReconnect) as e:
-                raise DatabaseConnectionError(
-                    f"Connection failed during delete_one on {collection_name}: {str(e)}",
-                    operation='delete_one',
-                    database=self.database_name,
-                    collection=collection_name,
-                    original_error=e
-                )
-            except Exception as e:
-                raise DatabaseQueryError(
-                    f"delete_one failed on {collection_name}: {str(e)}",
-                    operation='delete_one',
-                    database=self.database_name,
-                    collection=collection_name,
-                    query=filter_doc,
-                    original_error=e
-                )
-    
-    @with_database_retry(max_attempts=3, min_wait=1.0, max_wait=10.0)
-    async def delete_many(
-        self,
-        collection_name: str,
-        filter_doc: FilterType,
-        hint: Optional[Union[str, List[Tuple[str, int]]]] = None,
-        session: Optional[AsyncIOMotorClientSession] = None
-    ) -> Dict[str, Any]:
-        """
-        Delete multiple documents matching the filter criteria.
-        
-        Provides async multi-document deletion with comprehensive
-        result tracking. Optimized for bulk deletion operations
-        while maintaining transaction consistency.
-        
-        Args:
-            collection_name: Name of the MongoDB collection
-            filter_doc: Query filter for document selection
-            hint: Index hint for query optimization
-            session: Client session for transaction context
+            logger.info("Motor async client closed successfully")
             
-        Returns:
-            Dict containing deletion result details
-            
-        Raises:
-            DatabaseQueryError: On deletion failure
-            DatabaseConnectionError: On connection failure
-        """
-        if not self._motor_integration:
-            raise DatabaseException("Motor monitoring integration not initialized")
-        
-        async with self._motor_integration.monitor_operation('delete_many', self.database_name, collection_name):
-            try:
-                collection = await self.get_collection(collection_name)
-                
-                # Build delete options
-                delete_options = {}
-                if hint is not None:
-                    delete_options['hint'] = hint
-                if session is not None:
-                    delete_options['session'] = session
-                
-                # Execute async deletion
-                result = await collection.delete_many(filter_doc, **delete_options)
-                
-                delete_result = {
-                    'deleted_count': result.deleted_count,
-                    'acknowledged': result.acknowledged
-                }
-                
-                logger.debug(
-                    f"delete_many completed on {collection_name}",
-                    collection_name=collection_name,
-                    deleted_count=result.deleted_count
-                )
-                
-                return delete_result
-                
-            except (ConnectionFailure, ServerSelectionTimeoutError, NetworkTimeout, AutoReconnect) as e:
-                raise DatabaseConnectionError(
-                    f"Connection failed during delete_many on {collection_name}: {str(e)}",
-                    operation='delete_many',
-                    database=self.database_name,
-                    collection=collection_name,
-                    original_error=e
-                )
-            except Exception as e:
-                raise DatabaseQueryError(
-                    f"delete_many failed on {collection_name}: {str(e)}",
-                    operation='delete_many',
-                    database=self.database_name,
-                    collection=collection_name,
-                    query=filter_doc,
-                    original_error=e
-                )
-    
-    @with_database_retry(max_attempts=3, min_wait=1.0, max_wait=10.0)
-    async def aggregate(
-        self,
-        collection_name: str,
-        pipeline: List[Dict[str, Any]],
-        allow_disk_use: bool = False,
-        max_time_ms: Optional[int] = None,
-        batch_size: Optional[int] = None,
-        bypass_document_validation: bool = False,
-        read_concern: Optional[ReadConcern] = None,
-        hint: Optional[Union[str, List[Tuple[str, int]]]] = None,
-        session: Optional[AsyncIOMotorClientSession] = None
-    ) -> List[DocumentType]:
-        """
-        Execute an aggregation pipeline on the collection.
-        
-        Provides async aggregation operations with comprehensive pipeline support,
-        disk usage options, and performance optimization. Maintains compatibility
-        with existing aggregation patterns while leveraging Motor async capabilities.
-        
-        Args:
-            collection_name: Name of the MongoDB collection
-            pipeline: Aggregation pipeline stages
-            allow_disk_use: Allow pipeline stages to write to temporary files
-            max_time_ms: Maximum execution time in milliseconds
-            batch_size: Cursor batch size for network optimization
-            bypass_document_validation: Skip document validation
-            read_concern: Read concern for the operation
-            hint: Index hint for pipeline optimization
-            session: Client session for transaction context
-            
-        Returns:
-            List of aggregation result documents
-            
-        Raises:
-            DatabaseQueryError: On aggregation failure
-            DatabaseTimeoutError: On operation timeout
-            DatabaseConnectionError: On connection failure
-        """
-        if not self._motor_integration:
-            raise DatabaseException("Motor monitoring integration not initialized")
-        
-        async with self._motor_integration.monitor_operation('aggregate', self.database_name, collection_name):
-            try:
-                collection = await self.get_collection(collection_name, read_concern=read_concern)
-                
-                # Build aggregation options
-                aggregate_options = {
-                    'allowDiskUse': allow_disk_use,
-                    'bypassDocumentValidation': bypass_document_validation
-                }
-                if max_time_ms is not None:
-                    aggregate_options['maxTimeMS'] = max_time_ms
-                if batch_size is not None:
-                    aggregate_options['batchSize'] = batch_size
-                if hint is not None:
-                    aggregate_options['hint'] = hint
-                if session is not None:
-                    aggregate_options['session'] = session
-                
-                # Execute aggregation pipeline
-                cursor = collection.aggregate(pipeline, **aggregate_options)
-                results = await cursor.to_list(length=None)
-                
-                logger.debug(
-                    f"aggregation completed on {collection_name}",
-                    collection_name=collection_name,
-                    pipeline_stages=len(pipeline),
-                    result_count=len(results),
-                    allow_disk_use=allow_disk_use
-                )
-                
-                return results
-                
-            except (ExecutionTimeout, WTimeoutError) as e:
-                raise DatabaseTimeoutError(
-                    f"Aggregation timed out on {collection_name}: {str(e)}",
-                    operation='aggregate',
-                    database=self.database_name,
-                    collection=collection_name,
-                    timeout_duration=max_time_ms,
-                    original_error=e
-                )
-            except (ConnectionFailure, ServerSelectionTimeoutError, NetworkTimeout, AutoReconnect) as e:
-                raise DatabaseConnectionError(
-                    f"Connection failed during aggregation on {collection_name}: {str(e)}",
-                    operation='aggregate',
-                    database=self.database_name,
-                    collection=collection_name,
-                    original_error=e
-                )
-            except Exception as e:
-                raise DatabaseQueryError(
-                    f"Aggregation failed on {collection_name}: {str(e)}",
-                    operation='aggregate',
-                    database=self.database_name,
-                    collection=collection_name,
-                    original_error=e
-                )
-    
-    @with_database_retry(max_attempts=3, min_wait=1.0, max_wait=10.0)
-    async def count_documents(
-        self,
-        collection_name: str,
-        filter_doc: FilterType,
-        skip: Optional[int] = None,
-        limit: Optional[int] = None,
-        hint: Optional[Union[str, List[Tuple[str, int]]]] = None,
-        max_time_ms: Optional[int] = None,
-        session: Optional[AsyncIOMotorClientSession] = None
-    ) -> int:
-        """
-        Count documents matching the filter criteria.
-        
-        Provides async document counting with query optimization and
-        comprehensive filtering options. Uses count_documents for
-        accurate counting with filter support.
-        
-        Args:
-            collection_name: Name of the MongoDB collection
-            filter_doc: Query filter for document selection
-            skip: Number of documents to skip
-            limit: Maximum number of documents to count
-            hint: Index hint for query optimization
-            max_time_ms: Maximum execution time in milliseconds
-            session: Client session for transaction context
-            
-        Returns:
-            Number of documents matching the filter
-            
-        Raises:
-            DatabaseQueryError: On count failure
-            DatabaseTimeoutError: On operation timeout
-            DatabaseConnectionError: On connection failure
-        """
-        if not self._motor_integration:
-            raise DatabaseException("Motor monitoring integration not initialized")
-        
-        async with self._motor_integration.monitor_operation('count_documents', self.database_name, collection_name):
-            try:
-                collection = await self.get_collection(collection_name)
-                
-                # Build count options
-                count_options = {}
-                if skip is not None:
-                    count_options['skip'] = skip
-                if limit is not None:
-                    count_options['limit'] = limit
-                if hint is not None:
-                    count_options['hint'] = hint
-                if max_time_ms is not None:
-                    count_options['maxTimeMS'] = max_time_ms
-                if session is not None:
-                    count_options['session'] = session
-                
-                # Execute async count
-                count = await collection.count_documents(filter_doc, **count_options)
-                
-                logger.debug(
-                    f"count_documents completed on {collection_name}",
-                    collection_name=collection_name,
-                    count=count,
-                    filter_keys=list(filter_doc.keys()) if filter_doc else []
-                )
-                
-                return count
-                
-            except (ExecutionTimeout, WTimeoutError) as e:
-                raise DatabaseTimeoutError(
-                    f"count_documents timed out on {collection_name}: {str(e)}",
-                    operation='count_documents',
-                    database=self.database_name,
-                    collection=collection_name,
-                    timeout_duration=max_time_ms,
-                    original_error=e
-                )
-            except (ConnectionFailure, ServerSelectionTimeoutError, NetworkTimeout, AutoReconnect) as e:
-                raise DatabaseConnectionError(
-                    f"Connection failed during count_documents on {collection_name}: {str(e)}",
-                    operation='count_documents',
-                    database=self.database_name,
-                    collection=collection_name,
-                    original_error=e
-                )
-            except Exception as e:
-                raise DatabaseQueryError(
-                    f"count_documents failed on {collection_name}: {str(e)}",
-                    operation='count_documents',
-                    database=self.database_name,
-                    collection=collection_name,
-                    query=filter_doc,
-                    original_error=e
-                )
+        except Exception as e:
+            logger.error(
+                "Error closing Motor async client",
+                error=str(e)
+            )
     
     @asynccontextmanager
-    async def start_session(
-        self, 
-        causal_consistency: bool = True,
-        default_transaction_options: Optional[Dict[str, Any]] = None
-    ) -> AsyncIterator[AsyncIOMotorClientSession]:
+    async def async_session(self) -> AsyncGenerator[AsyncIOMotorClientSession, None]:
         """
-        Create a client session for transaction and causal consistency support.
+        Async context manager for Motor database sessions.
         
-        Provides async session management with automatic cleanup and
-        comprehensive configuration options. Enables multi-document
-        transactions and causal consistency patterns.
+        Provides proper session lifecycle management with automatic
+        resource cleanup and error handling.
         
-        Args:
-            causal_consistency: Enable causal consistency for session
-            default_transaction_options: Default options for transactions
-            
         Yields:
-            AsyncIOMotorClientSession: Configured client session
+            AsyncIOMotorClientSession: Motor async session instance
             
         Raises:
-            DatabaseConnectionError: On session creation failure
+            ConnectionException: If session creation fails
         """
         session = None
+        session_id = str(uuid.uuid4())
+        
         try:
-            # Configure session options
-            session_options = {
-                'causal_consistency': causal_consistency
-            }
-            if default_transaction_options:
-                session_options['default_transaction_options'] = default_transaction_options
-            
-            # Create async client session
-            session = await self.client.start_session(**session_options)
+            session = await self.client.start_session()
+            self._active_sessions.add(session)
             
             logger.debug(
-                f"Started client session for {self.database_name}",
-                database_name=self.database_name,
-                causal_consistency=causal_consistency,
-                session_id=str(session.session_id) if session else None
+                "Motor async session created",
+                session_id=session_id,
+                database=self.database_name
             )
             
             yield session
             
         except Exception as e:
             logger.error(
-                f"Failed to create client session for {self.database_name}: {str(e)}",
-                database_name=self.database_name,
-                error=str(e)
+                "Motor async session error",
+                session_id=session_id,
+                error=str(e),
+                error_type=type(e).__name__
             )
-            raise DatabaseConnectionError(
-                f"Failed to create client session: {str(e)}",
-                operation='start_session',
+            raise ConnectionException(
+                f"Motor async session error: {str(e)}",
                 database=self.database_name,
                 original_error=e
             )
@@ -1346,543 +369,1381 @@ class MotorAsyncDatabase:
             if session:
                 try:
                     await session.end_session()
+                    self._active_sessions.discard(session)
+                    
                     logger.debug(
-                        f"Ended client session for {self.database_name}",
-                        database_name=self.database_name,
-                        session_id=str(session.session_id)
+                        "Motor async session closed",
+                        session_id=session_id
                     )
                 except Exception as e:
                     logger.warning(
-                        f"Error ending session for {self.database_name}: {str(e)}",
-                        database_name=self.database_name,
+                        "Error closing Motor async session",
+                        session_id=session_id,
                         error=str(e)
                     )
     
     @asynccontextmanager
-    async def start_transaction(
-        self,
-        session: Optional[AsyncIOMotorClientSession] = None,
-        read_concern: Optional[ReadConcern] = None,
-        write_concern: Optional[WriteConcern] = None,
-        read_preference: Optional[ReadPreference] = None,
-        max_commit_time_ms: Optional[int] = None
-    ) -> AsyncIterator[AsyncIOMotorClientSession]:
+    async def async_transaction(self, session: Optional[AsyncIOMotorClientSession] = None) -> AsyncGenerator[AsyncIOMotorClientSession, None]:
         """
-        Start a multi-document transaction with comprehensive options.
+        Async context manager for Motor database transactions.
         
-        Provides async transaction management with automatic commit/rollback,
-        monitoring integration, and comprehensive configuration options.
-        Implements ACID compliance for multi-document operations.
+        Provides ACID transaction support with automatic commit/rollback
+        and comprehensive error handling for data consistency.
         
         Args:
-            session: Existing session or create new one
-            read_concern: Read concern for transaction
-            write_concern: Write concern for transaction
-            read_preference: Read preference for transaction
-            max_commit_time_ms: Maximum commit time in milliseconds
+            session: Optional existing session (creates new if None)
             
         Yields:
-            AsyncIOMotorClientSession: Session with active transaction
+            AsyncIOMotorClientSession: Transaction session instance
             
         Raises:
-            DatabaseTransactionError: On transaction failure
-            DatabaseConnectionError: On connection failure
+            TransactionException: If transaction fails or cannot be created
         """
-        transaction_session = session
-        session_created = False
+        transaction_id = str(uuid.uuid4())
+        start_time = time.perf_counter()
+        status = 'committed'
+        own_session = session is None
         
-        # Monitor transaction performance if monitoring available
-        if self._metrics:
-            transaction_monitor = monitor_transaction(self._metrics, self.database_name)
+        if own_session:
+            async with self.async_session() as new_session:
+                yield from self._execute_async_transaction(new_session, transaction_id, start_time)
         else:
-            # Create a no-op context manager if monitoring unavailable
-            @asynccontextmanager
-            async def no_op_monitor():
-                yield
-            transaction_monitor = no_op_monitor()
+            yield from self._execute_async_transaction(session, transaction_id, start_time)
+    
+    async def _execute_async_transaction(self, session: AsyncIOMotorClientSession, 
+                                       transaction_id: str, start_time: float) -> AsyncGenerator[AsyncIOMotorClientSession, None]:
+        """Execute async transaction with proper error handling."""
+        status = 'committed'
         
-        async with transaction_monitor:
-            try:
-                # Create session if not provided
-                if transaction_session is None:
-                    async with self.start_session() as new_session:
-                        transaction_session = new_session
-                        session_created = True
-                
-                # Configure transaction options
-                transaction_options = {}
-                if read_concern:
-                    transaction_options['read_concern'] = read_concern
-                if write_concern:
-                    transaction_options['write_concern'] = write_concern
-                if read_preference:
-                    transaction_options['read_preference'] = read_preference
-                if max_commit_time_ms:
-                    transaction_options['max_commit_time_ms'] = max_commit_time_ms
-                
-                # Start async transaction
-                async with transaction_session.start_transaction(**transaction_options):
-                    logger.debug(
-                        f"Started transaction for {self.database_name}",
-                        database_name=self.database_name,
-                        session_id=str(transaction_session.session_id),
-                        transaction_options=transaction_options
-                    )
-                    
-                    yield transaction_session
-                    
-                    logger.debug(
-                        f"Transaction committed successfully for {self.database_name}",
-                        database_name=self.database_name,
-                        session_id=str(transaction_session.session_id)
-                    )
-                
-            except Exception as e:
-                logger.error(
-                    f"Transaction failed for {self.database_name}: {str(e)}",
-                    database_name=self.database_name,
-                    session_id=str(transaction_session.session_id) if transaction_session else None,
-                    error=str(e)
+        try:
+            # Start transaction
+            async with session.start_transaction():
+                logger.debug(
+                    "Motor async transaction started",
+                    transaction_id=transaction_id,
+                    database=self.database_name
                 )
                 
-                raise DatabaseTransactionError(
-                    f"Transaction failed: {str(e)}",
-                    operation='transaction',
+                # Update concurrent operations metric
+                async_concurrent_operations.labels(
                     database=self.database_name,
-                    transaction_id=str(transaction_session.session_id) if transaction_session else None,
-                    original_error=e
+                    operation_type='transaction'
+                ).inc()
+                
+                yield session
+                
+                logger.debug(
+                    "Motor async transaction committed",
+                    transaction_id=transaction_id,
+                    database=self.database_name
                 )
-    
-    async def create_index(
-        self,
-        collection_name: str,
-        keys: Union[str, List[Tuple[str, int]]],
-        name: Optional[str] = None,
-        unique: bool = False,
-        background: bool = True,
-        sparse: bool = False,
-        expire_after_seconds: Optional[int] = None,
-        partial_filter_expression: Optional[Dict[str, Any]] = None,
-        session: Optional[AsyncIOMotorClientSession] = None
-    ) -> str:
-        """
-        Create an index on the collection.
+            
+        except Exception as e:
+            status = 'rolled_back'
+            
+            logger.error(
+                "Motor async transaction failed",
+                transaction_id=transaction_id,
+                database=self.database_name,
+                error=str(e),
+                error_type=type(e).__name__
+            )
+            
+            raise TransactionException(
+                f"Motor async transaction failed: {str(e)}",
+                transaction_id=transaction_id,
+                database=self.database_name,
+                original_error=e
+            )
         
-        Provides async index creation with comprehensive options
-        for performance optimization and constraint enforcement.
-        
-        Args:
-            collection_name: Name of the MongoDB collection
-            keys: Index specification (field name or list of (field, direction) tuples)
-            name: Index name (generated if not provided)
-            unique: Create unique index
-            background: Create index in background
-            sparse: Create sparse index
-            expire_after_seconds: TTL for documents (TTL index)
-            partial_filter_expression: Partial index filter
-            session: Client session for transaction context
+        finally:
+            # Record transaction metrics
+            duration = time.perf_counter() - start_time
             
-        Returns:
-            Name of the created index
+            async_transaction_duration_seconds.labels(
+                database=self.database_name,
+                status=status
+            ).observe(duration)
             
-        Raises:
-            DatabaseQueryError: On index creation failure
-            DatabaseConnectionError: On connection failure
-        """
-        try:
-            collection = await self.get_collection(collection_name)
-            
-            # Build index options
-            index_options = {
-                'background': background,
-                'unique': unique,
-                'sparse': sparse
-            }
-            if name:
-                index_options['name'] = name
-            if expire_after_seconds is not None:
-                index_options['expireAfterSeconds'] = expire_after_seconds
-            if partial_filter_expression:
-                index_options['partialFilterExpression'] = partial_filter_expression
-            if session:
-                index_options['session'] = session
-            
-            # Create async index
-            index_name = await collection.create_index(keys, **index_options)
+            # Update concurrent operations metric
+            async_concurrent_operations.labels(
+                database=self.database_name,
+                operation_type='transaction'
+            ).dec()
             
             logger.info(
-                f"Created index '{index_name}' on {collection_name}",
-                collection_name=collection_name,
-                index_name=index_name,
-                keys=keys,
-                unique=unique,
-                background=background
-            )
-            
-            return index_name
-            
-        except (ConnectionFailure, ServerSelectionTimeoutError, NetworkTimeout, AutoReconnect) as e:
-            raise DatabaseConnectionError(
-                f"Connection failed during index creation on {collection_name}: {str(e)}",
-                operation='create_index',
+                "Motor async transaction completed",
+                transaction_id=transaction_id,
                 database=self.database_name,
-                collection=collection_name,
-                original_error=e
+                duration_ms=duration * 1000,
+                status=status
             )
-        except Exception as e:
-            raise DatabaseQueryError(
-                f"Index creation failed on {collection_name}: {str(e)}",
-                operation='create_index',
-                database=self.database_name,
-                collection=collection_name,
-                original_error=e
-            )
+
+
+class MotorAsyncCRUD:
+    """
+    Motor 3.3+ async CRUD operations implementing high-performance
+    database operations with comprehensive error handling and monitoring.
     
-    async def drop_index(
-        self,
-        collection_name: str,
-        index: Union[str, List[Tuple[str, int]]],
-        session: Optional[AsyncIOMotorClientSession] = None
-    ) -> None:
+    This class provides enterprise-grade async CRUD operations including:
+    - Async create, read, update, delete operations with optimized performance
+    - Bulk operation support for high-throughput data processing
+    - Query pattern preservation maintaining PyMongo compatibility
+    - Transaction-aware operations with proper context handling
+    - Performance monitoring with real-time metrics collection
+    - Circuit breaker integration for operation resilience
+    
+    Features:
+    - High-performance async operations with connection pooling optimization
+    - Comprehensive error handling with recovery strategies
+    - Prometheus metrics integration for operation monitoring
+    - Query result caching for performance optimization
+    - Async aggregation pipeline support for complex queries
+    """
+    
+    def __init__(self, manager: MotorAsyncManager):
         """
-        Drop an index from the collection.
+        Initialize Motor async CRUD operations.
+        
+        Args:
+            manager: Motor async database manager instance
+        """
+        self.manager = manager
+        self.logger = logger.bind(component="motor_crud")
+    
+    @monitor_async_database_operation('default', 'collection', 'insert_one')
+    async def insert_one(self, collection_name: str, document: Dict[str, Any],
+                         session: Optional[AsyncIOMotorClientSession] = None,
+                         **kwargs) -> str:
+        """
+        Insert a single document asynchronously.
         
         Args:
             collection_name: Name of the MongoDB collection
-            index: Index name or specification to drop
-            session: Client session for transaction context
+            document: Document to insert
+            session: Optional async session for transaction support
+            **kwargs: Additional PyMongo insert options
+            
+        Returns:
+            str: Inserted document ObjectId as string
             
         Raises:
-            DatabaseQueryError: On index drop failure
-            DatabaseConnectionError: On connection failure
+            QueryException: If insert operation fails
         """
+        start_time = time.perf_counter()
+        status = 'success'
+        
         try:
-            collection = await self.get_collection(collection_name)
+            collection = self.manager.get_collection(collection_name)
             
-            drop_options = {}
+            # Ensure _id field handling
+            if '_id' not in document:
+                document['_id'] = ObjectId()
+            
+            # Insert document with session support
             if session:
-                drop_options['session'] = session
+                result = await collection.insert_one(document, session=session, **kwargs)
+            else:
+                result = await collection.insert_one(document, **kwargs)
             
-            await collection.drop_index(index, **drop_options)
-            
-            logger.info(
-                f"Dropped index '{index}' from {collection_name}",
-                collection_name=collection_name,
-                index=str(index)
+            # Record performance metrics
+            duration = time.perf_counter() - start_time
+            await self._record_operation_metrics(
+                collection_name, 'insert_one', duration, status
             )
             
-        except (ConnectionFailure, ServerSelectionTimeoutError, NetworkTimeout, AutoReconnect) as e:
-            raise DatabaseConnectionError(
-                f"Connection failed during index drop on {collection_name}: {str(e)}",
-                operation='drop_index',
-                database=self.database_name,
+            self.logger.info(
+                "Motor async insert_one completed",
                 collection=collection_name,
-                original_error=e
+                document_id=str(result.inserted_id),
+                duration_ms=duration * 1000
             )
+            
+            return str(result.inserted_id)
+            
         except Exception as e:
-            raise DatabaseQueryError(
-                f"Index drop failed on {collection_name}: {str(e)}",
-                operation='drop_index',
-                database=self.database_name,
-                collection=collection_name,
-                original_error=e
+            status = 'error'
+            duration = time.perf_counter() - start_time
+            await self._record_operation_metrics(
+                collection_name, 'insert_one', duration, status
             )
+            
+            error = handle_database_error(
+                e, 
+                operation=DatabaseOperationType.WRITE,
+                database=self.manager.database_name,
+                collection=collection_name
+            )
+            raise error
     
-    async def list_indexes(
-        self,
-        collection_name: str,
-        session: Optional[AsyncIOMotorClientSession] = None
-    ) -> List[Dict[str, Any]]:
+    @monitor_async_database_operation('default', 'collection', 'insert_many')
+    async def insert_many(self, collection_name: str, documents: List[Dict[str, Any]],
+                          session: Optional[AsyncIOMotorClientSession] = None,
+                          ordered: bool = True, **kwargs) -> List[str]:
         """
-        List all indexes for the collection.
+        Insert multiple documents asynchronously with bulk optimization.
         
         Args:
             collection_name: Name of the MongoDB collection
-            session: Client session for transaction context
+            documents: List of documents to insert
+            session: Optional async session for transaction support
+            ordered: Whether to maintain insertion order
+            **kwargs: Additional PyMongo insert options
             
         Returns:
-            List of index specifications
+            List[str]: List of inserted document ObjectIds as strings
             
         Raises:
-            DatabaseQueryError: On index listing failure
-            DatabaseConnectionError: On connection failure
+            QueryException: If bulk insert operation fails
         """
-        try:
-            collection = await self.get_collection(collection_name)
-            
-            list_options = {}
-            if session:
-                list_options['session'] = session
-            
-            indexes = await collection.list_indexes(**list_options).to_list(length=None)
-            
-            logger.debug(
-                f"Listed {len(indexes)} indexes for {collection_name}",
-                collection_name=collection_name,
-                index_count=len(indexes)
-            )
-            
-            return indexes
-            
-        except (ConnectionFailure, ServerSelectionTimeoutError, NetworkTimeout, AutoReconnect) as e:
-            raise DatabaseConnectionError(
-                f"Connection failed during index listing on {collection_name}: {str(e)}",
-                operation='list_indexes',
-                database=self.database_name,
-                collection=collection_name,
-                original_error=e
-            )
-        except Exception as e:
-            raise DatabaseQueryError(
-                f"Index listing failed on {collection_name}: {str(e)}",
-                operation='list_indexes',
-                database=self.database_name,
-                collection=collection_name,
-                original_error=e
-            )
-    
-    async def get_connection_pool_stats(self) -> Dict[str, Any]:
-        """
-        Get connection pool statistics for monitoring.
+        start_time = time.perf_counter()
+        status = 'success'
         
-        Returns:
-            Dict containing connection pool statistics
-        """
         try:
-            # Get pool information from client
-            pool_info = {}
+            if not documents:
+                return []
             
-            if hasattr(self.client, 'nodes'):
-                for address, server in self.client.nodes.items():
-                    if hasattr(server, 'pool'):
-                        pool = server.pool
-                        pool_stats = {
-                            'address': str(address),
-                            'pool_size': getattr(pool, 'max_pool_size', 0),
-                            'checked_out': getattr(pool, 'checked_out_count', 0),
-                            'available': getattr(pool, 'available_count', 0),
-                            'created': getattr(pool, 'total_created', 0)
-                        }
-                        pool_info[str(address)] = pool_stats
-                        
-                        # Update Motor connection pool metrics if monitoring available
-                        if self._motor_integration:
-                            self._motor_integration.monitor_connection_pool(pool_stats, str(address))
+            collection = self.manager.get_collection(collection_name)
             
-            logger.debug(
-                f"Retrieved connection pool stats for {self.database_name}",
-                database_name=self.database_name,
-                pool_count=len(pool_info)
+            # Ensure _id fields for all documents
+            for doc in documents:
+                if '_id' not in doc:
+                    doc['_id'] = ObjectId()
+            
+            # Bulk insert with session support
+            if session:
+                result = await collection.insert_many(
+                    documents, session=session, ordered=ordered, **kwargs
+                )
+            else:
+                result = await collection.insert_many(
+                    documents, ordered=ordered, **kwargs
+                )
+            
+            # Record performance metrics
+            duration = time.perf_counter() - start_time
+            await self._record_operation_metrics(
+                collection_name, 'insert_many', duration, status,
+                additional_labels={'document_count': len(documents)}
             )
             
-            return pool_info
+            inserted_ids = [str(oid) for oid in result.inserted_ids]
+            
+            self.logger.info(
+                "Motor async insert_many completed",
+                collection=collection_name,
+                document_count=len(documents),
+                duration_ms=duration * 1000
+            )
+            
+            return inserted_ids
             
         except Exception as e:
-            logger.warning(
-                f"Failed to retrieve connection pool stats for {self.database_name}: {str(e)}",
-                database_name=self.database_name,
-                error=str(e)
+            status = 'error'
+            duration = time.perf_counter() - start_time
+            await self._record_operation_metrics(
+                collection_name, 'insert_many', duration, status
             )
-            return {}
+            
+            error = handle_database_error(
+                e,
+                operation=DatabaseOperationType.WRITE,
+                database=self.manager.database_name,
+                collection=collection_name
+            )
+            raise error
     
-    async def ping(self, timeout: float = 5.0) -> Dict[str, Any]:
+    @monitor_async_database_operation('default', 'collection', 'find_one')
+    async def find_one(self, collection_name: str, filter_dict: Optional[Dict[str, Any]] = None,
+                       projection: Optional[Dict[str, Any]] = None,
+                       session: Optional[AsyncIOMotorClientSession] = None,
+                       **kwargs) -> Optional[Dict[str, Any]]:
         """
-        Test database connectivity and performance.
+        Find a single document asynchronously.
         
         Args:
-            timeout: Connection timeout in seconds
+            collection_name: Name of the MongoDB collection
+            filter_dict: Query filter (None for first document)
+            projection: Fields to include/exclude
+            session: Optional async session for transaction support
+            **kwargs: Additional PyMongo find options
             
         Returns:
-            Dict containing ping result and performance metrics
+            Optional[Dict[str, Any]]: Found document or None
             
         Raises:
-            DatabaseConnectionError: On connection failure
+            QueryException: If find operation fails
         """
+        start_time = time.perf_counter()
+        status = 'success'
+        
         try:
-            start_time = time.perf_counter()
+            collection = self.manager.get_collection(collection_name)
             
-            # Execute ping command with timeout
-            await self.database.command('ping', maxTimeMS=int(timeout * 1000))
+            # Execute find_one with session support
+            if session:
+                result = await collection.find_one(
+                    filter_dict, projection, session=session, **kwargs
+                )
+            else:
+                result = await collection.find_one(filter_dict, projection, **kwargs)
             
-            end_time = time.perf_counter()
-            response_time_ms = (end_time - start_time) * 1000
+            # Record performance metrics
+            duration = time.perf_counter() - start_time
+            await self._record_operation_metrics(
+                collection_name, 'find_one', duration, status
+            )
             
-            result = {
-                'status': 'ok',
-                'response_time_ms': response_time_ms,
-                'database': self.database_name,
-                'timestamp': time.time()
-            }
-            
-            logger.debug(
-                f"Database ping successful for {self.database_name}",
-                database_name=self.database_name,
-                response_time_ms=response_time_ms
+            self.logger.debug(
+                "Motor async find_one completed",
+                collection=collection_name,
+                filter=str(filter_dict) if filter_dict else 'none',
+                found=result is not None,
+                duration_ms=duration * 1000
             )
             
             return result
             
         except Exception as e:
-            logger.error(
-                f"Database ping failed for {self.database_name}: {str(e)}",
-                database_name=self.database_name,
-                error=str(e)
+            status = 'error'
+            duration = time.perf_counter() - start_time
+            await self._record_operation_metrics(
+                collection_name, 'find_one', duration, status
             )
             
-            raise DatabaseConnectionError(
-                f"Database ping failed: {str(e)}",
-                operation='ping',
-                database=self.database_name,
-                original_error=e
+            error = handle_database_error(
+                e,
+                operation=DatabaseOperationType.READ,
+                database=self.manager.database_name,
+                collection=collection_name
+            )
+            raise error
+    
+    @monitor_async_database_operation('default', 'collection', 'find')
+    async def find(self, collection_name: str, filter_dict: Optional[Dict[str, Any]] = None,
+                   projection: Optional[Dict[str, Any]] = None,
+                   sort: Optional[List[Tuple[str, int]]] = None,
+                   limit: Optional[int] = None, skip: Optional[int] = None,
+                   session: Optional[AsyncIOMotorClientSession] = None,
+                   **kwargs) -> List[Dict[str, Any]]:
+        """
+        Find multiple documents asynchronously with cursor optimization.
+        
+        Args:
+            collection_name: Name of the MongoDB collection
+            filter_dict: Query filter (None for all documents)
+            projection: Fields to include/exclude
+            sort: Sort specification
+            limit: Maximum number of documents to return
+            skip: Number of documents to skip
+            session: Optional async session for transaction support
+            **kwargs: Additional PyMongo find options
+            
+        Returns:
+            List[Dict[str, Any]]: List of found documents
+            
+        Raises:
+            QueryException: If find operation fails
+        """
+        start_time = time.perf_counter()
+        status = 'success'
+        
+        try:
+            collection = self.manager.get_collection(collection_name)
+            
+            # Build cursor with session support
+            if session:
+                cursor = collection.find(
+                    filter_dict, projection, session=session, **kwargs
+                )
+            else:
+                cursor = collection.find(filter_dict, projection, **kwargs)
+            
+            # Apply cursor modifiers
+            if sort:
+                cursor = cursor.sort(sort)
+            if skip:
+                cursor = cursor.skip(skip)
+            if limit:
+                cursor = cursor.limit(limit)
+            
+            # Execute query and collect results
+            results = await cursor.to_list(length=limit)
+            
+            # Record performance metrics
+            duration = time.perf_counter() - start_time
+            await self._record_operation_metrics(
+                collection_name, 'find', duration, status,
+                additional_labels={'result_count': len(results)}
+            )
+            
+            self.logger.debug(
+                "Motor async find completed",
+                collection=collection_name,
+                filter=str(filter_dict) if filter_dict else 'none',
+                result_count=len(results),
+                duration_ms=duration * 1000
+            )
+            
+            return results
+            
+        except Exception as e:
+            status = 'error'
+            duration = time.perf_counter() - start_time
+            await self._record_operation_metrics(
+                collection_name, 'find', duration, status
+            )
+            
+            error = handle_database_error(
+                e,
+                operation=DatabaseOperationType.READ,
+                database=self.manager.database_name,
+                collection=collection_name
+            )
+            raise error
+    
+    @monitor_async_database_operation('default', 'collection', 'update_one')
+    async def update_one(self, collection_name: str, filter_dict: Dict[str, Any],
+                         update_doc: Dict[str, Any], upsert: bool = False,
+                         session: Optional[AsyncIOMotorClientSession] = None,
+                         **kwargs) -> Dict[str, Any]:
+        """
+        Update a single document asynchronously.
+        
+        Args:
+            collection_name: Name of the MongoDB collection
+            filter_dict: Query filter for document selection
+            update_doc: Update operation specification
+            upsert: Whether to insert if document not found
+            session: Optional async session for transaction support
+            **kwargs: Additional PyMongo update options
+            
+        Returns:
+            Dict[str, Any]: Update result information
+            
+        Raises:
+            QueryException: If update operation fails
+        """
+        start_time = time.perf_counter()
+        status = 'success'
+        
+        try:
+            collection = self.manager.get_collection(collection_name)
+            
+            # Execute update_one with session support
+            if session:
+                result = await collection.update_one(
+                    filter_dict, update_doc, upsert=upsert, session=session, **kwargs
+                )
+            else:
+                result = await collection.update_one(
+                    filter_dict, update_doc, upsert=upsert, **kwargs
+                )
+            
+            # Record performance metrics
+            duration = time.perf_counter() - start_time
+            await self._record_operation_metrics(
+                collection_name, 'update_one', duration, status
+            )
+            
+            result_info = {
+                'matched_count': result.matched_count,
+                'modified_count': result.modified_count,
+                'upserted_id': str(result.upserted_id) if result.upserted_id else None
+            }
+            
+            self.logger.info(
+                "Motor async update_one completed",
+                collection=collection_name,
+                matched_count=result.matched_count,
+                modified_count=result.modified_count,
+                upserted=result.upserted_id is not None,
+                duration_ms=duration * 1000
+            )
+            
+            return result_info
+            
+        except Exception as e:
+            status = 'error'
+            duration = time.perf_counter() - start_time
+            await self._record_operation_metrics(
+                collection_name, 'update_one', duration, status
+            )
+            
+            error = handle_database_error(
+                e,
+                operation=DatabaseOperationType.WRITE,
+                database=self.manager.database_name,
+                collection=collection_name
+            )
+            raise error
+    
+    @monitor_async_database_operation('default', 'collection', 'update_many')
+    async def update_many(self, collection_name: str, filter_dict: Dict[str, Any],
+                          update_doc: Dict[str, Any], upsert: bool = False,
+                          session: Optional[AsyncIOMotorClientSession] = None,
+                          **kwargs) -> Dict[str, Any]:
+        """
+        Update multiple documents asynchronously.
+        
+        Args:
+            collection_name: Name of the MongoDB collection
+            filter_dict: Query filter for document selection
+            update_doc: Update operation specification
+            upsert: Whether to insert if no documents match
+            session: Optional async session for transaction support
+            **kwargs: Additional PyMongo update options
+            
+        Returns:
+            Dict[str, Any]: Update result information
+            
+        Raises:
+            QueryException: If update operation fails
+        """
+        start_time = time.perf_counter()
+        status = 'success'
+        
+        try:
+            collection = self.manager.get_collection(collection_name)
+            
+            # Execute update_many with session support
+            if session:
+                result = await collection.update_many(
+                    filter_dict, update_doc, upsert=upsert, session=session, **kwargs
+                )
+            else:
+                result = await collection.update_many(
+                    filter_dict, update_doc, upsert=upsert, **kwargs
+                )
+            
+            # Record performance metrics
+            duration = time.perf_counter() - start_time
+            await self._record_operation_metrics(
+                collection_name, 'update_many', duration, status,
+                additional_labels={'modified_count': result.modified_count}
+            )
+            
+            result_info = {
+                'matched_count': result.matched_count,
+                'modified_count': result.modified_count,
+                'upserted_id': str(result.upserted_id) if result.upserted_id else None
+            }
+            
+            self.logger.info(
+                "Motor async update_many completed",
+                collection=collection_name,
+                matched_count=result.matched_count,
+                modified_count=result.modified_count,
+                upserted=result.upserted_id is not None,
+                duration_ms=duration * 1000
+            )
+            
+            return result_info
+            
+        except Exception as e:
+            status = 'error'
+            duration = time.perf_counter() - start_time
+            await self._record_operation_metrics(
+                collection_name, 'update_many', duration, status
+            )
+            
+            error = handle_database_error(
+                e,
+                operation=DatabaseOperationType.WRITE,
+                database=self.manager.database_name,
+                collection=collection_name
+            )
+            raise error
+    
+    @monitor_async_database_operation('default', 'collection', 'delete_one')
+    async def delete_one(self, collection_name: str, filter_dict: Dict[str, Any],
+                         session: Optional[AsyncIOMotorClientSession] = None,
+                         **kwargs) -> Dict[str, Any]:
+        """
+        Delete a single document asynchronously.
+        
+        Args:
+            collection_name: Name of the MongoDB collection
+            filter_dict: Query filter for document selection
+            session: Optional async session for transaction support
+            **kwargs: Additional PyMongo delete options
+            
+        Returns:
+            Dict[str, Any]: Delete result information
+            
+        Raises:
+            QueryException: If delete operation fails
+        """
+        start_time = time.perf_counter()
+        status = 'success'
+        
+        try:
+            collection = self.manager.get_collection(collection_name)
+            
+            # Execute delete_one with session support
+            if session:
+                result = await collection.delete_one(filter_dict, session=session, **kwargs)
+            else:
+                result = await collection.delete_one(filter_dict, **kwargs)
+            
+            # Record performance metrics
+            duration = time.perf_counter() - start_time
+            await self._record_operation_metrics(
+                collection_name, 'delete_one', duration, status
+            )
+            
+            result_info = {
+                'deleted_count': result.deleted_count
+            }
+            
+            self.logger.info(
+                "Motor async delete_one completed",
+                collection=collection_name,
+                deleted_count=result.deleted_count,
+                duration_ms=duration * 1000
+            )
+            
+            return result_info
+            
+        except Exception as e:
+            status = 'error'
+            duration = time.perf_counter() - start_time
+            await self._record_operation_metrics(
+                collection_name, 'delete_one', duration, status
+            )
+            
+            error = handle_database_error(
+                e,
+                operation=DatabaseOperationType.WRITE,
+                database=self.manager.database_name,
+                collection=collection_name
+            )
+            raise error
+    
+    @monitor_async_database_operation('default', 'collection', 'delete_many')
+    async def delete_many(self, collection_name: str, filter_dict: Dict[str, Any],
+                          session: Optional[AsyncIOMotorClientSession] = None,
+                          **kwargs) -> Dict[str, Any]:
+        """
+        Delete multiple documents asynchronously.
+        
+        Args:
+            collection_name: Name of the MongoDB collection
+            filter_dict: Query filter for document selection
+            session: Optional async session for transaction support
+            **kwargs: Additional PyMongo delete options
+            
+        Returns:
+            Dict[str, Any]: Delete result information
+            
+        Raises:
+            QueryException: If delete operation fails
+        """
+        start_time = time.perf_counter()
+        status = 'success'
+        
+        try:
+            collection = self.manager.get_collection(collection_name)
+            
+            # Execute delete_many with session support
+            if session:
+                result = await collection.delete_many(filter_dict, session=session, **kwargs)
+            else:
+                result = await collection.delete_many(filter_dict, **kwargs)
+            
+            # Record performance metrics
+            duration = time.perf_counter() - start_time
+            await self._record_operation_metrics(
+                collection_name, 'delete_many', duration, status,
+                additional_labels={'deleted_count': result.deleted_count}
+            )
+            
+            result_info = {
+                'deleted_count': result.deleted_count
+            }
+            
+            self.logger.info(
+                "Motor async delete_many completed",
+                collection=collection_name,
+                deleted_count=result.deleted_count,
+                duration_ms=duration * 1000
+            )
+            
+            return result_info
+            
+        except Exception as e:
+            status = 'error'
+            duration = time.perf_counter() - start_time
+            await self._record_operation_metrics(
+                collection_name, 'delete_many', duration, status
+            )
+            
+            error = handle_database_error(
+                e,
+                operation=DatabaseOperationType.WRITE,
+                database=self.manager.database_name,
+                collection=collection_name
+            )
+            raise error
+    
+    @monitor_async_database_operation('default', 'collection', 'count_documents')
+    async def count_documents(self, collection_name: str, 
+                             filter_dict: Optional[Dict[str, Any]] = None,
+                             session: Optional[AsyncIOMotorClientSession] = None,
+                             **kwargs) -> int:
+        """
+        Count documents asynchronously.
+        
+        Args:
+            collection_name: Name of the MongoDB collection
+            filter_dict: Query filter (None for all documents)
+            session: Optional async session for transaction support
+            **kwargs: Additional PyMongo count options
+            
+        Returns:
+            int: Number of documents matching the filter
+            
+        Raises:
+            QueryException: If count operation fails
+        """
+        start_time = time.perf_counter()
+        status = 'success'
+        
+        try:
+            collection = self.manager.get_collection(collection_name)
+            
+            # Use empty filter if None provided
+            if filter_dict is None:
+                filter_dict = {}
+            
+            # Execute count_documents with session support
+            if session:
+                count = await collection.count_documents(filter_dict, session=session, **kwargs)
+            else:
+                count = await collection.count_documents(filter_dict, **kwargs)
+            
+            # Record performance metrics
+            duration = time.perf_counter() - start_time
+            await self._record_operation_metrics(
+                collection_name, 'count_documents', duration, status
+            )
+            
+            self.logger.debug(
+                "Motor async count_documents completed",
+                collection=collection_name,
+                filter=str(filter_dict),
+                count=count,
+                duration_ms=duration * 1000
+            )
+            
+            return count
+            
+        except Exception as e:
+            status = 'error'
+            duration = time.perf_counter() - start_time
+            await self._record_operation_metrics(
+                collection_name, 'count_documents', duration, status
+            )
+            
+            error = handle_database_error(
+                e,
+                operation=DatabaseOperationType.READ,
+                database=self.manager.database_name,
+                collection=collection_name
+            )
+            raise error
+    
+    @monitor_async_database_operation('default', 'collection', 'aggregate')
+    async def aggregate(self, collection_name: str, pipeline: List[Dict[str, Any]],
+                        session: Optional[AsyncIOMotorClientSession] = None,
+                        **kwargs) -> List[Dict[str, Any]]:
+        """
+        Execute aggregation pipeline asynchronously.
+        
+        Args:
+            collection_name: Name of the MongoDB collection
+            pipeline: Aggregation pipeline stages
+            session: Optional async session for transaction support
+            **kwargs: Additional PyMongo aggregation options
+            
+        Returns:
+            List[Dict[str, Any]]: Aggregation results
+            
+        Raises:
+            QueryException: If aggregation operation fails
+        """
+        start_time = time.perf_counter()
+        status = 'success'
+        
+        try:
+            collection = self.manager.get_collection(collection_name)
+            
+            # Execute aggregation with session support
+            if session:
+                cursor = collection.aggregate(pipeline, session=session, **kwargs)
+            else:
+                cursor = collection.aggregate(pipeline, **kwargs)
+            
+            # Collect results
+            results = await cursor.to_list(length=None)
+            
+            # Record performance metrics
+            duration = time.perf_counter() - start_time
+            await self._record_operation_metrics(
+                collection_name, 'aggregate', duration, status,
+                additional_labels={'result_count': len(results), 'pipeline_stages': len(pipeline)}
+            )
+            
+            self.logger.info(
+                "Motor async aggregate completed",
+                collection=collection_name,
+                pipeline_stages=len(pipeline),
+                result_count=len(results),
+                duration_ms=duration * 1000
+            )
+            
+            return results
+            
+        except Exception as e:
+            status = 'error'
+            duration = time.perf_counter() - start_time
+            await self._record_operation_metrics(
+                collection_name, 'aggregate', duration, status
+            )
+            
+            error = handle_database_error(
+                e,
+                operation=DatabaseOperationType.AGGREGATION,
+                database=self.manager.database_name,
+                collection=collection_name
+            )
+            raise error
+    
+    async def _record_operation_metrics(self, collection_name: str, operation: str,
+                                       duration: float, status: str,
+                                       additional_labels: Optional[Dict] = None):
+        """Record async operation metrics for monitoring."""
+        try:
+            # Record operation count
+            async_operations_total.labels(
+                database=self.manager.database_name,
+                collection=collection_name,
+                operation=operation,
+                status=status
+            ).inc()
+            
+            # Record operation duration
+            async_operation_duration_seconds.labels(
+                database=self.manager.database_name,
+                collection=collection_name,
+                operation=operation
+            ).observe(duration)
+            
+            # Store performance history for analysis
+            if self.manager.monitoring_enabled:
+                self.manager._performance_history[f"{collection_name}.{operation}"].append({
+                    'timestamp': time.time(),
+                    'duration': duration,
+                    'status': status,
+                    'additional_labels': additional_labels or {}
+                })
+                
+                # Limit history size
+                if len(self.manager._performance_history[f"{collection_name}.{operation}"]) > 1000:
+                    self.manager._performance_history[f"{collection_name}.{operation}"].pop(0)
+        
+        except Exception as e:
+            # Don't let metrics recording failures affect operations
+            self.logger.warning(
+                "Failed to record async operation metrics",
+                error=str(e),
+                collection=collection_name,
+                operation=operation
             )
 
 
-# Convenience functions for global Motor client management
-_motor_client: Optional[AsyncIOMotorClient] = None
-_motor_databases: Dict[str, MotorAsyncDatabase] = {}
-
-
-async def initialize_motor_client(
-    connection_string: str,
-    max_pool_size: int = 50,
-    min_pool_size: int = 5,
-    max_idle_time_ms: int = 30000,
-    wait_queue_timeout_ms: int = 30000,
-    server_selection_timeout_ms: int = 30000,
-    socket_timeout_ms: int = 20000,
-    connect_timeout_ms: int = 20000,
-    heartbeat_frequency_ms: int = 10000,
-    **kwargs
-) -> AsyncIOMotorClient:
+class MotorAsyncBulkOperations:
     """
-    Initialize global Motor async client with optimized connection pool settings.
+    Motor 3.3+ async bulk operations for high-throughput data processing.
     
-    Configures Motor client with performance-optimized connection pool settings
-    and comprehensive monitoring integration for enterprise-grade deployments.
+    This class provides optimized bulk operations including:
+    - Async bulk write operations with ordered/unordered execution
+    - Batch processing with configurable batch sizes
+    - Error handling for partial bulk operation failures
+    - Performance optimization for large-scale data operations
+    """
+    
+    def __init__(self, manager: MotorAsyncManager):
+        """
+        Initialize Motor async bulk operations.
+        
+        Args:
+            manager: Motor async database manager instance
+        """
+        self.manager = manager
+        self.logger = logger.bind(component="motor_bulk")
+    
+    @monitor_async_database_operation('default', 'collection', 'bulk_write')
+    async def bulk_write(self, collection_name: str, operations: List[Dict[str, Any]],
+                         ordered: bool = True, 
+                         session: Optional[AsyncIOMotorClientSession] = None,
+                         **kwargs) -> Dict[str, Any]:
+        """
+        Execute bulk write operations asynchronously.
+        
+        Args:
+            collection_name: Name of the MongoDB collection
+            operations: List of bulk operation dictionaries
+            ordered: Whether to execute operations in order
+            session: Optional async session for transaction support
+            **kwargs: Additional PyMongo bulk write options
+            
+        Returns:
+            Dict[str, Any]: Bulk write result information
+            
+        Raises:
+            QueryException: If bulk write operation fails
+        """
+        start_time = time.perf_counter()
+        status = 'success'
+        
+        try:
+            if not operations:
+                return {
+                    'inserted_count': 0,
+                    'matched_count': 0,
+                    'modified_count': 0,
+                    'deleted_count': 0,
+                    'upserted_count': 0,
+                    'upserted_ids': {}
+                }
+            
+            collection = self.manager.get_collection(collection_name)
+            
+            # Convert operation dictionaries to PyMongo bulk operations
+            bulk_ops = self._convert_to_bulk_operations(operations)
+            
+            # Execute bulk write with session support
+            if session:
+                result = await collection.bulk_write(
+                    bulk_ops, ordered=ordered, session=session, **kwargs
+                )
+            else:
+                result = await collection.bulk_write(bulk_ops, ordered=ordered, **kwargs)
+            
+            # Record performance metrics
+            duration = time.perf_counter() - start_time
+            await self._record_bulk_metrics(
+                collection_name, 'bulk_write', duration, status, 
+                len(operations), result
+            )
+            
+            result_info = {
+                'inserted_count': result.inserted_count,
+                'matched_count': result.matched_count,
+                'modified_count': result.modified_count,
+                'deleted_count': result.deleted_count,
+                'upserted_count': result.upserted_count,
+                'upserted_ids': {str(k): str(v) for k, v in result.upserted_ids.items()}
+            }
+            
+            self.logger.info(
+                "Motor async bulk_write completed",
+                collection=collection_name,
+                operation_count=len(operations),
+                inserted_count=result.inserted_count,
+                modified_count=result.modified_count,
+                deleted_count=result.deleted_count,
+                duration_ms=duration * 1000
+            )
+            
+            return result_info
+            
+        except Exception as e:
+            status = 'error'
+            duration = time.perf_counter() - start_time
+            await self._record_bulk_metrics(
+                collection_name, 'bulk_write', duration, status, 
+                len(operations) if operations else 0, None
+            )
+            
+            error = handle_database_error(
+                e,
+                operation=DatabaseOperationType.WRITE,
+                database=self.manager.database_name,
+                collection=collection_name
+            )
+            raise error
+    
+    def _convert_to_bulk_operations(self, operations: List[Dict[str, Any]]) -> List:
+        """Convert operation dictionaries to PyMongo bulk operations."""
+        from pymongo import InsertOne, UpdateOne, UpdateMany, DeleteOne, DeleteMany, ReplaceOne
+        
+        bulk_ops = []
+        
+        for op in operations:
+            op_type = op.get('type')
+            
+            if op_type == 'insert':
+                bulk_ops.append(InsertOne(op['document']))
+            elif op_type == 'update_one':
+                bulk_ops.append(UpdateOne(
+                    op['filter'], 
+                    op['update'], 
+                    upsert=op.get('upsert', False)
+                ))
+            elif op_type == 'update_many':
+                bulk_ops.append(UpdateMany(
+                    op['filter'], 
+                    op['update'], 
+                    upsert=op.get('upsert', False)
+                ))
+            elif op_type == 'replace_one':
+                bulk_ops.append(ReplaceOne(
+                    op['filter'], 
+                    op['replacement'], 
+                    upsert=op.get('upsert', False)
+                ))
+            elif op_type == 'delete_one':
+                bulk_ops.append(DeleteOne(op['filter']))
+            elif op_type == 'delete_many':
+                bulk_ops.append(DeleteMany(op['filter']))
+            else:
+                raise QueryException(
+                    f"Unsupported bulk operation type: {op_type}",
+                    database=self.manager.database_name
+                )
+        
+        return bulk_ops
+    
+    async def _record_bulk_metrics(self, collection_name: str, operation: str,
+                                  duration: float, status: str, operation_count: int,
+                                  result: Optional[Any]):
+        """Record bulk operation metrics."""
+        try:
+            # Record operation metrics
+            async_operations_total.labels(
+                database=self.manager.database_name,
+                collection=collection_name,
+                operation=operation,
+                status=status
+            ).inc()
+            
+            async_operation_duration_seconds.labels(
+                database=self.manager.database_name,
+                collection=collection_name,
+                operation=operation
+            ).observe(duration)
+            
+        except Exception as e:
+            self.logger.warning(
+                "Failed to record bulk operation metrics",
+                error=str(e),
+                collection=collection_name,
+                operation=operation
+            )
+
+
+# Global Motor async manager instance
+_motor_async_manager: Optional[MotorAsyncManager] = None
+
+
+async def init_motor_async(database_name: Optional[str] = None, 
+                          monitoring_enabled: bool = True) -> MotorAsyncManager:
+    """
+    Initialize global Motor async database manager.
     
     Args:
-        connection_string: MongoDB connection string
-        max_pool_size: Maximum connections in pool
-        min_pool_size: Minimum connections in pool  
-        max_idle_time_ms: Maximum connection idle time
-        wait_queue_timeout_ms: Connection checkout timeout
-        server_selection_timeout_ms: Server selection timeout
-        socket_timeout_ms: Socket operation timeout
-        connect_timeout_ms: Initial connection timeout
-        heartbeat_frequency_ms: Server heartbeat frequency
-        **kwargs: Additional Motor client options
+        database_name: Target database name (defaults to configured database)
+        monitoring_enabled: Enable performance monitoring and metrics collection
         
     Returns:
-        Configured AsyncIOMotorClient instance
+        MotorAsyncManager: Initialized Motor async manager instance
         
     Raises:
-        DatabaseConnectionError: On client initialization failure
+        ImportError: If Motor is not available
+        ConnectionException: If Motor async connection cannot be established
     """
-    global _motor_client
+    global _motor_async_manager
     
-    try:
-        # Configure optimized connection pool settings
-        client_options = {
-            'maxPoolSize': max_pool_size,
-            'minPoolSize': min_pool_size,
-            'maxIdleTimeMS': max_idle_time_ms,
-            'waitQueueTimeoutMS': wait_queue_timeout_ms,
-            'serverSelectionTimeoutMS': server_selection_timeout_ms,
-            'socketTimeoutMS': socket_timeout_ms,
-            'connectTimeoutMS': connect_timeout_ms,
-            'heartbeatFrequencyMS': heartbeat_frequency_ms,
-            **kwargs
-        }
+    _motor_async_manager = MotorAsyncManager(database_name, monitoring_enabled)
+    await _motor_async_manager.initialize()
+    
+    logger.info(
+        "Global Motor async manager initialized",
+        database_name=database_name,
+        monitoring_enabled=monitoring_enabled
+    )
+    
+    return _motor_async_manager
+
+
+def get_motor_async_manager() -> MotorAsyncManager:
+    """
+    Get global Motor async database manager.
+    
+    Returns:
+        MotorAsyncManager: Global Motor async manager instance
         
-        # Create Motor async client
-        _motor_client = AsyncIOMotorClient(connection_string, **client_options)
-        
-        # Test connection
-        await _motor_client.admin.command('ping')
-        
-        logger.info(
-            "Motor async client initialized successfully",
-            max_pool_size=max_pool_size,
-            min_pool_size=min_pool_size,
-            connection_timeout_ms=connect_timeout_ms
+    Raises:
+        RuntimeError: If Motor async manager has not been initialized
+    """
+    if _motor_async_manager is None:
+        raise RuntimeError(
+            "Motor async manager not initialized. "
+            "Call init_motor_async() first."
         )
+    return _motor_async_manager
+
+
+async def get_motor_async_crud() -> MotorAsyncCRUD:
+    """
+    Get Motor async CRUD operations instance.
+    
+    Returns:
+        MotorAsyncCRUD: Motor async CRUD operations instance
+    """
+    manager = get_motor_async_manager()
+    return MotorAsyncCRUD(manager)
+
+
+async def get_motor_async_bulk() -> MotorAsyncBulkOperations:
+    """
+    Get Motor async bulk operations instance.
+    
+    Returns:
+        MotorAsyncBulkOperations: Motor async bulk operations instance
+    """
+    manager = get_motor_async_manager()
+    return MotorAsyncBulkOperations(manager)
+
+
+async def close_motor_async() -> None:
+    """
+    Close global Motor async database manager and cleanup resources.
+    
+    Properly closes all connections and cleans up resources
+    for graceful application shutdown.
+    """
+    global _motor_async_manager
+    
+    if _motor_async_manager:
+        await _motor_async_manager.close()
+        _motor_async_manager = None
         
-        return _motor_client
+        logger.info("Global Motor async manager closed")
+
+
+# Convenience functions for common async operations
+@mongodb_circuit_breaker
+async def async_find_one_by_id(collection_name: str, document_id: str, 
+                               projection: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """
+    Find a document by ObjectId asynchronously with circuit breaker protection.
+    
+    Args:
+        collection_name: Name of the MongoDB collection
+        document_id: Document ObjectId as string
+        projection: Fields to include/exclude
         
-    except Exception as e:
-        logger.error(f"Failed to initialize Motor client: {str(e)}")
-        raise DatabaseConnectionError(
-            f"Motor client initialization failed: {str(e)}",
-            operation='initialize_motor_client',
+    Returns:
+        Optional[Dict[str, Any]]: Found document or None
+        
+    Raises:
+        QueryException: If find operation fails
+        InvalidId: If document_id is not a valid ObjectId
+    """
+    try:
+        object_id = ObjectId(document_id)
+    except InvalidId as e:
+        raise QueryException(
+            f"Invalid ObjectId: {document_id}",
+            database=get_motor_async_manager().database_name,
+            collection=collection_name,
             original_error=e
         )
+    
+    crud = await get_motor_async_crud()
+    return await crud.find_one(collection_name, {'_id': object_id}, projection)
 
 
-async def get_motor_database(
-    database_name: str,
-    client: Optional[AsyncIOMotorClient] = None,
-    **kwargs
-) -> MotorAsyncDatabase:
+@mongodb_circuit_breaker
+async def async_insert_with_timestamp(collection_name: str, document: Dict[str, Any]) -> str:
     """
-    Get or create Motor async database instance.
+    Insert a document with automatic timestamp fields asynchronously.
     
     Args:
-        database_name: Name of the MongoDB database
-        client: Motor client instance (uses global if not provided)
-        **kwargs: Additional MotorAsyncDatabase options
+        collection_name: Name of the MongoDB collection
+        document: Document to insert
         
     Returns:
-        MotorAsyncDatabase instance
+        str: Inserted document ObjectId as string
         
     Raises:
-        DatabaseConnectionError: If no client available
+        QueryException: If insert operation fails
     """
-    global _motor_client, _motor_databases
+    now = datetime.now(timezone.utc)
+    document.setdefault('created_at', now)
+    document.setdefault('updated_at', now)
     
-    if database_name in _motor_databases:
-        return _motor_databases[database_name]
+    crud = await get_motor_async_crud()
+    return await crud.insert_one(collection_name, document)
+
+
+@mongodb_circuit_breaker
+async def async_update_with_timestamp(collection_name: str, filter_dict: Dict[str, Any],
+                                     update_doc: Dict[str, Any], upsert: bool = False) -> Dict[str, Any]:
+    """
+    Update a document with automatic updated_at timestamp asynchronously.
     
-    motor_client = client or _motor_client
-    if not motor_client:
-        raise DatabaseConnectionError(
-            "No Motor client available. Call initialize_motor_client() first.",
-            operation='get_motor_database'
+    Args:
+        collection_name: Name of the MongoDB collection
+        filter_dict: Query filter for document selection
+        update_doc: Update operation specification
+        upsert: Whether to insert if document not found
+        
+    Returns:
+        Dict[str, Any]: Update result information
+        
+    Raises:
+        QueryException: If update operation fails
+    """
+    # Add updated_at timestamp
+    if '$set' not in update_doc:
+        update_doc['$set'] = {}
+    update_doc['$set']['updated_at'] = datetime.now(timezone.utc)
+    
+    # Add created_at for upserts
+    if upsert:
+        if '$setOnInsert' not in update_doc:
+            update_doc['$setOnInsert'] = {}
+        update_doc['$setOnInsert']['created_at'] = datetime.now(timezone.utc)
+    
+    crud = await get_motor_async_crud()
+    return await crud.update_one(collection_name, filter_dict, update_doc, upsert)
+
+
+# Performance monitoring and health check functions
+async def get_motor_async_performance_summary() -> Dict[str, Any]:
+    """
+    Get Motor async performance summary for monitoring dashboards.
+    
+    Returns:
+        Dict[str, Any]: Comprehensive performance summary
+    """
+    try:
+        manager = get_motor_async_manager()
+        
+        # Collect active session information
+        active_sessions = len(manager._active_sessions)
+        
+        # Aggregate performance history
+        total_operations = sum(
+            len(history) for history in manager._performance_history.values()
         )
+        
+        # Calculate recent performance metrics
+        recent_performance = {}
+        for operation_key, history in manager._performance_history.items():
+            if history:
+                recent_ops = history[-10:]  # Last 10 operations
+                avg_duration = sum(op['duration'] for op in recent_ops) / len(recent_ops)
+                recent_performance[operation_key] = {
+                    'avg_duration_ms': avg_duration * 1000,
+                    'recent_operation_count': len(recent_ops),
+                    'last_operation_time': recent_ops[-1]['timestamp']
+                }
+        
+        return {
+            'motor_async_manager': {
+                'initialized': True,
+                'database_name': manager.database_name,
+                'monitoring_enabled': manager.monitoring_enabled,
+                'active_sessions': active_sessions,
+                'total_operations': total_operations
+            },
+            'performance_metrics': {
+                'recent_performance': recent_performance,
+                'operation_types': list(manager._performance_history.keys())
+            },
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
     
-    # Create new database instance
-    database = MotorAsyncDatabase(motor_client, database_name, **kwargs)
-    _motor_databases[database_name] = database
-    
-    logger.info(f"Created Motor async database instance for {database_name}")
-    
-    return database
+    except Exception as e:
+        logger.error(
+            "Failed to get Motor async performance summary",
+            error=str(e)
+        )
+        return {
+            'error': str(e),
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
 
 
-async def close_motor_client() -> None:
+async def motor_async_health_check() -> Dict[str, Any]:
     """
-    Close global Motor client and cleanup resources.
-    """
-    global _motor_client, _motor_databases
+    Perform Motor async health check for monitoring integration.
     
-    if _motor_client:
-        try:
-            _motor_client.close()
-            logger.info("Motor async client closed successfully")
-        except Exception as e:
-            logger.warning(f"Error closing Motor client: {str(e)}")
-        finally:
-            _motor_client = None
-            _motor_databases.clear()
+    Returns:
+        Dict[str, Any]: Health check results
+    """
+    try:
+        manager = get_motor_async_manager()
+        
+        # Test basic connectivity
+        start_time = time.perf_counter()
+        await manager.database.command('ping')
+        ping_duration = time.perf_counter() - start_time
+        
+        # Get database stats
+        stats = await manager.database.command('dbStats')
+        
+        return {
+            'status': 'healthy',
+            'motor_async': {
+                'database_name': manager.database_name,
+                'ping_response_time_ms': ping_duration * 1000,
+                'active_sessions': len(manager._active_sessions),
+                'monitoring_enabled': manager.monitoring_enabled
+            },
+            'database_stats': {
+                'collections': stats.get('collections', 0),
+                'objects': stats.get('objects', 0),
+                'data_size_bytes': stats.get('dataSize', 0),
+                'storage_size_bytes': stats.get('storageSize', 0)
+            },
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
+    
+    except Exception as e:
+        logger.error(
+            "Motor async health check failed",
+            error=str(e),
+            error_type=type(e).__name__
+        )
+        
+        return {
+            'status': 'unhealthy',
+            'error': str(e),
+            'error_type': type(e).__name__,
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
 
 
 # Export public interface
 __all__ = [
-    'MotorAsyncDatabase',
-    'initialize_motor_client',
-    'get_motor_database', 
-    'close_motor_client',
-    'DocumentType',
-    'FilterType',
-    'UpdateType',
-    'ProjectionType'
+    'MotorAsyncManager',
+    'MotorAsyncCRUD', 
+    'MotorAsyncBulkOperations',
+    'MotorAsyncDatabaseError',
+    'init_motor_async',
+    'get_motor_async_manager',
+    'get_motor_async_crud',
+    'get_motor_async_bulk',
+    'close_motor_async',
+    'async_find_one_by_id',
+    'async_insert_with_timestamp',
+    'async_update_with_timestamp',
+    'get_motor_async_performance_summary',
+    'motor_async_health_check'
 ]
