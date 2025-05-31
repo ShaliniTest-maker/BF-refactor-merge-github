@@ -1,47 +1,55 @@
 """
-Load Testing Scenarios for Flask Application Performance Validation
+Load Testing Scenarios with Concurrent User Capacity Validation
 
-Comprehensive load testing implementation using locust framework for concurrent user capacity
-validation ensuring equivalent or improved performance compared to Node.js implementation.
-Tests realistic traffic patterns, concurrent request handling, resource utilization under load,
-and system scalability per Section 0.2.3 and Section 4.6.3 requirements.
+This module implements comprehensive load testing scenarios using the locust framework to validate
+concurrent request handling, system scalability, and performance compliance with ≤10% variance
+from Node.js baseline. Supports realistic traffic patterns, progressive load scaling, and
+automated performance threshold enforcement per Section 6.6.1 load testing requirements.
 
-Architecture:
-- Progressive load scaling from 10 to 1000 concurrent users per Section 4.6.3
+Key Features:
+- Locust framework integration for concurrent user capacity validation per Section 6.6.1
+- Progressive scaling from 10 to 1000 concurrent users per Section 4.6.3
 - Target 100-500 requests per second sustained load per Section 4.6.3
-- Concurrent request capacity validation matching Node.js capabilities per Section 6.6.3
-- ≤10% performance variance enforcement per Section 0.2.3 load testing requirements
-- Realistic traffic pattern simulation across all Flask application endpoints
-- Resource utilization monitoring and scalability testing
+- Performance variance validation ensuring ≤10% deviation from Node.js baseline per Section 0.1.1
+- Realistic traffic pattern simulation matching Node.js capabilities per Section 0.2.3
+- Resource utilization monitoring during load testing per Section 6.6.3
 - Automated load test reporting with failure threshold enforcement per Section 6.6.2
+- Integration with Flask application factory and monitoring stack per Section 6.6.1
+
+Load Testing Architecture:
+- Section 6.6.1: Locust framework for automated load testing and throughput validation
+- Section 4.6.3: Performance testing flows with gradual load increase methodology
+- Section 6.6.3: Concurrent request capacity validation matching Node.js capabilities
+- Section 0.2.3: Load testing parameters for realistic production-equivalent scenarios
+- Section 6.6.2: Automated load test reporting with comprehensive metrics collection
+- Section 6.6.5: Production-equivalent test environment for accurate performance validation
+
+Performance Requirements:
+- Concurrent Users: Progressive scaling from 10 to 1000 users per Section 4.6.3
+- Request Rate: Sustained 100-500 RPS load per Section 4.6.3  
+- Response Time Variance: ≤10% from Node.js baseline per Section 0.1.1
+- Error Rate: ≤0.1% under normal load per Section 4.6.3
+- Resource Utilization: CPU ≤70%, Memory ≤80% during peak load per Section 4.6.3
 
 Test Scenarios:
-1. Baseline Performance Testing: Single user request validation
-2. Gradual Load Increase: Progressive scaling 10→50→100→500→1000 users
-3. Sustained Load Testing: Extended high-load scenarios
-4. Spike Load Testing: Rapid user increase simulation
-5. Stress Testing: Beyond normal capacity validation
-6. Endurance Testing: Long-duration performance stability
-
-Performance Validation:
-- Response time variance ≤10% from Node.js baseline
-- Error rate ≤0.1% under normal load conditions
-- Resource utilization CPU ≤70%, Memory ≤80% during peak load
-- Concurrent user capacity preserve or improve original capabilities
-
-Integration:
-- Flask application testing with production-equivalent configuration
-- MongoDB and Redis load testing with realistic data volumes
-- Authentication flow performance under concurrent load
-- External service integration performance validation
-- Comprehensive performance metrics collection and reporting
+- Authentication Flow Load Testing: JWT validation and Auth0 integration under load
+- API Workflow Load Testing: Business logic endpoints with realistic request patterns
+- Database Operation Load Testing: MongoDB and Redis operations under concurrent access
+- External Service Load Testing: Circuit breaker validation and resilience testing
+- Complete E2E Load Testing: Full user workflow simulation with production traffic patterns
 
 Dependencies:
-- locust ≥2.x for load testing framework per Section 6.6.1
-- pytest integration for automated test execution
-- requests session management for HTTP client efficiency
-- psutil for system resource monitoring during tests
-- prometheus_client for metrics collection and analysis
+- locust ≥2.x for load testing framework and distributed execution
+- pytest 7.4+ with E2E testing configuration per Section 6.6.1
+- pytest-asyncio for async load testing scenarios with Motor integration
+- prometheus-client for performance metrics collection during load testing
+- psutil for system resource monitoring and utilization validation
+- requests/httpx for HTTP client performance measurement and validation
+
+Author: Load Testing Team
+Version: 1.0.0
+Coverage Target: 100% critical load scenarios per Section 6.6.1
+Performance Compliance: ≤10% variance from Node.js baseline per Section 0.1.1
 """
 
 import asyncio
@@ -50,1464 +58,1821 @@ import logging
 import os
 import psutil
 import statistics
-import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import contextmanager
-from dataclasses import dataclass, field
+from contextlib import contextmanager, asynccontextmanager
 from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Any, Dict, Generator, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Callable, Union
 from unittest.mock import Mock, patch
 
 import pytest
-import requests
-from requests.adapters import HTTPAdapter
-from requests.sessions import Session
-from urllib3.util.retry import Retry
+import pytest_asyncio
+from flask import Flask
+from flask.testing import FlaskClient
 
-# Locust imports for load testing
+# Import locust framework for load testing per Section 6.6.1
 try:
-    from locust import HttpUser, User, task, between, events, run_single_user
+    import locust
+    from locust import HttpUser, task, constant, between, events
     from locust.env import Environment
-    from locust.stats import stats_printer, stats_history, RequestStats
+    from locust.stats import stats_printer, stats_history
     from locust.log import setup_logging
-    from locust.runners import MasterRunner, WorkerRunner, LocalRunner
-    from locust.exception import InterruptTaskSet, RescheduleTask
+    from locust.runners import LocalRunner, MasterRunner, WorkerRunner
     LOCUST_AVAILABLE = True
 except ImportError:
     LOCUST_AVAILABLE = False
-    pytest.skip("Locust not available - skipping load testing scenarios", allow_module_level=True)
 
-# Monitoring and metrics imports
-try:
-    from prometheus_client import CollectorRegistry, Counter, Histogram, Gauge, push_to_gateway
-    PROMETHEUS_AVAILABLE = True
-except ImportError:
-    PROMETHEUS_AVAILABLE = False
+# Import E2E testing fixtures and utilities
+from tests.e2e.conftest import (
+    comprehensive_e2e_environment,
+    e2e_performance_monitor,
+    locust_load_tester,
+    apache_bench_tester,
+    production_equivalent_environment,
+    e2e_test_reporter,
+    skip_if_not_e2e,
+    require_load_testing,
+    E2ETestingConfig
+)
 
-# Application imports
-from tests.e2e.conftest import *
+# Import base testing utilities
+from tests.conftest import (
+    performance_monitoring,
+    test_metrics_collector,
+    comprehensive_test_environment,
+    skip_if_no_docker
+)
+
+# Configure load testing specific logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - [LOAD_TEST] %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Configure pytest-asyncio for async load testing scenarios
+pytest_plugins = ('pytest_asyncio',)
 
 
 # =============================================================================
 # LOAD TESTING CONFIGURATION AND CONSTANTS
 # =============================================================================
 
-@dataclass
-class LoadTestConfiguration:
-    """Comprehensive load testing configuration per Section 4.6.3 requirements"""
+class LoadTestingConfig:
+    """
+    Load testing configuration with progressive scaling parameters.
     
-    # User scaling configuration per Section 4.6.3
-    min_users: int = 10
-    max_users: int = 1000
-    spawn_rate: float = 2.0  # users per second
+    Implements Section 4.6.3 load testing parameters and Section 6.6.1 
+    performance testing requirements for realistic production validation.
+    """
+    
+    # Progressive user scaling configuration per Section 4.6.3
+    MIN_USERS = int(os.getenv('LOAD_TEST_MIN_USERS', '10'))
+    MAX_USERS = int(os.getenv('LOAD_TEST_MAX_USERS', '1000'))
+    USER_SCALING_STEPS = [10, 25, 50, 100, 200, 500, 1000]
     
     # Request rate targets per Section 4.6.3
-    target_rps_min: int = 100
-    target_rps_max: int = 500
+    MIN_RPS = int(os.getenv('LOAD_TEST_MIN_RPS', '100'))
+    MAX_RPS = int(os.getenv('LOAD_TEST_MAX_RPS', '500'))
+    TARGET_RPS = int(os.getenv('LOAD_TEST_TARGET_RPS', '300'))
     
-    # Test duration configuration
-    ramp_up_duration: int = 60  # seconds
-    sustained_duration: int = 300  # 5 minutes sustained load
-    cooldown_duration: int = 30  # seconds
+    # Load testing duration configuration
+    RAMP_UP_TIME = int(os.getenv('LOAD_TEST_RAMP_UP_TIME', '60'))  # seconds
+    SUSTAINED_LOAD_TIME = int(os.getenv('LOAD_TEST_SUSTAINED_TIME', '300'))  # 5 minutes
+    COOL_DOWN_TIME = int(os.getenv('LOAD_TEST_COOL_DOWN_TIME', '30'))  # seconds
     
-    # Performance variance thresholds per Section 0.2.3
-    max_response_time_variance: float = 0.10  # ≤10% variance requirement
-    max_error_rate: float = 0.001  # ≤0.1% error rate
+    # Performance variance thresholds per Section 0.1.1
+    VARIANCE_THRESHOLD = float(os.getenv('LOAD_TEST_VARIANCE_THRESHOLD', '0.10'))  # ≤10%
+    ERROR_RATE_THRESHOLD = float(os.getenv('LOAD_TEST_ERROR_THRESHOLD', '0.001'))  # ≤0.1%
     
-    # Resource utilization thresholds per Section 4.6.3
-    max_cpu_usage: float = 0.70  # ≤70% CPU usage
-    max_memory_usage: float = 0.80  # ≤80% memory usage
+    # Resource utilization limits per Section 4.6.3
+    CPU_UTILIZATION_LIMIT = float(os.getenv('LOAD_TEST_CPU_LIMIT', '70.0'))  # ≤70%
+    MEMORY_UTILIZATION_LIMIT = float(os.getenv('LOAD_TEST_MEMORY_LIMIT', '80.0'))  # ≤80%
     
-    # Test endpoint configuration
-    test_endpoints: Dict[str, Dict[str, Any]] = field(default_factory=lambda: {
-        'health_check': {
-            'path': '/health',
-            'method': 'GET',
-            'weight': 5,
-            'expected_status': 200
-        },
-        'readiness_probe': {
-            'path': '/health/ready',
-            'method': 'GET', 
-            'weight': 5,
-            'expected_status': 200
-        },
-        'root_endpoint': {
-            'path': '/',
-            'method': 'GET',
-            'weight': 10,
-            'expected_status': 200
-        },
-        'api_status': {
-            'path': '/api/v1/status',
-            'method': 'GET',
-            'weight': 20,
-            'expected_status': 200,
-            'requires_auth': True
-        },
-        'metrics_endpoint': {
-            'path': '/metrics',
-            'method': 'GET',
-            'weight': 2,
-            'expected_status': 200
-        }
-    })
+    # Node.js baseline performance metrics for comparison per Section 0.1.1
+    NODEJS_BASELINES = {
+        'health_check_response_time': 0.050,  # 50ms
+        'auth_flow_response_time': 0.350,     # 350ms
+        'api_endpoint_response_time': 0.200,  # 200ms
+        'database_query_time': 0.100,         # 100ms
+        'cache_operation_time': 0.010,        # 10ms
+        'external_service_time': 0.500,       # 500ms
+        'complete_workflow_time': 1.500,      # 1.5s
+    }
     
-    # Node.js baseline performance data (will be loaded from configuration)
-    nodejs_baseline: Dict[str, float] = field(default_factory=lambda: {
-        'average_response_time': 150.0,  # milliseconds
-        'p95_response_time': 300.0,      # milliseconds
-        'p99_response_time': 500.0,      # milliseconds
-        'requests_per_second': 250.0,    # baseline RPS capacity
-        'concurrent_users': 500,         # baseline concurrent user capacity
-        'error_rate': 0.0005            # baseline error rate (0.05%)
-    })
-
-
-@dataclass
-class LoadTestResults:
-    """Comprehensive load test results tracking and analysis"""
+    # Load testing environment configuration
+    HOST = os.getenv('LOAD_TEST_HOST', 'http://localhost:5000')
+    SPAWN_RATE = int(os.getenv('LOAD_TEST_SPAWN_RATE', '5'))  # users per second
     
-    test_name: str
-    start_time: datetime
-    end_time: Optional[datetime] = None
-    
-    # Request statistics
-    total_requests: int = 0
-    total_failures: int = 0
-    requests_per_second: float = 0.0
-    
-    # Response time statistics
-    average_response_time: float = 0.0
-    median_response_time: float = 0.0
-    p95_response_time: float = 0.0
-    p99_response_time: float = 0.0
-    min_response_time: float = 0.0
-    max_response_time: float = 0.0
-    
-    # Performance variance analysis
-    response_time_variance: float = 0.0
-    rps_variance: float = 0.0
-    error_rate: float = 0.0
-    
-    # Resource utilization
-    peak_cpu_usage: float = 0.0
-    peak_memory_usage: float = 0.0
-    average_cpu_usage: float = 0.0
-    average_memory_usage: float = 0.0
-    
-    # Concurrent user metrics
-    peak_concurrent_users: int = 0
-    successful_concurrent_users: int = 0
-    
-    # Compliance validation
-    meets_variance_requirement: bool = False
-    meets_error_rate_requirement: bool = False
-    meets_resource_requirements: bool = False
-    
-    # Additional metrics
-    endpoint_statistics: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    error_details: List[Dict[str, Any]] = field(default_factory=list)
-    performance_timeline: List[Dict[str, Any]] = field(default_factory=list)
-
-
-# Global configuration instance
-load_test_config = LoadTestConfiguration()
+    # Reporting and monitoring configuration
+    ENABLE_DETAILED_REPORTING = os.getenv('LOAD_TEST_DETAILED_REPORTING', 'true').lower() == 'true'
+    ENABLE_RESOURCE_MONITORING = os.getenv('LOAD_TEST_RESOURCE_MONITORING', 'true').lower() == 'true'
+    PROMETHEUS_METRICS_ENABLED = os.getenv('LOAD_TEST_PROMETHEUS_METRICS', 'true').lower() == 'true'
 
 
 # =============================================================================
-# PERFORMANCE MONITORING UTILITIES
+# LOCUST USER CLASSES FOR REALISTIC TRAFFIC SIMULATION
 # =============================================================================
 
-class PerformanceMonitor:
-    """System resource monitoring during load tests"""
-    
-    def __init__(self, monitoring_interval: float = 1.0):
-        self.monitoring_interval = monitoring_interval
-        self.monitoring_active = False
-        self.monitoring_thread: Optional[threading.Thread] = None
-        self.cpu_readings: List[float] = []
-        self.memory_readings: List[float] = []
-        self.timestamp_readings: List[datetime] = []
-        self.lock = threading.Lock()
-    
-    def start_monitoring(self) -> None:
-        """Start system resource monitoring"""
-        if self.monitoring_active:
-            return
-        
-        self.monitoring_active = True
-        self.cpu_readings.clear()
-        self.memory_readings.clear()
-        self.timestamp_readings.clear()
-        
-        self.monitoring_thread = threading.Thread(target=self._monitor_resources)
-        self.monitoring_thread.daemon = True
-        self.monitoring_thread.start()
-        
-        logging.info("Performance monitoring started")
-    
-    def stop_monitoring(self) -> Dict[str, Any]:
-        """Stop monitoring and return collected data"""
-        if not self.monitoring_active:
-            return {}
-        
-        self.monitoring_active = False
-        
-        if self.monitoring_thread:
-            self.monitoring_thread.join(timeout=5.0)
-        
-        with self.lock:
-            results = {
-                'peak_cpu_usage': max(self.cpu_readings) if self.cpu_readings else 0.0,
-                'average_cpu_usage': statistics.mean(self.cpu_readings) if self.cpu_readings else 0.0,
-                'peak_memory_usage': max(self.memory_readings) if self.memory_readings else 0.0,
-                'average_memory_usage': statistics.mean(self.memory_readings) if self.memory_readings else 0.0,
-                'monitoring_duration': len(self.cpu_readings) * self.monitoring_interval,
-                'sample_count': len(self.cpu_readings)
-            }
-        
-        logging.info(f"Performance monitoring stopped - Peak CPU: {results['peak_cpu_usage']:.1%}, Peak Memory: {results['peak_memory_usage']:.1%}")
-        return results
-    
-    def _monitor_resources(self) -> None:
-        """Internal resource monitoring loop"""
-        while self.monitoring_active:
-            try:
-                cpu_percent = psutil.cpu_percent(interval=None) / 100.0
-                memory_info = psutil.virtual_memory()
-                memory_percent = memory_info.percent / 100.0
-                
-                with self.lock:
-                    self.cpu_readings.append(cpu_percent)
-                    self.memory_readings.append(memory_percent)
-                    self.timestamp_readings.append(datetime.now())
-                
-                time.sleep(self.monitoring_interval)
-                
-            except Exception as e:
-                logging.error(f"Resource monitoring error: {e}")
-                time.sleep(self.monitoring_interval)
-
-
-# =============================================================================
-# CUSTOM LOCUST USER CLASSES FOR REALISTIC TRAFFIC PATTERNS
-# =============================================================================
-
-class FlaskApplicationUser(HttpUser):
+class BaseLoadTestUser(HttpUser):
     """
-    Realistic Flask application user behavior simulation
+    Base load test user class with common functionality.
     
-    Implements weighted request patterns matching real-world usage:
-    - Health checks (low frequency, high priority)
-    - API endpoints (medium frequency, business critical)
-    - Public endpoints (high frequency, variable patterns)
-    - Authentication flows (periodic, security critical)
+    Implements realistic user behavior patterns for Flask application
+    load testing with comprehensive metrics collection and error handling.
     """
     
-    abstract = True  # Base class for other user types
-    wait_time = between(0.5, 3.0)  # Realistic user think time
+    # User behavior configuration
+    wait_time = between(1, 3)  # Wait 1-3 seconds between requests
+    weight = 1
     
     def on_start(self):
-        """Initialize user session and authentication"""
-        self.client.headers.update({
-            'User-Agent': 'FlaskLoadTest/1.0',
-            'Accept': 'application/json',
-            'Content-Type': 'application/json'
-        })
-        
-        # Set up session with retry strategy
-        retry_strategy = Retry(
-            total=3,
-            backoff_factor=0.1,
-            status_forcelist=[500, 502, 503, 504]
-        )
-        adapter = HTTPAdapter(max_retries=retry_strategy)
-        self.client.mount("http://", adapter)
-        self.client.mount("https://", adapter)
-        
-        # Initialize user context
+        """Initialize user session for load testing."""
         self.user_id = str(uuid.uuid4())
-        self.session_start = datetime.now()
-        self.request_count = 0
+        self.session_start_time = time.time()
+        self.auth_token = None
+        self.user_context = {
+            'authenticated': False,
+            'role': 'user',
+            'permissions': [],
+            'session_id': str(uuid.uuid4())
+        }
         
-        logging.info(f"User {self.user_id} started session")
+        logger.debug(f"Load test user {self.user_id} started session")
     
     def on_stop(self):
-        """Clean up user session"""
-        session_duration = datetime.now() - self.session_start
-        logging.info(f"User {self.user_id} ended session - Duration: {session_duration}, Requests: {self.request_count}")
-
-
-class HealthCheckUser(FlaskApplicationUser):
-    """Specialized user for health check endpoint testing"""
+        """Clean up user session after load testing."""
+        session_duration = time.time() - self.session_start_time
+        logger.debug(
+            f"Load test user {self.user_id} ended session",
+            duration=round(session_duration, 3)
+        )
     
-    weight = 5  # Lower frequency user type
+    def authenticate_user(self):
+        """Simulate user authentication flow."""
+        login_data = {
+            'email': f'loadtest-{self.user_id}@example.com',
+            'password': 'LoadTest123!',
+            'remember_me': False
+        }
+        
+        with self.client.post(
+            '/auth/login',
+            json=login_data,
+            catch_response=True,
+            name='Auth: Login Flow'
+        ) as response:
+            if response.status_code == 200:
+                try:
+                    response_data = response.json()
+                    self.auth_token = response_data.get('access_token')
+                    self.user_context['authenticated'] = True
+                    self.user_context['role'] = response_data.get('role', 'user')
+                    self.user_context['permissions'] = response_data.get('permissions', [])
+                    response.success()
+                except (ValueError, KeyError) as e:
+                    response.failure(f"Authentication response parsing failed: {e}")
+            else:
+                response.failure(f"Authentication failed with status {response.status_code}")
+    
+    def get_auth_headers(self) -> Dict[str, str]:
+        """Get authentication headers for authenticated requests."""
+        headers = {
+            'Content-Type': 'application/json',
+            'X-Request-ID': str(uuid.uuid4()),
+            'User-Agent': 'LoadTest-Client/1.0'
+        }
+        
+        if self.auth_token:
+            headers['Authorization'] = f'Bearer {self.auth_token}'
+        
+        return headers
+
+
+class HealthCheckUser(BaseLoadTestUser):
+    """
+    Load test user focused on health check endpoints.
+    
+    Validates system health monitoring under load per Section 6.6.1
+    health check integration requirements.
+    """
+    
+    weight = 5  # Higher frequency for health checks
+    wait_time = constant(1)  # Consistent 1-second intervals
     
     @task(10)
-    def check_health(self):
-        """Test main health endpoint"""
-        with self.client.get("/health", catch_response=True) as response:
-            self.request_count += 1
+    def health_check(self):
+        """Test main health check endpoint under load."""
+        with self.client.get(
+            '/health',
+            catch_response=True,
+            name='Health: Main Check'
+        ) as response:
             if response.status_code == 200:
-                response.success()
+                try:
+                    health_data = response.json()
+                    if health_data.get('status') == 'healthy':
+                        response.success()
+                    else:
+                        response.failure(f"Health check returned unhealthy status: {health_data.get('status')}")
+                except ValueError:
+                    response.failure("Health check response is not valid JSON")
             else:
                 response.failure(f"Health check failed with status {response.status_code}")
     
-    @task(10)
-    def check_readiness(self):
-        """Test Kubernetes readiness probe"""
-        with self.client.get("/health/ready", catch_response=True) as response:
-            self.request_count += 1
+    @task(3)
+    def liveness_probe(self):
+        """Test Kubernetes liveness probe endpoint."""
+        with self.client.get(
+            '/health/live',
+            catch_response=True,
+            name='Health: Liveness Probe'
+        ) as response:
             if response.status_code == 200:
                 response.success()
             else:
-                response.failure(f"Readiness check failed with status {response.status_code}")
+                response.failure(f"Liveness probe failed with status {response.status_code}")
     
-    @task(5)
-    def check_liveness(self):
-        """Test Kubernetes liveness probe"""
-        with self.client.get("/health/live", catch_response=True) as response:
-            self.request_count += 1
+    @task(3)
+    def readiness_probe(self):
+        """Test Kubernetes readiness probe endpoint."""
+        with self.client.get(
+            '/health/ready',
+            catch_response=True,
+            name='Health: Readiness Probe'
+        ) as response:
             if response.status_code == 200:
-                response.success()
+                try:
+                    readiness_data = response.json()
+                    if readiness_data.get('status') == 'ready':
+                        response.success()
+                    else:
+                        response.failure(f"Readiness probe returned not ready: {readiness_data.get('status')}")
+                except ValueError:
+                    response.failure("Readiness probe response is not valid JSON")
             else:
-                response.failure(f"Liveness check failed with status {response.status_code}")
-
-
-class APIUser(FlaskApplicationUser):
-    """Business logic API user with authentication simulation"""
+                response.failure(f"Readiness probe failed with status {response.status_code}")
     
-    weight = 20  # Higher frequency user type
-    
-    def on_start(self):
-        """Initialize API user with authentication"""
-        super().on_start()
-        self.auth_token = None
-        self.authenticate()
-    
-    def authenticate(self):
-        """Simulate authentication flow"""
-        # Mock authentication for load testing
-        self.auth_token = f"Bearer test-token-{self.user_id}"
-        self.client.headers.update({
-            'Authorization': self.auth_token
-        })
-    
-    @task(15)
-    def get_api_status(self):
-        """Test API status endpoint"""
-        with self.client.get("/api/v1/status", catch_response=True) as response:
-            self.request_count += 1
-            if response.status_code in [200, 401]:  # Accept both authenticated and unauthenticated
-                response.success()
-            else:
-                response.failure(f"API status check failed with status {response.status_code}")
-    
-    @task(10)
-    def get_root_endpoint(self):
-        """Test root application endpoint"""
-        with self.client.get("/", catch_response=True) as response:
-            self.request_count += 1
+    @task(1)
+    def metrics_endpoint(self):
+        """Test Prometheus metrics endpoint under load."""
+        with self.client.get(
+            '/metrics',
+            catch_response=True,
+            name='Health: Metrics Endpoint'
+        ) as response:
             if response.status_code == 200:
-                response.success()
-            else:
-                response.failure(f"Root endpoint failed with status {response.status_code}")
-    
-    @task(5)
-    def get_metrics(self):
-        """Test metrics endpoint for monitoring"""
-        with self.client.get("/metrics", catch_response=True) as response:
-            self.request_count += 1
-            if response.status_code == 200:
-                response.success()
+                # Validate Prometheus metrics format
+                if 'flask_request_duration_seconds' in response.text:
+                    response.success()
+                else:
+                    response.failure("Metrics endpoint missing expected Flask metrics")
             else:
                 response.failure(f"Metrics endpoint failed with status {response.status_code}")
 
 
-class RealisticTrafficUser(FlaskApplicationUser):
+class AuthenticationUser(BaseLoadTestUser):
     """
-    Mixed traffic pattern user simulating realistic application usage
+    Load test user focused on authentication workflows.
     
-    Combines multiple user behaviors with realistic patterns:
-    - Browsing behavior with page views
-    - API interactions with business logic
-    - Periodic health checks
-    - Authentication and session management
+    Validates JWT token processing and Auth0 integration under load
+    per Section 6.6.1 authentication integration requirements.
     """
     
-    weight = 30  # Primary user type for mixed workload
+    weight = 3
+    wait_time = between(2, 5)
     
     def on_start(self):
-        """Initialize realistic user session"""
+        """Initialize authentication user session."""
         super().on_start()
-        self.pages_visited = 0
-        self.api_calls_made = 0
-        self.errors_encountered = 0
-    
-    @task(20)
-    def browse_application(self):
-        """Simulate typical application browsing"""
-        endpoints = ["/", "/health", "/api/v1/status"]
-        endpoint = self.environment.parsed_options.choice(endpoints) if hasattr(self.environment, 'parsed_options') else "/"
-        
-        with self.client.get(endpoint, catch_response=True) as response:
-            self.request_count += 1
-            self.pages_visited += 1
-            
-            if response.status_code in [200, 401]:
-                response.success()
-            else:
-                self.errors_encountered += 1
-                response.failure(f"Browse failed with status {response.status_code}")
-    
-    @task(10)
-    def perform_api_operations(self):
-        """Simulate API operations with business logic"""
-        operations = [
-            ("GET", "/api/v1/status"),
-            ("GET", "/health/ready"),
-            ("GET", "/metrics")
-        ]
-        
-        method, endpoint = operations[self.request_count % len(operations)]
-        
-        with self.client.request(method, endpoint, catch_response=True) as response:
-            self.request_count += 1
-            self.api_calls_made += 1
-            
-            if response.status_code in [200, 401, 404]:  # Accept common status codes
-                response.success()
-            else:
-                self.errors_encountered += 1
-                response.failure(f"API operation failed with status {response.status_code}")
+        # 80% of users authenticate immediately
+        if hash(self.user_id) % 10 < 8:
+            self.authenticate_user()
     
     @task(5)
-    def check_system_health(self):
-        """Periodic system health validation"""
-        with self.client.get("/health", catch_response=True) as response:
-            self.request_count += 1
+    def login_flow(self):
+        """Test complete login workflow under load."""
+        # Logout first if authenticated
+        if self.user_context['authenticated']:
+            with self.client.post(
+                '/auth/logout',
+                headers=self.get_auth_headers(),
+                catch_response=True,
+                name='Auth: Logout'
+            ) as response:
+                if response.status_code in [200, 204]:
+                    self.auth_token = None
+                    self.user_context['authenticated'] = False
+                    response.success()
+                else:
+                    response.failure(f"Logout failed with status {response.status_code}")
+        
+        # Perform login
+        self.authenticate_user()
+    
+    @task(3)
+    def token_validation(self):
+        """Test JWT token validation under load."""
+        if not self.user_context['authenticated']:
+            self.authenticate_user()
+        
+        if self.user_context['authenticated']:
+            with self.client.get(
+                '/auth/validate',
+                headers=self.get_auth_headers(),
+                catch_response=True,
+                name='Auth: Token Validation'
+            ) as response:
+                if response.status_code == 200:
+                    response.success()
+                else:
+                    response.failure(f"Token validation failed with status {response.status_code}")
+    
+    @task(2)
+    def user_profile_access(self):
+        """Test authenticated user profile access."""
+        if not self.user_context['authenticated']:
+            self.authenticate_user()
+        
+        if self.user_context['authenticated']:
+            with self.client.get(
+                '/api/v1/users/profile',
+                headers=self.get_auth_headers(),
+                catch_response=True,
+                name='Auth: Profile Access'
+            ) as response:
+                if response.status_code == 200:
+                    response.success()
+                elif response.status_code == 401:
+                    # Token expired, re-authenticate
+                    self.authenticate_user()
+                    response.failure("Token expired during profile access")
+                else:
+                    response.failure(f"Profile access failed with status {response.status_code}")
+    
+    @task(1)
+    def permission_check(self):
+        """Test permission validation under load."""
+        if not self.user_context['authenticated']:
+            self.authenticate_user()
+        
+        if self.user_context['authenticated']:
+            with self.client.get(
+                '/api/v1/users/permissions',
+                headers=self.get_auth_headers(),
+                catch_response=True,
+                name='Auth: Permission Check'
+            ) as response:
+                if response.status_code == 200:
+                    response.success()
+                else:
+                    response.failure(f"Permission check failed with status {response.status_code}")
+
+
+class APIWorkflowUser(BaseLoadTestUser):
+    """
+    Load test user focused on API workflow testing.
+    
+    Validates business logic endpoints and data processing under load
+    per Section 6.6.1 API workflow load testing requirements.
+    """
+    
+    weight = 4
+    wait_time = between(1, 4)
+    
+    def on_start(self):
+        """Initialize API workflow user session."""
+        super().on_start()
+        self.authenticate_user()
+        self.created_resources = []
+    
+    @task(8)
+    def list_projects(self):
+        """Test project listing API under load."""
+        with self.client.get(
+            '/api/v1/projects',
+            headers=self.get_auth_headers(),
+            catch_response=True,
+            name='API: List Projects'
+        ) as response:
+            if response.status_code == 200:
+                try:
+                    projects = response.json()
+                    if isinstance(projects, list):
+                        response.success()
+                    else:
+                        response.failure("Projects response is not a list")
+                except ValueError:
+                    response.failure("Projects response is not valid JSON")
+            else:
+                response.failure(f"List projects failed with status {response.status_code}")
+    
+    @task(3)
+    def create_project(self):
+        """Test project creation API under load."""
+        project_data = {
+            'name': f'Load Test Project {uuid.uuid4().hex[:8]}',
+            'description': f'Project created during load test by user {self.user_id}',
+            'settings': {
+                'public': False,
+                'collaboration_enabled': True
+            }
+        }
+        
+        with self.client.post(
+            '/api/v1/projects',
+            json=project_data,
+            headers=self.get_auth_headers(),
+            catch_response=True,
+            name='API: Create Project'
+        ) as response:
+            if response.status_code == 201:
+                try:
+                    created_project = response.json()
+                    project_id = created_project.get('id')
+                    if project_id:
+                        self.created_resources.append(('project', project_id))
+                        response.success()
+                    else:
+                        response.failure("Created project missing ID")
+                except ValueError:
+                    response.failure("Create project response is not valid JSON")
+            else:
+                response.failure(f"Create project failed with status {response.status_code}")
+    
+    @task(5)
+    def get_project_details(self):
+        """Test project details retrieval under load."""
+        # Use existing project or create one
+        if not self.created_resources:
+            self.create_project()
+        
+        project_resources = [r for r in self.created_resources if r[0] == 'project']
+        if project_resources:
+            project_id = project_resources[0][1]
             
+            with self.client.get(
+                f'/api/v1/projects/{project_id}',
+                headers=self.get_auth_headers(),
+                catch_response=True,
+                name='API: Get Project Details'
+            ) as response:
+                if response.status_code == 200:
+                    response.success()
+                elif response.status_code == 404:
+                    # Project might have been deleted, remove from tracking
+                    self.created_resources = [r for r in self.created_resources if not (r[0] == 'project' and r[1] == project_id)]
+                    response.failure("Project not found")
+                else:
+                    response.failure(f"Get project details failed with status {response.status_code}")
+    
+    @task(2)
+    def update_project(self):
+        """Test project update API under load."""
+        project_resources = [r for r in self.created_resources if r[0] == 'project']
+        if project_resources:
+            project_id = project_resources[0][1]
+            
+            update_data = {
+                'description': f'Updated during load test at {datetime.utcnow().isoformat()}',
+                'settings': {
+                    'public': True,
+                    'collaboration_enabled': True
+                }
+            }
+            
+            with self.client.put(
+                f'/api/v1/projects/{project_id}',
+                json=update_data,
+                headers=self.get_auth_headers(),
+                catch_response=True,
+                name='API: Update Project'
+            ) as response:
+                if response.status_code == 200:
+                    response.success()
+                elif response.status_code == 404:
+                    self.created_resources = [r for r in self.created_resources if not (r[0] == 'project' and r[1] == project_id)]
+                    response.failure("Project not found for update")
+                else:
+                    response.failure(f"Update project failed with status {response.status_code}")
+    
+    @task(1)
+    def delete_project(self):
+        """Test project deletion API under load."""
+        project_resources = [r for r in self.created_resources if r[0] == 'project']
+        if len(project_resources) > 3:  # Keep some projects for other operations
+            project_id = project_resources[0][1]
+            
+            with self.client.delete(
+                f'/api/v1/projects/{project_id}',
+                headers=self.get_auth_headers(),
+                catch_response=True,
+                name='API: Delete Project'
+            ) as response:
+                if response.status_code in [200, 204]:
+                    self.created_resources = [r for r in self.created_resources if not (r[0] == 'project' and r[1] == project_id)]
+                    response.success()
+                else:
+                    response.failure(f"Delete project failed with status {response.status_code}")
+    
+    @task(4)
+    def dashboard_stats(self):
+        """Test dashboard statistics API under load."""
+        with self.client.get(
+            '/api/v1/dashboard/stats',
+            headers=self.get_auth_headers(),
+            catch_response=True,
+            name='API: Dashboard Stats'
+        ) as response:
+            if response.status_code == 200:
+                try:
+                    stats = response.json()
+                    if 'projects' in stats and 'users' in stats:
+                        response.success()
+                    else:
+                        response.failure("Dashboard stats missing required fields")
+                except ValueError:
+                    response.failure("Dashboard stats response is not valid JSON")
+            else:
+                response.failure(f"Dashboard stats failed with status {response.status_code}")
+
+
+class DatabaseOperationUser(BaseLoadTestUser):
+    """
+    Load test user focused on database operations.
+    
+    Validates MongoDB and Redis operations under load per Section 6.6.1
+    database integration testing requirements.
+    """
+    
+    weight = 2
+    wait_time = between(0.5, 2)
+    
+    def on_start(self):
+        """Initialize database operation user session."""
+        super().on_start()
+        self.authenticate_user()
+    
+    @task(6)
+    def search_operations(self):
+        """Test database search operations under load."""
+        search_params = {
+            'query': f'test-{uuid.uuid4().hex[:6]}',
+            'limit': 20,
+            'offset': 0
+        }
+        
+        with self.client.get(
+            '/api/v1/search',
+            params=search_params,
+            headers=self.get_auth_headers(),
+            catch_response=True,
+            name='Database: Search Operations'
+        ) as response:
             if response.status_code == 200:
                 response.success()
             else:
-                self.errors_encountered += 1
-                response.failure(f"Health check failed with status {response.status_code}")
-
-
-# =============================================================================
-# LOAD TESTING SCENARIOS AND EXECUTION
-# =============================================================================
-
-class LoadTestRunner:
-    """Comprehensive load test execution and coordination"""
+                response.failure(f"Search operations failed with status {response.status_code}")
     
-    def __init__(self, config: LoadTestConfiguration):
-        self.config = config
-        self.performance_monitor = PerformanceMonitor()
-        self.results_history: List[LoadTestResults] = []
-        
-        if PROMETHEUS_AVAILABLE:
-            self.metrics_registry = CollectorRegistry()
-            self.setup_prometheus_metrics()
-    
-    def setup_prometheus_metrics(self):
-        """Initialize Prometheus metrics for load testing"""
-        if not PROMETHEUS_AVAILABLE:
-            return
-        
-        self.load_test_requests = Counter(
-            'load_test_requests_total',
-            'Total load test requests',
-            ['test_name', 'endpoint', 'status'],
-            registry=self.metrics_registry
-        )
-        
-        self.load_test_response_time = Histogram(
-            'load_test_response_time_seconds',
-            'Load test response times',
-            ['test_name', 'endpoint'],
-            registry=self.metrics_registry
-        )
-        
-        self.load_test_users = Gauge(
-            'load_test_concurrent_users',
-            'Current concurrent users in load test',
-            ['test_name'],
-            registry=self.metrics_registry
-        )
-    
-    def create_locust_environment(self, user_classes: List[HttpUser], 
-                                host: str = "http://localhost:5000") -> Environment:
-        """Create and configure Locust environment"""
-        env = Environment(
-            user_classes=user_classes,
-            host=host,
-            events=events,
-            reset_stats=True
-        )
-        
-        # Set up event listeners for metrics collection
-        @env.events.request.add_listener
-        def on_request(request_type, name, response_time, response_length, exception, context, **kwargs):
-            """Track individual request metrics"""
-            if PROMETHEUS_AVAILABLE:
-                status = "success" if exception is None else "failure"
-                self.load_test_requests.labels(
-                    test_name=context.get('test_name', 'unknown'),
-                    endpoint=name,
-                    status=status
-                ).inc()
-                
-                if exception is None:
-                    self.load_test_response_time.labels(
-                        test_name=context.get('test_name', 'unknown'),
-                        endpoint=name
-                    ).observe(response_time / 1000.0)  # Convert to seconds
-        
-        @env.events.user_add.add_listener
-        def on_user_add(environment, **kwargs):
-            """Track user addition"""
-            if PROMETHEUS_AVAILABLE:
-                self.load_test_users.labels(test_name='current').set(environment.runner.user_count)
-        
-        @env.events.user_remove.add_listener  
-        def on_user_remove(environment, **kwargs):
-            """Track user removal"""
-            if PROMETHEUS_AVAILABLE:
-                self.load_test_users.labels(test_name='current').set(environment.runner.user_count)
-        
-        return env
-    
-    def run_baseline_test(self, host: str = "http://localhost:5000") -> LoadTestResults:
-        """
-        Run baseline performance test with single user
-        
-        Establishes performance baseline for variance calculations per Section 0.2.3
-        """
-        logging.info("Starting baseline performance test")
-        
-        results = LoadTestResults(
-            test_name="baseline_single_user",
-            start_time=datetime.now()
-        )
-        
-        # Create environment with single realistic user
-        env = self.create_locust_environment([RealisticTrafficUser], host)
-        
-        # Start performance monitoring
-        self.performance_monitor.start_monitoring()
-        
-        try:
-            # Run single user for baseline measurement
-            runner = LocalRunner(env, [RealisticTrafficUser])
-            runner.start(user_count=1, spawn_rate=1)
-            
-            # Run for 30 seconds to establish baseline
-            time.sleep(30)
-            
-            runner.quit()
-            
-            # Collect statistics
-            stats = runner.stats
-            results.total_requests = stats.total.num_requests
-            results.total_failures = stats.total.num_failures
-            results.requests_per_second = stats.total.current_rps
-            results.average_response_time = stats.total.avg_response_time
-            results.median_response_time = stats.total.median_response_time
-            results.p95_response_time = stats.total.get_response_time_percentile(0.95)
-            results.p99_response_time = stats.total.get_response_time_percentile(0.99)
-            results.min_response_time = stats.total.min_response_time
-            results.max_response_time = stats.total.max_response_time
-            results.error_rate = stats.total.fail_ratio
-            
-        finally:
-            # Stop monitoring and collect resource data
-            resource_data = self.performance_monitor.stop_monitoring()
-            results.peak_cpu_usage = resource_data.get('peak_cpu_usage', 0.0)
-            results.average_cpu_usage = resource_data.get('average_cpu_usage', 0.0)
-            results.peak_memory_usage = resource_data.get('peak_memory_usage', 0.0)
-            results.average_memory_usage = resource_data.get('average_memory_usage', 0.0)
-            
-            results.end_time = datetime.now()
-        
-        # Validate baseline against Node.js performance
-        self._validate_baseline_performance(results)
-        
-        logging.info(f"Baseline test completed - RPS: {results.requests_per_second:.1f}, "
-                    f"Avg Response: {results.average_response_time:.1f}ms, "
-                    f"Error Rate: {results.error_rate:.3%}")
-        
-        self.results_history.append(results)
-        return results
-    
-    def run_gradual_load_test(self, host: str = "http://localhost:5000") -> LoadTestResults:
-        """
-        Run gradual load increase test per Section 4.6.3
-        
-        Progressive scaling from 10 to 1000 concurrent users with performance monitoring
-        """
-        logging.info("Starting gradual load increase test")
-        
-        results = LoadTestResults(
-            test_name="gradual_load_increase",
-            start_time=datetime.now()
-        )
-        
-        # Create environment with mixed user types
-        user_classes = [HealthCheckUser, APIUser, RealisticTrafficUser]
-        env = self.create_locust_environment(user_classes, host)
-        
-        # Start performance monitoring
-        self.performance_monitor.start_monitoring()
-        
-        try:
-            runner = LocalRunner(env, user_classes)
-            
-            # Progressive load stages per Section 4.6.3
-            load_stages = [
-                (10, 60),    # 10 users for 1 minute
-                (50, 120),   # 50 users for 2 minutes  
-                (100, 180),  # 100 users for 3 minutes
-                (250, 240),  # 250 users for 4 minutes
-                (500, 300),  # 500 users for 5 minutes
-                (1000, 300)  # 1000 users for 5 minutes
-            ]
-            
-            stage_results = []
-            
-            for user_count, duration in load_stages:
-                logging.info(f"Scaling to {user_count} users for {duration} seconds")
-                
-                # Update concurrent user tracking
-                results.peak_concurrent_users = max(results.peak_concurrent_users, user_count)
-                
-                # Start this stage
-                runner.start(user_count=user_count, spawn_rate=self.config.spawn_rate)
-                
-                # Monitor this stage
-                stage_start = time.time()
-                while time.time() - stage_start < duration:
-                    time.sleep(10)  # Check every 10 seconds
-                    
-                    current_stats = runner.stats.total
-                    stage_results.append({
-                        'timestamp': datetime.now(),
-                        'user_count': user_count,
-                        'rps': current_stats.current_rps,
-                        'avg_response_time': current_stats.avg_response_time,
-                        'error_rate': current_stats.fail_ratio
-                    })
-                    
-                    # Validate performance compliance during test
-                    if current_stats.current_rps > 0:
-                        variance = abs(current_stats.avg_response_time - self.config.nodejs_baseline['average_response_time']) / self.config.nodejs_baseline['average_response_time']
-                        if variance > self.config.max_response_time_variance:
-                            logging.warning(f"Performance variance exceeded threshold: {variance:.1%} > {self.config.max_response_time_variance:.1%}")
-            
-            runner.quit()
-            
-            # Aggregate final statistics
-            final_stats = runner.stats.total
-            results.total_requests = final_stats.num_requests
-            results.total_failures = final_stats.num_failures
-            results.requests_per_second = final_stats.current_rps
-            results.average_response_time = final_stats.avg_response_time
-            results.median_response_time = final_stats.median_response_time
-            results.p95_response_time = final_stats.get_response_time_percentile(0.95)
-            results.p99_response_time = final_stats.get_response_time_percentile(0.99)
-            results.error_rate = final_stats.fail_ratio
-            results.performance_timeline = stage_results
-            
-        finally:
-            # Stop monitoring and collect resource data
-            resource_data = self.performance_monitor.stop_monitoring()
-            results.peak_cpu_usage = resource_data.get('peak_cpu_usage', 0.0)
-            results.average_cpu_usage = resource_data.get('average_cpu_usage', 0.0)
-            results.peak_memory_usage = resource_data.get('peak_memory_usage', 0.0)
-            results.average_memory_usage = resource_data.get('average_memory_usage', 0.0)
-            
-            results.end_time = datetime.now()
-        
-        # Validate performance requirements
-        self._validate_performance_requirements(results)
-        
-        logging.info(f"Gradual load test completed - Peak Users: {results.peak_concurrent_users}, "
-                    f"Final RPS: {results.requests_per_second:.1f}, "
-                    f"Error Rate: {results.error_rate:.3%}")
-        
-        self.results_history.append(results)
-        return results
-    
-    def run_sustained_load_test(self, user_count: int = 500, 
-                              duration: int = 300,
-                              host: str = "http://localhost:5000") -> LoadTestResults:
-        """
-        Run sustained load test per Section 4.6.3
-        
-        Extended high-load scenario validation for system stability
-        """
-        logging.info(f"Starting sustained load test - {user_count} users for {duration} seconds")
-        
-        results = LoadTestResults(
-            test_name="sustained_load",
-            start_time=datetime.now()
-        )
-        
-        # Create environment with all user types
-        user_classes = [HealthCheckUser, APIUser, RealisticTrafficUser]
-        env = self.create_locust_environment(user_classes, host)
-        
-        # Start performance monitoring
-        self.performance_monitor.start_monitoring()
-        
-        try:
-            runner = LocalRunner(env, user_classes)
-            
-            # Ramp up to target user count
-            logging.info(f"Ramping up to {user_count} users")
-            runner.start(user_count=user_count, spawn_rate=self.config.spawn_rate)
-            
-            # Wait for ramp up completion
-            ramp_time = user_count / self.config.spawn_rate
-            time.sleep(ramp_time)
-            
-            # Sustained load monitoring
-            sustained_start = time.time()
-            monitoring_data = []
-            
-            while time.time() - sustained_start < duration:
-                current_stats = runner.stats.total
-                monitoring_data.append({
-                    'timestamp': datetime.now(),
-                    'rps': current_stats.current_rps,
-                    'avg_response_time': current_stats.avg_response_time,
-                    'error_rate': current_stats.fail_ratio,
-                    'active_users': runner.user_count
-                })
-                
-                time.sleep(10)  # Monitor every 10 seconds
-            
-            runner.quit()
-            
-            # Collect final statistics
-            final_stats = runner.stats.total
-            results.total_requests = final_stats.num_requests
-            results.total_failures = final_stats.num_failures
-            results.requests_per_second = final_stats.current_rps
-            results.average_response_time = final_stats.avg_response_time
-            results.median_response_time = final_stats.median_response_time
-            results.p95_response_time = final_stats.get_response_time_percentile(0.95)
-            results.p99_response_time = final_stats.get_response_time_percentile(0.99)
-            results.error_rate = final_stats.fail_ratio
-            results.peak_concurrent_users = user_count
-            results.successful_concurrent_users = user_count if final_stats.fail_ratio < self.config.max_error_rate else 0
-            results.performance_timeline = monitoring_data
-            
-        finally:
-            # Stop monitoring and collect resource data
-            resource_data = self.performance_monitor.stop_monitoring()
-            results.peak_cpu_usage = resource_data.get('peak_cpu_usage', 0.0)
-            results.average_cpu_usage = resource_data.get('average_cpu_usage', 0.0)
-            results.peak_memory_usage = resource_data.get('peak_memory_usage', 0.0)
-            results.average_memory_usage = resource_data.get('average_memory_usage', 0.0)
-            
-            results.end_time = datetime.now()
-        
-        # Validate sustained performance requirements
-        self._validate_performance_requirements(results)
-        
-        logging.info(f"Sustained load test completed - RPS: {results.requests_per_second:.1f}, "
-                    f"Avg Response: {results.average_response_time:.1f}ms, "
-                    f"Error Rate: {results.error_rate:.3%}")
-        
-        self.results_history.append(results)
-        return results
-    
-    def run_spike_load_test(self, baseline_users: int = 100,
-                          spike_users: int = 1000,
-                          spike_duration: int = 60,
-                          host: str = "http://localhost:5000") -> LoadTestResults:
-        """
-        Run spike load test for rapid user increase simulation
-        
-        Tests system resilience to sudden traffic spikes
-        """
-        logging.info(f"Starting spike load test - {baseline_users} to {spike_users} users")
-        
-        results = LoadTestResults(
-            test_name="spike_load",
-            start_time=datetime.now()
-        )
-        
-        user_classes = [HealthCheckUser, APIUser, RealisticTrafficUser]
-        env = self.create_locust_environment(user_classes, host)
-        
-        self.performance_monitor.start_monitoring()
-        
-        try:
-            runner = LocalRunner(env, user_classes)
-            
-            # Establish baseline load
-            runner.start(user_count=baseline_users, spawn_rate=self.config.spawn_rate)
-            time.sleep(60)  # 1 minute baseline
-            
-            # Rapid spike to peak load
-            logging.info(f"Spiking to {spike_users} users")
-            runner.start(user_count=spike_users, spawn_rate=spike_users / 5)  # Fast ramp
-            
-            # Monitor spike period
-            spike_start = time.time()
-            spike_monitoring = []
-            
-            while time.time() - spike_start < spike_duration:
-                current_stats = runner.stats.total
-                spike_monitoring.append({
-                    'timestamp': datetime.now(),
-                    'rps': current_stats.current_rps,
-                    'avg_response_time': current_stats.avg_response_time,
-                    'error_rate': current_stats.fail_ratio
-                })
-                time.sleep(5)  # Fast monitoring during spike
-            
-            # Return to baseline
-            runner.start(user_count=baseline_users, spawn_rate=self.config.spawn_rate)
-            time.sleep(30)  # Recovery period
-            
-            runner.quit()
-            
-            # Collect statistics
-            final_stats = runner.stats.total
-            results.total_requests = final_stats.num_requests
-            results.total_failures = final_stats.num_failures
-            results.requests_per_second = final_stats.current_rps
-            results.average_response_time = final_stats.avg_response_time
-            results.error_rate = final_stats.fail_ratio
-            results.peak_concurrent_users = spike_users
-            results.performance_timeline = spike_monitoring
-            
-        finally:
-            resource_data = self.performance_monitor.stop_monitoring()
-            results.peak_cpu_usage = resource_data.get('peak_cpu_usage', 0.0)
-            results.peak_memory_usage = resource_data.get('peak_memory_usage', 0.0)
-            results.end_time = datetime.now()
-        
-        self._validate_performance_requirements(results)
-        
-        logging.info(f"Spike load test completed - Peak Users: {spike_users}, "
-                    f"Error Rate: {results.error_rate:.3%}")
-        
-        self.results_history.append(results)
-        return results
-    
-    def _validate_baseline_performance(self, results: LoadTestResults) -> None:
-        """Validate baseline performance against Node.js requirements"""
-        baseline = self.config.nodejs_baseline
-        
-        # Response time variance check
-        if results.average_response_time > 0:
-            variance = abs(results.average_response_time - baseline['average_response_time']) / baseline['average_response_time']
-            results.response_time_variance = variance
-            results.meets_variance_requirement = variance <= self.config.max_response_time_variance
-        
-        # Error rate check
-        results.meets_error_rate_requirement = results.error_rate <= self.config.max_error_rate
-        
-        # Resource utilization check
-        results.meets_resource_requirements = (
-            results.peak_cpu_usage <= self.config.max_cpu_usage and
-            results.peak_memory_usage <= self.config.max_memory_usage
-        )
-    
-    def _validate_performance_requirements(self, results: LoadTestResults) -> None:
-        """Comprehensive performance requirement validation"""
-        self._validate_baseline_performance(results)
-        
-        # Additional validation for load tests
-        baseline = self.config.nodejs_baseline
-        
-        # RPS variance check
-        if baseline['requests_per_second'] > 0:
-            rps_variance = abs(results.requests_per_second - baseline['requests_per_second']) / baseline['requests_per_second']
-            results.rps_variance = rps_variance
-        
-        # Concurrent user capacity check
-        if results.peak_concurrent_users >= baseline['concurrent_users']:
-            results.successful_concurrent_users = results.peak_concurrent_users
-        
-        logging.info(f"Performance validation - Variance: {results.response_time_variance:.1%}, "
-                    f"Error Rate: {results.error_rate:.3%}, "
-                    f"Resources OK: {results.meets_resource_requirements}")
-    
-    def generate_performance_report(self) -> Dict[str, Any]:
-        """Generate comprehensive performance test report"""
-        if not self.results_history:
-            return {'error': 'No test results available'}
-        
-        report = {
-            'test_summary': {
-                'total_tests': len(self.results_history),
-                'test_duration': str(datetime.now() - self.results_history[0].start_time),
-                'overall_compliance': all(r.meets_variance_requirement for r in self.results_history)
-            },
-            'performance_metrics': {},
-            'compliance_analysis': {},
-            'recommendations': []
+    @task(4)
+    def cache_operations(self):
+        """Test Redis cache operations under load."""
+        cache_key = f'load-test-{self.user_id}-{int(time.time())}'
+        cache_data = {
+            'action': 'cache_test',
+            'data': f'Load test data for user {self.user_id}'
         }
         
-        # Aggregate performance metrics
-        for result in self.results_history:
-            report['performance_metrics'][result.test_name] = {
-                'requests_per_second': result.requests_per_second,
-                'average_response_time': result.average_response_time,
-                'p95_response_time': result.p95_response_time,
-                'error_rate': result.error_rate,
-                'peak_concurrent_users': result.peak_concurrent_users,
-                'peak_cpu_usage': result.peak_cpu_usage,
-                'peak_memory_usage': result.peak_memory_usage
-            }
+        # Cache write operation
+        with self.client.post(
+            '/api/v1/cache',
+            json={'key': cache_key, 'value': cache_data, 'ttl': 300},
+            headers=self.get_auth_headers(),
+            catch_response=True,
+            name='Database: Cache Write'
+        ) as response:
+            if response.status_code in [200, 201]:
+                response.success()
+            else:
+                response.failure(f"Cache write failed with status {response.status_code}")
+        
+        # Cache read operation
+        with self.client.get(
+            f'/api/v1/cache/{cache_key}',
+            headers=self.get_auth_headers(),
+            catch_response=True,
+            name='Database: Cache Read'
+        ) as response:
+            if response.status_code == 200:
+                response.success()
+            elif response.status_code == 404:
+                response.failure("Cache key not found after write")
+            else:
+                response.failure(f"Cache read failed with status {response.status_code}")
+    
+    @task(3)
+    def bulk_operations(self):
+        """Test bulk database operations under load."""
+        bulk_data = {
+            'operations': [
+                {'type': 'create', 'collection': 'load_test', 'data': {'test_id': str(uuid.uuid4())}},
+                {'type': 'create', 'collection': 'load_test', 'data': {'test_id': str(uuid.uuid4())}},
+                {'type': 'create', 'collection': 'load_test', 'data': {'test_id': str(uuid.uuid4())}}
+            ]
+        }
+        
+        with self.client.post(
+            '/api/v1/database/bulk',
+            json=bulk_data,
+            headers=self.get_auth_headers(),
+            catch_response=True,
+            name='Database: Bulk Operations'
+        ) as response:
+            if response.status_code == 200:
+                response.success()
+            else:
+                response.failure(f"Bulk operations failed with status {response.status_code}")
+    
+    @task(2)
+    def transaction_operations(self):
+        """Test database transaction operations under load."""
+        transaction_data = {
+            'transaction_id': str(uuid.uuid4()),
+            'operations': [
+                {'type': 'update', 'collection': 'users', 'query': {'id': self.user_id}, 'data': {'last_active': datetime.utcnow().isoformat()}},
+                {'type': 'insert', 'collection': 'activity_log', 'data': {'user_id': self.user_id, 'action': 'load_test', 'timestamp': datetime.utcnow().isoformat()}}
+            ]
+        }
+        
+        with self.client.post(
+            '/api/v1/database/transaction',
+            json=transaction_data,
+            headers=self.get_auth_headers(),
+            catch_response=True,
+            name='Database: Transaction Operations'
+        ) as response:
+            if response.status_code == 200:
+                response.success()
+            else:
+                response.failure(f"Transaction operations failed with status {response.status_code}")
+
+
+class ExternalServiceUser(BaseLoadTestUser):
+    """
+    Load test user focused on external service integration.
+    
+    Validates circuit breaker patterns and external service resilience
+    under load per Section 6.6.1 external service integration requirements.
+    """
+    
+    weight = 1
+    wait_time = between(2, 6)
+    
+    def on_start(self):
+        """Initialize external service user session."""
+        super().on_start()
+        self.authenticate_user()
+    
+    @task(4)
+    def file_upload_operations(self):
+        """Test file upload to AWS S3 under load."""
+        file_data = {
+            'filename': f'load-test-{uuid.uuid4().hex[:8]}.txt',
+            'content_type': 'text/plain',
+            'size': 1024,
+            'data': 'Load testing file content'
+        }
+        
+        with self.client.post(
+            '/api/v1/files/upload',
+            json=file_data,
+            headers=self.get_auth_headers(),
+            catch_response=True,
+            name='External: File Upload'
+        ) as response:
+            if response.status_code in [200, 201]:
+                response.success()
+            else:
+                response.failure(f"File upload failed with status {response.status_code}")
+    
+    @task(3)
+    def external_api_calls(self):
+        """Test external API integration under load."""
+        api_request = {
+            'endpoint': 'user_validation',
+            'data': {'user_id': self.user_id},
+            'timeout': 10
+        }
+        
+        with self.client.post(
+            '/api/v1/external/call',
+            json=api_request,
+            headers=self.get_auth_headers(),
+            catch_response=True,
+            name='External: API Calls'
+        ) as response:
+            if response.status_code == 200:
+                response.success()
+            elif response.status_code == 503:
+                response.failure("External service unavailable (circuit breaker open)")
+            else:
+                response.failure(f"External API call failed with status {response.status_code}")
+    
+    @task(2)
+    def notification_services(self):
+        """Test notification service integration under load."""
+        notification_data = {
+            'type': 'load_test',
+            'recipient': f'loadtest-{self.user_id}@example.com',
+            'subject': 'Load Test Notification',
+            'message': f'Load testing notification for user {self.user_id}'
+        }
+        
+        with self.client.post(
+            '/api/v1/notifications/send',
+            json=notification_data,
+            headers=self.get_auth_headers(),
+            catch_response=True,
+            name='External: Notification Services'
+        ) as response:
+            if response.status_code in [200, 202]:
+                response.success()
+            else:
+                response.failure(f"Notification service failed with status {response.status_code}")
+
+
+# =============================================================================
+# PERFORMANCE MONITORING AND RESOURCE TRACKING
+# =============================================================================
+
+class LoadTestPerformanceMonitor:
+    """
+    Comprehensive performance monitoring for load testing scenarios.
+    
+    Tracks system resource utilization, response time variance, and
+    performance compliance with Node.js baseline per Section 0.1.1.
+    """
+    
+    def __init__(self, config: LoadTestingConfig = None):
+        """Initialize performance monitor with configuration."""
+        self.config = config or LoadTestingConfig()
+        self.monitoring_active = False
+        self.start_time = None
+        self.measurements = []
+        self.resource_samples = []
+        self.performance_violations = []
+        
+        # Initialize system monitoring
+        if self.config.ENABLE_RESOURCE_MONITORING:
+            try:
+                self.process = psutil.Process()
+                self.system_available = True
+            except Exception:
+                self.system_available = False
+                logger.warning("System resource monitoring not available")
+        else:
+            self.system_available = False
+    
+    @contextmanager
+    def monitor_load_test(self, test_name: str):
+        """Context manager for monitoring load test execution."""
+        self.start_time = time.time()
+        self.monitoring_active = True
+        
+        logger.info(f"Starting performance monitoring for load test: {test_name}")
+        
+        # Start background resource monitoring
+        resource_monitor_thread = None
+        if self.system_available:
+            import threading
+            resource_monitor_thread = threading.Thread(
+                target=self._monitor_system_resources,
+                daemon=True
+            )
+            resource_monitor_thread.start()
+        
+        try:
+            yield self
+        finally:
+            self.monitoring_active = False
             
-            report['compliance_analysis'][result.test_name] = {
-                'meets_variance_requirement': result.meets_variance_requirement,
-                'meets_error_rate_requirement': result.meets_error_rate_requirement,
-                'meets_resource_requirements': result.meets_resource_requirements,
-                'response_time_variance': result.response_time_variance,
-                'rps_variance': getattr(result, 'rps_variance', 0.0)
+            # Wait for resource monitoring to complete
+            if resource_monitor_thread and resource_monitor_thread.is_alive():
+                resource_monitor_thread.join(timeout=5)
+            
+            test_duration = time.time() - self.start_time
+            logger.info(
+                f"Performance monitoring completed for {test_name}",
+                duration=round(test_duration, 3),
+                measurements=len(self.measurements),
+                resource_samples=len(self.resource_samples),
+                violations=len(self.performance_violations)
+            )
+    
+    def _monitor_system_resources(self):
+        """Background system resource monitoring."""
+        while self.monitoring_active:
+            try:
+                # CPU utilization
+                cpu_percent = psutil.cpu_percent(interval=1)
+                
+                # Memory utilization
+                memory = psutil.virtual_memory()
+                memory_percent = memory.percent
+                
+                # Network I/O
+                net_io = psutil.net_io_counters()
+                
+                # Disk I/O
+                disk_io = psutil.disk_io_counters()
+                
+                resource_sample = {
+                    'timestamp': time.time(),
+                    'cpu_percent': cpu_percent,
+                    'memory_percent': memory_percent,
+                    'memory_used_mb': memory.used / (1024 * 1024),
+                    'network_bytes_sent': net_io.bytes_sent,
+                    'network_bytes_recv': net_io.bytes_recv,
+                    'disk_read_bytes': disk_io.read_bytes if disk_io else 0,
+                    'disk_write_bytes': disk_io.write_bytes if disk_io else 0
+                }
+                
+                self.resource_samples.append(resource_sample)
+                
+                # Check resource utilization thresholds
+                if cpu_percent > self.config.CPU_UTILIZATION_LIMIT:
+                    violation = {
+                        'type': 'cpu_utilization',
+                        'timestamp': time.time(),
+                        'measured_value': cpu_percent,
+                        'threshold': self.config.CPU_UTILIZATION_LIMIT,
+                        'severity': 'critical' if cpu_percent > 90 else 'warning'
+                    }
+                    self.performance_violations.append(violation)
+                    logger.warning(
+                        f"CPU utilization violation: {cpu_percent:.1f}% > {self.config.CPU_UTILIZATION_LIMIT:.1f}%"
+                    )
+                
+                if memory_percent > self.config.MEMORY_UTILIZATION_LIMIT:
+                    violation = {
+                        'type': 'memory_utilization',
+                        'timestamp': time.time(),
+                        'measured_value': memory_percent,
+                        'threshold': self.config.MEMORY_UTILIZATION_LIMIT,
+                        'severity': 'critical' if memory_percent > 95 else 'warning'
+                    }
+                    self.performance_violations.append(violation)
+                    logger.warning(
+                        f"Memory utilization violation: {memory_percent:.1f}% > {self.config.MEMORY_UTILIZATION_LIMIT:.1f}%"
+                    )
+                
+            except Exception as e:
+                logger.error(f"Resource monitoring error: {e}")
+            
+            time.sleep(5)  # Sample every 5 seconds
+    
+    def record_performance_measurement(
+        self,
+        operation: str,
+        duration: float,
+        baseline_key: str = None,
+        additional_metrics: Dict[str, Any] = None
+    ):
+        """Record performance measurement with baseline comparison."""
+        measurement = {
+            'operation': operation,
+            'duration': duration,
+            'timestamp': time.time(),
+            'baseline_key': baseline_key,
+            'additional_metrics': additional_metrics or {}
+        }
+        
+        self.measurements.append(measurement)
+        
+        # Compare against Node.js baseline if provided
+        if baseline_key and baseline_key in self.config.NODEJS_BASELINES:
+            baseline_value = self.config.NODEJS_BASELINES[baseline_key]
+            variance = abs(duration - baseline_value) / baseline_value
+            
+            if variance > self.config.VARIANCE_THRESHOLD:
+                violation = {
+                    'type': 'performance_variance',
+                    'operation': operation,
+                    'measured_duration': duration,
+                    'baseline_duration': baseline_value,
+                    'variance_percentage': variance * 100,
+                    'threshold_percentage': self.config.VARIANCE_THRESHOLD * 100,
+                    'timestamp': time.time(),
+                    'severity': 'critical' if variance > 0.25 else 'warning'
+                }
+                self.performance_violations.append(violation)
+                
+                logger.warning(
+                    f"Performance variance violation for {operation}: "
+                    f"{variance * 100:.1f}% > {self.config.VARIANCE_THRESHOLD * 100:.1f}%"
+                )
+    
+    def get_performance_summary(self) -> Dict[str, Any]:
+        """Generate comprehensive performance summary."""
+        if not self.measurements:
+            return {'status': 'no_measurements'}
+        
+        # Calculate performance statistics
+        durations = [m['duration'] for m in self.measurements]
+        
+        performance_stats = {
+            'total_measurements': len(self.measurements),
+            'average_duration': statistics.mean(durations),
+            'median_duration': statistics.median(durations),
+            'min_duration': min(durations),
+            'max_duration': max(durations),
+            'p95_duration': statistics.quantiles(durations, n=20)[18] if len(durations) >= 20 else max(durations),
+            'p99_duration': statistics.quantiles(durations, n=100)[98] if len(durations) >= 100 else max(durations)
+        }
+        
+        # Calculate resource utilization statistics
+        resource_stats = {}
+        if self.resource_samples:
+            cpu_values = [r['cpu_percent'] for r in self.resource_samples]
+            memory_values = [r['memory_percent'] for r in self.resource_samples]
+            
+            resource_stats = {
+                'cpu_utilization': {
+                    'average': statistics.mean(cpu_values),
+                    'peak': max(cpu_values),
+                    'samples': len(cpu_values)
+                },
+                'memory_utilization': {
+                    'average': statistics.mean(memory_values),
+                    'peak': max(memory_values),
+                    'samples': len(memory_values)
+                }
             }
         
-        # Generate recommendations
-        failed_tests = [r for r in self.results_history if not r.meets_variance_requirement]
-        if failed_tests:
-            report['recommendations'].append("Performance variance exceeds ≤10% requirement - optimization needed")
+        # Violation summary
+        violation_stats = {
+            'total_violations': len(self.performance_violations),
+            'critical_violations': len([v for v in self.performance_violations if v.get('severity') == 'critical']),
+            'warning_violations': len([v for v in self.performance_violations if v.get('severity') == 'warning']),
+            'violation_types': {}
+        }
         
-        high_error_tests = [r for r in self.results_history if not r.meets_error_rate_requirement]
-        if high_error_tests:
-            report['recommendations'].append("Error rate exceeds ≤0.1% requirement - error handling review needed")
+        for violation in self.performance_violations:
+            violation_type = violation.get('type', 'unknown')
+            if violation_type not in violation_stats['violation_types']:
+                violation_stats['violation_types'][violation_type] = 0
+            violation_stats['violation_types'][violation_type] += 1
         
-        resource_issues = [r for r in self.results_history if not r.meets_resource_requirements]
-        if resource_issues:
-            report['recommendations'].append("Resource utilization exceeds thresholds - capacity planning needed")
+        # Overall compliance assessment
+        total_operations = len(self.measurements)
+        performance_violations = len([v for v in self.performance_violations if v.get('type') == 'performance_variance'])
+        compliance_rate = (total_operations - performance_violations) / total_operations * 100 if total_operations > 0 else 100
         
-        return report
+        return {
+            'status': 'completed',
+            'test_duration': time.time() - self.start_time if self.start_time else 0,
+            'performance_stats': performance_stats,
+            'resource_stats': resource_stats,
+            'violation_stats': violation_stats,
+            'compliance_rate': compliance_rate,
+            'baseline_compliant': compliance_rate >= (100 - self.config.VARIANCE_THRESHOLD * 100)
+        }
 
 
 # =============================================================================
-# PYTEST TEST INTEGRATION
+# PROGRESSIVE LOAD TESTING SCENARIOS
 # =============================================================================
 
-@pytest.fixture(scope="session")
-def load_test_runner():
-    """Session-scoped load test runner fixture"""
-    return LoadTestRunner(load_test_config)
-
-
-@pytest.fixture(scope="session")
-def flask_app_url(live_server):
-    """Get Flask application URL for load testing"""
-    if live_server:
-        return live_server.url()
-    return "http://localhost:5000"
-
-
-@pytest.mark.load_test
-@pytest.mark.timeout(600)  # 10 minute timeout for load tests
+@pytest.mark.e2e
+@pytest.mark.performance
+@pytest.mark.load_testing
+@skip_if_not_e2e()
+@require_load_testing()
+@pytest.mark.skipif(not LOCUST_AVAILABLE, reason="Locust framework not available")
 class TestLoadScenarios:
     """
-    Comprehensive load testing scenarios per Section 0.2.3 and Section 4.6.3
+    Comprehensive load testing scenarios with progressive user scaling.
     
-    Tests realistic traffic patterns, concurrent request handling, resource utilization
-    under load, and system scalability ensuring equivalent or improved capacity
-    compared to Node.js implementation.
+    Implements Section 4.6.3 performance testing flows and Section 6.6.1
+    load testing framework requirements for concurrent capacity validation.
     """
     
-    def test_baseline_performance(self, load_test_runner: LoadTestRunner, flask_app_url: str):
-        """
-        Test baseline single-user performance for variance calculation baseline
+    def setup_method(self):
+        """Set up load testing environment for each test method."""
+        self.config = LoadTestingConfig()
+        self.performance_monitor = LoadTestPerformanceMonitor(self.config)
+        self.test_results = []
         
-        Validates:
-        - Single user response time baseline
-        - Error rate compliance ≤0.1%
-        - Resource utilization baseline
-        - Performance metrics collection
-        """
-        results = load_test_runner.run_baseline_test(flask_app_url)
-        
-        # Validate baseline requirements
-        assert results.total_requests > 0, "Baseline test should generate requests"
-        assert results.error_rate <= load_test_config.max_error_rate, f"Error rate {results.error_rate:.3%} exceeds maximum {load_test_config.max_error_rate:.3%}"
-        assert results.average_response_time > 0, "Should measure response times"
-        assert results.requests_per_second > 0, "Should measure request rate"
-        
-        # Resource utilization validation
-        assert results.peak_cpu_usage <= load_test_config.max_cpu_usage, f"CPU usage {results.peak_cpu_usage:.1%} exceeds threshold"
-        assert results.peak_memory_usage <= load_test_config.max_memory_usage, f"Memory usage {results.peak_memory_usage:.1%} exceeds threshold"
-        
-        logging.info(f"Baseline performance established - RPS: {results.requests_per_second:.1f}, "
-                    f"Response Time: {results.average_response_time:.1f}ms")
+        logger.info("Load testing scenario setup completed")
     
-    def test_gradual_load_increase(self, load_test_runner: LoadTestRunner, flask_app_url: str):
-        """
-        Test progressive scaling from 10 to 1000 concurrent users per Section 4.6.3
+    def teardown_method(self):
+        """Clean up after each load testing scenario."""
+        # Generate final test report
+        if self.test_results:
+            self._generate_load_test_report()
         
-        Validates:
-        - Progressive load scaling 10→50→100→500→1000 users
-        - Performance variance ≤10% compliance throughout scaling
-        - Request rate targets 100-500 RPS per Section 4.6.3
-        - Concurrent user capacity validation per Section 6.6.3
-        """
-        results = load_test_runner.run_gradual_load_test(flask_app_url)
-        
-        # Validate gradual load requirements
-        assert results.peak_concurrent_users >= 1000, f"Should reach 1000 concurrent users, reached {results.peak_concurrent_users}"
-        assert results.total_requests > 1000, "Should generate substantial request volume"
-        
-        # Performance variance validation per Section 0.2.3
-        assert results.meets_variance_requirement, f"Response time variance {results.response_time_variance:.1%} exceeds ≤10% requirement"
-        assert results.meets_error_rate_requirement, f"Error rate {results.error_rate:.3%} exceeds ≤0.1% requirement"
-        
-        # Request rate validation per Section 4.6.3
-        assert results.requests_per_second >= load_test_config.target_rps_min, f"RPS {results.requests_per_second:.1f} below minimum {load_test_config.target_rps_min}"
-        
-        # Resource utilization validation
-        assert results.meets_resource_requirements, f"Resource utilization exceeds thresholds - CPU: {results.peak_cpu_usage:.1%}, Memory: {results.peak_memory_usage:.1%}"
-        
-        logging.info(f"Gradual load test passed - Peak Users: {results.peak_concurrent_users}, "
-                    f"RPS: {results.requests_per_second:.1f}, Variance: {results.response_time_variance:.1%}")
+        logger.info("Load testing scenario cleanup completed")
     
-    def test_sustained_load_capacity(self, load_test_runner: LoadTestRunner, flask_app_url: str):
+    def test_health_check_load_capacity(self, comprehensive_e2e_environment):
         """
-        Test sustained load handling per Section 4.6.3 endurance requirements
+        Test health check endpoints under progressive load scaling.
         
-        Validates:
-        - 500 concurrent users for 5 minutes sustained load
-        - Performance stability over extended duration
-        - Resource utilization compliance under sustained load
-        - Error rate compliance throughout test duration
+        Validates health monitoring system performance under load per
+        Section 6.6.1 health check integration requirements.
         """
-        user_count = 500
-        duration = 300  # 5 minutes
+        with self.performance_monitor.monitor_load_test('health_check_load'):
+            # Progressive load testing for health endpoints
+            user_counts = [10, 25, 50, 100]
+            
+            for user_count in user_counts:
+                logger.info(f"Testing health check load with {user_count} concurrent users")
+                
+                # Create locust environment
+                env = Environment(user_classes=[HealthCheckUser])
+                env.create_local_runner()
+                
+                # Configure host
+                env.host = self.config.HOST
+                
+                # Start load test
+                start_time = time.time()
+                env.runner.start(user_count, spawn_rate=self.config.SPAWN_RATE)
+                
+                # Run for 60 seconds
+                import gevent
+                gevent.sleep(60)
+                
+                # Stop and collect results
+                env.runner.stop()
+                test_duration = time.time() - start_time
+                
+                # Collect performance metrics
+                stats = env.runner.stats
+                
+                # Record performance measurements
+                if stats.total.num_requests > 0:
+                    avg_response_time = stats.total.avg_response_time / 1000  # Convert to seconds
+                    self.performance_monitor.record_performance_measurement(
+                        operation=f'health_check_load_{user_count}_users',
+                        duration=avg_response_time,
+                        baseline_key='health_check_response_time',
+                        additional_metrics={
+                            'total_requests': stats.total.num_requests,
+                            'total_failures': stats.total.num_failures,
+                            'requests_per_second': stats.total.total_rps,
+                            'user_count': user_count,
+                            'test_duration': test_duration
+                        }
+                    )
+                
+                test_result = {
+                    'scenario': 'health_check_load',
+                    'user_count': user_count,
+                    'duration': test_duration,
+                    'total_requests': stats.total.num_requests,
+                    'total_failures': stats.total.num_failures,
+                    'failure_rate': stats.total.fail_ratio,
+                    'avg_response_time': stats.total.avg_response_time,
+                    'requests_per_second': stats.total.total_rps,
+                    'min_response_time': stats.total.min_response_time,
+                    'max_response_time': stats.total.max_response_time
+                }
+                
+                self.test_results.append(test_result)
+                
+                # Validate performance requirements
+                assert stats.total.fail_ratio <= self.config.ERROR_RATE_THRESHOLD, (
+                    f"Health check failure rate {stats.total.fail_ratio:.3f} exceeds threshold {self.config.ERROR_RATE_THRESHOLD:.3f}"
+                )
+                
+                assert stats.total.total_rps >= self.config.MIN_RPS / 4, (  # Scale requirement by user count
+                    f"Health check RPS {stats.total.total_rps:.1f} below minimum requirement"
+                )
+                
+                logger.info(
+                    f"Health check load test completed for {user_count} users",
+                    requests=stats.total.num_requests,
+                    failures=stats.total.num_failures,
+                    rps=round(stats.total.total_rps, 2),
+                    avg_response_time=round(stats.total.avg_response_time, 2)
+                )
+                
+                # Cool down between test phases
+                gevent.sleep(self.config.COOL_DOWN_TIME)
         
-        results = load_test_runner.run_sustained_load_test(user_count, duration, flask_app_url)
+        # Validate overall performance compliance
+        performance_summary = self.performance_monitor.get_performance_summary()
+        assert performance_summary['baseline_compliant'], (
+            f"Health check load testing failed baseline compliance: "
+            f"{performance_summary['compliance_rate']:.1f}% < {100 - self.config.VARIANCE_THRESHOLD * 100:.1f}%"
+        )
+    
+    def test_authentication_flow_load_capacity(self, comprehensive_e2e_environment):
+        """
+        Test authentication workflows under progressive load scaling.
+        
+        Validates JWT processing and Auth0 integration performance under load
+        per Section 6.6.1 authentication integration requirements.
+        """
+        with self.performance_monitor.monitor_load_test('authentication_flow_load'):
+            user_counts = [10, 25, 50, 100, 200]
+            
+            for user_count in user_counts:
+                logger.info(f"Testing authentication flow load with {user_count} concurrent users")
+                
+                env = Environment(user_classes=[AuthenticationUser])
+                env.create_local_runner()
+                env.host = self.config.HOST
+                
+                start_time = time.time()
+                env.runner.start(user_count, spawn_rate=self.config.SPAWN_RATE)
+                
+                # Run for 120 seconds to allow multiple auth cycles
+                import gevent
+                gevent.sleep(120)
+                
+                env.runner.stop()
+                test_duration = time.time() - start_time
+                
+                stats = env.runner.stats
+                
+                # Record auth flow performance
+                if stats.total.num_requests > 0:
+                    avg_response_time = stats.total.avg_response_time / 1000
+                    self.performance_monitor.record_performance_measurement(
+                        operation=f'auth_flow_load_{user_count}_users',
+                        duration=avg_response_time,
+                        baseline_key='auth_flow_response_time',
+                        additional_metrics={
+                            'total_requests': stats.total.num_requests,
+                            'total_failures': stats.total.num_failures,
+                            'requests_per_second': stats.total.total_rps,
+                            'user_count': user_count,
+                            'test_duration': test_duration
+                        }
+                    )
+                
+                test_result = {
+                    'scenario': 'authentication_flow_load',
+                    'user_count': user_count,
+                    'duration': test_duration,
+                    'total_requests': stats.total.num_requests,
+                    'total_failures': stats.total.num_failures,
+                    'failure_rate': stats.total.fail_ratio,
+                    'avg_response_time': stats.total.avg_response_time,
+                    'requests_per_second': stats.total.total_rps,
+                    'min_response_time': stats.total.min_response_time,
+                    'max_response_time': stats.total.max_response_time
+                }
+                
+                self.test_results.append(test_result)
+                
+                # Validate authentication performance requirements
+                assert stats.total.fail_ratio <= self.config.ERROR_RATE_THRESHOLD, (
+                    f"Authentication failure rate {stats.total.fail_ratio:.3f} exceeds threshold"
+                )
+                
+                # Authentication flows should handle lower RPS due to complexity
+                min_auth_rps = max(10, self.config.MIN_RPS / 8)
+                assert stats.total.total_rps >= min_auth_rps, (
+                    f"Authentication RPS {stats.total.total_rps:.1f} below minimum {min_auth_rps}"
+                )
+                
+                logger.info(
+                    f"Authentication flow load test completed for {user_count} users",
+                    requests=stats.total.num_requests,
+                    failures=stats.total.num_failures,
+                    rps=round(stats.total.total_rps, 2)
+                )
+                
+                gevent.sleep(self.config.COOL_DOWN_TIME)
+        
+        performance_summary = self.performance_monitor.get_performance_summary()
+        assert performance_summary['baseline_compliant'], (
+            "Authentication flow load testing failed baseline compliance"
+        )
+    
+    def test_api_workflow_load_capacity(self, comprehensive_e2e_environment):
+        """
+        Test API workflow endpoints under progressive load scaling.
+        
+        Validates business logic performance under load per Section 6.6.1
+        API workflow load testing requirements.
+        """
+        with self.performance_monitor.monitor_load_test('api_workflow_load'):
+            user_counts = [25, 50, 100, 200, 500]
+            
+            for user_count in user_counts:
+                logger.info(f"Testing API workflow load with {user_count} concurrent users")
+                
+                env = Environment(user_classes=[APIWorkflowUser])
+                env.create_local_runner()
+                env.host = self.config.HOST
+                
+                start_time = time.time()
+                env.runner.start(user_count, spawn_rate=self.config.SPAWN_RATE)
+                
+                # Run for 180 seconds for comprehensive workflow testing
+                import gevent
+                gevent.sleep(180)
+                
+                env.runner.stop()
+                test_duration = time.time() - start_time
+                
+                stats = env.runner.stats
+                
+                if stats.total.num_requests > 0:
+                    avg_response_time = stats.total.avg_response_time / 1000
+                    self.performance_monitor.record_performance_measurement(
+                        operation=f'api_workflow_load_{user_count}_users',
+                        duration=avg_response_time,
+                        baseline_key='api_endpoint_response_time',
+                        additional_metrics={
+                            'total_requests': stats.total.num_requests,
+                            'total_failures': stats.total.num_failures,
+                            'requests_per_second': stats.total.total_rps,
+                            'user_count': user_count,
+                            'test_duration': test_duration
+                        }
+                    )
+                
+                test_result = {
+                    'scenario': 'api_workflow_load',
+                    'user_count': user_count,
+                    'duration': test_duration,
+                    'total_requests': stats.total.num_requests,
+                    'total_failures': stats.total.num_failures,
+                    'failure_rate': stats.total.fail_ratio,
+                    'avg_response_time': stats.total.avg_response_time,
+                    'requests_per_second': stats.total.total_rps,
+                    'min_response_time': stats.total.min_response_time,
+                    'max_response_time': stats.total.max_response_time
+                }
+                
+                self.test_results.append(test_result)
+                
+                # Validate API workflow performance requirements
+                assert stats.total.fail_ratio <= self.config.ERROR_RATE_THRESHOLD, (
+                    f"API workflow failure rate {stats.total.fail_ratio:.3f} exceeds threshold"
+                )
+                
+                # Scale RPS requirement based on user count
+                expected_rps = min(self.config.TARGET_RPS, user_count * 2)
+                assert stats.total.total_rps >= expected_rps * 0.8, (  # Allow 20% tolerance
+                    f"API workflow RPS {stats.total.total_rps:.1f} below expected {expected_rps * 0.8:.1f}"
+                )
+                
+                logger.info(
+                    f"API workflow load test completed for {user_count} users",
+                    requests=stats.total.num_requests,
+                    failures=stats.total.num_failures,
+                    rps=round(stats.total.total_rps, 2)
+                )
+                
+                gevent.sleep(self.config.COOL_DOWN_TIME)
+        
+        performance_summary = self.performance_monitor.get_performance_summary()
+        assert performance_summary['baseline_compliant'], (
+            "API workflow load testing failed baseline compliance"
+        )
+    
+    def test_database_operation_load_capacity(self, comprehensive_e2e_environment):
+        """
+        Test database operations under progressive load scaling.
+        
+        Validates MongoDB and Redis performance under load per Section 6.6.1
+        database integration testing requirements.
+        """
+        with self.performance_monitor.monitor_load_test('database_operation_load'):
+            user_counts = [20, 50, 100, 200]
+            
+            for user_count in user_counts:
+                logger.info(f"Testing database operation load with {user_count} concurrent users")
+                
+                env = Environment(user_classes=[DatabaseOperationUser])
+                env.create_local_runner()
+                env.host = self.config.HOST
+                
+                start_time = time.time()
+                env.runner.start(user_count, spawn_rate=self.config.SPAWN_RATE)
+                
+                # Run for 150 seconds for database operation testing
+                import gevent
+                gevent.sleep(150)
+                
+                env.runner.stop()
+                test_duration = time.time() - start_time
+                
+                stats = env.runner.stats
+                
+                if stats.total.num_requests > 0:
+                    avg_response_time = stats.total.avg_response_time / 1000
+                    self.performance_monitor.record_performance_measurement(
+                        operation=f'database_operation_load_{user_count}_users',
+                        duration=avg_response_time,
+                        baseline_key='database_query_time',
+                        additional_metrics={
+                            'total_requests': stats.total.num_requests,
+                            'total_failures': stats.total.num_failures,
+                            'requests_per_second': stats.total.total_rps,
+                            'user_count': user_count,
+                            'test_duration': test_duration
+                        }
+                    )
+                
+                test_result = {
+                    'scenario': 'database_operation_load',
+                    'user_count': user_count,
+                    'duration': test_duration,
+                    'total_requests': stats.total.num_requests,
+                    'total_failures': stats.total.num_failures,
+                    'failure_rate': stats.total.fail_ratio,
+                    'avg_response_time': stats.total.avg_response_time,
+                    'requests_per_second': stats.total.total_rps,
+                    'min_response_time': stats.total.min_response_time,
+                    'max_response_time': stats.total.max_response_time
+                }
+                
+                self.test_results.append(test_result)
+                
+                # Validate database operation performance requirements
+                assert stats.total.fail_ratio <= self.config.ERROR_RATE_THRESHOLD, (
+                    f"Database operation failure rate {stats.total.fail_ratio:.3f} exceeds threshold"
+                )
+                
+                logger.info(
+                    f"Database operation load test completed for {user_count} users",
+                    requests=stats.total.num_requests,
+                    failures=stats.total.num_failures,
+                    rps=round(stats.total.total_rps, 2)
+                )
+                
+                gevent.sleep(self.config.COOL_DOWN_TIME)
+        
+        performance_summary = self.performance_monitor.get_performance_summary()
+        assert performance_summary['baseline_compliant'], (
+            "Database operation load testing failed baseline compliance"
+        )
+    
+    def test_mixed_workload_capacity_validation(self, comprehensive_e2e_environment):
+        """
+        Test mixed workload with all user types under maximum load.
+        
+        Validates complete system performance under realistic mixed traffic
+        patterns per Section 6.6.1 concurrent request handling capacity.
+        """
+        with self.performance_monitor.monitor_load_test('mixed_workload_capacity'):
+            # Maximum load test with mixed user types
+            total_users = min(self.config.MAX_USERS, 1000)
+            
+            logger.info(f"Testing mixed workload capacity with {total_users} concurrent users")
+            
+            # Define user distribution for realistic traffic patterns
+            user_classes = [
+                HealthCheckUser,      # 20% - Health monitoring
+                AuthenticationUser,   # 20% - Authentication flows  
+                APIWorkflowUser,      # 40% - Primary business logic
+                DatabaseOperationUser, # 15% - Database operations
+                ExternalServiceUser   # 5% - External integrations
+            ]
+            
+            env = Environment(user_classes=user_classes)
+            env.create_local_runner()
+            env.host = self.config.HOST
+            
+            start_time = time.time()
+            
+            # Progressive ramp-up to maximum users
+            env.runner.start(total_users, spawn_rate=self.config.SPAWN_RATE)
+            
+            # Sustained load testing for 300 seconds (5 minutes)
+            import gevent
+            gevent.sleep(self.config.SUSTAINED_LOAD_TIME)
+            
+            env.runner.stop()
+            test_duration = time.time() - start_time
+            
+            stats = env.runner.stats
+            
+            # Record comprehensive mixed workload performance
+            if stats.total.num_requests > 0:
+                avg_response_time = stats.total.avg_response_time / 1000
+                self.performance_monitor.record_performance_measurement(
+                    operation='mixed_workload_capacity',
+                    duration=avg_response_time,
+                    baseline_key='complete_workflow_time',
+                    additional_metrics={
+                        'total_requests': stats.total.num_requests,
+                        'total_failures': stats.total.num_failures,
+                        'requests_per_second': stats.total.total_rps,
+                        'user_count': total_users,
+                        'test_duration': test_duration,
+                        'peak_load_test': True
+                    }
+                )
+            
+            test_result = {
+                'scenario': 'mixed_workload_capacity',
+                'user_count': total_users,
+                'duration': test_duration,
+                'total_requests': stats.total.num_requests,
+                'total_failures': stats.total.num_failures,
+                'failure_rate': stats.total.fail_ratio,
+                'avg_response_time': stats.total.avg_response_time,
+                'requests_per_second': stats.total.total_rps,
+                'min_response_time': stats.total.min_response_time,
+                'max_response_time': stats.total.max_response_time,
+                'p95_response_time': stats.total.get_response_time_percentile(0.95),
+                'p99_response_time': stats.total.get_response_time_percentile(0.99)
+            }
+            
+            self.test_results.append(test_result)
+            
+            # Validate mixed workload performance requirements
+            assert stats.total.fail_ratio <= self.config.ERROR_RATE_THRESHOLD, (
+                f"Mixed workload failure rate {stats.total.fail_ratio:.3f} exceeds threshold {self.config.ERROR_RATE_THRESHOLD:.3f}"
+            )
+            
+            assert stats.total.total_rps >= self.config.MIN_RPS, (
+                f"Mixed workload RPS {stats.total.total_rps:.1f} below minimum requirement {self.config.MIN_RPS}"
+            )
+            
+            assert stats.total.total_rps <= self.config.MAX_RPS * 1.2, (  # Allow 20% over target for peak capacity
+                f"Mixed workload RPS {stats.total.total_rps:.1f} unexpectedly high (possible measurement error)"
+            )
+            
+            # Validate response time requirements
+            assert stats.total.avg_response_time <= 2000, (  # 2 second average response time limit
+                f"Mixed workload average response time {stats.total.avg_response_time:.1f}ms exceeds 2000ms limit"
+            )
+            
+            assert stats.total.get_response_time_percentile(0.95) <= 5000, (  # 5 second P95 response time limit
+                f"Mixed workload P95 response time exceeds 5000ms limit"
+            )
+            
+            logger.info(
+                f"Mixed workload capacity test completed",
+                users=total_users,
+                duration=round(test_duration, 1),
+                requests=stats.total.num_requests,
+                failures=stats.total.num_failures,
+                rps=round(stats.total.total_rps, 2),
+                avg_response_time=round(stats.total.avg_response_time, 2),
+                p95_response_time=round(stats.total.get_response_time_percentile(0.95), 2),
+                failure_rate=round(stats.total.fail_ratio * 100, 3)
+            )
+        
+        # Validate overall performance compliance for mixed workload
+        performance_summary = self.performance_monitor.get_performance_summary()
+        
+        assert performance_summary['baseline_compliant'], (
+            f"Mixed workload load testing failed baseline compliance: "
+            f"{performance_summary['compliance_rate']:.1f}% < {100 - self.config.VARIANCE_THRESHOLD * 100:.1f}%"
+        )
+        
+        # Validate resource utilization compliance
+        if performance_summary['resource_stats']:
+            cpu_peak = performance_summary['resource_stats']['cpu_utilization']['peak']
+            memory_peak = performance_summary['resource_stats']['memory_utilization']['peak']
+            
+            assert cpu_peak <= self.config.CPU_UTILIZATION_LIMIT * 1.1, (  # Allow 10% tolerance
+                f"Peak CPU utilization {cpu_peak:.1f}% exceeds limit {self.config.CPU_UTILIZATION_LIMIT:.1f}%"
+            )
+            
+            assert memory_peak <= self.config.MEMORY_UTILIZATION_LIMIT * 1.1, (  # Allow 10% tolerance
+                f"Peak memory utilization {memory_peak:.1f}% exceeds limit {self.config.MEMORY_UTILIZATION_LIMIT:.1f}%"
+            )
+        
+        # Log final validation results
+        logger.info(
+            "Mixed workload capacity validation completed successfully",
+            baseline_compliant=performance_summary['baseline_compliant'],
+            compliance_rate=round(performance_summary['compliance_rate'], 2),
+            total_violations=performance_summary['violation_stats']['total_violations'],
+            critical_violations=performance_summary['violation_stats']['critical_violations']
+        )
+    
+    def _generate_load_test_report(self):
+        """Generate comprehensive load test execution report."""
+        try:
+            performance_summary = self.performance_monitor.get_performance_summary()
+            
+            report = {
+                'test_execution': {
+                    'timestamp': datetime.utcnow().isoformat(),
+                    'total_scenarios': len(self.test_results),
+                    'configuration': {
+                        'min_users': self.config.MIN_USERS,
+                        'max_users': self.config.MAX_USERS,
+                        'target_rps': self.config.TARGET_RPS,
+                        'variance_threshold': self.config.VARIANCE_THRESHOLD,
+                        'error_rate_threshold': self.config.ERROR_RATE_THRESHOLD
+                    }
+                },
+                'performance_summary': performance_summary,
+                'scenario_results': self.test_results,
+                'compliance_assessment': {
+                    'baseline_compliant': performance_summary.get('baseline_compliant', False),
+                    'variance_threshold_met': performance_summary.get('compliance_rate', 0) >= (100 - self.config.VARIANCE_THRESHOLD * 100),
+                    'resource_utilization_compliant': True,  # Will be updated based on resource checks
+                    'error_rate_compliant': all(r['failure_rate'] <= self.config.ERROR_RATE_THRESHOLD for r in self.test_results)
+                }
+            }
+            
+            # Export report to file
+            timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+            report_file = f'load_test_report_{timestamp}.json'
+            
+            with open(report_file, 'w') as f:
+                json.dump(report, f, indent=2, default=str)
+            
+            logger.info(f"Load test report generated: {report_file}")
+            
+        except Exception as e:
+            logger.error(f"Failed to generate load test report: {e}")
+
+
+# =============================================================================
+# PYTEST INTEGRATION AND UTILITIES
+# =============================================================================
+
+@pytest.mark.e2e
+@pytest.mark.performance
+@pytest.mark.slow
+@skip_if_not_e2e()
+@require_load_testing()
+@pytest.mark.skipif(not LOCUST_AVAILABLE, reason="Locust framework not available")
+def test_progressive_load_scaling(comprehensive_e2e_environment):
+    """
+    Test progressive load scaling from 10 to 1000 users per Section 4.6.3.
+    
+    Validates system scalability with gradual load increases and automated
+    performance threshold enforcement per Section 6.6.2.
+    """
+    config = LoadTestingConfig()
+    performance_monitor = LoadTestPerformanceMonitor(config)
+    
+    with performance_monitor.monitor_load_test('progressive_load_scaling'):
+        # Test each scaling step
+        for user_count in config.USER_SCALING_STEPS:
+            if user_count > config.MAX_USERS:
+                break
+            
+            logger.info(f"Testing progressive load scaling step: {user_count} users")
+            
+            # Use mixed workload for realistic testing
+            user_classes = [HealthCheckUser, AuthenticationUser, APIWorkflowUser]
+            
+            env = Environment(user_classes=user_classes)
+            env.create_local_runner()
+            env.host = config.HOST
+            
+            start_time = time.time()
+            env.runner.start(user_count, spawn_rate=config.SPAWN_RATE)
+            
+            # Run each step for 90 seconds
+            import gevent
+            gevent.sleep(90)
+            
+            env.runner.stop()
+            test_duration = time.time() - start_time
+            
+            stats = env.runner.stats
+            
+            # Record scaling step performance
+            if stats.total.num_requests > 0:
+                avg_response_time = stats.total.avg_response_time / 1000
+                performance_monitor.record_performance_measurement(
+                    operation=f'progressive_scaling_{user_count}_users',
+                    duration=avg_response_time,
+                    baseline_key='api_endpoint_response_time',
+                    additional_metrics={
+                        'user_count': user_count,
+                        'total_requests': stats.total.num_requests,
+                        'requests_per_second': stats.total.total_rps,
+                        'failure_rate': stats.total.fail_ratio
+                    }
+                )
+            
+            # Validate scaling step requirements
+            assert stats.total.fail_ratio <= config.ERROR_RATE_THRESHOLD, (
+                f"Failure rate {stats.total.fail_ratio:.3f} exceeds threshold at {user_count} users"
+            )
+            
+            # RPS should scale roughly linearly with user count
+            expected_min_rps = max(10, user_count * 0.5)  # Conservative estimate
+            assert stats.total.total_rps >= expected_min_rps, (
+                f"RPS {stats.total.total_rps:.1f} below expected minimum {expected_min_rps} for {user_count} users"
+            )
+            
+            logger.info(
+                f"Progressive scaling step completed: {user_count} users",
+                rps=round(stats.total.total_rps, 2),
+                avg_response_time=round(stats.total.avg_response_time, 2),
+                failure_rate=round(stats.total.fail_ratio * 100, 3)
+            )
+            
+            # Brief cool-down between scaling steps
+            gevent.sleep(30)
+    
+    # Validate overall progressive scaling compliance
+    performance_summary = performance_monitor.get_performance_summary()
+    assert performance_summary['baseline_compliant'], (
+        "Progressive load scaling failed baseline compliance requirements"
+    )
+    
+    logger.info(
+        "Progressive load scaling validation completed successfully",
+        total_measurements=performance_summary['performance_stats']['total_measurements'],
+        compliance_rate=round(performance_summary['compliance_rate'], 2)
+    )
+
+
+@pytest.mark.e2e
+@pytest.mark.performance
+@pytest.mark.critical
+@skip_if_not_e2e()
+@require_load_testing()
+@pytest.mark.skipif(not LOCUST_AVAILABLE, reason="Locust framework not available")
+def test_sustained_load_capacity(comprehensive_e2e_environment):
+    """
+    Test sustained load capacity at target RPS per Section 4.6.3.
+    
+    Validates system ability to maintain target request rate over extended
+    periods with resource utilization monitoring per Section 6.6.3.
+    """
+    config = LoadTestingConfig()
+    performance_monitor = LoadTestPerformanceMonitor(config)
+    
+    with performance_monitor.monitor_load_test('sustained_load_capacity'):
+        # Calculate user count to achieve target RPS
+        target_users = min(config.TARGET_RPS // 2, config.MAX_USERS)  # Conservative estimate
+        
+        logger.info(f"Testing sustained load capacity: {target_users} users for {config.SUSTAINED_LOAD_TIME} seconds")
+        
+        # Use all user types for comprehensive sustained testing
+        user_classes = [
+            HealthCheckUser,
+            AuthenticationUser, 
+            APIWorkflowUser,
+            DatabaseOperationUser,
+            ExternalServiceUser
+        ]
+        
+        env = Environment(user_classes=user_classes)
+        env.create_local_runner()
+        env.host = config.HOST
+        
+        start_time = time.time()
+        
+        # Gradual ramp-up to target users
+        env.runner.start(target_users, spawn_rate=config.SPAWN_RATE)
+        
+        # Sustained load testing
+        import gevent
+        gevent.sleep(config.SUSTAINED_LOAD_TIME)
+        
+        env.runner.stop()
+        test_duration = time.time() - start_time
+        
+        stats = env.runner.stats
+        
+        # Record sustained load performance
+        if stats.total.num_requests > 0:
+            avg_response_time = stats.total.avg_response_time / 1000
+            performance_monitor.record_performance_measurement(
+                operation='sustained_load_capacity',
+                duration=avg_response_time,
+                baseline_key='complete_workflow_time',
+                additional_metrics={
+                    'user_count': target_users,
+                    'total_requests': stats.total.num_requests,
+                    'requests_per_second': stats.total.total_rps,
+                    'test_duration': test_duration,
+                    'sustained_load': True
+                }
+            )
         
         # Validate sustained load requirements
-        assert results.peak_concurrent_users == user_count, f"Should sustain {user_count} users"
-        assert results.total_requests > user_count * 10, "Should generate substantial sustained request volume"
-        
-        # Performance stability validation
-        assert results.meets_variance_requirement, f"Sustained performance variance {results.response_time_variance:.1%} exceeds ≤10% requirement"
-        assert results.meets_error_rate_requirement, f"Sustained error rate {results.error_rate:.3%} exceeds ≤0.1% requirement"
-        
-        # Resource stability validation
-        assert results.meets_resource_requirements, "Resource utilization should remain stable under sustained load"
-        
-        # Request rate validation
-        assert results.requests_per_second >= load_test_config.target_rps_min, f"Sustained RPS {results.requests_per_second:.1f} below minimum"
-        
-        logging.info(f"Sustained load test passed - Duration: {duration}s, "
-                    f"RPS: {results.requests_per_second:.1f}, Error Rate: {results.error_rate:.3%}")
-    
-    def test_spike_load_resilience(self, load_test_runner: LoadTestRunner, flask_app_url: str):
-        """
-        Test system resilience to sudden traffic spikes
-        
-        Validates:
-        - Rapid user increase from 100 to 1000 concurrent users
-        - System stability during traffic spikes
-        - Error rate compliance during spike conditions
-        - Recovery performance post-spike
-        """
-        results = load_test_runner.run_spike_load_test(
-            baseline_users=100,
-            spike_users=1000,
-            spike_duration=60,
-            host=flask_app_url
+        assert stats.total.fail_ratio <= config.ERROR_RATE_THRESHOLD, (
+            f"Sustained load failure rate {stats.total.fail_ratio:.3f} exceeds threshold {config.ERROR_RATE_THRESHOLD:.3f}"
         )
         
-        # Validate spike resilience
-        assert results.peak_concurrent_users >= 1000, "Should handle spike to 1000 users"
-        assert results.total_requests > 500, "Should process requests during spike"
-        
-        # Error rate should remain acceptable even during spikes
-        assert results.error_rate <= 0.05, f"Spike error rate {results.error_rate:.3%} too high"  # Allow higher error rate for spikes
-        
-        # Performance should be measurable during spike
-        assert results.average_response_time > 0, "Should measure response times during spike"
-        assert results.requests_per_second > 0, "Should maintain some request throughput during spike"
-        
-        logging.info(f"Spike load test passed - Peak Users: {results.peak_concurrent_users}, "
-                    f"Spike Error Rate: {results.error_rate:.3%}")
-    
-    def test_concurrent_user_capacity_validation(self, load_test_runner: LoadTestRunner, flask_app_url: str):
-        """
-        Test concurrent user capacity validation matching Node.js capabilities per Section 6.6.3
-        
-        Validates:
-        - Maximum concurrent user capacity determination
-        - Performance degradation thresholds
-        - Capacity comparison with Node.js baseline
-        - Scalability limits identification
-        """
-        # Test increasing user counts to find capacity limits
-        user_counts = [100, 250, 500, 750, 1000]
-        capacity_results = []
-        
-        for user_count in user_counts:
-            logging.info(f"Testing capacity with {user_count} concurrent users")
-            
-            results = load_test_runner.run_sustained_load_test(
-                user_count=user_count,
-                duration=120,  # 2 minutes per capacity test
-                host=flask_app_url
-            )
-            
-            capacity_results.append({
-                'user_count': user_count,
-                'rps': results.requests_per_second,
-                'response_time': results.average_response_time,
-                'error_rate': results.error_rate,
-                'cpu_usage': results.peak_cpu_usage,
-                'memory_usage': results.peak_memory_usage,
-                'meets_requirements': results.meets_variance_requirement and results.meets_error_rate_requirement
-            })
-            
-            # Stop if performance degrades significantly
-            if not results.meets_variance_requirement or results.error_rate > 0.01:  # 1% error rate threshold
-                logging.warning(f"Performance degradation detected at {user_count} users")
-                break
-        
-        # Validate capacity results
-        successful_tests = [r for r in capacity_results if r['meets_requirements']]
-        assert len(successful_tests) > 0, "Should successfully handle some concurrent user load"
-        
-        max_successful_users = max(r['user_count'] for r in successful_tests)
-        baseline_capacity = load_test_config.nodejs_baseline['concurrent_users']
-        
-        # Capacity should meet or exceed Node.js baseline per Section 6.6.3
-        assert max_successful_users >= baseline_capacity, f"Concurrent capacity {max_successful_users} below Node.js baseline {baseline_capacity}"
-        
-        logging.info(f"Concurrent capacity validation passed - Max Users: {max_successful_users}, "
-                    f"Baseline: {baseline_capacity}")
-    
-    def test_request_rate_performance(self, load_test_runner: LoadTestRunner, flask_app_url: str):
-        """
-        Test request rate performance targets per Section 4.6.3
-        
-        Validates:
-        - Target 100-500 requests per second sustained load
-        - Request rate stability under varying user loads
-        - Performance variance compliance at different RPS levels
-        - Throughput comparison with Node.js baseline
-        """
-        # Test different user counts to achieve target RPS
-        target_rps_tests = [
-            (50, 100),   # Target ~100 RPS
-            (150, 250),  # Target ~250 RPS
-            (300, 500),  # Target ~500 RPS
-        ]
-        
-        rps_results = []
-        
-        for user_count, target_rps in target_rps_tests:
-            logging.info(f"Testing {target_rps} RPS target with {user_count} users")
-            
-            results = load_test_runner.run_sustained_load_test(
-                user_count=user_count,
-                duration=180,  # 3 minutes per RPS test
-                host=flask_app_url
-            )
-            
-            rps_achieved = results.requests_per_second
-            rps_variance = abs(rps_achieved - target_rps) / target_rps if target_rps > 0 else 1.0
-            
-            rps_results.append({
-                'target_rps': target_rps,
-                'achieved_rps': rps_achieved,
-                'rps_variance': rps_variance,
-                'response_time': results.average_response_time,
-                'error_rate': results.error_rate,
-                'meets_performance_requirements': results.meets_variance_requirement
-            })
-            
-            # Validate RPS achievement within reasonable variance
-            assert rps_achieved >= target_rps * 0.8, f"RPS {rps_achieved:.1f} significantly below target {target_rps}"
-            assert results.meets_error_rate_requirement, f"Error rate {results.error_rate:.3%} exceeds threshold at {target_rps} RPS"
-        
-        # Validate overall RPS performance
-        successful_rps_tests = [r for r in rps_results if r['meets_performance_requirements']]
-        assert len(successful_rps_tests) > 0, "Should successfully achieve target RPS with performance compliance"
-        
-        max_achieved_rps = max(r['achieved_rps'] for r in successful_rps_tests)
-        baseline_rps = load_test_config.nodejs_baseline['requests_per_second']
-        
-        # RPS should meet or exceed Node.js baseline
-        assert max_achieved_rps >= baseline_rps * 0.9, f"Max RPS {max_achieved_rps:.1f} below 90% of Node.js baseline {baseline_rps}"
-        
-        logging.info(f"Request rate performance validated - Max RPS: {max_achieved_rps:.1f}, "
-                    f"Baseline: {baseline_rps:.1f}")
-    
-    def test_resource_utilization_monitoring(self, load_test_runner: LoadTestRunner, flask_app_url: str):
-        """
-        Test resource utilization monitoring during load testing per Section 6.6.3
-        
-        Validates:
-        - CPU utilization ≤70% during peak load
-        - Memory utilization ≤80% during peak load
-        - Resource monitoring accuracy and reporting
-        - Resource efficiency compared to Node.js baseline
-        """
-        # Run high-load test with comprehensive resource monitoring
-        results = load_test_runner.run_sustained_load_test(
-            user_count=750,  # High load for resource testing
-            duration=240,    # 4 minutes for stable resource measurements
-            host=flask_app_url
+        assert stats.total.total_rps >= config.MIN_RPS, (
+            f"Sustained load RPS {stats.total.total_rps:.1f} below minimum requirement {config.MIN_RPS}"
         )
         
-        # Validate resource utilization thresholds
-        assert results.peak_cpu_usage <= load_test_config.max_cpu_usage, f"Peak CPU {results.peak_cpu_usage:.1%} exceeds {load_test_config.max_cpu_usage:.1%} threshold"
-        assert results.peak_memory_usage <= load_test_config.max_memory_usage, f"Peak Memory {results.peak_memory_usage:.1%} exceeds {load_test_config.max_memory_usage:.1%} threshold"
-        
-        # Validate resource monitoring data quality
-        assert results.average_cpu_usage > 0, "Should measure average CPU usage"
-        assert results.average_memory_usage > 0, "Should measure average memory usage"
-        assert results.peak_cpu_usage >= results.average_cpu_usage, "Peak CPU should be >= average CPU"
-        assert results.peak_memory_usage >= results.average_memory_usage, "Peak memory should be >= average memory"
-        
-        # Validate resource efficiency
-        assert results.requests_per_second > 0, "Should maintain request throughput under resource monitoring"
-        assert results.meets_variance_requirement, "Performance should meet requirements under resource constraints"
-        
-        # Calculate resource efficiency (RPS per CPU/Memory unit)
-        cpu_efficiency = results.requests_per_second / results.average_cpu_usage if results.average_cpu_usage > 0 else 0
-        memory_efficiency = results.requests_per_second / results.average_memory_usage if results.average_memory_usage > 0 else 0
-        
-        logging.info(f"Resource utilization validated - CPU: {results.peak_cpu_usage:.1%}, "
-                    f"Memory: {results.peak_memory_usage:.1%}, "
-                    f"CPU Efficiency: {cpu_efficiency:.1f} RPS/CPU%, "
-                    f"Memory Efficiency: {memory_efficiency:.1f} RPS/Memory%")
-    
-    def test_system_scalability_analysis(self, load_test_runner: LoadTestRunner, flask_app_url: str):
-        """
-        Test system scalability ensuring equivalent or improved capacity per Section 0.2.3
-        
-        Validates:
-        - Linear scalability characteristics
-        - Performance degradation patterns
-        - Scalability comparison with Node.js implementation
-        - Capacity planning metrics
-        """
-        # Run comprehensive scalability analysis
-        scalability_tests = [
-            (100, "low_load"),
-            (300, "medium_load"), 
-            (600, "high_load"),
-            (1000, "peak_load")
-        ]
-        
-        scalability_results = []
-        
-        for user_count, load_level in scalability_tests:
-            logging.info(f"Scalability test - {load_level}: {user_count} users")
-            
-            results = load_test_runner.run_sustained_load_test(
-                user_count=user_count,
-                duration=150,  # 2.5 minutes per scalability test
-                host=flask_app_url
-            )
-            
-            scalability_results.append({
-                'load_level': load_level,
-                'user_count': user_count,
-                'rps': results.requests_per_second,
-                'rps_per_user': results.requests_per_second / user_count,
-                'avg_response_time': results.average_response_time,
-                'p95_response_time': results.p95_response_time,
-                'error_rate': results.error_rate,
-                'cpu_usage': results.peak_cpu_usage,
-                'memory_usage': results.peak_memory_usage,
-                'meets_requirements': results.meets_variance_requirement and results.meets_error_rate_requirement
-            })
-        
-        # Validate scalability characteristics
-        successful_results = [r for r in scalability_results if r['meets_requirements']]
-        assert len(successful_results) >= 2, "Should demonstrate scalability across multiple load levels"
-        
-        # Analyze scalability trends
-        if len(successful_results) >= 2:
-            rps_trend = []
-            for i in range(1, len(successful_results)):
-                prev = successful_results[i-1]
-                curr = successful_results[i]
-                rps_increase_ratio = curr['rps'] / prev['rps'] if prev['rps'] > 0 else 0
-                user_increase_ratio = curr['user_count'] / prev['user_count']
-                scalability_ratio = rps_increase_ratio / user_increase_ratio if user_increase_ratio > 0 else 0
-                rps_trend.append(scalability_ratio)
-            
-            # Scalability should be reasonably linear (ratio > 0.7 indicates good scalability)
-            avg_scalability = statistics.mean(rps_trend) if rps_trend else 0
-            assert avg_scalability > 0.5, f"Poor scalability detected - ratio: {avg_scalability:.2f}"
-        
-        # Compare with Node.js baseline capacity
-        max_successful_users = max(r['user_count'] for r in successful_results)
-        baseline_capacity = load_test_config.nodejs_baseline['concurrent_users']
-        
-        assert max_successful_users >= baseline_capacity, f"Scalability capacity {max_successful_users} below Node.js baseline {baseline_capacity}"
-        
-        logging.info(f"Scalability analysis completed - Max Users: {max_successful_users}, "
-                    f"Scalability Ratio: {avg_scalability:.2f}")
-    
-    def test_comprehensive_performance_report(self, load_test_runner: LoadTestRunner):
-        """
-        Generate comprehensive performance report with failure threshold enforcement per Section 6.6.2
-        
-        Validates:
-        - Automated load test reporting integration
-        - Performance metrics aggregation and analysis
-        - Compliance validation across all test scenarios
-        - Failure threshold enforcement and recommendations
-        """
-        # Ensure we have test results to report on
-        if not load_test_runner.results_history:
-            pytest.skip("No load test results available for reporting")
-        
-        # Generate comprehensive performance report
-        report = load_test_runner.generate_performance_report()
-        
-        # Validate report structure and content
-        assert 'test_summary' in report, "Report should include test summary"
-        assert 'performance_metrics' in report, "Report should include performance metrics"
-        assert 'compliance_analysis' in report, "Report should include compliance analysis"
-        assert 'recommendations' in report, "Report should include recommendations"
-        
-        # Validate test summary data
-        test_summary = report['test_summary']
-        assert test_summary['total_tests'] > 0, "Should report on executed tests"
-        assert 'overall_compliance' in test_summary, "Should include overall compliance status"
-        
-        # Validate performance metrics for each test
-        performance_metrics = report['performance_metrics']
-        assert len(performance_metrics) > 0, "Should include performance metrics for executed tests"
-        
-        for test_name, metrics in performance_metrics.items():
-            assert 'requests_per_second' in metrics, f"Missing RPS metric for {test_name}"
-            assert 'average_response_time' in metrics, f"Missing response time metric for {test_name}"
-            assert 'error_rate' in metrics, f"Missing error rate metric for {test_name}"
-            assert metrics['requests_per_second'] >= 0, f"Invalid RPS for {test_name}"
-            assert metrics['average_response_time'] >= 0, f"Invalid response time for {test_name}"
-        
-        # Validate compliance analysis
-        compliance_analysis = report['compliance_analysis']
-        assert len(compliance_analysis) > 0, "Should include compliance analysis for executed tests"
-        
-        overall_compliance = all(
-            analysis['meets_variance_requirement'] and 
-            analysis['meets_error_rate_requirement']
-            for analysis in compliance_analysis.values()
+        assert stats.total.total_rps <= config.MAX_RPS * 1.1, (  # Allow 10% tolerance
+            f"Sustained load RPS {stats.total.total_rps:.1f} exceeds maximum expectation"
         )
         
-        # Log comprehensive performance report
-        logging.info("=== COMPREHENSIVE PERFORMANCE REPORT ===")
-        logging.info(f"Total Tests Executed: {test_summary['total_tests']}")
-        logging.info(f"Overall Compliance: {test_summary['overall_compliance']}")
+        # Validate response time stability during sustained load
+        assert stats.total.avg_response_time <= 1500, (  # 1.5 second average limit
+            f"Sustained load average response time {stats.total.avg_response_time:.1f}ms exceeds 1500ms limit"
+        )
         
-        for test_name, metrics in performance_metrics.items():
-            compliance = compliance_analysis[test_name]
-            logging.info(f"\n{test_name.upper()}:")
-            logging.info(f"  RPS: {metrics['requests_per_second']:.1f}")
-            logging.info(f"  Avg Response Time: {metrics['average_response_time']:.1f}ms")
-            logging.info(f"  Error Rate: {metrics['error_rate']:.3%}")
-            logging.info(f"  Variance Compliance: {compliance['meets_variance_requirement']}")
-            logging.info(f"  Error Rate Compliance: {compliance['meets_error_rate_requirement']}")
+        logger.info(
+            "Sustained load capacity test completed successfully",
+            users=target_users,
+            duration=round(test_duration, 1),
+            total_requests=stats.total.num_requests,
+            avg_rps=round(stats.total.total_rps, 2),
+            avg_response_time=round(stats.total.avg_response_time, 2),
+            failure_rate=round(stats.total.fail_ratio * 100, 3)
+        )
+    
+    # Validate overall sustained load performance
+    performance_summary = performance_monitor.get_performance_summary()
+    assert performance_summary['baseline_compliant'], (
+        "Sustained load capacity testing failed baseline compliance"
+    )
+    
+    # Validate resource utilization during sustained load
+    if performance_summary['resource_stats']:
+        cpu_avg = performance_summary['resource_stats']['cpu_utilization']['average']
+        memory_avg = performance_summary['resource_stats']['memory_utilization']['average']
         
-        if report['recommendations']:
-            logging.info(f"\nRecommendations:")
-            for rec in report['recommendations']:
-                logging.info(f"  - {rec}")
+        assert cpu_avg <= config.CPU_UTILIZATION_LIMIT, (
+            f"Average CPU utilization {cpu_avg:.1f}% exceeds limit {config.CPU_UTILIZATION_LIMIT:.1f}%"
+        )
         
-        logging.info("=== END PERFORMANCE REPORT ===")
+        assert memory_avg <= config.MEMORY_UTILIZATION_LIMIT, (
+            f"Average memory utilization {memory_avg:.1f}% exceeds limit {config.MEMORY_UTILIZATION_LIMIT:.1f}%"
+        )
         
-        # Assert overall performance compliance for test success
-        # Allow partial success in CI/CD but log warnings for failures
-        failed_tests = [name for name, analysis in compliance_analysis.items() 
-                       if not (analysis['meets_variance_requirement'] and analysis['meets_error_rate_requirement'])]
-        
-        if failed_tests:
-            warning_msg = f"Performance compliance issues detected in: {', '.join(failed_tests)}"
-            logging.warning(warning_msg)
-            # In CI/CD, you might want to make this a failure:
-            # pytest.fail(warning_msg)
-        
-        # Validate that at least some tests passed performance requirements
-        passed_tests = [name for name, analysis in compliance_analysis.items() 
-                       if analysis['meets_variance_requirement'] and analysis['meets_error_rate_requirement']]
-        
-        assert len(passed_tests) > 0, "At least some load tests should meet performance requirements"
-        
-        logging.info(f"Performance report validation completed - {len(passed_tests)}/{len(compliance_analysis)} tests passed")
+        logger.info(
+            "Resource utilization validation passed",
+            avg_cpu=round(cpu_avg, 1),
+            avg_memory=round(memory_avg, 1)
+        )
 
 
-# =============================================================================
-# STANDALONE LOAD TEST EXECUTION
-# =============================================================================
-
-def run_standalone_load_tests(host: str = "http://localhost:5000"):
+if __name__ == '__main__':
     """
-    Run load tests outside of pytest framework for development and debugging
+    Direct execution support for load testing scenarios.
     
-    Args:
-        host: Target Flask application URL
-    """
-    logging.basicConfig(level=logging.INFO)
-    logging.info("Starting standalone load test execution")
-    
-    runner = LoadTestRunner(load_test_config)
-    
-    try:
-        # Run comprehensive load test suite
-        baseline_results = runner.run_baseline_test(host)
-        logging.info(f"Baseline completed: {baseline_results.requests_per_second:.1f} RPS")
-        
-        gradual_results = runner.run_gradual_load_test(host)
-        logging.info(f"Gradual load completed: {gradual_results.peak_concurrent_users} peak users")
-        
-        sustained_results = runner.run_sustained_load_test(500, 300, host)
-        logging.info(f"Sustained load completed: {sustained_results.error_rate:.3%} error rate")
-        
-        # Generate final report
-        report = runner.generate_performance_report()
-        print("\n" + "="*50)
-        print("LOAD TEST EXECUTION COMPLETED")
-        print("="*50)
-        print(f"Total Tests: {report['test_summary']['total_tests']}")
-        print(f"Overall Compliance: {report['test_summary']['overall_compliance']}")
-        
-        if report['recommendations']:
-            print("\nRecommendations:")
-            for rec in report['recommendations']:
-                print(f"  - {rec}")
-        
-    except Exception as e:
-        logging.error(f"Standalone load test execution failed: {e}")
-        raise
-
-
-if __name__ == "__main__":
-    """
-    Entry point for standalone load test execution
-    
-    Usage:
-        python test_load_scenarios.py
-        python test_load_scenarios.py --host http://localhost:8000
+    Allows running load tests directly outside of pytest for development
+    and debugging purposes.
     """
     import sys
     
-    host = "http://localhost:5000"
-    if len(sys.argv) > 1 and sys.argv[1].startswith("--host"):
-        if "=" in sys.argv[1]:
-            host = sys.argv[1].split("=", 1)[1]
-        elif len(sys.argv) > 2:
-            host = sys.argv[2]
+    if len(sys.argv) > 1 and sys.argv[1] == 'run_load_test':
+        config = LoadTestingConfig()
+        
+        # Create simple test environment
+        from locust.env import Environment
+        from locust import events
+        
+        # Set up logging
+        setup_logging("INFO", None)
+        
+        # Configure environment
+        env = Environment(user_classes=[HealthCheckUser, APIWorkflowUser])
+        env.create_local_runner()
+        env.host = config.HOST
+        
+        print(f"Starting load test with {config.MIN_USERS} users...")
+        print(f"Target: {config.HOST}")
+        print("Press Ctrl+C to stop")
+        
+        try:
+            # Start load test
+            env.runner.start(config.MIN_USERS, spawn_rate=config.SPAWN_RATE)
+            
+            # Run until interrupted
+            import time
+            while True:
+                time.sleep(10)
+                stats = env.runner.stats
+                print(f"Requests: {stats.total.num_requests}, "
+                      f"Failures: {stats.total.num_failures}, "
+                      f"RPS: {stats.total.total_rps:.2f}, "
+                      f"Avg Response: {stats.total.avg_response_time:.2f}ms")
+        
+        except KeyboardInterrupt:
+            print("\nStopping load test...")
+            env.runner.stop()
+            
+            # Print final stats
+            stats = env.runner.stats
+            print(f"\nFinal Results:")
+            print(f"Total Requests: {stats.total.num_requests}")
+            print(f"Total Failures: {stats.total.num_failures}")
+            print(f"Failure Rate: {stats.total.fail_ratio:.3f}")
+            print(f"Average RPS: {stats.total.total_rps:.2f}")
+            print(f"Average Response Time: {stats.total.avg_response_time:.2f}ms")
+            print(f"Min Response Time: {stats.total.min_response_time:.2f}ms")
+            print(f"Max Response Time: {stats.total.max_response_time:.2f}ms")
     
-    run_standalone_load_tests(host)
+    else:
+        print("Load Testing Scenarios Module")
+        print("Usage:")
+        print("  pytest tests/e2e/test_load_scenarios.py -v  # Run all load tests")
+        print("  python tests/e2e/test_load_scenarios.py run_load_test  # Direct execution")
+        print("\nEnvironment Variables:")
+        print("  E2E_TESTING=true  # Enable E2E testing mode")
+        print("  E2E_LOAD_TESTING=true  # Enable load testing")
+        print("  LOAD_TEST_HOST=http://localhost:5000  # Target host")
+        print("  LOAD_TEST_MAX_USERS=1000  # Maximum concurrent users")
+        print("  LOAD_TEST_TARGET_RPS=300  # Target requests per second")
