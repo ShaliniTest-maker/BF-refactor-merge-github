@@ -1,806 +1,878 @@
 """
-Database access layer package initialization providing centralized PyMongo and Motor client setup.
+Database Access Layer Package Initialization
 
-This package initializes and configures the complete database access infrastructure for the Flask application,
-implementing PyMongo 4.5+ and Motor 3.3+ drivers with connection pooling, monitoring integration, and health
-checks. Provides seamless Flask application factory integration for comprehensive database connectivity.
+This module provides centralized PyMongo and Motor client setup, connection pool configuration,
+and Flask application integration for the Node.js to Python migration. Exposes database clients
+and core data access functionality to the Flask application factory for seamless database
+connectivity with performance monitoring compliance.
 
-Key Components:
-- PyMongo 4.5+ synchronous client with connection pooling and monitoring
-- Motor 3.3+ async client for high-performance concurrent operations  
-- Prometheus metrics collection and performance monitoring integration
-- Database health checking and circuit breaker patterns
-- Flask application factory registration and configuration
-- Connection pool optimization for ≤10% variance from Node.js baseline
+Key Features:
+- PyMongo 4.5+ synchronous database client setup with optimized connection pooling
+- Motor 3.3+ asynchronous database client configuration for high-performance operations
+- Flask application factory pattern integration with database service registration
+- Centralized database configuration management with environment-specific settings
+- Performance monitoring integration ensuring ≤10% variance from Node.js baseline
+- Database health check functionality for monitoring and observability
+- Comprehensive error handling with circuit breaker patterns and retry logic
+- Prometheus metrics collection for enterprise monitoring infrastructure
 
-Implements requirements from:
-- Section 0.1.2: Database access layer must implement PyMongo 4.5+ and Motor 3.3+ drivers
-- Section 0.1.2: Connection pool management with equivalent patterns for data access components
-- Section 6.1.1: Database layer must integrate with Flask application factory pattern
+Architecture Integration:
+- Integrates with Flask application factory via init_app() pattern
+- Provides database client instances accessible throughout Flask application context
+- Supports environment-specific configuration (development, testing, production)
+- Enables structured logging for database operations and performance events
+- Facilitates seamless integration with business logic and API endpoints
+
+Technical Requirements Compliance:
+- Section 0.1.2: PyMongo 4.5+ and Motor 3.3+ driver implementation per data access components
+- Section 0.1.2: Connection pool management with equivalent Node.js patterns
+- Section 6.1.1: Flask application factory pattern integration per core services architecture
 - Section 0.1.1: Performance monitoring to ensure ≤10% variance from Node.js baseline
-- Section 6.2.4: Performance optimization with connection pooling and monitoring
-- Section 6.2.2: Data management with PyMongo event monitoring for Prometheus metrics
+- Section 5.2.5: Database access layer with comprehensive CRUD operations and monitoring
+- Section 6.2.4: Performance optimization with connection pooling and health monitoring
+- Section 6.2.2: Prometheus metrics collection for data management compliance monitoring
+
+Usage Examples:
+    # Basic initialization in Flask application factory
+    from src.data import init_database_services, get_mongodb_manager
+    
+    def create_app():
+        app = Flask(__name__)
+        
+        # Initialize database services
+        init_database_services(app, environment='production')
+        
+        # Access database manager in routes
+        @app.route('/api/data')
+        def get_data():
+            db_manager = get_mongodb_manager()
+            return db_manager.find_many('collection_name', {})
+    
+    # Async operations with Motor
+    from src.data import get_async_mongodb_manager
+    
+    async def async_data_operation():
+        async_manager = get_async_mongodb_manager()
+        result = await async_manager.find_one('collection', {'_id': object_id})
+        return result
+    
+    # Health monitoring integration
+    from src.data import get_database_health_status
+    
+    @app.route('/health/database')
+    def database_health():
+        return get_database_health_status()
+
+References:
+- Section 0.1.2 DATA ACCESS COMPONENTS: MongoDB driver migration and connection pooling
+- Section 6.1.1 FLASK APPLICATION FACTORY: Database service integration patterns  
+- Section 5.2.5 DATABASE ACCESS LAYER: Comprehensive database operations and monitoring
+- Section 6.2.4 PERFORMANCE OPTIMIZATION: Connection pool configuration and monitoring
+- Section 0.1.1 PRIMARY OBJECTIVE: ≤10% performance variance compliance requirements
 """
 
+import asyncio
 import logging
-import os
-import time
-from typing import Optional, Dict, Any, Union, List, Tuple
-from threading import Lock
-from dataclasses import dataclass, field
+import sys
+import warnings
+from typing import Any, Dict, List, Optional, Union, Callable
+from datetime import datetime, timezone
 from contextlib import contextmanager
 
-import structlog
-from flask import Flask, g, current_app
-from motor.motor_asyncio import AsyncIOMotorClient
+# Flask integration
+try:
+    from flask import Flask, current_app, g
+    FLASK_AVAILABLE = True
+except ImportError:
+    FLASK_AVAILABLE = False
+    Flask = None
 
-# Import core database modules
-from .mongodb import (
-    MongoDBClient,
-    MongoDBConfig,
-    QueryResult,
-    create_mongodb_client,
-    get_object_id,
-    serialize_for_json,
-    DEFAULT_CONNECTION_TIMEOUT_MS,
-    DEFAULT_SERVER_SELECTION_TIMEOUT_MS,
-    DEFAULT_SOCKET_TIMEOUT_MS,
-    DEFAULT_MAX_POOL_SIZE,
-    DEFAULT_MIN_POOL_SIZE,
-    DEFAULT_MAX_IDLE_TIME_MS,
-    DEFAULT_WAIT_QUEUE_TIMEOUT_MS,
-    DEFAULT_TRANSACTION_TIMEOUT_SECONDS,
-    MAX_TRANSACTION_RETRY_ATTEMPTS,
-    DEFAULT_BATCH_SIZE,
-    MAX_BATCH_SIZE
+# Database drivers and core functionality
+import pymongo
+from pymongo import MongoClient
+from pymongo.database import Database
+from pymongo.collection import Collection
+
+try:
+    from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase, AsyncIOMotorCollection
+    MOTOR_AVAILABLE = True
+except ImportError:
+    MOTOR_AVAILABLE = False
+
+# Core database components
+from src.config.database import (
+    DatabaseConfig, 
+    DatabaseConnectionError,
+    init_database_config,
+    get_database_config,
+    get_mongodb_client,
+    get_motor_client,
+    get_redis_client,
+    get_database,
+    get_async_database
 )
 
-from .motor_async import (
-    MotorAsyncDatabase,
-    initialize_motor_client,
-    get_motor_database,
-    close_motor_client,
-    DocumentType,
-    FilterType,
-    UpdateType,
-    ProjectionType
+from src.data.mongodb import (
+    MongoDBManager,
+    AsyncMongoDBManager,
+    create_mongodb_manager,
+    create_async_mongodb_manager,
+    init_mongodb_manager,
+    init_async_mongodb_manager,
+    get_mongodb_manager,
+    get_async_mongodb_manager,
+    validate_object_id
 )
 
-from .monitoring import (
-    DatabaseMetrics,
-    DatabaseMonitoringListener,
-    ConnectionPoolMonitoringListener,
-    ServerMonitoringListener,
-    MotorMonitoringIntegration,
-    DatabaseHealthChecker,
-    initialize_database_monitoring,
-    get_database_monitoring_components,
-    get_database_metrics_exposition,
-    get_database_metrics_content_type,
-    monitor_transaction,
-    database_registry,
-    PERFORMANCE_VARIANCE_THRESHOLD,
-    NODEJS_BASELINE_PERCENTILES
+from src.data.monitoring import (
+    DatabaseMonitoringManager,
+    DatabaseMetricsCollector,
+    monitor_database_operation,
+    monitor_async_database_operation,
+    monitor_database_transaction
 )
 
-# Configure structured logger
-logger = structlog.get_logger(__name__)
+from src.data.exceptions import (
+    DatabaseException,
+    ConnectionException,
+    TimeoutException,
+    TransactionException,
+    QueryException,
+    ResourceException,
+    DatabaseErrorSeverity,
+    DatabaseOperationType,
+    DatabaseErrorCategory,
+    with_database_retry,
+    handle_database_error,
+    mongodb_circuit_breaker
+)
 
-# Global database client instances for Flask integration
-_mongodb_client: Optional[MongoDBClient] = None
-_motor_client: Optional[AsyncIOMotorClient] = None
-_monitoring_components: Optional[Dict[str, Any]] = None
-_database_lock = Lock()
+# Configure module logger
+logger = logging.getLogger(__name__)
 
 
-@dataclass
-class DatabasePackageConfig:
+class DatabaseServices:
     """
-    Database package configuration container for comprehensive database initialization.
+    Centralized database services container providing comprehensive database functionality
+    for Flask application integration with performance monitoring compliance.
     
-    Centralizes all database configuration parameters including MongoDB connection settings,
-    Motor async client configuration, monitoring integration options, and Flask application
-    factory integration parameters.
-    """
+    This class manages the lifecycle of database services including:
+    - PyMongo 4.5+ synchronous database operations with connection pooling
+    - Motor 3.3+ asynchronous database operations for high-performance scenarios
+    - Database configuration management with environment-specific settings
+    - Performance monitoring and metrics collection for baseline compliance
+    - Health checking and observability for enterprise monitoring integration
+    - Circuit breaker patterns and error handling for system resilience
     
-    # MongoDB connection configuration
-    mongodb_uri: str = field(default_factory=lambda: os.getenv('MONGODB_URI', 'mongodb://localhost:27017'))
-    database_name: str = field(default_factory=lambda: os.getenv('DATABASE_NAME', 'flask_app'))
-    
-    # Connection pool configuration
-    max_pool_size: int = field(default=DEFAULT_MAX_POOL_SIZE)
-    min_pool_size: int = field(default=DEFAULT_MIN_POOL_SIZE)
-    max_idle_time_ms: int = field(default=DEFAULT_MAX_IDLE_TIME_MS)
-    wait_queue_timeout_ms: int = field(default=DEFAULT_WAIT_QUEUE_TIMEOUT_MS)
-    
-    # Timeout configuration
-    connection_timeout_ms: int = field(default=DEFAULT_CONNECTION_TIMEOUT_MS)
-    server_selection_timeout_ms: int = field(default=DEFAULT_SERVER_SELECTION_TIMEOUT_MS)
-    socket_timeout_ms: int = field(default=DEFAULT_SOCKET_TIMEOUT_MS)
-    
-    # Performance and monitoring configuration
-    enable_monitoring: bool = field(default=True)
-    enable_health_checks: bool = field(default=True)
-    performance_variance_threshold: float = field(default=PERFORMANCE_VARIANCE_THRESHOLD)
-    
-    # Motor async configuration
-    enable_motor_async: bool = field(default=True)
-    motor_max_pool_size: int = field(default=100)
-    motor_min_pool_size: int = field(default=10)
-    
-    # Flask integration configuration
-    flask_config_key: str = field(default='DATABASE_CONFIG')
-    health_check_endpoint: str = field(default='/health/database')
-    metrics_endpoint: str = field(default='/metrics')
-    
-    def to_mongodb_config(self) -> MongoDBConfig:
-        """Convert to MongoDBConfig for PyMongo client initialization."""
-        return MongoDBConfig(
-            uri=self.mongodb_uri,
-            database_name=self.database_name,
-            max_pool_size=self.max_pool_size,
-            min_pool_size=self.min_pool_size,
-            max_idle_time_ms=self.max_idle_time_ms,
-            wait_queue_timeout_ms=self.wait_queue_timeout_ms,
-            connection_timeout_ms=self.connection_timeout_ms,
-            server_selection_timeout_ms=self.server_selection_timeout_ms,
-            socket_timeout_ms=self.socket_timeout_ms,
-            enable_monitoring=self.enable_monitoring
-        )
-    
-    def get_motor_client_options(self) -> Dict[str, Any]:
-        """Get Motor async client configuration options."""
-        return {
-            'maxPoolSize': self.motor_max_pool_size,
-            'minPoolSize': self.motor_min_pool_size,
-            'maxIdleTimeMS': self.max_idle_time_ms,
-            'waitQueueTimeoutMS': self.wait_queue_timeout_ms,
-            'serverSelectionTimeoutMS': self.server_selection_timeout_ms,
-            'socketTimeoutMS': self.socket_timeout_ms,
-            'connectTimeoutMS': self.connection_timeout_ms,
-            'retryWrites': True,
-            'retryReads': True,
-            'appName': 'Flask-Migration-App-Async'
-        }
-
-
-class DatabaseManager:
-    """
-    Centralized database management for Flask application integration.
-    
-    Provides comprehensive database client lifecycle management, monitoring integration,
-    health checking, and Flask application factory pattern support. Manages both PyMongo
-    synchronous and Motor async clients with connection pooling optimization.
+    Features:
+    - Flask application factory pattern support via init_app()
+    - Environment-specific database configuration (development, testing, production)
+    - Connection pool optimization per Section 6.1.3 resource optimization patterns
+    - Performance monitoring ensuring ≤10% variance compliance per Section 0.1.1
+    - Comprehensive error handling with circuit breaker integration per Section 4.2.3
+    - Prometheus metrics collection for enterprise monitoring per Section 6.2.2
     """
     
-    def __init__(self, config: Optional[DatabasePackageConfig] = None):
+    def __init__(self, environment: str = 'development', monitoring_enabled: bool = True):
         """
-        Initialize database manager with configuration and monitoring setup.
+        Initialize database services with comprehensive configuration.
         
         Args:
-            config: Database package configuration (creates default if not provided)
+            environment: Target environment ('development', 'testing', 'production')
+            monitoring_enabled: Enable performance monitoring and metrics collection
         """
-        self.config = config or DatabasePackageConfig()
-        self._mongodb_client: Optional[MongoDBClient] = None
-        self._motor_client: Optional[AsyncIOMotorClient] = None
-        self._motor_database: Optional[MotorAsyncDatabase] = None
-        self._monitoring_components: Optional[Dict[str, Any]] = None
-        self._health_checker: Optional[DatabaseHealthChecker] = None
+        self.environment = environment
+        self.monitoring_enabled = monitoring_enabled
         self._initialized = False
-        self._flask_app: Optional[Flask] = None
+        self._app = None
+        
+        # Core database components
+        self._database_config: Optional[DatabaseConfig] = None
+        self._mongodb_manager: Optional[MongoDBManager] = None
+        self._async_mongodb_manager: Optional[AsyncMongoDBManager] = None
+        self._monitoring_manager: Optional[DatabaseMonitoringManager] = None
+        
+        # Flask integration state
+        self._flask_integrated = False
         
         logger.info(
-            "Database manager initialized",
-            database_name=self.config.database_name,
-            mongodb_uri=self.config.mongodb_uri.split('@')[-1] if '@' in self.config.mongodb_uri else self.config.mongodb_uri,
-            max_pool_size=self.config.max_pool_size,
-            enable_monitoring=self.config.enable_monitoring
+            "Database services initialized",
+            environment=environment,
+            monitoring_enabled=monitoring_enabled,
+            pymongo_available=True,
+            motor_available=MOTOR_AVAILABLE,
+            flask_available=FLASK_AVAILABLE
         )
-    
-    def initialize(self) -> None:
-        """
-        Initialize all database components with monitoring and health checks.
-        
-        Sets up PyMongo synchronous client, Motor async client, monitoring integration,
-        and health checking capabilities for comprehensive database operations.
-        
-        Raises:
-            DatabaseConnectionError: If database initialization fails
-            DatabaseException: If monitoring setup fails
-        """
-        if self._initialized:
-            logger.debug("Database manager already initialized")
-            return
-        
-        try:
-            # Initialize monitoring components first
-            if self.config.enable_monitoring:
-                self._monitoring_components = initialize_database_monitoring()
-                logger.info("Database monitoring components initialized successfully")
-            
-            # Initialize PyMongo synchronous client
-            mongodb_config = self.config.to_mongodb_config()
-            self._mongodb_client = create_mongodb_client(mongodb_config)
-            self._mongodb_client.initialize()
-            
-            logger.info(
-                "PyMongo synchronous client initialized",
-                database_name=self.config.database_name,
-                max_pool_size=self.config.max_pool_size
-            )
-            
-            # Initialize Motor async client if enabled
-            if self.config.enable_motor_async:
-                motor_options = self.config.get_motor_client_options()
-                self._motor_client = await initialize_motor_client(
-                    self.config.mongodb_uri,
-                    **motor_options
-                )
-                self._motor_database = await get_motor_database(
-                    self.config.database_name,
-                    client=self._motor_client
-                )
-                
-                logger.info(
-                    "Motor async client initialized",
-                    database_name=self.config.database_name,
-                    motor_max_pool_size=self.config.motor_max_pool_size
-                )
-            
-            # Initialize health checker
-            if self.config.enable_health_checks and self._monitoring_components:
-                self._health_checker = self._monitoring_components['health_checker']
-                logger.info("Database health checker initialized")
-            
-            self._initialized = True
-            
-            logger.info(
-                "Database manager initialization completed successfully",
-                mongodb_client=self._mongodb_client is not None,
-                motor_client=self._motor_client is not None,
-                monitoring_enabled=self._monitoring_components is not None,
-                health_checks_enabled=self._health_checker is not None
-            )
-            
-        except Exception as e:
-            logger.error(
-                "Database manager initialization failed",
-                error=str(e),
-                database_name=self.config.database_name
-            )
-            raise
-    
-    async def initialize_async(self) -> None:
-        """
-        Initialize async components (Motor client and database).
-        
-        Separate async initialization method for Motor components that require
-        async context for proper initialization and connection verification.
-        """
-        if self.config.enable_motor_async and not self._motor_client:
-            try:
-                motor_options = self.config.get_motor_client_options()
-                self._motor_client = await initialize_motor_client(
-                    self.config.mongodb_uri,
-                    **motor_options
-                )
-                self._motor_database = await get_motor_database(
-                    self.config.database_name,
-                    client=self._motor_client
-                )
-                
-                logger.info(
-                    "Motor async components initialized",
-                    database_name=self.config.database_name,
-                    motor_max_pool_size=self.config.motor_max_pool_size
-                )
-                
-            except Exception as e:
-                logger.error(
-                    "Motor async initialization failed",
-                    error=str(e),
-                    database_name=self.config.database_name
-                )
-                raise
     
     def init_app(self, app: Flask) -> None:
         """
-        Initialize database manager with Flask application factory pattern.
+        Initialize database services with Flask application using factory pattern.
         
-        Integrates database clients with Flask application configuration, registers
-        health check and metrics endpoints, and sets up application context support.
+        Implements Flask application factory integration per Section 6.1.1 core services
+        architecture, providing database client registration and configuration management.
         
         Args:
             app: Flask application instance
+            
+        Raises:
+            RuntimeError: If Flask is not available or initialization fails
         """
-        self._flask_app = app
+        if not FLASK_AVAILABLE:
+            raise RuntimeError("Flask is not available for database services integration")
         
-        # Store database manager in app extensions
-        if not hasattr(app, 'extensions'):
-            app.extensions = {}
-        app.extensions['database_manager'] = self
+        if self._flask_integrated:
+            logger.warning("Database services already integrated with Flask application")
+            return
         
-        # Configure from Flask app config if available
-        if self.config.flask_config_key in app.config:
-            flask_db_config = app.config[self.config.flask_config_key]
-            self._update_config_from_flask(flask_db_config)
-        
-        # Register teardown handlers
-        app.teardown_appcontext(self._teardown_request)
-        app.teardown_request(self._close_db_connection)
-        
-        # Register health check endpoint if enabled
-        if self.config.enable_health_checks:
-            self._register_health_endpoint(app)
-        
-        # Register metrics endpoint if monitoring enabled
-        if self.config.enable_monitoring:
-            self._register_metrics_endpoint(app)
-        
-        # Initialize database components
-        with app.app_context():
-            self.initialize()
-        
-        logger.info(
-            "Database manager integrated with Flask application",
-            app_name=app.name,
-            health_endpoint=self.config.health_check_endpoint,
-            metrics_endpoint=self.config.metrics_endpoint
-        )
+        try:
+            self._app = app
+            
+            # Store database services instance in Flask app config
+            if not hasattr(app, 'extensions'):
+                app.extensions = {}
+            app.extensions['database_services'] = self
+            
+            # Initialize database configuration
+            self._initialize_database_config()
+            
+            # Initialize MongoDB managers
+            self._initialize_mongodb_managers()
+            
+            # Initialize monitoring if enabled
+            if self.monitoring_enabled:
+                self._initialize_monitoring()
+            
+            # Register Flask teardown handlers
+            self._register_teardown_handlers(app)
+            
+            # Register health check endpoints
+            self._register_health_endpoints(app)
+            
+            self._flask_integrated = True
+            self._initialized = True
+            
+            logger.info(
+                "Database services integrated with Flask application",
+                app_name=app.name,
+                environment=self.environment,
+                monitoring_enabled=self.monitoring_enabled
+            )
+            
+        except Exception as e:
+            error_msg = f"Failed to initialize database services with Flask: {str(e)}"
+            logger.error(error_msg, error=str(e), error_type=type(e).__name__)
+            raise RuntimeError(error_msg) from e
     
-    def _update_config_from_flask(self, flask_config: Dict[str, Any]) -> None:
-        """Update database configuration from Flask app config."""
-        if 'MONGODB_URI' in flask_config:
-            self.config.mongodb_uri = flask_config['MONGODB_URI']
-        if 'DATABASE_NAME' in flask_config:
-            self.config.database_name = flask_config['DATABASE_NAME']
-        if 'MAX_POOL_SIZE' in flask_config:
-            self.config.max_pool_size = flask_config['MAX_POOL_SIZE']
-        if 'ENABLE_MONITORING' in flask_config:
-            self.config.enable_monitoring = flask_config['ENABLE_MONITORING']
-        
-        logger.debug(
-            "Database configuration updated from Flask config",
-            database_name=self.config.database_name,
-            max_pool_size=self.config.max_pool_size
-        )
+    def _initialize_database_config(self) -> None:
+        """Initialize database configuration with environment-specific settings."""
+        try:
+            self._database_config = init_database_config(environment=self.environment)
+            
+            logger.info(
+                "Database configuration initialized",
+                environment=self.environment,
+                mongodb_database=self._database_config.mongodb_database
+            )
+            
+        except Exception as e:
+            error_msg = f"Failed to initialize database configuration: {str(e)}"
+            logger.error(error_msg)
+            raise DatabaseConnectionError(error_msg) from e
     
-    def _register_health_endpoint(self, app: Flask) -> None:
-        """Register database health check endpoint."""
-        @app.route(self.config.health_check_endpoint)
-        def database_health():
-            """Database health check endpoint for monitoring and load balancer integration."""
+    def _initialize_mongodb_managers(self) -> None:
+        """Initialize PyMongo and Motor database managers with optimized configuration."""
+        try:
+            # Initialize synchronous MongoDB manager
+            database_name = self._database_config.mongodb_database if self._database_config else None
+            self._mongodb_manager = init_mongodb_manager(
+                database_name=database_name,
+                monitoring_enabled=self.monitoring_enabled
+            )
+            
+            logger.info(
+                "PyMongo synchronous manager initialized",
+                database=database_name,
+                monitoring_enabled=self.monitoring_enabled
+            )
+            
+            # Initialize asynchronous MongoDB manager if Motor is available
+            if MOTOR_AVAILABLE:
+                # Note: Async manager initialization requires asyncio context
+                # This will be handled by the get_async_mongodb_manager() function
+                # when first accessed in an async context
+                logger.info("Motor async manager setup prepared (requires async context for initialization)")
+            else:
+                logger.warning("Motor async driver not available - async operations disabled")
+            
+        except Exception as e:
+            error_msg = f"Failed to initialize MongoDB managers: {str(e)}"
+            logger.error(error_msg)
+            raise DatabaseConnectionError(error_msg) from e
+    
+    def _initialize_monitoring(self) -> None:
+        """Initialize database monitoring and metrics collection."""
+        try:
+            self._monitoring_manager = DatabaseMonitoringManager()
+            
+            # Register MongoDB clients for monitoring
+            if self._mongodb_manager:
+                self._monitoring_manager.register_pymongo_client(self._mongodb_manager.client)
+            
+            # Motor client registration handled when async manager is initialized
+            
+            logger.info("Database monitoring initialized successfully")
+            
+        except Exception as e:
+            logger.warning(f"Failed to initialize database monitoring: {str(e)}")
+            self._monitoring_manager = None
+    
+    def _register_teardown_handlers(self, app: Flask) -> None:
+        """Register Flask teardown handlers for database cleanup."""
+        @app.teardown_appcontext
+        def close_database_connections(error):
+            """Close database connections on application context teardown."""
+            try:
+                # Close database config connections
+                if self._database_config:
+                    self._database_config.close_connections()
+                
+                logger.debug("Database connections closed on teardown")
+                
+            except Exception as e:
+                logger.error(f"Error closing database connections: {str(e)}")
+        
+        logger.debug("Flask teardown handlers registered")
+    
+    def _register_health_endpoints(self, app: Flask) -> None:
+        """Register database health check endpoints for monitoring integration."""
+        @app.route('/health/database')
+        def database_health_check():
+            """Database health check endpoint for monitoring integration."""
             try:
                 health_status = self.get_health_status()
-                status_code = 200 if health_status['overall_status'] == 'healthy' else 503
                 
-                return health_status, status_code
+                # Determine overall status
+                overall_status = 'healthy'
+                if any(
+                    service.get('status') == 'unhealthy' 
+                    for service in health_status.get('services', {}).values()
+                ):
+                    overall_status = 'unhealthy'
                 
-            except Exception as e:
-                logger.error(f"Health check endpoint error: {e}")
                 return {
-                    'overall_status': 'error',
-                    'error': str(e),
-                    'timestamp': time.time()
-                }, 503
-    
-    def _register_metrics_endpoint(self, app: Flask) -> None:
-        """Register Prometheus metrics endpoint."""
-        @app.route(self.config.metrics_endpoint)
-        def database_metrics():
-            """Prometheus metrics endpoint for database performance monitoring."""
-            try:
-                metrics_data = get_database_metrics_exposition()
-                content_type = get_database_metrics_content_type()
-                
-                return metrics_data, 200, {'Content-Type': content_type}
+                    'status': overall_status,
+                    'timestamp': datetime.now(timezone.utc).isoformat(),
+                    'details': health_status
+                }, 200 if overall_status == 'healthy' else 503
                 
             except Exception as e:
-                logger.error(f"Metrics endpoint error: {e}")
-                return f"# Error generating metrics: {str(e)}", 500
-    
-    def _teardown_request(self, exception: Optional[Exception]) -> None:
-        """Flask request teardown handler."""
-        if exception:
-            logger.debug(f"Request teardown with exception: {exception}")
+                logger.error(f"Health check failed: {str(e)}")
+                return {
+                    'status': 'unhealthy',
+                    'timestamp': datetime.now(timezone.utc).isoformat(),
+                    'error': str(e)
+                }, 503
         
-        # Clear request-local database references
-        if hasattr(g, 'mongodb_client'):
-            delattr(g, 'mongodb_client')
-        if hasattr(g, 'motor_database'):
-            delattr(g, 'motor_database')
-    
-    def _close_db_connection(self, response_or_exc) -> None:
-        """Flask request cleanup handler."""
-        # Connection pools handle cleanup automatically
-        pass
-    
-    @property
-    def mongodb_client(self) -> Optional[MongoDBClient]:
-        """Get PyMongo synchronous client instance."""
-        return self._mongodb_client
-    
-    @property
-    def motor_client(self) -> Optional[AsyncIOMotorClient]:
-        """Get Motor async client instance."""
-        return self._motor_client
+        @app.route('/health/database/detailed')
+        def detailed_database_health():
+            """Detailed database health check with performance metrics."""
+            try:
+                health_status = self.get_health_status()
+                performance_metrics = self.get_performance_metrics()
+                
+                return {
+                    'health': health_status,
+                    'performance': performance_metrics,
+                    'timestamp': datetime.now(timezone.utc).isoformat()
+                }
+                
+            except Exception as e:
+                logger.error(f"Detailed health check failed: {str(e)}")
+                return {'error': str(e)}, 500
+        
+        logger.debug("Database health check endpoints registered")
     
     @property
-    def motor_database(self) -> Optional[MotorAsyncDatabase]:
-        """Get Motor async database instance."""
-        return self._motor_database
+    def database_config(self) -> Optional[DatabaseConfig]:
+        """Get database configuration instance."""
+        return self._database_config
     
     @property
-    def monitoring_components(self) -> Optional[Dict[str, Any]]:
-        """Get database monitoring components."""
-        return self._monitoring_components
+    def mongodb_manager(self) -> Optional[MongoDBManager]:
+        """Get PyMongo synchronous database manager."""
+        return self._mongodb_manager
     
     @property
-    def health_checker(self) -> Optional[DatabaseHealthChecker]:
-        """Get database health checker instance."""
-        return self._health_checker
+    def async_mongodb_manager(self) -> Optional[AsyncMongoDBManager]:
+        """Get Motor asynchronous database manager."""
+        return self._async_mongodb_manager
+    
+    @property
+    def monitoring_manager(self) -> Optional[DatabaseMonitoringManager]:
+        """Get database monitoring manager."""
+        return self._monitoring_manager
+    
+    @property
+    def is_initialized(self) -> bool:
+        """Check if database services are fully initialized."""
+        return self._initialized
+    
+    @property
+    def flask_integrated(self) -> bool:
+        """Check if database services are integrated with Flask."""
+        return self._flask_integrated
     
     def get_health_status(self) -> Dict[str, Any]:
         """
-        Get comprehensive database health status.
+        Get comprehensive database health status for monitoring integration.
         
         Returns:
-            Dict containing overall health status and component details
+            Dict[str, Any]: Complete health status including all database services
         """
-        if not self._health_checker:
-            return {
-                'overall_status': 'unknown',
-                'error': 'Health checker not initialized',
-                'timestamp': time.time()
-            }
+        health_status = {
+            'environment': self.environment,
+            'initialized': self._initialized,
+            'flask_integrated': self._flask_integrated,
+            'monitoring_enabled': self.monitoring_enabled,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'services': {}
+        }
         
         try:
-            # Check MongoDB health
-            mongodb_health = {}
-            if self._mongodb_client:
-                mongodb_health = self._health_checker.check_mongodb_health(
-                    self._mongodb_client.client,
-                    timeout=5.0
-                )
+            # Database configuration health
+            if self._database_config:
+                health_status['services']['database_config'] = self._database_config.health_check()
             
-            # Get overall health status
-            overall_health = self._health_checker.get_overall_health_status()
+            # MongoDB manager health
+            if self._mongodb_manager:
+                health_status['services']['mongodb_sync'] = self._mongodb_manager.health_check()
             
-            # Add component-specific health information
-            overall_health['components']['mongodb'] = mongodb_health
-            
-            if self._mongodb_client:
-                overall_health['components']['mongodb_sync'] = self._mongodb_client.get_health_status()
-            
-            if self._motor_database:
-                overall_health['components']['motor_async'] = {
-                    'status': 'healthy',
-                    'database_name': self.config.database_name,
-                    'async_enabled': True
+            # Async MongoDB manager health (if available)
+            if self._async_mongodb_manager:
+                # Note: Async health check would require asyncio context
+                health_status['services']['mongodb_async'] = {
+                    'status': 'available',
+                    'note': 'async health check requires asyncio context'
                 }
             
-            return overall_health
+            # Monitoring manager health
+            if self._monitoring_manager:
+                health_status['services']['monitoring'] = {
+                    'status': 'healthy',
+                    'enabled': True
+                }
+            else:
+                health_status['services']['monitoring'] = {
+                    'status': 'disabled',
+                    'enabled': False
+                }
             
         except Exception as e:
-            logger.error(f"Error getting database health status: {e}")
-            return {
-                'overall_status': 'error',
-                'error': str(e),
-                'timestamp': time.time()
-            }
-    
-    def close(self) -> None:
-        """
-        Close all database connections and cleanup resources.
+            logger.error(f"Error getting health status: {str(e)}")
+            health_status['error'] = str(e)
         
-        Properly closes PyMongo and Motor clients, cleans up monitoring resources,
-        and performs graceful shutdown for application termination.
+        return health_status
+    
+    def get_performance_metrics(self) -> Dict[str, Any]:
         """
+        Get database performance metrics for baseline compliance monitoring.
+        
+        Returns:
+            Dict[str, Any]: Performance metrics and statistics
+        """
+        metrics = {
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'environment': self.environment,
+            'monitoring_enabled': self.monitoring_enabled,
+            'mongodb_sync': {},
+            'mongodb_async': {},
+            'connection_pools': {}
+        }
+        
         try:
-            # Close PyMongo client
-            if self._mongodb_client:
-                self._mongodb_client.close()
-                self._mongodb_client = None
-                logger.info("PyMongo client closed")
+            # PyMongo synchronous metrics
+            if self._mongodb_manager:
+                metrics['mongodb_sync'] = self._mongodb_manager.get_performance_metrics()
             
-            # Close Motor client
-            if self._motor_client:
-                close_motor_client()
-                self._motor_client = None
-                self._motor_database = None
-                logger.info("Motor async client closed")
+            # Connection pool metrics
+            if self._database_config:
+                metrics['connection_pools'] = self._database_config.get_connection_info()
             
-            # Reset initialization state
-            self._initialized = False
-            
-            logger.info("Database manager closed successfully")
+            # Note: Async metrics would require asyncio context
             
         except Exception as e:
-            logger.error(f"Error closing database manager: {e}")
+            logger.error(f"Error getting performance metrics: {str(e)}")
+            metrics['error'] = str(e)
+        
+        return metrics
 
 
-# Global database manager instance
-_database_manager: Optional[DatabaseManager] = None
+# Global database services instance for application use
+_database_services: Optional[DatabaseServices] = None
 
 
-def create_database_manager(config: Optional[DatabasePackageConfig] = None) -> DatabaseManager:
+def init_database_services(app: Optional[Flask] = None, environment: str = 'development', 
+                          monitoring_enabled: bool = True) -> DatabaseServices:
     """
-    Create configured database manager instance.
+    Initialize global database services instance with Flask application integration.
     
-    Factory function for creating database manager with comprehensive configuration
-    and monitoring setup for Flask application integration.
+    Implements centralized database services initialization supporting Flask application
+    factory pattern per Section 6.1.1 core services architecture.
     
     Args:
-        config: Database package configuration (creates default if not provided)
+        app: Flask application instance (optional)
+        environment: Target environment ('development', 'testing', 'production')
+        monitoring_enabled: Enable performance monitoring and metrics collection
         
     Returns:
-        DatabaseManager: Configured database manager instance
+        DatabaseServices: Global database services instance
+        
+    Raises:
+        RuntimeError: If initialization fails or Flask integration errors occur
     """
-    global _database_manager
+    global _database_services
     
-    if _database_manager is None:
-        _database_manager = DatabaseManager(config)
-        logger.info("Database manager created")
-    
-    return _database_manager
+    try:
+        # Initialize database services
+        _database_services = DatabaseServices(
+            environment=environment,
+            monitoring_enabled=monitoring_enabled
+        )
+        
+        # Integrate with Flask application if provided
+        if app is not None:
+            _database_services.init_app(app)
+        
+        logger.info(
+            "Global database services initialized",
+            environment=environment,
+            monitoring_enabled=monitoring_enabled,
+            flask_integrated=app is not None
+        )
+        
+        return _database_services
+        
+    except Exception as e:
+        error_msg = f"Failed to initialize database services: {str(e)}"
+        logger.error(error_msg)
+        raise RuntimeError(error_msg) from e
 
 
-def get_database_manager() -> Optional[DatabaseManager]:
+def get_database_services() -> DatabaseServices:
     """
-    Get current database manager instance.
+    Get global database services instance.
     
     Returns:
-        DatabaseManager instance or None if not created
+        DatabaseServices: Global database services instance
+        
+    Raises:
+        RuntimeError: If database services not initialized
     """
-    global _database_manager
-    return _database_manager
+    if _database_services is None:
+        raise RuntimeError(
+            "Database services not initialized. "
+            "Call init_database_services() first."
+        )
+    return _database_services
 
 
-def init_database_app(app: Flask, config: Optional[DatabasePackageConfig] = None) -> DatabaseManager:
+def get_current_database_services() -> DatabaseServices:
     """
-    Initialize database package with Flask application factory pattern.
+    Get database services from current Flask application context.
     
-    Comprehensive Flask application integration function that creates and configures
-    database manager, registers endpoints, and sets up monitoring integration.
+    Returns:
+        DatabaseServices: Database services from Flask application extensions
+        
+    Raises:
+        RuntimeError: If not in Flask context or services not initialized
+    """
+    if not FLASK_AVAILABLE:
+        raise RuntimeError("Flask not available for context access")
+    
+    try:
+        app = current_app
+        if 'database_services' not in app.extensions:
+            raise RuntimeError("Database services not initialized in Flask application")
+        
+        return app.extensions['database_services']
+        
+    except Exception as e:
+        raise RuntimeError(f"Failed to get database services from Flask context: {str(e)}")
+
+
+# Convenience functions for direct database access
+
+def get_mongodb_client() -> MongoClient:
+    """
+    Get PyMongo synchronous client from global database services.
+    
+    Returns:
+        MongoClient: Configured PyMongo client instance
+    """
+    services = get_database_services()
+    if services.mongodb_manager:
+        return services.mongodb_manager.client
+    else:
+        # Fallback to direct config access
+        return get_mongodb_client()
+
+
+def get_motor_client() -> Optional['AsyncIOMotorClient']:
+    """
+    Get Motor asynchronous client from global database services.
+    
+    Returns:
+        Optional[AsyncIOMotorClient]: Configured Motor async client instance or None
+    """
+    if not MOTOR_AVAILABLE:
+        return None
+    
+    services = get_database_services()
+    if services.async_mongodb_manager:
+        return services.async_mongodb_manager.motor_client
+    else:
+        # Fallback to direct config access
+        return get_motor_client()
+
+
+def get_database(database_name: Optional[str] = None) -> Database:
+    """
+    Get MongoDB database instance from global database services.
     
     Args:
-        app: Flask application instance
-        config: Database package configuration (optional)
+        database_name: Database name (defaults to configured database)
         
     Returns:
-        DatabaseManager: Configured and initialized database manager
+        Database: PyMongo database instance
     """
-    # Create or get database manager
-    db_manager = create_database_manager(config)
-    
-    # Initialize with Flask app
-    db_manager.init_app(app)
-    
-    logger.info(
-        "Database package initialized with Flask application",
-        app_name=app.name,
-        database_name=db_manager.config.database_name
-    )
-    
-    return db_manager
+    services = get_database_services()
+    if services.mongodb_manager:
+        return services.mongodb_manager.database if database_name is None else services.mongodb_manager.client[database_name]
+    else:
+        # Fallback to direct config access
+        return get_database(database_name)
 
 
-def get_mongodb_client() -> Optional[MongoDBClient]:
+def get_async_database(database_name: Optional[str] = None) -> Optional['AsyncIOMotorDatabase']:
     """
-    Get PyMongo synchronous client from current Flask application context.
+    Get async MongoDB database instance from global database services.
+    
+    Args:
+        database_name: Database name (defaults to configured database)
+        
+    Returns:
+        Optional[AsyncIOMotorDatabase]: Motor async database instance or None
+    """
+    if not MOTOR_AVAILABLE:
+        return None
+    
+    services = get_database_services()
+    if services.async_mongodb_manager:
+        return services.async_mongodb_manager.database if database_name is None else services.async_mongodb_manager.motor_client[database_name]
+    else:
+        # Fallback to direct config access
+        return get_async_database(database_name)
+
+
+def get_collection(collection_name: str, database_name: Optional[str] = None) -> Collection:
+    """
+    Get MongoDB collection instance from global database services.
+    
+    Args:
+        collection_name: Collection name
+        database_name: Database name (defaults to configured database)
+        
+    Returns:
+        Collection: PyMongo collection instance
+    """
+    services = get_database_services()
+    if services.mongodb_manager:
+        return services.mongodb_manager.get_collection(collection_name)
+    else:
+        # Fallback to direct access
+        db = get_database(database_name)
+        return db[collection_name]
+
+
+def get_async_collection(collection_name: str, database_name: Optional[str] = None) -> Optional['AsyncIOMotorCollection']:
+    """
+    Get async MongoDB collection instance from global database services.
+    
+    Args:
+        collection_name: Collection name
+        database_name: Database name (defaults to configured database)
+        
+    Returns:
+        Optional[AsyncIOMotorCollection]: Motor async collection instance or None
+    """
+    if not MOTOR_AVAILABLE:
+        return None
+    
+    services = get_database_services()
+    if services.async_mongodb_manager:
+        return services.async_mongodb_manager.get_collection(collection_name)
+    else:
+        # Fallback to direct access
+        db = get_async_database(database_name)
+        return db[collection_name] if db else None
+
+
+# Health monitoring functions
+
+def get_database_health_status() -> Dict[str, Any]:
+    """
+    Get comprehensive database health status for monitoring integration.
     
     Returns:
-        MongoDBClient instance or None if not available
+        Dict[str, Any]: Complete health status including all database services
     """
     try:
-        if hasattr(g, 'mongodb_client'):
-            return g.mongodb_client
-        
-        db_manager = get_database_manager()
-        if db_manager and db_manager.mongodb_client:
-            g.mongodb_client = db_manager.mongodb_client
-            return g.mongodb_client
-        
-        return None
-        
+        services = get_database_services()
+        return services.get_health_status()
     except Exception as e:
-        logger.error(f"Error getting MongoDB client: {e}")
-        return None
+        return {
+            'status': 'unhealthy',
+            'error': str(e),
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
 
 
-def get_motor_database() -> Optional[MotorAsyncDatabase]:
+def get_database_performance_metrics() -> Dict[str, Any]:
     """
-    Get Motor async database from current Flask application context.
+    Get database performance metrics for baseline compliance monitoring.
     
     Returns:
-        MotorAsyncDatabase instance or None if not available
+        Dict[str, Any]: Performance metrics and statistics
     """
     try:
-        if hasattr(g, 'motor_database'):
-            return g.motor_database
-        
-        db_manager = get_database_manager()
-        if db_manager and db_manager.motor_database:
-            g.motor_database = db_manager.motor_database
-            return g.motor_database
-        
-        return None
-        
+        services = get_database_services()
+        return services.get_performance_metrics()
     except Exception as e:
-        logger.error(f"Error getting Motor database: {e}")
-        return None
+        return {
+            'error': str(e),
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
 
+
+# Transaction management convenience functions
 
 @contextmanager
-def database_transaction():
+def database_transaction(read_concern=None, write_concern=None, read_preference=None):
     """
-    Context manager for database transactions with automatic rollback.
+    Context manager for database transactions using global services.
     
-    Provides transaction management for PyMongo operations with automatic
-    commit on success and rollback on error.
-    
+    Args:
+        read_concern: Read concern for transaction
+        write_concern: Write concern for transaction
+        read_preference: Read preference for transaction
+        
     Yields:
-        ClientSession: MongoDB session for transaction operations
+        session: MongoDB session for transaction operations
+        
+    Example:
+        with database_transaction() as session:
+            # Perform database operations within transaction
+            pass
     """
-    mongodb_client = get_mongodb_client()
-    if not mongodb_client:
-        raise RuntimeError("MongoDB client not available for transaction")
+    services = get_database_services()
+    if not services.mongodb_manager:
+        raise RuntimeError("MongoDB manager not available for transactions")
     
-    with mongodb_client.transaction() as session:
+    with services.mongodb_manager.transaction(
+        read_concern=read_concern,
+        write_concern=write_concern,
+        read_preference=read_preference
+    ) as session:
         yield session
 
 
-async def async_database_transaction():
-    """
-    Async context manager for Motor database transactions.
-    
-    Provides async transaction management for Motor operations with automatic
-    commit on success and rollback on error.
-    
-    Yields:
-        AsyncIOMotorClientSession: Motor session for async transaction operations
-    """
-    motor_db = get_motor_database()
-    if not motor_db:
-        raise RuntimeError("Motor database not available for async transaction")
-    
-    async with motor_db.start_transaction() as session:
-        yield session
-
-
-# Convenience functions for common database operations
-def execute_query(
-    collection_name: str,
-    operation: str,
-    *args,
-    **kwargs
-) -> QueryResult:
-    """
-    Execute database query with automatic client selection and error handling.
-    
-    Args:
-        collection_name: Name of the MongoDB collection
-        operation: Database operation name (find_one, insert_one, etc.)
-        *args: Operation arguments
-        **kwargs: Operation keyword arguments
-        
-    Returns:
-        QueryResult: Standardized query result
-    """
-    mongodb_client = get_mongodb_client()
-    if not mongodb_client:
-        raise RuntimeError("MongoDB client not available")
-    
-    operation_method = getattr(mongodb_client, operation, None)
-    if not operation_method:
-        raise ValueError(f"Unknown operation: {operation}")
-    
-    return operation_method(collection_name, *args, **kwargs)
-
-
-async def execute_async_query(
-    collection_name: str,
-    operation: str,
-    *args,
-    **kwargs
-) -> Any:
-    """
-    Execute async database query with Motor client.
-    
-    Args:
-        collection_name: Name of the MongoDB collection
-        operation: Database operation name (find_one, insert_one, etc.)
-        *args: Operation arguments
-        **kwargs: Operation keyword arguments
-        
-    Returns:
-        Operation result from Motor async database
-    """
-    motor_db = get_motor_database()
-    if not motor_db:
-        raise RuntimeError("Motor database not available")
-    
-    operation_method = getattr(motor_db, operation, None)
-    if not operation_method:
-        raise ValueError(f"Unknown async operation: {operation}")
-    
-    return await operation_method(collection_name, *args, **kwargs)
-
-
-# Public API exports
+# Package public interface
 __all__ = [
-    # Main database manager and configuration
-    'DatabaseManager',
-    'DatabasePackageConfig',
-    'create_database_manager',
-    'get_database_manager',
-    'init_database_app',
+    # Core classes
+    'DatabaseServices',
     
-    # Client access functions
+    # Initialization functions
+    'init_database_services',
+    'get_database_services',
+    'get_current_database_services',
+    
+    # Database client access
     'get_mongodb_client',
-    'get_motor_database',
+    'get_motor_client',
+    'get_database',
+    'get_async_database',
+    'get_collection',
+    'get_async_collection',
+    
+    # Manager access
+    'get_mongodb_manager',
+    'get_async_mongodb_manager',
+    
+    # Health monitoring
+    'get_database_health_status',
+    'get_database_performance_metrics',
     
     # Transaction management
     'database_transaction',
-    'async_database_transaction',
     
-    # Convenience query functions
-    'execute_query',
-    'execute_async_query',
+    # Utilities
+    'validate_object_id',
     
-    # Core database classes and functions from submodules
-    'MongoDBClient',
-    'MongoDBConfig',
-    'QueryResult',
-    'create_mongodb_client',
-    'get_object_id',
-    'serialize_for_json',
+    # Exception classes
+    'DatabaseException',
+    'ConnectionException',
+    'TimeoutException',
+    'TransactionException',
+    'QueryException',
+    'ResourceException',
+    'DatabaseConnectionError',
     
-    # Motor async classes and functions
-    'MotorAsyncDatabase',
-    'initialize_motor_client',
-    'close_motor_client',
-    'DocumentType',
-    'FilterType',
-    'UpdateType',
-    'ProjectionType',
+    # Enums
+    'DatabaseErrorSeverity',
+    'DatabaseOperationType',
+    'DatabaseErrorCategory',
     
-    # Monitoring and health check classes
-    'DatabaseMetrics',
-    'DatabaseMonitoringListener',
-    'ConnectionPoolMonitoringListener',
-    'ServerMonitoringListener',
-    'MotorMonitoringIntegration',
-    'DatabaseHealthChecker',
-    'initialize_database_monitoring',
-    'get_database_monitoring_components',
-    'get_database_metrics_exposition',
-    'get_database_metrics_content_type',
-    'monitor_transaction',
-    'database_registry',
+    # Decorators and utilities
+    'with_database_retry',
+    'handle_database_error',
+    'mongodb_circuit_breaker',
+    'monitor_database_operation',
+    'monitor_async_database_operation',
+    'monitor_database_transaction',
     
-    # Configuration constants
-    'DEFAULT_CONNECTION_TIMEOUT_MS',
-    'DEFAULT_SERVER_SELECTION_TIMEOUT_MS',
-    'DEFAULT_SOCKET_TIMEOUT_MS',
-    'DEFAULT_MAX_POOL_SIZE',
-    'DEFAULT_MIN_POOL_SIZE',
-    'DEFAULT_MAX_IDLE_TIME_MS',
-    'DEFAULT_WAIT_QUEUE_TIMEOUT_MS',
-    'DEFAULT_TRANSACTION_TIMEOUT_SECONDS',
-    'MAX_TRANSACTION_RETRY_ATTEMPTS',
-    'DEFAULT_BATCH_SIZE',
-    'MAX_BATCH_SIZE',
-    'PERFORMANCE_VARIANCE_THRESHOLD',
-    'NODEJS_BASELINE_PERCENTILES'
+    # Availability flags
+    'MOTOR_AVAILABLE',
+    'FLASK_AVAILABLE'
 ]
 
-# Package initialization logging
+
+# Package version and metadata
+__version__ = '1.0.0'
+__author__ = 'Database Migration Team'
+__description__ = 'Database access layer for Node.js to Python Flask migration'
+
+
+# Initialize warnings for missing dependencies
+if not MOTOR_AVAILABLE:
+    warnings.warn(
+        "Motor async driver not available. Async database operations disabled.",
+        ImportWarning,
+        stacklevel=2
+    )
+
+if not FLASK_AVAILABLE:
+    warnings.warn(
+        "Flask not available. Flask integration features disabled.",
+        ImportWarning,
+        stacklevel=2
+    )
+
+
+# Module-level initialization logging
 logger.info(
     "Database access layer package initialized",
-    pymongo_support=True,
-    motor_support=True,
-    monitoring_support=True,
-    flask_integration=True,
-    performance_threshold=PERFORMANCE_VARIANCE_THRESHOLD
+    pymongo_available=True,
+    motor_available=MOTOR_AVAILABLE,
+    flask_available=FLASK_AVAILABLE,
+    version=__version__
 )
