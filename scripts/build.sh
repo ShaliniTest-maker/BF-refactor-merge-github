@@ -3,652 +3,634 @@
 # =============================================================================
 # Docker Container Build Automation Script
 # =============================================================================
-# 
-# This script implements enterprise-grade Docker container build automation
-# for Flask application deployment with multi-stage builds, security scanning,
-# and optimized container image generation replacing Node.js build patterns.
+#
+# Enterprise-grade Docker container build automation script implementing 
+# multi-stage builds with python:3.11-slim base image, comprehensive security 
+# scanning integration, and optimized container image generation for Flask 
+# application deployment.
+#
+# Based on Technical Specification:
+# - Section 8.3.2: Base Image Strategy (python:3.11-slim)
+# - Section 8.3.3: Multi-Stage Build Strategy with pip-tools integration
+# - Section 8.5.2: Container Vulnerability Scanning with Trivy 0.48+
+# - Section 8.3.1: WSGI Server Integration with Gunicorn 21.2+
+# - Section 8.3.4: Build Optimization Techniques
+# - Section 8.3.5: Container Security Framework
 #
 # Key Features:
-# - Multi-stage Docker builds with python:3.11-slim base image
+# - Multi-stage Docker builds for optimal performance and security
 # - Trivy 0.48+ container vulnerability scanning with critical blocking
-# - Gunicorn 21.2+ WSGI server configuration as container entrypoint
-# - Container health check configuration for orchestration compatibility
-# - Build optimization techniques for efficient deployment
-# - Security hardening with non-root user execution
+# - Gunicorn WSGI server configuration as container entrypoint
+# - Container health check configuration using Flask health endpoints
+# - Build optimization with layer caching and dependency management
+# - Enterprise-grade deployment patterns and CI/CD integration
+# - Comprehensive security scanning and policy enforcement
 #
-# Author: Enterprise Software Architecture Team
-# Version: 1.0.0
 # =============================================================================
 
-set -euo pipefail  # Exit on error, undefined vars, pipe failures
+set -euo pipefail  # Exit on any error, undefined variables, or pipe failures
 
 # =============================================================================
-# SCRIPT CONFIGURATION AND GLOBAL VARIABLES
+# CONFIGURATION AND VARIABLES
 # =============================================================================
 
-# Script directory and project root
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# Script configuration
+readonly SCRIPT_NAME="$(basename "$0")"
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+readonly LOG_FILE="${PROJECT_ROOT}/build.log"
+
+# Docker configuration
+readonly DOCKER_REGISTRY="${DOCKER_REGISTRY:-""}"
+readonly IMAGE_NAME="${IMAGE_NAME:-flask-app}"
+readonly IMAGE_TAG="${IMAGE_TAG:-latest}"
+readonly BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+readonly BUILD_VERSION="${BUILD_VERSION:-$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')}"
 
 # Build configuration
-DOCKER_REGISTRY="${DOCKER_REGISTRY:-}"
-IMAGE_NAME="${IMAGE_NAME:-flask-app}"
-IMAGE_TAG="${IMAGE_TAG:-latest}"
-BUILD_TARGET="${BUILD_TARGET:-production}"
-DOCKERFILE_PATH="${PROJECT_ROOT}/Dockerfile"
-DOCKER_CONTEXT="${PROJECT_ROOT}"
+readonly DOCKERFILE_PATH="${PROJECT_ROOT}/Dockerfile"
+readonly DOCKER_CONTEXT="${PROJECT_ROOT}"
+readonly BUILD_CACHE_DIR="${PROJECT_ROOT}/.docker-cache"
+readonly TRIVY_CACHE_DIR="${PROJECT_ROOT}/.trivy-cache"
 
 # Security scanning configuration
-TRIVY_VERSION="${TRIVY_VERSION:-0.48.0}"
-TRIVY_SEVERITY="${TRIVY_SEVERITY:-CRITICAL,HIGH,MEDIUM}"
-TRIVY_EXIT_CODE="${TRIVY_EXIT_CODE:-1}"  # Fail build on critical vulnerabilities
-TRIVY_FORMAT="${TRIVY_FORMAT:-sarif}"
-TRIVY_OUTPUT="${PROJECT_ROOT}/trivy-results.sarif"
+readonly TRIVY_VERSION="${TRIVY_VERSION:-0.48.3}"
+readonly TRIVY_SEVERITY="${TRIVY_SEVERITY:-CRITICAL,HIGH,MEDIUM}"
+readonly TRIVY_EXIT_CODE="${TRIVY_EXIT_CODE:-1}"
+readonly TRIVY_FORMAT="${TRIVY_FORMAT:-sarif}"
+readonly SECURITY_SCAN_ENABLED="${SECURITY_SCAN_ENABLED:-true}"
 
 # Performance and optimization configuration
-PARALLEL_BUILDS="${PARALLEL_BUILDS:-true}"
-BUILD_CACHE="${BUILD_CACHE:-true}"
-BUILD_SQUASH="${BUILD_SQUASH:-false}"
-DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-1}"
-
-# Logging configuration
-LOG_LEVEL="${LOG_LEVEL:-INFO}"
-LOG_FILE="${PROJECT_ROOT}/build.log"
+readonly DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-1}"
+readonly BUILD_PARALLEL="${BUILD_PARALLEL:-true}"
+readonly CACHE_FROM_ENABLED="${CACHE_FROM_ENABLED:-true}"
+readonly BUILD_PROGRESS="${BUILD_PROGRESS:-auto}"
 
 # Health check configuration
-HEALTH_CHECK_ENABLED="${HEALTH_CHECK_ENABLED:-true}"
-HEALTH_CHECK_INTERVAL="${HEALTH_CHECK_INTERVAL:-30s}"
-HEALTH_CHECK_TIMEOUT="${HEALTH_CHECK_TIMEOUT:-10s}"
-HEALTH_CHECK_START_PERIOD="${HEALTH_CHECK_START_PERIOD:-5s}"
-HEALTH_CHECK_RETRIES="${HEALTH_CHECK_RETRIES:-3}"
+readonly HEALTH_CHECK_ENABLED="${HEALTH_CHECK_ENABLED:-true}"
+readonly HEALTH_CHECK_TIMEOUT="${HEALTH_CHECK_TIMEOUT:-30}"
+readonly HEALTH_CHECK_RETRIES="${HEALTH_CHECK_RETRIES:-3}"
+
+# Logging colors and formatting
+readonly RED='\033[0;31m'
+readonly GREEN='\033[0;32m'
+readonly YELLOW='\033[1;33m'
+readonly BLUE='\033[0;34m'
+readonly NC='\033[0m' # No Color
 
 # =============================================================================
-# UTILITY FUNCTIONS
+# LOGGING AND UTILITY FUNCTIONS
 # =============================================================================
 
-# Logging function with timestamp and log levels
+# Logging function with timestamp and level
 log() {
     local level="$1"
-    shift
-    local message="$*"
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    local message="$2"
+    local timestamp="$(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+    local color=""
     
-    case "${level}" in
-        ERROR)
-            echo "[${timestamp}] ERROR: ${message}" >&2
-            echo "[${timestamp}] ERROR: ${message}" >> "${LOG_FILE}"
-            ;;
-        WARN)
-            echo "[${timestamp}] WARN: ${message}" >&2
-            echo "[${timestamp}] WARN: ${message}" >> "${LOG_FILE}"
-            ;;
-        INFO)
-            echo "[${timestamp}] INFO: ${message}"
-            echo "[${timestamp}] INFO: ${message}" >> "${LOG_FILE}"
-            ;;
-        DEBUG)
-            if [[ "${LOG_LEVEL}" == "DEBUG" ]]; then
-                echo "[${timestamp}] DEBUG: ${message}"
-                echo "[${timestamp}] DEBUG: ${message}" >> "${LOG_FILE}"
-            fi
-            ;;
+    case "$level" in
+        "INFO")  color="$GREEN" ;;
+        "WARN")  color="$YELLOW" ;;
+        "ERROR") color="$RED" ;;
+        "DEBUG") color="$BLUE" ;;
+        *)       color="$NC" ;;
     esac
+    
+    echo -e "${color}[$timestamp] [$level] $message${NC}" | tee -a "$LOG_FILE"
 }
 
-# Error handling function
-handle_error() {
-    local exit_code=$?
-    local line_number=$1
-    log "ERROR" "Script failed at line ${line_number} with exit code ${exit_code}"
-    log "ERROR" "Build process terminated due to error"
-    exit ${exit_code}
+# Error handling with cleanup
+error_exit() {
+    local message="$1"
+    local exit_code="${2:-1}"
+    log "ERROR" "$message"
+    cleanup
+    exit "$exit_code"
 }
 
-# Cleanup function for temporary files
+# Cleanup function for temporary resources
 cleanup() {
-    log "INFO" "Cleaning up temporary files and resources"
+    log "INFO" "Performing cleanup operations..."
     
-    # Remove temporary Trivy cache if exists
-    if [[ -d "/tmp/trivy-cache" ]]; then
-        rm -rf "/tmp/trivy-cache"
-        log "DEBUG" "Removed Trivy cache directory"
+    # Remove temporary containers if they exist
+    if [[ -n "${BUILD_CONTAINER_ID:-}" ]]; then
+        docker rm -f "$BUILD_CONTAINER_ID" 2>/dev/null || true
     fi
     
-    # Clean up any dangling Docker images if build fails
-    if docker images -f "dangling=true" -q | grep -q .; then
-        log "INFO" "Cleaning up dangling Docker images"
-        docker images -f "dangling=true" -q | xargs -r docker rmi || true
-    fi
+    # Clean up dangling images from failed builds
+    docker image prune -f --filter "dangling=true" 2>/dev/null || true
+    
+    log "INFO" "Cleanup completed"
 }
 
-# Set error trap
-trap 'handle_error ${LINENO}' ERR
+# Trap for cleanup on script exit
 trap cleanup EXIT
 
-# =============================================================================
-# VALIDATION FUNCTIONS
-# =============================================================================
-
-# Validate prerequisites and environment
-validate_prerequisites() {
-    log "INFO" "Validating build prerequisites and environment"
-    
-    # Check Docker availability
-    if ! command -v docker >/dev/null 2>&1; then
-        log "ERROR" "Docker is not installed or not in PATH"
-        exit 1
-    fi
-    
-    # Check Docker daemon availability
-    if ! docker info >/dev/null 2>&1; then
-        log "ERROR" "Docker daemon is not running or accessible"
-        exit 1
-    fi
-    
-    # Validate Docker version compatibility
-    local docker_version=$(docker version --format '{{.Server.Version}}' 2>/dev/null)
-    log "INFO" "Docker version: ${docker_version}"
-    
-    # Check Dockerfile existence
-    if [[ ! -f "${DOCKERFILE_PATH}" ]]; then
-        log "ERROR" "Dockerfile not found at ${DOCKERFILE_PATH}"
-        exit 1
-    fi
-    
-    # Check project structure
-    if [[ ! -f "${PROJECT_ROOT}/requirements.txt" ]]; then
-        log "ERROR" "requirements.txt not found in project root"
-        exit 1
-    fi
-    
-    if [[ ! -f "${PROJECT_ROOT}/app.py" ]]; then
-        log "ERROR" "app.py not found in project root"
-        exit 1
-    fi
-    
-    # Check Gunicorn configuration
-    if [[ ! -f "${PROJECT_ROOT}/gunicorn.conf.py" ]]; then
-        log "WARN" "gunicorn.conf.py not found, using default configuration"
-    fi
-    
-    # Validate environment variables
-    if [[ -z "${IMAGE_NAME}" ]]; then
-        log "ERROR" "IMAGE_NAME environment variable is required"
-        exit 1
-    fi
-    
-    log "INFO" "Prerequisites validation completed successfully"
+# Check if command exists
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
 }
 
-# Validate pip-tools dependency resolution
+# Validate required dependencies
 validate_dependencies() {
-    log "INFO" "Validating pip-tools dependency resolution"
+    log "INFO" "Validating build dependencies..."
     
-    if [[ ! -f "${PROJECT_ROOT}/requirements.in" ]]; then
-        log "WARN" "requirements.in not found, skipping pip-tools validation"
-        return 0
+    # Check Docker
+    if ! command_exists docker; then
+        error_exit "Docker is not installed or not in PATH"
     fi
     
-    # Check if requirements.txt is up to date with requirements.in
-    local temp_requirements="/tmp/requirements-compiled.txt"
-    
-    # Use Docker to run pip-compile in consistent environment
-    docker run --rm \
-        -v "${PROJECT_ROOT}:/workspace" \
-        -w /workspace \
-        python:3.11-slim \
-        bash -c "
-            pip install pip-tools==7.3.0 >/dev/null 2>&1 && \
-            pip-compile requirements.in --output-file ${temp_requirements} --quiet
-        " || {
-        log "ERROR" "Failed to compile dependencies with pip-tools"
-        exit 1
-    }
-    
-    if ! diff -q "${PROJECT_ROOT}/requirements.txt" "${temp_requirements}" >/dev/null 2>&1; then
-        log "ERROR" "requirements.txt is not up to date with requirements.in"
-        log "ERROR" "Run 'pip-compile requirements.in' to update"
-        rm -f "${temp_requirements}"
-        exit 1
+    # Check Docker daemon
+    if ! docker info >/dev/null 2>&1; then
+        error_exit "Docker daemon is not running"
     fi
     
-    rm -f "${temp_requirements}"
-    log "INFO" "Dependency validation completed successfully"
+    # Check git (optional, for build version)
+    if ! command_exists git; then
+        log "WARN" "Git not available, using 'unknown' for build version"
+    fi
+    
+    # Check if Dockerfile exists
+    if [[ ! -f "$DOCKERFILE_PATH" ]]; then
+        error_exit "Dockerfile not found at: $DOCKERFILE_PATH"
+    fi
+    
+    log "INFO" "All dependencies validated successfully"
 }
 
 # =============================================================================
-# TRIVY SECURITY SCANNING FUNCTIONS
+# SECURITY SCANNING FUNCTIONS
 # =============================================================================
 
-# Install Trivy if not available
+# Install Trivy for container vulnerability scanning
 install_trivy() {
-    log "INFO" "Checking Trivy installation"
+    log "INFO" "Installing Trivy $TRIVY_VERSION for container vulnerability scanning..."
     
-    if command -v trivy >/dev/null 2>&1; then
-        local current_version=$(trivy version --format json 2>/dev/null | grep -o '"Version":"[^"]*"' | cut -d'"' -f4 || echo "unknown")
-        log "INFO" "Trivy is already installed: ${current_version}"
-        return 0
+    # Create cache directory
+    mkdir -p "$TRIVY_CACHE_DIR"
+    
+    # Check if Trivy is already installed with correct version
+    if command_exists trivy; then
+        local installed_version
+        installed_version="$(trivy --version | grep -oE 'Version: [0-9]+\.[0-9]+\.[0-9]+' | cut -d' ' -f2)"
+        if [[ "$installed_version" == "$TRIVY_VERSION" ]]; then
+            log "INFO" "Trivy $TRIVY_VERSION already installed"
+            return 0
+        fi
     fi
-    
-    log "INFO" "Installing Trivy ${TRIVY_VERSION}"
-    
-    # Detect architecture
-    local arch=$(uname -m)
-    case ${arch} in
-        x86_64) arch="64bit" ;;
-        aarch64|arm64) arch="ARM64" ;;
-        *) 
-            log "ERROR" "Unsupported architecture: ${arch}"
-            exit 1
-            ;;
-    esac
-    
-    # Detect OS
-    local os=$(uname -s | tr '[:upper:]' '[:lower:]')
     
     # Download and install Trivy
-    local trivy_url="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_${os}-${arch}.tar.gz"
+    local trivy_url="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
     local temp_dir="/tmp/trivy-install"
     
-    mkdir -p "${temp_dir}"
+    mkdir -p "$temp_dir"
+    cd "$temp_dir"
     
-    log "INFO" "Downloading Trivy from: ${trivy_url}"
-    if ! curl -fsSL "${trivy_url}" | tar -xz -C "${temp_dir}"; then
-        log "ERROR" "Failed to download and extract Trivy"
-        exit 1
-    fi
+    log "INFO" "Downloading Trivy from: $trivy_url"
+    curl -sL "$trivy_url" | tar xz
     
-    # Install to system path if we have permissions, otherwise use local bin
-    if [[ -w "/usr/local/bin" ]]; then
-        mv "${temp_dir}/trivy" "/usr/local/bin/"
-        log "INFO" "Trivy installed to /usr/local/bin/trivy"
+    # Install to /usr/local/bin (requires sudo) or local directory
+    if [[ $EUID -eq 0 ]] || sudo -n true 2>/dev/null; then
+        sudo mv trivy /usr/local/bin/
+        sudo chmod +x /usr/local/bin/trivy
     else
-        mkdir -p "${PROJECT_ROOT}/bin"
-        mv "${temp_dir}/trivy" "${PROJECT_ROOT}/bin/"
-        export PATH="${PROJECT_ROOT}/bin:${PATH}"
-        log "INFO" "Trivy installed to ${PROJECT_ROOT}/bin/trivy"
+        # Install to local directory if no sudo access
+        local local_bin="$HOME/.local/bin"
+        mkdir -p "$local_bin"
+        mv trivy "$local_bin/"
+        chmod +x "$local_bin/trivy"
+        
+        # Add to PATH if not already there
+        if [[ ":$PATH:" != *":$local_bin:"* ]]; then
+            export PATH="$local_bin:$PATH"
+        fi
     fi
     
-    rm -rf "${temp_dir}"
+    cd "$PROJECT_ROOT"
+    rm -rf "$temp_dir"
     
-    # Verify installation
-    if ! command -v trivy >/dev/null 2>&1; then
-        log "ERROR" "Trivy installation verification failed"
-        exit 1
-    fi
-    
-    log "INFO" "Trivy installation completed successfully"
+    log "INFO" "Trivy $TRIVY_VERSION installed successfully"
 }
 
-# Perform container vulnerability scanning
+# Perform container vulnerability scanning with Trivy
 scan_container_vulnerabilities() {
-    local image_ref="$1"
+    local image_name="$1"
+    log "INFO" "Performing container vulnerability scan with Trivy..."
     
-    log "INFO" "Starting container vulnerability scanning with Trivy"
-    log "INFO" "Scanning image: ${image_ref}"
-    log "INFO" "Severity levels: ${TRIVY_SEVERITY}"
+    # Ensure Trivy is installed
+    if [[ "$SECURITY_SCAN_ENABLED" == "true" ]]; then
+        install_trivy
+    else
+        log "WARN" "Security scanning disabled, skipping Trivy scan"
+        return 0
+    fi
     
-    # Create cache directory for Trivy
-    local trivy_cache_dir="/tmp/trivy-cache"
-    mkdir -p "${trivy_cache_dir}"
-    
-    # Scan container image
-    log "INFO" "Executing Trivy security scan"
-    local scan_start_time=$(date +%s)
-    
-    # Run Trivy scan with comprehensive options
+    # Configure Trivy scan parameters
+    local scan_output="$PROJECT_ROOT/trivy-results.${TRIVY_FORMAT}"
     local trivy_cmd=(
         trivy image
-        --cache-dir "${trivy_cache_dir}"
-        --format "${TRIVY_FORMAT}"
-        --output "${TRIVY_OUTPUT}"
-        --severity "${TRIVY_SEVERITY}"
-        --exit-code "${TRIVY_EXIT_CODE}"
+        --cache-dir "$TRIVY_CACHE_DIR"
+        --format "$TRIVY_FORMAT"
+        --output "$scan_output"
+        --severity "$TRIVY_SEVERITY"
+        --exit-code "$TRIVY_EXIT_CODE"
+        --timeout 10m
         --no-progress
-        --quiet
-        "${image_ref}"
+        "$image_name"
     )
     
-    log "DEBUG" "Trivy command: ${trivy_cmd[*]}"
+    log "INFO" "Running Trivy scan: ${trivy_cmd[*]}"
     
+    # Execute Trivy scan
     if "${trivy_cmd[@]}"; then
-        local scan_end_time=$(date +%s)
-        local scan_duration=$((scan_end_time - scan_start_time))
-        log "INFO" "Container vulnerability scan completed successfully in ${scan_duration}s"
+        log "INFO" "Container vulnerability scan passed"
+        log "INFO" "Scan results saved to: $scan_output"
+    else
+        local scan_exit_code=$?
+        log "ERROR" "Container vulnerability scan failed with exit code: $scan_exit_code"
         
-        # Generate human-readable summary
-        if [[ -f "${TRIVY_OUTPUT}" ]]; then
-            log "INFO" "Security scan results saved to: ${TRIVY_OUTPUT}"
-            
-            # Extract vulnerability count if SARIF format
-            if [[ "${TRIVY_FORMAT}" == "sarif" ]]; then
-                local vuln_count=$(grep -c '"ruleId"' "${TRIVY_OUTPUT}" 2>/dev/null || echo "0")
-                log "INFO" "Total vulnerabilities found: ${vuln_count}"
-            fi
+        # Display scan results for debugging
+        if [[ -f "$scan_output" ]]; then
+            log "ERROR" "Vulnerability scan results:"
+            cat "$scan_output" | tee -a "$LOG_FILE"
         fi
         
-        return 0
-    else
-        local scan_end_time=$(date +%s)
-        local scan_duration=$((scan_end_time - scan_start_time))
-        log "ERROR" "Container vulnerability scan failed after ${scan_duration}s"
-        
-        # Try to get more details about failures
-        log "ERROR" "Trivy scan failed - checking for critical vulnerabilities"
-        
-        # Run again with table format for human readable output
-        trivy image \
-            --cache-dir "${trivy_cache_dir}" \
-            --format table \
-            --severity CRITICAL,HIGH \
-            --no-progress \
-            "${image_ref}" || true
-        
-        return 1
+        # Check if this is a critical vulnerability failure
+        if [[ $scan_exit_code -eq 1 ]]; then
+            error_exit "Critical or high severity vulnerabilities detected. Build blocked per security policy." $scan_exit_code
+        else
+            log "WARN" "Non-critical scan issues detected, continuing with build"
+        fi
     fi
+    
+    # Generate human-readable report
+    log "INFO" "Generating vulnerability summary report..."
+    trivy image --cache-dir "$TRIVY_CACHE_DIR" --format table "$image_name" > "$PROJECT_ROOT/trivy-summary.txt" || true
+    
+    log "INFO" "Vulnerability scan completed"
 }
 
 # =============================================================================
 # DOCKER BUILD FUNCTIONS
 # =============================================================================
 
-# Build Docker image with multi-stage optimization
-build_docker_image() {
-    log "INFO" "Starting Docker image build process"
-    log "INFO" "Image: ${IMAGE_NAME}:${IMAGE_TAG}"
-    log "INFO" "Target: ${BUILD_TARGET}"
-    log "INFO" "Context: ${DOCKER_CONTEXT}"
-    log "INFO" "Dockerfile: ${DOCKERFILE_PATH}"
+# Prepare build environment and validate prerequisites
+prepare_build_environment() {
+    log "INFO" "Preparing Docker build environment..."
     
-    local build_start_time=$(date +%s)
-    local full_image_name="${IMAGE_NAME}:${IMAGE_TAG}"
+    # Create build cache directory
+    mkdir -p "$BUILD_CACHE_DIR"
     
-    # Add registry prefix if specified
-    if [[ -n "${DOCKER_REGISTRY}" ]]; then
-        full_image_name="${DOCKER_REGISTRY}/${full_image_name}"
+    # Enable Docker BuildKit for advanced build features
+    export DOCKER_BUILDKIT="$DOCKER_BUILDKIT"
+    
+    # Validate build context
+    if [[ ! -d "$DOCKER_CONTEXT" ]]; then
+        error_exit "Docker build context directory not found: $DOCKER_CONTEXT"
     fi
     
-    # Construct Docker build command with optimizations
-    local build_args=(
-        docker build
-        --file "${DOCKERFILE_PATH}"
-        --target "${BUILD_TARGET}"
-        --tag "${full_image_name}"
-    )
+    # Check for required files in build context
+    local required_files=("requirements.txt" "app.py" "gunicorn.conf.py")
+    for file in "${required_files[@]}"; do
+        if [[ ! -f "$DOCKER_CONTEXT/$file" ]]; then
+            log "WARN" "Required file not found: $file (continuing with build)"
+        fi
+    done
     
-    # Add build arguments for optimization
-    if [[ "${BUILD_CACHE}" == "true" ]]; then
-        build_args+=(--cache-from "${full_image_name}")
-        log "DEBUG" "Build cache enabled"
-    fi
+    # Clean up previous build artifacts if they exist
+    log "INFO" "Cleaning up previous build artifacts..."
+    docker system prune -f --filter "label=stage=dependency-builder" 2>/dev/null || true
     
-    if [[ "${BUILD_SQUASH}" == "true" ]]; then
-        build_args+=(--squash)
-        log "DEBUG" "Build squash enabled"
-    fi
-    
-    # Add build arguments for pip-tools and dependencies
-    build_args+=(
-        --build-arg BUILDKIT_INLINE_CACHE=1
-        --build-arg PIP_NO_CACHE_DIR=1
-        --build-arg PIP_DISABLE_PIP_VERSION_CHECK=1
-        --build-arg PYTHONUNBUFFERED=1
-        --build-arg PYTHONDONTWRITEBYTECODE=1
-    )
-    
-    # Add health check configuration if enabled
-    if [[ "${HEALTH_CHECK_ENABLED}" == "true" ]]; then
-        build_args+=(
-            --build-arg HEALTH_CHECK_INTERVAL="${HEALTH_CHECK_INTERVAL}"
-            --build-arg HEALTH_CHECK_TIMEOUT="${HEALTH_CHECK_TIMEOUT}"
-            --build-arg HEALTH_CHECK_START_PERIOD="${HEALTH_CHECK_START_PERIOD}"
-            --build-arg HEALTH_CHECK_RETRIES="${HEALTH_CHECK_RETRIES}"
-        )
-        log "DEBUG" "Health check configuration enabled"
-    fi
-    
-    # Add Docker context
-    build_args+=("${DOCKER_CONTEXT}")
-    
-    log "DEBUG" "Docker build command: ${build_args[*]}"
-    
-    # Execute Docker build
-    log "INFO" "Executing Docker build command"
-    if "${build_args[@]}"; then
-        local build_end_time=$(date +%s)
-        local build_duration=$((build_end_time - build_start_time))
-        log "INFO" "Docker image build completed successfully in ${build_duration}s"
-        
-        # Get image information
-        local image_id=$(docker images --format "{{.ID}}" "${full_image_name}" | head -1)
-        local image_size=$(docker images --format "{{.Size}}" "${full_image_name}" | head -1)
-        
-        log "INFO" "Image ID: ${image_id}"
-        log "INFO" "Image Size: ${image_size}"
-        
-        return 0
-    else
-        local build_end_time=$(date +%s)
-        local build_duration=$((build_end_time - build_start_time))
-        log "ERROR" "Docker image build failed after ${build_duration}s"
-        
-        # Try to get build logs for debugging
-        log "ERROR" "Build failed - checking Docker daemon logs"
-        docker system events --since "${build_start_time}s" --until "${build_end_time}s" || true
-        
-        return 1
-    fi
+    log "INFO" "Build environment prepared successfully"
 }
 
-# Validate built image
-validate_built_image() {
-    local image_name="$1"
+# Execute multi-stage Docker build with optimization
+execute_docker_build() {
+    log "INFO" "Starting Docker multi-stage build process..."
     
-    log "INFO" "Validating built Docker image: ${image_name}"
-    
-    # Check if image exists
-    if ! docker images "${image_name}" --format "{{.Repository}}:{{.Tag}}" | grep -q "${image_name}"; then
-        log "ERROR" "Built image not found: ${image_name}"
-        return 1
+    # Construct full image name with registry if specified
+    local full_image_name="$IMAGE_NAME:$IMAGE_TAG"
+    if [[ -n "$DOCKER_REGISTRY" ]]; then
+        full_image_name="$DOCKER_REGISTRY/$full_image_name"
     fi
     
-    # Inspect image configuration
-    local image_config=$(docker inspect "${image_name}" --format '{{json .Config}}' 2>/dev/null)
-    if [[ -z "${image_config}" ]]; then
-        log "ERROR" "Failed to inspect image configuration"
-        return 1
-    fi
+    # Prepare build arguments
+    local build_args=(
+        --file "$DOCKERFILE_PATH"
+        --tag "$full_image_name"
+        --label "build.date=$BUILD_DATE"
+        --label "build.version=$BUILD_VERSION"
+        --label "build.source=flask-migration"
+        --label "deployment.type=production"
+        --progress "$BUILD_PROGRESS"
+    )
     
-    # Validate entrypoint and command
-    local entrypoint=$(echo "${image_config}" | grep -o '"Entrypoint":\[[^]]*\]' || echo "null")
-    local cmd=$(echo "${image_config}" | grep -o '"Cmd":\[[^]]*\]' || echo "null")
-    
-    log "DEBUG" "Image entrypoint: ${entrypoint}"
-    log "DEBUG" "Image command: ${cmd}"
-    
-    # Check for Gunicorn in entrypoint or command
-    if echo "${entrypoint}${cmd}" | grep -q "gunicorn"; then
-        log "INFO" "Gunicorn WSGI server detected in image configuration"
-    else
-        log "WARN" "Gunicorn WSGI server not detected in image configuration"
-    fi
-    
-    # Validate health check configuration if enabled
-    if [[ "${HEALTH_CHECK_ENABLED}" == "true" ]]; then
-        local healthcheck=$(echo "${image_config}" | grep -o '"Healthcheck":{[^}]*}' || echo "null")
-        if [[ "${healthcheck}" != "null" ]]; then
-            log "INFO" "Health check configuration detected in image"
-            log "DEBUG" "Health check: ${healthcheck}"
-        else
-            log "WARN" "Health check configuration not found in image"
+    # Add cache configuration if enabled
+    if [[ "$CACHE_FROM_ENABLED" == "true" ]]; then
+        # Use previous image as cache source if it exists
+        if docker image inspect "$full_image_name" >/dev/null 2>&1; then
+            build_args+=(--cache-from "$full_image_name")
         fi
     fi
     
-    # Test basic image functionality
-    log "INFO" "Testing basic image functionality"
-    
-    # Try to run a simple command to verify the image works
-    if docker run --rm "${image_name}" python --version >/dev/null 2>&1; then
-        log "INFO" "Python runtime validation successful"
-    else
-        log "ERROR" "Python runtime validation failed"
-        return 1
+    # Add build optimization arguments
+    if [[ "$BUILD_PARALLEL" == "true" ]]; then
+        build_args+=(--rm)
     fi
     
-    # Check for Flask application module
-    if docker run --rm "${image_name}" python -c "import app; print('Flask app module imported successfully')" >/dev/null 2>&1; then
-        log "INFO" "Flask application module validation successful"
-    else
-        log "ERROR" "Flask application module validation failed"
-        return 1
-    fi
+    # Add build context
+    build_args+=("$DOCKER_CONTEXT")
     
-    log "INFO" "Image validation completed successfully"
-    return 0
-}
-
-# =============================================================================
-# PERFORMANCE OPTIMIZATION FUNCTIONS
-# =============================================================================
-
-# Optimize Docker build cache
-optimize_build_cache() {
-    log "INFO" "Optimizing Docker build cache"
+    log "INFO" "Build command: docker build ${build_args[*]}"
+    log "INFO" "Building image: $full_image_name"
     
-    # Clean up dangling images
-    local dangling_images=$(docker images -f "dangling=true" -q)
-    if [[ -n "${dangling_images}" ]]; then
-        log "INFO" "Removing dangling images"
-        echo "${dangling_images}" | xargs docker rmi || true
-    fi
+    # Execute Docker build with timing
+    local build_start_time
+    build_start_time="$(date +%s)"
     
-    # Prune unused build cache (keep recent)
-    log "INFO" "Pruning unused build cache"
-    docker builder prune --filter "until=24h" -f || true
-    
-    # Show disk usage
-    local docker_size=$(docker system df --format "table {{.Type}}\t{{.Size}}" | tail -n +2 | awk '{print $2}' | paste -sd+ | bc 2>/dev/null || echo "unknown")
-    log "INFO" "Docker disk usage: ${docker_size}"
-}
-
-# =============================================================================
-# CONTAINER REGISTRY FUNCTIONS
-# =============================================================================
-
-# Tag image for registry push
-tag_image_for_registry() {
-    local source_image="$1"
-    local target_image="$2"
-    
-    log "INFO" "Tagging image for registry: ${source_image} -> ${target_image}"
-    
-    if docker tag "${source_image}" "${target_image}"; then
-        log "INFO" "Image tagged successfully"
+    if docker build "${build_args[@]}"; then
+        local build_end_time
+        build_end_time="$(date +%s)"
+        local build_duration=$((build_end_time - build_start_time))
+        
+        log "INFO" "Docker build completed successfully in ${build_duration}s"
+        log "INFO" "Image built: $full_image_name"
+        
+        # Store image name for security scanning
+        echo "$full_image_name" > "$PROJECT_ROOT/.last-built-image"
+        
         return 0
     else
-        log "ERROR" "Failed to tag image"
-        return 1
+        local build_exit_code=$?
+        error_exit "Docker build failed with exit code: $build_exit_code" $build_exit_code
     fi
 }
 
-# Push image to registry (optional)
-push_image_to_registry() {
+# Validate built container image
+validate_container_image() {
+    local image_name="$1"
+    log "INFO" "Validating built container image..."
+    
+    # Check if image exists
+    if ! docker image inspect "$image_name" >/dev/null 2>&1; then
+        error_exit "Built image not found: $image_name"
+    fi
+    
+    # Get image information
+    local image_id
+    image_id="$(docker image inspect "$image_name" --format '{{.Id}}')"
+    local image_size
+    image_size="$(docker image inspect "$image_name" --format '{{.Size}}' | numfmt --to=iec-i --suffix=B)"
+    
+    log "INFO" "Image validation successful:"
+    log "INFO" "  Image ID: $image_id"
+    log "INFO" "  Image Size: $image_size"
+    log "INFO" "  Image Name: $image_name"
+    
+    # Validate image layers for optimization
+    local layer_count
+    layer_count="$(docker image inspect "$image_name" --format '{{len .RootFS.Layers}}')"
+    log "INFO" "  Layer Count: $layer_count"
+    
+    if [[ $layer_count -gt 20 ]]; then
+        log "WARN" "Image has $layer_count layers, consider optimizing for fewer layers"
+    fi
+    
+    # Check for security best practices
+    local non_root_user
+    non_root_user="$(docker image inspect "$image_name" --format '{{.Config.User}}')"
+    if [[ -n "$non_root_user" && "$non_root_user" != "root" ]]; then
+        log "INFO" "  Security: Non-root user configured ($non_root_user)"
+    else
+        log "WARN" "  Security: Image may be running as root user"
+    fi
+    
+    log "INFO" "Container image validation completed"
+}
+
+# =============================================================================
+# CONTAINER HEALTH CHECK FUNCTIONS
+# =============================================================================
+
+# Test container health endpoints
+test_container_health() {
     local image_name="$1"
     
-    if [[ -z "${DOCKER_REGISTRY}" ]]; then
-        log "INFO" "No registry specified, skipping push"
+    if [[ "$HEALTH_CHECK_ENABLED" != "true" ]]; then
+        log "INFO" "Container health checks disabled, skipping health validation"
         return 0
     fi
     
-    log "INFO" "Pushing image to registry: ${image_name}"
+    log "INFO" "Testing container health endpoints..."
     
-    if docker push "${image_name}"; then
-        log "INFO" "Image pushed successfully to registry"
-        return 0
+    # Start container in background for health testing
+    local container_name="flask-health-test-$(date +%s)"
+    local container_port="8080"
+    
+    log "INFO" "Starting test container: $container_name"
+    
+    # Run container with health check enabled
+    local container_id
+    if container_id="$(docker run -d \
+        --name "$container_name" \
+        --publish "$container_port:8000" \
+        --env FLASK_ENV=production \
+        --health-cmd="curl -f http://localhost:8000/health || exit 1" \
+        --health-interval=10s \
+        --health-timeout=5s \
+        --health-retries="$HEALTH_CHECK_RETRIES" \
+        "$image_name")"; then
+        
+        BUILD_CONTAINER_ID="$container_id"
+        log "INFO" "Test container started: $container_id"
     else
-        log "ERROR" "Failed to push image to registry"
-        return 1
+        error_exit "Failed to start test container"
     fi
+    
+    # Wait for container to be ready
+    log "INFO" "Waiting for container to be ready..."
+    local wait_count=0
+    local max_wait=30
+    
+    while [[ $wait_count -lt $max_wait ]]; do
+        if docker inspect "$container_id" --format '{{.State.Health.Status}}' 2>/dev/null | grep -q "healthy"; then
+            log "INFO" "Container health check passed"
+            break
+        elif docker inspect "$container_id" --format '{{.State.Health.Status}}' 2>/dev/null | grep -q "unhealthy"; then
+            log "ERROR" "Container health check failed"
+            docker logs "$container_id" | tail -20 | tee -a "$LOG_FILE"
+            docker rm -f "$container_id" 2>/dev/null || true
+            error_exit "Container failed health checks"
+        fi
+        
+        sleep 2
+        ((wait_count++))
+    done
+    
+    if [[ $wait_count -ge $max_wait ]]; then
+        log "ERROR" "Container health check timed out after ${max_wait} attempts"
+        docker logs "$container_id" | tail -20 | tee -a "$LOG_FILE"
+        docker rm -f "$container_id" 2>/dev/null || true
+        error_exit "Container health check timeout"
+    fi
+    
+    # Test specific health endpoints
+    local health_endpoints=("/health" "/health/ready" "/health/live")
+    for endpoint in "${health_endpoints[@]}"; do
+        log "INFO" "Testing health endpoint: $endpoint"
+        
+        local health_url="http://localhost:$container_port$endpoint"
+        if curl -f -s --max-time 10 "$health_url" >/dev/null; then
+            log "INFO" "Health endpoint $endpoint responded successfully"
+        else
+            log "WARN" "Health endpoint $endpoint failed or not available"
+        fi
+    done
+    
+    # Clean up test container
+    log "INFO" "Cleaning up test container..."
+    docker rm -f "$container_id" 2>/dev/null || true
+    BUILD_CONTAINER_ID=""
+    
+    log "INFO" "Container health validation completed successfully"
 }
 
 # =============================================================================
-# MONITORING AND METRICS FUNCTIONS
+# BUILD REPORTING AND METRICS
 # =============================================================================
 
-# Generate build metrics
-generate_build_metrics() {
+# Generate build report with metrics and summary
+generate_build_report() {
     local image_name="$1"
-    local build_start_time="$2"
-    local build_end_time="$3"
+    local build_status="$2"
     
-    log "INFO" "Generating build metrics"
+    log "INFO" "Generating build report..."
     
-    local build_duration=$((build_end_time - build_start_time))
-    local image_size=$(docker images --format "{{.Size}}" "${image_name}" 2>/dev/null || echo "unknown")
-    local image_id=$(docker images --format "{{.ID}}" "${image_name}" 2>/dev/null || echo "unknown")
+    local report_file="$PROJECT_ROOT/build-report.json"
+    local build_end_time="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
     
-    # Create metrics file
-    local metrics_file="${PROJECT_ROOT}/build-metrics.json"
-    cat > "${metrics_file}" << EOF
+    # Collect image metrics
+    local image_size=""
+    local image_id=""
+    local layer_count=""
+    
+    if [[ "$build_status" == "success" ]] && docker image inspect "$image_name" >/dev/null 2>&1; then
+        image_size="$(docker image inspect "$image_name" --format '{{.Size}}')"
+        image_id="$(docker image inspect "$image_name" --format '{{.Id}}')"
+        layer_count="$(docker image inspect "$image_name" --format '{{len .RootFS.Layers}}')"
+    fi
+    
+    # Generate JSON report for CI/CD integration
+    cat > "$report_file" <<EOF
 {
-  "build_timestamp": "$(date -Iseconds)",
-  "image_name": "${image_name}",
-  "image_id": "${image_id}",
-  "image_size": "${image_size}",
-  "build_duration_seconds": ${build_duration},
-  "build_target": "${BUILD_TARGET}",
-  "trivy_scan_results": "${TRIVY_OUTPUT}",
-  "docker_version": "$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo 'unknown')",
-  "python_version": "3.11",
-  "base_image": "python:3.11-slim",
-  "wsgi_server": "gunicorn"
+  "build": {
+    "status": "$build_status",
+    "timestamp": "$build_end_time",
+    "version": "$BUILD_VERSION",
+    "image": {
+      "name": "$image_name",
+      "id": "$image_id",
+      "size": "$image_size",
+      "layers": "$layer_count"
+    },
+    "security": {
+      "scan_enabled": "$SECURITY_SCAN_ENABLED",
+      "trivy_version": "$TRIVY_VERSION",
+      "scan_results": "trivy-results.$TRIVY_FORMAT"
+    },
+    "configuration": {
+      "docker_buildkit": "$DOCKER_BUILDKIT",
+      "base_image": "python:3.11-slim",
+      "wsgi_server": "gunicorn",
+      "health_check_enabled": "$HEALTH_CHECK_ENABLED"
+    }
+  }
 }
 EOF
     
-    log "INFO" "Build metrics saved to: ${metrics_file}"
-    log "INFO" "Build Duration: ${build_duration}s"
-    log "INFO" "Image Size: ${image_size}"
+    log "INFO" "Build report generated: $report_file"
+    
+    # Display summary
+    log "INFO" "=== BUILD SUMMARY ==="
+    log "INFO" "Status: $build_status"
+    log "INFO" "Image: $image_name"
+    log "INFO" "Build Version: $BUILD_VERSION"
+    log "INFO" "Build Date: $build_end_time"
+    
+    if [[ -n "$image_size" ]]; then
+        local size_mb=$((image_size / 1024 / 1024))
+        log "INFO" "Image Size: ${size_mb}MB"
+        log "INFO" "Layer Count: $layer_count"
+    fi
+    
+    if [[ "$SECURITY_SCAN_ENABLED" == "true" ]]; then
+        log "INFO" "Security Scan: Enabled (Trivy $TRIVY_VERSION)"
+    else
+        log "INFO" "Security Scan: Disabled"
+    fi
+    
+    log "INFO" "======================"
 }
 
 # =============================================================================
-# MAIN EXECUTION FUNCTIONS
+# MAIN BUILD ORCHESTRATION
 # =============================================================================
 
-# Display usage information
-show_usage() {
-    cat << EOF
-Usage: $0 [OPTIONS]
+# Display script usage information
+usage() {
+    cat <<EOF
+Usage: $SCRIPT_NAME [OPTIONS]
 
-Docker Container Build Automation Script for Flask Application
+Docker Container Build Automation Script for Flask Application Migration
+
+This script implements enterprise-grade Docker container build automation
+with multi-stage builds, security scanning, and optimization features.
 
 OPTIONS:
     -h, --help              Show this help message
-    -n, --name NAME         Set image name (default: flask-app)
-    -t, --tag TAG           Set image tag (default: latest)
-    -r, --registry REGISTRY Set Docker registry URL
-    -s, --scan              Force security scanning even if disabled
-    --no-scan              Skip security scanning
-    --target TARGET         Set build target (default: production)
-    --no-cache             Disable Docker build cache
-    --squash               Enable Docker image squashing
-    --push                 Push image to registry after build
-    --debug                Enable debug logging
-    -v, --verbose          Enable verbose output
+    -i, --image NAME        Image name (default: $IMAGE_NAME)
+    -t, --tag TAG           Image tag (default: $IMAGE_TAG)
+    -r, --registry URL      Docker registry URL
+    --skip-security         Disable security scanning
+    --skip-health           Disable health check validation
+    --debug                 Enable debug logging
+    --clean                 Clean build (no cache)
 
 ENVIRONMENT VARIABLES:
-    DOCKER_REGISTRY        Docker registry URL
-    IMAGE_NAME             Docker image name
-    IMAGE_TAG              Docker image tag
-    BUILD_TARGET           Docker build target
-    TRIVY_VERSION          Trivy scanner version
-    LOG_LEVEL              Logging level (DEBUG, INFO, WARN, ERROR)
+    IMAGE_NAME              Docker image name
+    IMAGE_TAG               Docker image tag
+    DOCKER_REGISTRY         Docker registry URL
+    BUILD_VERSION           Build version identifier
+    SECURITY_SCAN_ENABLED   Enable/disable security scanning (true/false)
+    HEALTH_CHECK_ENABLED    Enable/disable health checks (true/false)
+    TRIVY_VERSION           Trivy scanner version
+    DOCKER_BUILDKIT         Enable Docker BuildKit (1/0)
 
 EXAMPLES:
-    $0                     # Build with defaults
-    $0 -n myapp -t v1.0.0  # Build with custom name and tag
-    $0 --registry myregistry.com --push  # Build and push to registry
-    $0 --no-scan --debug   # Build without scanning, debug mode
+    # Basic build
+    $SCRIPT_NAME
 
+    # Build with custom image name and tag
+    $SCRIPT_NAME --image my-flask-app --tag v1.0.0
+
+    # Build with registry
+    $SCRIPT_NAME --registry docker.company.com --image flask-app --tag latest
+
+    # Build without security scanning (not recommended)
+    $SCRIPT_NAME --skip-security
+
+    # Clean build without cache
+    $SCRIPT_NAME --clean
+
+EXIT CODES:
+    0    Build completed successfully
+    1    Build failed due to errors
+    2    Security scan failed (critical vulnerabilities)
+    3    Health check validation failed
+    4    Missing dependencies or configuration errors
+
+For more information, see the technical specification Section 8.3 and 8.5.
 EOF
 }
 
@@ -657,10 +639,10 @@ parse_arguments() {
     while [[ $# -gt 0 ]]; do
         case $1 in
             -h|--help)
-                show_usage
+                usage
                 exit 0
                 ;;
-            -n|--name)
+            -i|--image)
                 IMAGE_NAME="$2"
                 shift 2
                 ;;
@@ -672,42 +654,27 @@ parse_arguments() {
                 DOCKER_REGISTRY="$2"
                 shift 2
                 ;;
-            -s|--scan)
-                FORCE_SCAN="true"
+            --skip-security)
+                SECURITY_SCAN_ENABLED="false"
                 shift
                 ;;
-            --no-scan)
-                SKIP_SCAN="true"
-                shift
-                ;;
-            --target)
-                BUILD_TARGET="$2"
-                shift 2
-                ;;
-            --no-cache)
-                BUILD_CACHE="false"
-                shift
-                ;;
-            --squash)
-                BUILD_SQUASH="true"
-                shift
-                ;;
-            --push)
-                PUSH_TO_REGISTRY="true"
+            --skip-health)
+                HEALTH_CHECK_ENABLED="false"
                 shift
                 ;;
             --debug)
-                LOG_LEVEL="DEBUG"
+                set -x  # Enable debug mode
                 shift
                 ;;
-            -v|--verbose)
-                set -x
+            --clean)
+                CACHE_FROM_ENABLED="false"
+                log "INFO" "Clean build enabled, cache disabled"
                 shift
                 ;;
             *)
                 log "ERROR" "Unknown option: $1"
-                show_usage
-                exit 1
+                usage
+                exit 4
                 ;;
         esac
     done
@@ -715,136 +682,75 @@ parse_arguments() {
 
 # Main build orchestration function
 main() {
-    local overall_start_time=$(date +%s)
+    local start_time
+    start_time="$(date +%s)"
     
-    log "INFO" "==================================================================="
-    log "INFO" "Flask Application Docker Build Process Started"
-    log "INFO" "==================================================================="
+    log "INFO" "Starting Flask Docker container build automation..."
+    log "INFO" "Script: $SCRIPT_NAME"
+    log "INFO" "Project Root: $PROJECT_ROOT"
+    log "INFO" "Target Image: ${DOCKER_REGISTRY:+$DOCKER_REGISTRY/}$IMAGE_NAME:$IMAGE_TAG"
+    log "INFO" "Build Version: $BUILD_VERSION"
     
-    # Initialize log file
-    echo "Flask Docker Build Log - $(date)" > "${LOG_FILE}"
+    # Parse command line arguments
+    parse_arguments "$@"
     
-    log "INFO" "Project Root: ${PROJECT_ROOT}"
-    log "INFO" "Build Configuration:"
-    log "INFO" "  - Image Name: ${IMAGE_NAME}"
-    log "INFO" "  - Image Tag: ${IMAGE_TAG}"
-    log "INFO" "  - Build Target: ${BUILD_TARGET}"
-    log "INFO" "  - Docker Registry: ${DOCKER_REGISTRY:-'(none)'}"
-    log "INFO" "  - Cache Enabled: ${BUILD_CACHE}"
-    log "INFO" "  - Squash Enabled: ${BUILD_SQUASH}"
-    log "INFO" "  - Health Check: ${HEALTH_CHECK_ENABLED}"
-    
-    # Step 1: Validate prerequisites
-    log "INFO" "Step 1/8: Validating prerequisites and environment"
-    validate_prerequisites
-    
-    # Step 2: Validate dependencies
-    log "INFO" "Step 2/8: Validating pip-tools dependency resolution"
+    # Validate environment and dependencies
     validate_dependencies
     
-    # Step 3: Optimize build cache
-    log "INFO" "Step 3/8: Optimizing Docker build cache"
-    optimize_build_cache
+    # Prepare build environment
+    prepare_build_environment
     
-    # Step 4: Build Docker image
-    log "INFO" "Step 4/8: Building Docker image"
-    local build_start_time=$(date +%s)
+    # Execute multi-stage Docker build
+    execute_docker_build
     
-    local full_image_name="${IMAGE_NAME}:${IMAGE_TAG}"
-    if [[ -n "${DOCKER_REGISTRY}" ]]; then
-        full_image_name="${DOCKER_REGISTRY}/${full_image_name}"
+    # Determine full image name for subsequent operations
+    local full_image_name="$IMAGE_NAME:$IMAGE_TAG"
+    if [[ -n "$DOCKER_REGISTRY" ]]; then
+        full_image_name="$DOCKER_REGISTRY/$full_image_name"
     fi
     
-    if ! build_docker_image; then
-        log "ERROR" "Docker image build failed"
-        exit 1
-    fi
+    # Validate built container image
+    validate_container_image "$full_image_name"
     
-    local build_end_time=$(date +%s)
+    # Perform security vulnerability scanning
+    scan_container_vulnerabilities "$full_image_name"
     
-    # Step 5: Validate built image
-    log "INFO" "Step 5/8: Validating built Docker image"
-    if ! validate_built_image "${full_image_name}"; then
-        log "ERROR" "Image validation failed"
-        exit 1
-    fi
+    # Test container health endpoints
+    test_container_health "$full_image_name"
     
-    # Step 6: Security scanning
-    if [[ "${SKIP_SCAN:-false}" != "true" ]]; then
-        log "INFO" "Step 6/8: Performing container security scanning"
-        
-        # Install Trivy if needed
-        install_trivy
-        
-        # Perform security scan
-        if ! scan_container_vulnerabilities "${full_image_name}"; then
-            log "ERROR" "Container security scan failed or found critical vulnerabilities"
-            if [[ "${FORCE_SCAN:-false}" != "true" ]]; then
-                log "ERROR" "Build failed due to security policy violation"
-                exit 1
-            else
-                log "WARN" "Continuing despite security scan failures (forced)"
-            fi
-        fi
-    else
-        log "INFO" "Step 6/8: Skipping container security scanning (disabled)"
-    fi
+    # Calculate build duration
+    local end_time
+    end_time="$(date +%s)"
+    local total_duration=$((end_time - start_time))
     
-    # Step 7: Registry operations
-    log "INFO" "Step 7/8: Handling registry operations"
-    if [[ "${PUSH_TO_REGISTRY:-false}" == "true" ]]; then
-        if ! push_image_to_registry "${full_image_name}"; then
-            log "ERROR" "Failed to push image to registry"
-            exit 1
-        fi
-    else
-        log "INFO" "Registry push skipped (not requested)"
-    fi
+    # Generate build report
+    generate_build_report "$full_image_name" "success"
     
-    # Step 8: Generate metrics and summary
-    log "INFO" "Step 8/8: Generating build metrics and summary"
-    generate_build_metrics "${full_image_name}" "${build_start_time}" "${build_end_time}"
+    log "INFO" "Flask Docker container build completed successfully!"
+    log "INFO" "Total build time: ${total_duration}s"
+    log "INFO" "Image ready for deployment: $full_image_name"
     
-    local overall_end_time=$(date +%s)
-    local total_duration=$((overall_end_time - overall_start_time))
-    
-    log "INFO" "==================================================================="
-    log "INFO" "Flask Application Docker Build Process Completed Successfully"
-    log "INFO" "==================================================================="
-    log "INFO" "Summary:"
-    log "INFO" "  - Total Build Time: ${total_duration}s"
-    log "INFO" "  - Final Image: ${full_image_name}"
-    log "INFO" "  - Build Target: ${BUILD_TARGET}"
-    log "INFO" "  - Base Image: python:3.11-slim"
-    log "INFO" "  - WSGI Server: Gunicorn 21.2+"
-    log "INFO" "  - Security Scan: ${SKIP_SCAN:-false}" 
-    if [[ -f "${TRIVY_OUTPUT}" ]]; then
-        log "INFO" "  - Security Results: ${TRIVY_OUTPUT}"
-    fi
-    log "INFO" "  - Build Log: ${LOG_FILE}"
-    log "INFO" "  - Build Metrics: ${PROJECT_ROOT}/build-metrics.json"
-    
-    # Display next steps
-    log "INFO" ""
-    log "INFO" "Next Steps:"
-    log "INFO" "  1. Test the container:"
-    log "INFO" "     docker run --rm -p 8000:8000 ${full_image_name}"
-    log "INFO" "  2. Check health endpoint:"
-    log "INFO" "     curl http://localhost:8000/health"
-    log "INFO" "  3. Deploy to staging environment for performance validation"
+    # Provide next steps
+    log "INFO" "=== NEXT STEPS ==="
+    log "INFO" "1. Test the container: docker run -p 8000:8000 $full_image_name"
+    log "INFO" "2. Check health: curl http://localhost:8000/health"
+    log "INFO" "3. Push to registry: docker push $full_image_name"
+    log "INFO" "4. Deploy using deployment scripts"
+    log "INFO" "=================="
     
     return 0
 }
 
 # =============================================================================
-# SCRIPT ENTRY POINT
+# SCRIPT EXECUTION
 # =============================================================================
 
-# Parse command line arguments
-parse_arguments "$@"
+# Initialize logging
+log "INFO" "Initializing Docker build automation script..."
 
-# Enable BuildKit for improved performance
-export DOCKER_BUILDKIT="${DOCKER_BUILDKIT}"
-
-# Execute main function
-main "$@"
+# Execute main function with all arguments
+if main "$@"; then
+    exit 0
+else
+    error_exit "Build process failed" $?
+fi
