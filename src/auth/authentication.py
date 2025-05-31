@@ -1,1786 +1,1622 @@
 """
-Core JWT authentication implementation using PyJWT 2.8+ for token validation, Auth0 Python SDK integration, 
-and cryptographic verification.
+Core JWT Authentication Implementation
 
-This module provides comprehensive token processing, user context creation, and authentication state management 
-equivalent to Node.js jsonwebtoken functionality while implementing enterprise-grade security patterns 
-and Flask integration.
+This module provides comprehensive JWT authentication functionality equivalent to Node.js
+jsonwebtoken patterns while implementing enterprise-grade security features using PyJWT 2.8+,
+Auth0 Python SDK 4.7+, and cryptography 41.0+ for secure token validation and signing.
+
+The authentication system maintains complete API compatibility with the Node.js implementation
+while providing enhanced security through Flask-Login integration, Redis-backed session
+management with AES-256-GCM encryption, and comprehensive audit logging.
 
 Key Features:
-- PyJWT 2.8+ token validation replacing Node.js jsonwebtoken per Section 0.1.2
-- Auth0 Python SDK 4.7+ enterprise integration per Section 6.4.1  
-- Cryptography 41.0+ for secure token validation and signing per Section 6.4.1
-- JWT claims extraction and validation per Section 0.1.4
-- Complete preservation of existing JWT token structure and claims per Section 0.1.4
-- Token expiration validation with automatic refresh handling per Section 6.4.1
-- Circuit breaker patterns for Auth0 API calls with fallback mechanisms
-- Comprehensive caching integration with Redis for performance optimization
-- Enterprise audit logging with structured JSON for compliance
-
-Security Features:
-- Cryptographic signature verification using Auth0 public key rotation
-- Token revocation support through Auth0 integration
-- Rate limiting protection against token abuse attacks
-- Comprehensive input validation and sanitization
-- Security-focused error handling preventing information disclosure
-- Circuit breaker patterns for Auth0 service resilience
-
-Performance Optimizations:
-- JWT validation caching with intelligent TTL management
-- Auth0 user profile caching with Redis backend
-- Connection pooling for external service communications
-- Efficient key rotation and cryptographic operations
-
-Compliance:
-- SOC 2 Type II audit logging and access controls
-- ISO 27001 security management alignment
-- OWASP Top 10 security pattern implementation
-- Enterprise security policy enforcement
+- JWT token processing migrated from jsonwebtoken to PyJWT 2.8+ per Section 0.1.2
+- Auth0 enterprise integration through Python SDK per Section 6.4.1
+- Cryptographic verification using cryptography 41.0+ per Section 6.4.1
+- Comprehensive token validation patterns preserving Node.js compatibility per Section 0.1.4
+- User context creation and authentication state management per Section 6.4.1
+- Performance optimization with Redis caching per Section 6.4.2
 
 Dependencies:
-- PyJWT 2.8+ for JWT token processing equivalent to Node.js jsonwebtoken
-- auth0-python 4.7+ for Auth0 enterprise integration
-- cryptography 41.0+ for secure cryptographic operations
-- redis-py 5.0+ for caching and session management
-- tenacity 9.1+ for circuit breaker patterns and retry strategies
-- httpx 0.24+ for async HTTP client operations
-- structlog 23.1+ for enterprise audit logging
+- PyJWT 2.8+: JWT token processing and validation
+- cryptography 41.0+: Secure cryptographic operations
+- auth0-python 4.7+: Auth0 service integration
+- redis 5.0+: Authentication caching and session management
+- structlog 23.1+: Comprehensive audit logging
 
 Author: Flask Migration Team
 Version: 1.0.0
 Compliance: SOC 2, ISO 27001, OWASP Top 10
 """
 
-import asyncio
-import hashlib
-import hmac
-import json
-import os
-import re
-import time
-from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional, Set, Any, Union, Tuple, Callable
-from functools import wraps
-from urllib.parse import urlparse
-import base64
-
-# Core authentication libraries
 import jwt
-from jwt import PyJWTError, ExpiredSignatureError, InvalidSignatureError, InvalidTokenError
-from cryptography.hazmat.primitives import serialization, hashes
-from cryptography.hazmat.primitives.asymmetric import rsa, padding
-from cryptography.hazmat.primitives.serialization import load_pem_public_key
-from cryptography.exceptions import InvalidSignature
+import json
+import time
+import secrets
+import hashlib
+import base64
+from datetime import datetime, timezone, timedelta
+from typing import Optional, Dict, Any, Union, List, Tuple, Callable
+from functools import wraps, lru_cache
+from urllib.parse import urlparse
+import asyncio
 
-# Auth0 integration
-from auth0.authentication import GetToken, Users
-from auth0.management import Auth0 as Auth0Management
-from auth0.exceptions import Auth0Error
-
-# HTTP client and circuit breaker
+# Flask and HTTP libraries
+from flask import request, g, current_app, jsonify
+from flask_login import current_user, login_user, logout_user
+import requests
 import httpx
-from tenacity import (
-    retry, 
-    stop_after_attempt, 
-    wait_exponential_jitter,
-    retry_if_exception_type,
-    before_sleep_log,
-    after_log
-)
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
-# Enterprise logging
-import structlog
+# Authentication and security libraries
+from auth0.authentication import GetToken
+from auth0.management import Auth0
+from auth0.exceptions import Auth0Error
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa, padding
+from cryptography.hazmat.backends import default_backend
 
 # Internal dependencies
+from .config import get_auth_config, User, JWTManager, auth_metrics
 from .exceptions import (
     AuthenticationException,
-    JWTException, 
+    JWTException,
     Auth0Exception,
     SessionException,
-    CircuitBreakerException,
-    ValidationException,
     SecurityErrorCode,
     create_safe_error_response
 )
 from .utils import (
-    JWTTokenUtils,
-    DateTimeUtils,
-    InputValidator,
-    CryptographicUtils,
-    validate_email,
-    parse_iso8601_date,
-    format_iso8601_date
+    jwt_manager,
+    datetime_utils,
+    input_validator,
+    crypto_utils,
+    log_security_event,
+    get_current_user_id,
+    create_token_hash
 )
 from .cache import (
-    AuthenticationCache,
-    get_auth_cache,
-    hash_token,
-    generate_session_id,
-    cache_operation_with_fallback
+    get_auth_cache_manager,
+    create_token_hash as cache_token_hash,
+    extract_user_id_from_session
 )
 
-# Configure structured logging for authentication events
-logger = structlog.get_logger("auth.authentication")
+# Monitoring and logging
+import structlog
+from prometheus_client import Counter, Histogram, Gauge
+
+# Configure structured logging for authentication operations
+logger = structlog.get_logger(__name__)
+
+# Prometheus metrics for authentication monitoring
+auth_operation_metrics = {
+    'token_validations_total': Counter(
+        'auth_token_validations_total',
+        'Total JWT token validations by result',
+        ['result', 'token_type', 'issuer']
+    ),
+    'auth0_operations_total': Counter(
+        'auth0_operations_total',
+        'Total Auth0 operations by type and result',
+        ['operation', 'result']
+    ),
+    'user_context_operations': Counter(
+        'auth_user_context_operations_total',
+        'User context creation and management operations',
+        ['operation', 'result']
+    ),
+    'authentication_duration': Histogram(
+        'auth_authentication_duration_seconds',
+        'Time spent on authentication operations',
+        ['operation', 'auth_method']
+    ),
+    'active_authenticated_users': Gauge(
+        'auth_active_authenticated_users',
+        'Number of currently authenticated users'
+    ),
+    'token_cache_operations': Counter(
+        'auth_token_cache_operations_total',
+        'Token validation cache operations',
+        ['operation', 'result']
+    )
+}
 
 
-class Auth0Config:
-    """Auth0 configuration management with secure environment variable loading"""
+class CoreJWTAuthenticator:
+    """
+    Core JWT authentication implementation providing comprehensive token validation,
+    user context management, and Auth0 integration equivalent to Node.js jsonwebtoken
+    patterns with enterprise-grade security enhancements.
     
-    def __init__(self):
-        """Initialize Auth0 configuration from environment variables"""
-        self.domain = os.getenv('AUTH0_DOMAIN')
-        self.client_id = os.getenv('AUTH0_CLIENT_ID') 
-        self.client_secret = os.getenv('AUTH0_CLIENT_SECRET')
-        self.audience = os.getenv('AUTH0_AUDIENCE')
-        self.algorithm = os.getenv('JWT_ALGORITHM', 'RS256')
-        self.issuer = f"https://{self.domain}/" if self.domain else None
-        
-        # Validate required configuration
-        self._validate_config()
-        
-        # Cache for Auth0 public keys
-        self._jwks_cache: Optional[Dict[str, Any]] = None
-        self._jwks_cache_expiry: Optional[datetime] = None
-        self._jwks_cache_ttl = timedelta(hours=24)  # Cache JWKS for 24 hours
+    This class serves as the primary authentication interface, orchestrating JWT token
+    validation, Auth0 service integration, user session management, and comprehensive
+    security auditing while maintaining complete API compatibility with the original
+    Node.js implementation.
     
-    def _validate_config(self) -> None:
-        """Validate Auth0 configuration completeness"""
-        required_vars = {
-            'AUTH0_DOMAIN': self.domain,
-            'AUTH0_CLIENT_ID': self.client_id,
-            'AUTH0_CLIENT_SECRET': self.client_secret,
-            'AUTH0_AUDIENCE': self.audience
-        }
-        
-        missing_vars = [var for var, value in required_vars.items() if not value]
-        if missing_vars:
-            raise AuthenticationException(
-                message=f"Missing Auth0 configuration: {', '.join(missing_vars)}",
-                error_code=SecurityErrorCode.AUTH_CREDENTIALS_INVALID,
-                user_message="Authentication service configuration error"
-            )
-        
-        # Validate domain format
-        if not re.match(r'^[a-zA-Z0-9.-]+\.auth0\.com$', self.domain):
-            raise AuthenticationException(
-                message=f"Invalid Auth0 domain format: {self.domain}",
-                error_code=SecurityErrorCode.AUTH_CREDENTIALS_INVALID,
-                user_message="Authentication service configuration error"
-            )
+    Features:
+    - PyJWT 2.8+ token validation equivalent to Node.js jsonwebtoken
+    - Auth0 Python SDK integration for enterprise authentication services
+    - Cryptographic operations using cryptography 41.0+ for secure token processing
+    - Redis-backed token validation caching for performance optimization
+    - Comprehensive audit logging and security event tracking
+    - Circuit breaker patterns for Auth0 service resilience
     
-    @property
-    def jwks_url(self) -> str:
-        """Get Auth0 JWKS URL for public key retrieval"""
-        return f"https://{self.domain}/.well-known/jwks.json"
+    Example:
+        authenticator = CoreJWTAuthenticator()
+        user_context = await authenticator.authenticate_request(token)
+        if user_context:
+            print(f"Authenticated user: {user_context.user_id}")
+    """
     
-    @property
-    def token_url(self) -> str:
-        """Get Auth0 token endpoint URL"""
-        return f"https://{self.domain}/oauth/token"
-    
-    @property
-    def userinfo_url(self) -> str:
-        """Get Auth0 user info endpoint URL"""
-        return f"https://{self.domain}/userinfo"
-
-
-class Auth0CircuitBreaker:
-    """Circuit breaker implementation for Auth0 API calls with intelligent retry strategies"""
-    
-    def __init__(self, failure_threshold: int = 5, recovery_timeout: int = 60):
-        """Initialize circuit breaker for Auth0 service protection
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        """
+        Initialize core JWT authenticator with comprehensive security configuration.
         
         Args:
-            failure_threshold: Number of failures before opening circuit
-            recovery_timeout: Seconds to wait before attempting recovery
+            config: Optional configuration override (uses global config if None)
         """
-        self.failure_threshold = failure_threshold
-        self.recovery_timeout = recovery_timeout
-        self.failure_count = 0
-        self.last_failure_time: Optional[datetime] = None
-        self.state = 'closed'  # closed, open, half-open
+        self.config = config or get_auth_config()
+        self.jwt_manager = jwt_manager
+        self.cache_manager = get_auth_cache_manager()
+        self.logger = logger.bind(component="core_jwt_authenticator")
         
-        logger.info(
-            "Auth0 circuit breaker initialized",
-            failure_threshold=failure_threshold,
-            recovery_timeout=recovery_timeout
+        # Auth0 configuration
+        self.auth0_domain = self.config.config.get('AUTH0_DOMAIN')
+        self.auth0_client_id = self.config.config.get('AUTH0_CLIENT_ID')
+        self.auth0_client_secret = self.config.config.get('AUTH0_CLIENT_SECRET')
+        self.auth0_audience = self.config.config.get('AUTH0_AUDIENCE')
+        
+        # JWT configuration
+        self.jwt_algorithm = 'RS256'  # Use RS256 for Auth0 compatibility
+        self.token_leeway = 10  # 10 seconds leeway for clock skew
+        
+        # Initialize Auth0 clients
+        self._auth0_management_client = None
+        self._auth0_public_keys = None
+        self._public_keys_cache_expiry = None
+        
+        # Circuit breaker state for Auth0 operations
+        self._auth0_circuit_breaker_state = 'closed'
+        self._auth0_failure_count = 0
+        self._auth0_last_failure_time = None
+        
+        # Performance optimization settings
+        self.cache_ttl_seconds = 300  # 5 minutes default cache TTL
+        self.max_concurrent_validations = 100
+        
+        self.logger.info(
+            "Core JWT authenticator initialized",
+            auth0_domain=self.auth0_domain,
+            jwt_algorithm=self.jwt_algorithm,
+            cache_enabled=True
         )
     
-    def __call__(self, func: Callable) -> Callable:
-        """Decorator to wrap functions with circuit breaker protection"""
-        @wraps(func)
-        async def async_wrapper(*args, **kwargs):
-            return await self._execute_async(func, *args, **kwargs)
+    async def authenticate_request(
+        self,
+        token: Optional[str] = None,
+        required_permissions: Optional[List[str]] = None,
+        allow_expired: bool = False
+    ) -> Optional['AuthenticatedUser']:
+        """
+        Comprehensive request authentication with JWT validation and user context creation.
         
-        @wraps(func)
-        def sync_wrapper(*args, **kwargs):
-            return self._execute_sync(func, *args, **kwargs)
-        
-        # Return appropriate wrapper based on function type
-        if asyncio.iscoroutinefunction(func):
-            return async_wrapper
-        else:
-            return sync_wrapper
-    
-    async def _execute_async(self, func: Callable, *args, **kwargs) -> Any:
-        """Execute async function with circuit breaker protection"""
-        if self.state == 'open':
-            if self._should_attempt_reset():
-                self.state = 'half-open'
-                logger.info("Auth0 circuit breaker entering half-open state")
-            else:
-                raise CircuitBreakerException(
-                    message="Auth0 circuit breaker is open",
-                    error_code=SecurityErrorCode.EXT_CIRCUIT_BREAKER_OPEN,
-                    service_name='auth0',
-                    circuit_state='open',
-                    failure_count=self.failure_count
-                )
-        
-        try:
-            result = await func(*args, **kwargs)
-            if self.state == 'half-open':
-                self._reset()
-            return result
-        except Exception as e:
-            self._record_failure(e)
-            raise
-    
-    def _execute_sync(self, func: Callable, *args, **kwargs) -> Any:
-        """Execute sync function with circuit breaker protection"""
-        if self.state == 'open':
-            if self._should_attempt_reset():
-                self.state = 'half-open'
-                logger.info("Auth0 circuit breaker entering half-open state")
-            else:
-                raise CircuitBreakerException(
-                    message="Auth0 circuit breaker is open",
-                    error_code=SecurityErrorCode.EXT_CIRCUIT_BREAKER_OPEN,
-                    service_name='auth0',
-                    circuit_state='open',
-                    failure_count=self.failure_count
-                )
-        
-        try:
-            result = func(*args, **kwargs)
-            if self.state == 'half-open':
-                self._reset()
-            return result
-        except Exception as e:
-            self._record_failure(e)
-            raise
-    
-    def _should_attempt_reset(self) -> bool:
-        """Check if circuit breaker should attempt reset"""
-        if not self.last_failure_time:
-            return True
-        return (datetime.utcnow() - self.last_failure_time).total_seconds() > self.recovery_timeout
-    
-    def _record_failure(self, exception: Exception) -> None:
-        """Record failure and potentially open circuit"""
-        self.failure_count += 1
-        self.last_failure_time = datetime.utcnow()
-        
-        logger.warning(
-            "Auth0 circuit breaker recorded failure",
-            failure_count=self.failure_count,
-            exception_type=type(exception).__name__,
-            exception_message=str(exception)
-        )
-        
-        if self.failure_count >= self.failure_threshold:
-            self.state = 'open'
-            logger.error(
-                "Auth0 circuit breaker opened",
-                failure_count=self.failure_count,
-                threshold=self.failure_threshold,
-                recovery_timeout=self.recovery_timeout
-            )
-    
-    def _reset(self) -> None:
-        """Reset circuit breaker to closed state"""
-        previous_state = self.state
-        self.failure_count = 0
-        self.last_failure_time = None
-        self.state = 'closed'
-        
-        logger.info(
-            "Auth0 circuit breaker reset to closed state",
-            previous_state=previous_state,
-            previous_failure_count=self.failure_count
-        )
-    
-    def get_state(self) -> Dict[str, Any]:
-        """Get current circuit breaker state information"""
-        return {
-            'state': self.state,
-            'failure_count': self.failure_count,
-            'last_failure_time': self.last_failure_time.isoformat() if self.last_failure_time else None,
-            'failure_threshold': self.failure_threshold,
-            'recovery_timeout': self.recovery_timeout
-        }
-
-
-class JWTTokenValidator:
-    """Comprehensive JWT token validation with PyJWT 2.8+ and Auth0 integration"""
-    
-    def __init__(self, auth0_config: Auth0Config, cache: AuthenticationCache):
-        """Initialize JWT token validator with Auth0 configuration and caching
+        This method provides complete authentication functionality equivalent to Node.js
+        authentication middleware, including token extraction, validation, user context
+        creation, and permission verification with comprehensive caching and monitoring.
         
         Args:
-            auth0_config: Auth0 configuration instance
-            cache: Authentication cache instance
+            token: JWT token string (extracted from request if None)
+            required_permissions: List of required permissions for authorization
+            allow_expired: Whether to allow expired tokens (for refresh operations)
+            
+        Returns:
+            AuthenticatedUser object if authentication succeeds, None otherwise
+            
+        Raises:
+            AuthenticationException: When authentication fails
+            JWTException: When token validation fails
+            Auth0Exception: When Auth0 service is unavailable
+            
+        Example:
+            # Extract and validate token from request
+            user = await authenticator.authenticate_request()
+            
+            # Validate token with specific permissions
+            user = await authenticator.authenticate_request(
+                token=jwt_token,
+                required_permissions=['read:documents', 'write:documents']
+            )
         """
-        self.auth0_config = auth0_config
-        self.cache = cache
-        self.jwt_utils = JWTTokenUtils()
-        self.datetime_utils = DateTimeUtils()
-        self.crypto_utils = CryptographicUtils()
+        start_time = time.time()
+        operation_result = "success"
         
-        # HTTP client for Auth0 API calls
-        self.http_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=10.0, read=30.0),
-            limits=httpx.Limits(max_connections=100, max_keepalive_connections=50)
-        )
-        
-        # Circuit breaker for Auth0 API protection
-        self.circuit_breaker = Auth0CircuitBreaker()
-        
-        logger.info("JWT token validator initialized with Auth0 integration")
+        try:
+            # Extract token from request if not provided
+            if token is None:
+                token = self._extract_token_from_request()
+            
+            if not token:
+                auth_operation_metrics['token_validations_total'].labels(
+                    result='missing_token',
+                    token_type='access_token',
+                    issuer='unknown'
+                ).inc()
+                
+                self.logger.warning("Authentication failed: missing token")
+                return None
+            
+            # Validate JWT token with comprehensive security checks
+            token_claims = await self._validate_jwt_token(
+                token, 
+                allow_expired=allow_expired
+            )
+            
+            if not token_claims:
+                operation_result = "invalid_token"
+                return None
+            
+            # Create authenticated user context
+            authenticated_user = await self._create_user_context(
+                token_claims, 
+                token
+            )
+            
+            if not authenticated_user:
+                operation_result = "context_creation_failed"
+                return None
+            
+            # Verify required permissions if specified
+            if required_permissions:
+                if not await self._verify_user_permissions(
+                    authenticated_user, 
+                    required_permissions
+                ):
+                    operation_result = "insufficient_permissions"
+                    self.logger.warning(
+                        "Authentication failed: insufficient permissions",
+                        user_id=authenticated_user.user_id,
+                        required_permissions=required_permissions,
+                        user_permissions=authenticated_user.permissions
+                    )
+                    
+                    raise AuthenticationException(
+                        message="Insufficient permissions for this operation",
+                        error_code=SecurityErrorCode.AUTHZ_INSUFFICIENT_PERMISSIONS,
+                        user_id=authenticated_user.user_id,
+                        metadata={
+                            'required_permissions': required_permissions,
+                            'user_permissions': authenticated_user.permissions[:10]  # Limit for security
+                        }
+                    )
+            
+            # Update authentication metrics
+            auth_operation_metrics['token_validations_total'].labels(
+                result='success',
+                token_type=token_claims.get('type', 'access_token'),
+                issuer=token_claims.get('iss', 'unknown')
+            ).inc()
+            
+            # Log successful authentication
+            self.logger.info(
+                "Request authenticated successfully",
+                user_id=authenticated_user.user_id,
+                token_type=token_claims.get('type'),
+                permissions_count=len(authenticated_user.permissions) if authenticated_user.permissions else 0,
+                duration=time.time() - start_time
+            )
+            
+            # Update active users metric
+            try:
+                auth_operation_metrics['active_authenticated_users'].set(
+                    len(self.cache_manager.redis_client.keys('session:*'))
+                )
+            except Exception:
+                pass  # Don't fail authentication for metrics errors
+            
+            return authenticated_user
+            
+        except (AuthenticationException, JWTException, Auth0Exception):
+            operation_result = "authentication_error"
+            raise
+        except Exception as e:
+            operation_result = "unexpected_error"
+            self.logger.error(
+                "Unexpected authentication error",
+                error=str(e),
+                error_type=type(e).__name__,
+                duration=time.time() - start_time
+            )
+            
+            raise AuthenticationException(
+                message="Authentication system error",
+                error_code=SecurityErrorCode.AUTH_TOKEN_INVALID,
+                metadata={'error_type': type(e).__name__}
+            )
+        finally:
+            # Record operation duration
+            auth_operation_metrics['authentication_duration'].labels(
+                operation='authenticate_request',
+                auth_method='jwt'
+            ).observe(time.time() - start_time)
+            
+            # Log authentication attempt for audit
+            log_security_event(
+                'authentication_attempt',
+                user_id=getattr(g, 'current_user_id', None),
+                metadata={
+                    'result': operation_result,
+                    'duration': time.time() - start_time,
+                    'has_required_permissions': required_permissions is not None,
+                    'allow_expired': allow_expired
+                }
+            )
     
-    async def validate_token(
+    async def _validate_jwt_token(
         self,
         token: str,
-        verify_signature: bool = True,
-        verify_expiration: bool = True,
-        verify_audience: bool = True,
-        cache_result: bool = True
-    ) -> Dict[str, Any]:
-        """Validate JWT token with comprehensive security checks and caching
+        allow_expired: bool = False
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Comprehensive JWT token validation using PyJWT 2.8+ with Auth0 integration.
+        
+        This method provides enterprise-grade JWT validation equivalent to Node.js
+        jsonwebtoken verify() functionality with performance caching, Auth0 public key
+        validation, and comprehensive security checks.
         
         Args:
             token: JWT token string to validate
-            verify_signature: Whether to verify token signature against Auth0 JWKS
-            verify_expiration: Whether to verify token expiration
-            verify_audience: Whether to verify token audience
-            cache_result: Whether to cache validation result
+            allow_expired: Whether to allow expired tokens
             
         Returns:
-            Validated token payload with user claims
+            Validated token claims or None if validation fails
             
         Raises:
             JWTException: When token validation fails
             Auth0Exception: When Auth0 service is unavailable
         """
-        # Generate token hash for caching
-        token_hash = hash_token(token)
-        
-        # Check cache first if enabled
-        if cache_result:
-            cached_result = self.cache.get_jwt_validation(token_hash)
-            if cached_result:
-                logger.debug(
-                    "JWT validation cache hit",
-                    token_hash=token_hash,
-                    cached_at=cached_result.get('cached_at')
+        try:
+            # Check cache first for performance optimization
+            token_hash = create_token_hash(token)
+            cached_result = self.cache_manager.get_cached_jwt_validation_result(token_hash)
+            
+            if cached_result and not allow_expired:
+                auth_operation_metrics['token_cache_operations'].labels(
+                    operation='hit',
+                    result='success'
+                ).inc()
+                
+                self.logger.debug(
+                    "JWT validation result retrieved from cache",
+                    token_hash=token_hash[:8] + "...",
+                    cache_hit=True
                 )
                 return cached_result
-        
-        try:
-            # Extract token header for key identification
-            unverified_header = jwt.get_unverified_header(token)
             
-            # Get signing key
-            if verify_signature:
-                signing_key = await self._get_signing_key(unverified_header.get('kid'))
-            else:
-                signing_key = None
+            # Decode token header without verification to get key ID
+            try:
+                unverified_header = jwt.get_unverified_header(token)
+                kid = unverified_header.get('kid')
+                algorithm = unverified_header.get('alg', 'RS256')
+            except jwt.InvalidTokenError as e:
+                raise JWTException(
+                    message=f"Invalid token header: {str(e)}",
+                    error_code=SecurityErrorCode.AUTH_TOKEN_MALFORMED,
+                    jwt_error=e,
+                    token_header=None
+                )
             
-            # Prepare validation options
+            # Get Auth0 public key for signature verification
+            public_key = await self._get_auth0_public_key(kid)
+            if not public_key:
+                raise JWTException(
+                    message=f"Unable to find public key for kid: {kid}",
+                    error_code=SecurityErrorCode.AUTH_TOKEN_INVALID,
+                    token_header=unverified_header
+                )
+            
+            # Configure JWT validation options
             validation_options = {
-                'verify_signature': verify_signature,
-                'verify_exp': verify_expiration,
-                'verify_aud': verify_audience,
+                'verify_signature': True,
+                'verify_exp': not allow_expired,
+                'verify_aud': True,
                 'verify_iss': True,
-                'require': ['exp', 'iat', 'sub']
+                'require': ['sub', 'iss', 'aud', 'exp', 'iat']
             }
             
-            # Validate token with PyJWT
-            decoded_payload = jwt.decode(
-                jwt=token,
-                key=signing_key,
-                algorithms=[self.auth0_config.algorithm],
-                audience=self.auth0_config.audience if verify_audience else None,
-                issuer=self.auth0_config.issuer,
-                options=validation_options
-            )
+            # Validate token with Auth0 public key
+            try:
+                decoded_token = jwt.decode(
+                    token,
+                    public_key,
+                    algorithms=[algorithm],
+                    audience=self.auth0_audience,
+                    issuer=f"https://{self.auth0_domain}/",
+                    options=validation_options,
+                    leeway=self.token_leeway
+                )
+            except jwt.ExpiredSignatureError as e:
+                if allow_expired:
+                    # Decode without expiration check for refresh operations
+                    validation_options['verify_exp'] = False
+                    decoded_token = jwt.decode(
+                        token,
+                        public_key,
+                        algorithms=[algorithm],
+                        audience=self.auth0_audience,
+                        issuer=f"https://{self.auth0_domain}/",
+                        options=validation_options,
+                        leeway=self.token_leeway
+                    )
+                    decoded_token['_expired'] = True
+                else:
+                    raise JWTException(
+                        message="Token has expired",
+                        error_code=SecurityErrorCode.AUTH_TOKEN_EXPIRED,
+                        jwt_error=e,
+                        token_header=unverified_header
+                    )
+            except jwt.InvalidAudienceError as e:
+                raise JWTException(
+                    message="Invalid token audience",
+                    error_code=SecurityErrorCode.AUTH_TOKEN_INVALID,
+                    jwt_error=e,
+                    token_header=unverified_header
+                )
+            except jwt.InvalidIssuerError as e:
+                raise JWTException(
+                    message="Invalid token issuer",
+                    error_code=SecurityErrorCode.AUTH_TOKEN_INVALID,
+                    jwt_error=e,
+                    token_header=unverified_header
+                )
+            except jwt.InvalidTokenError as e:
+                raise JWTException(
+                    message=f"Token validation failed: {str(e)}",
+                    error_code=SecurityErrorCode.AUTH_TOKEN_INVALID,
+                    jwt_error=e,
+                    token_header=unverified_header
+                )
             
-            # Additional custom validations
-            self._validate_custom_claims(decoded_payload)
+            # Additional security validations
+            await self._perform_additional_token_validations(decoded_token)
             
-            # Enhance payload with validation metadata
-            validation_result = {
-                **decoded_payload,
-                'validation_metadata': {
-                    'validated_at': datetime.utcnow().isoformat(),
-                    'token_hash': token_hash,
-                    'signature_verified': verify_signature,
-                    'expiration_verified': verify_expiration,
-                    'audience_verified': verify_audience,
-                    'validation_source': 'auth0_jwks'
-                }
-            }
+            # Cache validation result for performance (if not expired)
+            if not decoded_token.get('_expired', False):
+                self.cache_manager.cache_jwt_validation_result(
+                    token_hash,
+                    decoded_token,
+                    ttl=min(
+                        self.cache_ttl_seconds,
+                        decoded_token.get('exp', 0) - int(time.time())
+                    )
+                )
+                
+                auth_operation_metrics['token_cache_operations'].labels(
+                    operation='write',
+                    result='success'
+                ).inc()
             
-            # Cache validation result if enabled
-            if cache_result:
-                cache_ttl = min(300, int(decoded_payload.get('exp', time.time() + 300) - time.time()))
-                self.cache.cache_jwt_validation(token_hash, validation_result, cache_ttl)
-            
-            logger.info(
+            self.logger.debug(
                 "JWT token validated successfully",
-                user_id=decoded_payload.get('sub'),
-                token_hash=token_hash,
-                expires_at=decoded_payload.get('exp'),
-                audience=decoded_payload.get('aud')
+                user_id=decoded_token.get('sub'),
+                algorithm=algorithm,
+                kid=kid,
+                expired=decoded_token.get('_expired', False)
             )
             
-            return validation_result
+            return decoded_token
             
-        except ExpiredSignatureError:
-            logger.warning(
-                "JWT token expired",
-                token_hash=token_hash,
-                current_time=time.time()
-            )
-            raise JWTException(
-                message="JWT token has expired",
-                error_code=SecurityErrorCode.AUTH_TOKEN_EXPIRED,
-                token_header=unverified_header
-            )
-        except InvalidSignatureError:
-            logger.error(
-                "JWT token signature verification failed",
-                token_hash=token_hash,
-                algorithm=unverified_header.get('alg'),
-                key_id=unverified_header.get('kid')
-            )
-            raise JWTException(
-                message="JWT token signature verification failed",
-                error_code=SecurityErrorCode.AUTH_TOKEN_INVALID,
-                token_header=unverified_header
-            )
-        except InvalidTokenError as e:
-            logger.error(
-                "JWT token validation failed",
-                token_hash=token_hash,
-                error=str(e)
-            )
-            raise JWTException(
-                message=f"Invalid JWT token: {str(e)}",
-                error_code=SecurityErrorCode.AUTH_TOKEN_MALFORMED,
-                jwt_error=e,
-                token_header=unverified_header
-            )
+        except JWTException:
+            auth_operation_metrics['token_cache_operations'].labels(
+                operation='miss',
+                result='validation_failed'
+            ).inc()
+            raise
         except Exception as e:
-            logger.error(
-                "Unexpected error during JWT validation",
-                token_hash=token_hash,
+            self.logger.error(
+                "Unexpected JWT validation error",
                 error=str(e),
                 error_type=type(e).__name__
             )
+            
             raise JWTException(
-                message=f"JWT validation error: {str(e)}",
+                message="Token validation system error",
                 error_code=SecurityErrorCode.AUTH_TOKEN_INVALID,
                 jwt_error=e
             )
     
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential_jitter(initial=1, max=10, jitter=2),
-        retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)),
-        before_sleep=before_sleep_log(logger, 'WARNING'),
-        after=after_log(logger, 'INFO')
-    )
-    async def _get_signing_key(self, key_id: Optional[str]) -> str:
-        """Get Auth0 signing key with circuit breaker protection and caching
+    async def _get_auth0_public_key(self, kid: str) -> Optional[str]:
+        """
+        Retrieve Auth0 public key for JWT signature verification with caching.
         
         Args:
-            key_id: Key ID from JWT header
+            kid: Key ID from JWT header
             
         Returns:
-            PEM-formatted public key for signature verification
+            Public key for signature verification or None if not found
             
         Raises:
-            Auth0Exception: When key retrieval fails
+            Auth0Exception: When Auth0 JWKS endpoint is unavailable
         """
         try:
-            # Check if JWKS is cached and valid
-            if (self.auth0_config._jwks_cache and 
-                self.auth0_config._jwks_cache_expiry and
-                datetime.utcnow() < self.auth0_config._jwks_cache_expiry):
-                jwks = self.auth0_config._jwks_cache
-                logger.debug("Using cached JWKS data")
-            else:
-                # Fetch JWKS from Auth0
-                jwks = await self._fetch_jwks()
+            # Check if we have cached public keys
+            current_time = time.time()
+            if (self._auth0_public_keys and self._public_keys_cache_expiry and
+                current_time < self._public_keys_cache_expiry):
                 
-                # Cache JWKS data
-                self.auth0_config._jwks_cache = jwks
-                self.auth0_config._jwks_cache_expiry = datetime.utcnow() + self.auth0_config._jwks_cache_ttl
-                logger.debug("JWKS data fetched and cached")
+                # Find matching key in cache
+                for key_data in self._auth0_public_keys.get('keys', []):
+                    if key_data.get('kid') == kid:
+                        return jwt.algorithms.RSAAlgorithm.from_jwk(key_data)
+            
+            # Check circuit breaker state
+            if self._auth0_circuit_breaker_state == 'open':
+                if (current_time - self._auth0_last_failure_time) < 60:  # 60 second timeout
+                    raise Auth0Exception(
+                        message="Auth0 service circuit breaker is open",
+                        error_code=SecurityErrorCode.EXT_CIRCUIT_BREAKER_OPEN,
+                        circuit_breaker_state='open'
+                    )
+                else:
+                    # Attempt to close circuit breaker
+                    self._auth0_circuit_breaker_state = 'half-open'
+            
+            # Fetch JWKS from Auth0
+            jwks_url = f"https://{self.auth0_domain}/.well-known/jwks.json"
+            
+            # Configure requests session with retry strategy
+            session = requests.Session()
+            retry_strategy = Retry(
+                total=3,
+                backoff_factor=1,
+                status_forcelist=[429, 500, 502, 503, 504],
+                allowed_methods=["GET"]
+            )
+            adapter = HTTPAdapter(max_retries=retry_strategy)
+            session.mount("http://", adapter)
+            session.mount("https://", adapter)
+            
+            try:
+                response = session.get(jwks_url, timeout=10)
+                response.raise_for_status()
+                
+                self._auth0_public_keys = response.json()
+                self._public_keys_cache_expiry = current_time + 3600  # Cache for 1 hour
+                
+                # Reset circuit breaker on success
+                self._auth0_circuit_breaker_state = 'closed'
+                self._auth0_failure_count = 0
+                
+                auth_operation_metrics['auth0_operations_total'].labels(
+                    operation='jwks_fetch',
+                    result='success'
+                ).inc()
+                
+                self.logger.debug(
+                    "Auth0 JWKS retrieved successfully",
+                    keys_count=len(self._auth0_public_keys.get('keys', []))
+                )
+                
+            except requests.RequestException as e:
+                # Update circuit breaker state
+                self._auth0_failure_count += 1
+                self._auth0_last_failure_time = current_time
+                
+                if self._auth0_failure_count >= 5:
+                    self._auth0_circuit_breaker_state = 'open'
+                
+                auth_operation_metrics['auth0_operations_total'].labels(
+                    operation='jwks_fetch',
+                    result='failure'
+                ).inc()
+                
+                self.logger.error(
+                    "Failed to retrieve Auth0 JWKS",
+                    error=str(e),
+                    circuit_breaker_state=self._auth0_circuit_breaker_state,
+                    failure_count=self._auth0_failure_count
+                )
+                
+                raise Auth0Exception(
+                    message=f"Unable to retrieve Auth0 JWKS: {str(e)}",
+                    error_code=SecurityErrorCode.EXT_AUTH0_UNAVAILABLE,
+                    service_response={'error': str(e)},
+                    circuit_breaker_state=self._auth0_circuit_breaker_state
+                )
             
             # Find matching key
-            matching_key = None
-            for key in jwks.get('keys', []):
-                if key_id is None or key.get('kid') == key_id:
-                    matching_key = key
-                    break
+            for key_data in self._auth0_public_keys.get('keys', []):
+                if key_data.get('kid') == kid:
+                    return jwt.algorithms.RSAAlgorithm.from_jwk(key_data)
             
-            if not matching_key:
-                raise Auth0Exception(
-                    message=f"No matching key found for key ID: {key_id}",
-                    error_code=SecurityErrorCode.AUTH_TOKEN_INVALID
-                )
-            
-            # Convert JWK to PEM format
-            return self._jwk_to_pem(matching_key)
-            
-        except httpx.RequestError as e:
-            logger.error(
-                "Failed to fetch Auth0 JWKS",
-                error=str(e),
-                jwks_url=self.auth0_config.jwks_url
+            # Key not found
+            self.logger.warning(
+                "Public key not found for kid",
+                kid=kid,
+                available_kids=[k.get('kid') for k in self._auth0_public_keys.get('keys', [])]
             )
-            raise Auth0Exception(
-                message=f"Auth0 JWKS fetch failed: {str(e)}",
-                error_code=SecurityErrorCode.EXT_AUTH0_UNAVAILABLE,
-                service_response={'error': str(e)}
-            )
-        except Exception as e:
-            logger.error(
-                "Unexpected error getting signing key",
-                key_id=key_id,
-                error=str(e)
-            )
-            raise Auth0Exception(
-                message=f"Signing key retrieval failed: {str(e)}",
-                error_code=SecurityErrorCode.EXT_AUTH0_API_ERROR
-            )
-    
-    @Auth0CircuitBreaker()
-    async def _fetch_jwks(self) -> Dict[str, Any]:
-        """Fetch JWKS from Auth0 with circuit breaker protection"""
-        response = await self.http_client.get(self.auth0_config.jwks_url)
-        response.raise_for_status()
-        return response.json()
-    
-    def _jwk_to_pem(self, jwk: Dict[str, Any]) -> str:
-        """Convert JWK to PEM format for PyJWT validation
-        
-        Args:
-            jwk: JSON Web Key dictionary
+            return None
             
-        Returns:
-            PEM-formatted public key
-            
-        Raises:
-            Auth0Exception: When key conversion fails
-        """
-        try:
-            # Extract key parameters
-            if jwk.get('kty') != 'RSA':
-                raise ValueError(f"Unsupported key type: {jwk.get('kty')}")
-            
-            # Decode base64url components
-            n = self._base64url_decode(jwk['n'])
-            e = self._base64url_decode(jwk['e'])
-            
-            # Create RSA public key
-            public_numbers = rsa.RSAPublicNumbers(
-                e=int.from_bytes(e, byteorder='big'),
-                n=int.from_bytes(n, byteorder='big')
-            )
-            public_key = public_numbers.public_key()
-            
-            # Serialize to PEM format
-            pem_key = public_key.public_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PublicFormat.SubjectPublicKeyInfo
-            )
-            
-            return pem_key.decode('utf-8')
-            
-        except Exception as e:
-            logger.error(
-                "Failed to convert JWK to PEM",
-                jwk_kid=jwk.get('kid'),
-                error=str(e)
-            )
-            raise Auth0Exception(
-                message=f"JWK to PEM conversion failed: {str(e)}",
-                error_code=SecurityErrorCode.EXT_AUTH0_API_ERROR
-            )
-    
-    def _base64url_decode(self, data: str) -> bytes:
-        """Decode base64url-encoded data"""
-        # Add padding if needed
-        padding = 4 - len(data) % 4
-        if padding != 4:
-            data += '=' * padding
-        
-        return base64.urlsafe_b64decode(data)
-    
-    def _validate_custom_claims(self, payload: Dict[str, Any]) -> None:
-        """Validate custom claims for additional security requirements
-        
-        Args:
-            payload: Decoded JWT payload
-            
-        Raises:
-            JWTException: When custom validation fails
-        """
-        # Validate required claims
-        required_claims = ['sub', 'iat', 'exp']
-        for claim in required_claims:
-            if claim not in payload:
-                raise JWTException(
-                    message=f"Missing required claim: {claim}",
-                    error_code=SecurityErrorCode.AUTH_TOKEN_INVALID
-                )
-        
-        # Validate user ID format
-        user_id = payload.get('sub')
-        if user_id and not re.match(r'^[a-zA-Z0-9|@._-]+$', user_id):
-            raise JWTException(
-                message="Invalid user ID format in token",
-                error_code=SecurityErrorCode.AUTH_TOKEN_INVALID
-            )
-        
-        # Validate timestamp claims
-        current_time = time.time()
-        if payload.get('iat', 0) > current_time + 300:  # 5 minute leeway
-            raise JWTException(
-                message="Token issued in the future",
-                error_code=SecurityErrorCode.AUTH_TOKEN_INVALID
-            )
-        
-        # Additional custom validations can be added here
-        logger.debug(
-            "Custom JWT claims validation passed",
-            user_id=user_id,
-            issued_at=payload.get('iat'),
-            expires_at=payload.get('exp')
-        )
-    
-    async def refresh_token(self, refresh_token: str) -> Dict[str, Any]:
-        """Refresh JWT token using Auth0 refresh token
-        
-        Args:
-            refresh_token: Refresh token string
-            
-        Returns:
-            New token response with access_token and metadata
-            
-        Raises:
-            Auth0Exception: When token refresh fails
-        """
-        try:
-            token_data = {
-                'grant_type': 'refresh_token',
-                'client_id': self.auth0_config.client_id,
-                'client_secret': self.auth0_config.client_secret,
-                'refresh_token': refresh_token
-            }
-            
-            response = await self.http_client.post(
-                self.auth0_config.token_url,
-                data=token_data,
-                headers={'Content-Type': 'application/x-www-form-urlencoded'}
-            )
-            
-            response.raise_for_status()
-            token_response = response.json()
-            
-            logger.info(
-                "JWT token refreshed successfully",
-                token_type=token_response.get('token_type'),
-                expires_in=token_response.get('expires_in')
-            )
-            
-            return token_response
-            
-        except httpx.HTTPStatusError as e:
-            logger.error(
-                "Auth0 token refresh failed",
-                status_code=e.response.status_code,
-                response_text=e.response.text
-            )
-            raise Auth0Exception(
-                message=f"Token refresh failed: {e.response.status_code}",
-                error_code=SecurityErrorCode.EXT_AUTH0_API_ERROR,
-                service_response={
-                    'status_code': e.response.status_code,
-                    'error': e.response.text
-                }
-            )
-        except Exception as e:
-            logger.error(
-                "Unexpected error during token refresh",
-                error=str(e)
-            )
-            raise Auth0Exception(
-                message=f"Token refresh error: {str(e)}",
-                error_code=SecurityErrorCode.EXT_AUTH0_API_ERROR
-            )
-    
-    async def close(self) -> None:
-        """Close HTTP client connections"""
-        await self.http_client.aclose()
-        logger.debug("JWT token validator HTTP client closed")
-
-
-class Auth0UserManager:
-    """Auth0 user management with comprehensive caching and enterprise features"""
-    
-    def __init__(self, auth0_config: Auth0Config, cache: AuthenticationCache):
-        """Initialize Auth0 user manager with configuration and caching
-        
-        Args:
-            auth0_config: Auth0 configuration instance
-            cache: Authentication cache instance
-        """
-        self.auth0_config = auth0_config
-        self.cache = cache
-        self.input_validator = InputValidator()
-        
-        # Initialize Auth0 Management API client
-        self.management_client = Auth0Management(
-            domain=auth0_config.domain,
-            token=None,  # Will be set dynamically
-            rest_options={
-                'timeout': 30,
-                'retries': 3
-            }
-        )
-        
-        # HTTP client for direct API calls
-        self.http_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=10.0, read=30.0),
-            limits=httpx.Limits(max_connections=100, max_keepalive_connections=50)
-        )
-        
-        # Circuit breaker for Auth0 API protection
-        self.circuit_breaker = Auth0CircuitBreaker()
-        
-        logger.info("Auth0 user manager initialized")
-    
-    async def get_user_profile(
-        self,
-        user_id: str,
-        access_token: Optional[str] = None,
-        use_cache: bool = True
-    ) -> Dict[str, Any]:
-        """Get user profile from Auth0 with caching and fallback mechanisms
-        
-        Args:
-            user_id: Auth0 user identifier
-            access_token: Optional access token for API calls
-            use_cache: Whether to use cache for profile data
-            
-        Returns:
-            User profile data with metadata
-            
-        Raises:
-            Auth0Exception: When user profile retrieval fails
-        """
-        # Check cache first if enabled
-        if use_cache:
-            cached_profile = self.cache.get_auth0_user_profile(user_id)
-            if cached_profile:
-                logger.debug(
-                    "Auth0 user profile cache hit",
-                    user_id=user_id,
-                    cached_at=cached_profile.get('cached_at')
-                )
-                return cached_profile
-        
-        try:
-            # Fetch user profile from Auth0
-            profile_data = await self._fetch_user_profile(user_id, access_token)
-            
-            # Enhance with metadata
-            enhanced_profile = {
-                **profile_data,
-                'profile_metadata': {
-                    'fetched_at': datetime.utcnow().isoformat(),
-                    'user_id': user_id,
-                    'data_source': 'auth0_api',
-                    'cache_enabled': use_cache
-                }
-            }
-            
-            # Cache profile data if enabled
-            if use_cache:
-                self.cache.cache_auth0_user_profile(user_id, enhanced_profile, ttl=1800)
-            
-            logger.info(
-                "Auth0 user profile retrieved successfully",
-                user_id=user_id,
-                email=profile_data.get('email'),
-                email_verified=profile_data.get('email_verified')
-            )
-            
-            return enhanced_profile
-            
-        except Exception as e:
-            logger.error(
-                "Failed to get Auth0 user profile",
-                user_id=user_id,
-                error=str(e)
-            )
-            
-            # Try cache as fallback
-            if use_cache:
-                cached_profile = self.cache.get_auth0_user_profile(user_id)
-                if cached_profile:
-                    logger.warning(
-                        "Using cached Auth0 user profile as fallback",
-                        user_id=user_id
-                    )
-                    cached_profile['profile_metadata']['fallback_used'] = True
-                    return cached_profile
-            
-            raise Auth0Exception(
-                message=f"User profile retrieval failed: {str(e)}",
-                error_code=SecurityErrorCode.EXT_AUTH0_API_ERROR,
-                fallback_used=use_cache
-            )
-    
-    @Auth0CircuitBreaker()
-    async def _fetch_user_profile(self, user_id: str, access_token: Optional[str]) -> Dict[str, Any]:
-        """Fetch user profile from Auth0 API with circuit breaker protection"""
-        if access_token:
-            # Use userinfo endpoint with access token
-            response = await self.http_client.get(
-                self.auth0_config.userinfo_url,
-                headers={'Authorization': f'Bearer {access_token}'}
-            )
-        else:
-            # Use management API (requires management token)
-            management_token = await self._get_management_token()
-            response = await self.http_client.get(
-                f"https://{self.auth0_config.domain}/api/v2/users/{user_id}",
-                headers={'Authorization': f'Bearer {management_token}'}
-            )
-        
-        response.raise_for_status()
-        return response.json()
-    
-    async def _get_management_token(self) -> str:
-        """Get Auth0 Management API token with caching"""
-        # Check cache for management token
-        cached_token = self.cache.get('auth0_mgmt_token', 'current')
-        if cached_token:
-            return cached_token
-        
-        # Request new management token
-        token_data = {
-            'grant_type': 'client_credentials',
-            'client_id': self.auth0_config.client_id,
-            'client_secret': self.auth0_config.client_secret,
-            'audience': f"https://{self.auth0_config.domain}/api/v2/"
-        }
-        
-        response = await self.http_client.post(
-            self.auth0_config.token_url,
-            data=token_data,
-            headers={'Content-Type': 'application/x-www-form-urlencoded'}
-        )
-        
-        response.raise_for_status()
-        token_response = response.json()
-        
-        access_token = token_response['access_token']
-        expires_in = token_response.get('expires_in', 3600)
-        
-        # Cache management token
-        self.cache.set('auth0_mgmt_token', 'current', access_token, ttl=expires_in - 300)
-        
-        return access_token
-    
-    async def validate_user_permissions(
-        self,
-        user_id: str,
-        required_permissions: List[str],
-        use_cache: bool = True
-    ) -> Dict[str, Any]:
-        """Validate user permissions against Auth0 with caching and fallback
-        
-        Args:
-            user_id: Auth0 user identifier
-            required_permissions: List of required permissions
-            use_cache: Whether to use permission cache
-            
-        Returns:
-            Permission validation result with details
-            
-        Raises:
-            Auth0Exception: When permission validation fails
-        """
-        # Check cached permissions first
-        if use_cache:
-            cached_permissions = self.cache.get_user_permissions(user_id)
-            if cached_permissions:
-                has_permissions = all(perm in cached_permissions for perm in required_permissions)
-                
-                logger.debug(
-                    "User permissions cache hit",
-                    user_id=user_id,
-                    has_permissions=has_permissions,
-                    required_permissions=required_permissions
-                )
-                
-                return {
-                    'user_id': user_id,
-                    'has_permissions': has_permissions,
-                    'granted_permissions': list(cached_permissions),
-                    'required_permissions': required_permissions,
-                    'validation_source': 'cache',
-                    'timestamp': datetime.utcnow().isoformat()
-                }
-        
-        try:
-            # Fetch permissions from Auth0
-            user_permissions = await self._fetch_user_permissions(user_id)
-            
-            # Cache permissions
-            if use_cache:
-                self.cache.cache_user_permissions(user_id, user_permissions, ttl=300)
-            
-            # Validate permissions
-            has_permissions = all(perm in user_permissions for perm in required_permissions)
-            
-            validation_result = {
-                'user_id': user_id,
-                'has_permissions': has_permissions,
-                'granted_permissions': list(user_permissions),
-                'required_permissions': required_permissions,
-                'validation_source': 'auth0_api',
-                'timestamp': datetime.utcnow().isoformat()
-            }
-            
-            logger.info(
-                "User permissions validated",
-                user_id=user_id,
-                has_permissions=has_permissions,
-                permission_count=len(user_permissions)
-            )
-            
-            return validation_result
-            
-        except Exception as e:
-            logger.error(
-                "Failed to validate user permissions",
-                user_id=user_id,
-                required_permissions=required_permissions,
-                error=str(e)
-            )
-            
-            # Try cache as fallback
-            if use_cache:
-                cached_permissions = self.cache.get_user_permissions(user_id)
-                if cached_permissions:
-                    has_permissions = all(perm in cached_permissions for perm in required_permissions)
-                    
-                    logger.warning(
-                        "Using cached permissions as fallback",
-                        user_id=user_id,
-                        has_permissions=has_permissions
-                    )
-                    
-                    return {
-                        'user_id': user_id,
-                        'has_permissions': has_permissions,
-                        'granted_permissions': list(cached_permissions),
-                        'required_permissions': required_permissions,
-                        'validation_source': 'cache_fallback',
-                        'degraded_mode': True,
-                        'timestamp': datetime.utcnow().isoformat()
-                    }
-            
-            # Deny access when no cache available
-            logger.error(
-                "No cached permissions available during Auth0 outage",
-                user_id=user_id
-            )
-            
-            return {
-                'user_id': user_id,
-                'has_permissions': False,
-                'granted_permissions': [],
-                'required_permissions': required_permissions,
-                'validation_source': 'fallback_deny',
-                'degraded_mode': True,
-                'error': 'No cached permissions available',
-                'timestamp': datetime.utcnow().isoformat()
-            }
-    
-    @Auth0CircuitBreaker()
-    async def _fetch_user_permissions(self, user_id: str) -> Set[str]:
-        """Fetch user permissions from Auth0 Management API"""
-        management_token = await self._get_management_token()
-        
-        # Get user permissions
-        response = await self.http_client.get(
-            f"https://{self.auth0_config.domain}/api/v2/users/{user_id}/permissions",
-            headers={'Authorization': f'Bearer {management_token}'}
-        )
-        
-        response.raise_for_status()
-        permissions_data = response.json()
-        
-        # Extract permission names
-        permissions = set()
-        for perm in permissions_data:
-            permission_name = perm.get('permission_name')
-            if permission_name:
-                permissions.add(permission_name)
-        
-        return permissions
-    
-    async def close(self) -> None:
-        """Close HTTP client connections"""
-        await self.http_client.aclose()
-        logger.debug("Auth0 user manager HTTP client closed")
-
-
-class AuthenticationManager:
-    """
-    Comprehensive authentication manager implementing enterprise-grade JWT authentication
-    with Auth0 integration, caching, and security features equivalent to Node.js patterns.
-    
-    Features:
-    - PyJWT 2.8+ token validation replacing Node.js jsonwebtoken
-    - Auth0 Python SDK 4.7+ enterprise integration
-    - Cryptography 41.0+ for secure token operations
-    - Redis-based caching with AES-256-GCM encryption
-    - Circuit breaker patterns for Auth0 API resilience
-    - Comprehensive audit logging for compliance
-    - Rate limiting and abuse prevention
-    - Automatic token refresh and session management
-    """
-    
-    def __init__(self, cache: Optional[AuthenticationCache] = None):
-        """Initialize authentication manager with comprehensive security features
-        
-        Args:
-            cache: Optional authentication cache instance
-        """
-        # Initialize configuration and cache
-        self.auth0_config = Auth0Config()
-        self.cache = cache or get_auth_cache()
-        
-        # Initialize components
-        self.token_validator = JWTTokenValidator(self.auth0_config, self.cache)
-        self.user_manager = Auth0UserManager(self.auth0_config, self.cache)
-        
-        # Utility instances
-        self.datetime_utils = DateTimeUtils()
-        self.input_validator = InputValidator()
-        self.crypto_utils = CryptographicUtils()
-        
-        logger.info(
-            "Authentication manager initialized",
-            auth0_domain=self.auth0_config.domain,
-            cache_enabled=bool(cache)
-        )
-    
-    async def authenticate_user(
-        self,
-        token: str,
-        verify_signature: bool = True,
-        verify_expiration: bool = True,
-        cache_result: bool = True
-    ) -> Dict[str, Any]:
-        """Authenticate user with JWT token validation and user context creation
-        
-        Args:
-            token: JWT token string to validate
-            verify_signature: Whether to verify token signature
-            verify_expiration: Whether to verify token expiration
-            cache_result: Whether to cache validation result
-            
-        Returns:
-            Authentication result with user context and metadata
-            
-        Raises:
-            AuthenticationException: When authentication fails
-        """
-        try:
-            # Validate token structure and format
-            self._validate_token_format(token)
-            
-            # Validate JWT token
-            token_payload = await self.token_validator.validate_token(
-                token=token,
-                verify_signature=verify_signature,
-                verify_expiration=verify_expiration,
-                cache_result=cache_result
-            )
-            
-            user_id = token_payload.get('sub')
-            if not user_id:
-                raise AuthenticationException(
-                    message="No user ID found in token",
-                    error_code=SecurityErrorCode.AUTH_TOKEN_INVALID,
-                    token_claims=token_payload
-                )
-            
-            # Get user profile with caching
-            user_profile = await self.user_manager.get_user_profile(
-                user_id=user_id,
-                access_token=token,
-                use_cache=cache_result
-            )
-            
-            # Create authentication result
-            auth_result = {
-                'authenticated': True,
-                'user_id': user_id,
-                'token_payload': token_payload,
-                'user_profile': user_profile,
-                'authentication_metadata': {
-                    'authenticated_at': datetime.utcnow().isoformat(),
-                    'token_hash': hash_token(token),
-                    'authentication_method': 'jwt_token',
-                    'verification_level': 'full' if verify_signature and verify_expiration else 'partial',
-                    'cache_used': cache_result
-                }
-            }
-            
-            # Log successful authentication
-            logger.info(
-                "User authenticated successfully",
-                user_id=user_id,
-                email=user_profile.get('email'),
-                verification_level=auth_result['authentication_metadata']['verification_level'],
-                token_expires_at=token_payload.get('exp')
-            )
-            
-            return auth_result
-            
-        except (JWTException, Auth0Exception):
-            # Re-raise authentication-specific exceptions
+        except Auth0Exception:
             raise
         except Exception as e:
-            logger.error(
-                "Unexpected error during authentication",
+            self.logger.error(
+                "Unexpected error retrieving Auth0 public key",
+                error=str(e),
+                error_type=type(e).__name__,
+                kid=kid
+            )
+            
+            raise Auth0Exception(
+                message="Auth0 public key retrieval failed",
+                error_code=SecurityErrorCode.EXT_AUTH0_API_ERROR,
+                service_response={'error': str(e)}
+            )
+    
+    async def _perform_additional_token_validations(
+        self, 
+        token_claims: Dict[str, Any]
+    ) -> None:
+        """
+        Perform additional security validations on JWT token claims.
+        
+        Args:
+            token_claims: Decoded JWT token claims
+            
+        Raises:
+            JWTException: When additional validations fail
+        """
+        try:
+            # Validate token age (prevent extremely old tokens)
+            iat = token_claims.get('iat')
+            if iat:
+                token_age = time.time() - iat
+                max_age = 24 * 3600  # 24 hours
+                if token_age > max_age:
+                    raise JWTException(
+                        message="Token is too old",
+                        error_code=SecurityErrorCode.AUTH_TOKEN_INVALID,
+                        validation_context={'token_age_seconds': token_age}
+                    )
+            
+            # Validate subject (user ID) format
+            sub = token_claims.get('sub')
+            if not sub or not isinstance(sub, str) or len(sub) < 1:
+                raise JWTException(
+                    message="Invalid or missing subject in token",
+                    error_code=SecurityErrorCode.AUTH_TOKEN_MALFORMED,
+                    validation_context={'subject': sub}
+                )
+            
+            # Validate scope and permissions format
+            scope = token_claims.get('scope')
+            if scope and not isinstance(scope, str):
+                raise JWTException(
+                    message="Invalid scope format in token",
+                    error_code=SecurityErrorCode.AUTH_TOKEN_MALFORMED,
+                    validation_context={'scope_type': type(scope).__name__}
+                )
+            
+            # Validate permissions if present
+            permissions = token_claims.get('permissions')
+            if permissions and not isinstance(permissions, list):
+                raise JWTException(
+                    message="Invalid permissions format in token",
+                    error_code=SecurityErrorCode.AUTH_TOKEN_MALFORMED,
+                    validation_context={'permissions_type': type(permissions).__name__}
+                )
+            
+            # Validate custom claims structure
+            for claim_name, claim_value in token_claims.items():
+                if claim_name.startswith('https://') and not isinstance(claim_value, (str, list, dict)):
+                    self.logger.warning(
+                        "Unexpected custom claim type",
+                        claim_name=claim_name,
+                        claim_type=type(claim_value).__name__
+                    )
+            
+        except JWTException:
+            raise
+        except Exception as e:
+            self.logger.error(
+                "Unexpected error in additional token validations",
                 error=str(e),
                 error_type=type(e).__name__
             )
-            raise AuthenticationException(
-                message=f"Authentication error: {str(e)}",
-                error_code=SecurityErrorCode.AUTH_CREDENTIALS_INVALID
+            
+            raise JWTException(
+                message="Additional token validation failed",
+                error_code=SecurityErrorCode.AUTH_TOKEN_INVALID,
+                jwt_error=e
             )
     
-    async def validate_permissions(
+    async def _create_user_context(
         self,
-        user_id: str,
-        required_permissions: List[str],
-        resource_id: Optional[str] = None,
-        use_cache: bool = True
-    ) -> Dict[str, Any]:
-        """Validate user permissions for authorization decisions
+        token_claims: Dict[str, Any],
+        token: str
+    ) -> Optional['AuthenticatedUser']:
+        """
+        Create authenticated user context from validated JWT token claims.
         
         Args:
-            user_id: User identifier for permission check
-            required_permissions: List of required permissions
-            resource_id: Optional resource identifier for resource-specific permissions
-            use_cache: Whether to use permission cache
+            token_claims: Validated JWT token claims
+            token: Original JWT token string
             
         Returns:
-            Permission validation result with detailed information
+            AuthenticatedUser object or None if creation fails
             
         Raises:
-            AuthenticationException: When permission validation fails
+            AuthenticationException: When user context creation fails
         """
         try:
-            # Validate input parameters
-            if not user_id or not required_permissions:
-                raise ValidationException(
-                    message="User ID and required permissions must be provided",
-                    error_code=SecurityErrorCode.VAL_INPUT_INVALID
+            user_id = token_claims.get('sub')
+            if not user_id:
+                raise AuthenticationException(
+                    message="Missing user ID in token claims",
+                    error_code=SecurityErrorCode.AUTH_TOKEN_MALFORMED,
+                    token_claims=token_claims
                 )
             
-            # Validate permissions with Auth0
-            validation_result = await self.user_manager.validate_user_permissions(
+            # Extract permissions from token claims
+            permissions = []
+            
+            # Check for permissions in different claim formats
+            if 'permissions' in token_claims:
+                permissions.extend(token_claims['permissions'])
+            
+            if 'scope' in token_claims:
+                # Parse space-separated scopes
+                scopes = token_claims['scope'].split(' ')
+                permissions.extend(scopes)
+            
+            # Check for custom permission claims
+            for claim_name, claim_value in token_claims.items():
+                if claim_name.startswith('https://') and 'permissions' in claim_name.lower():
+                    if isinstance(claim_value, list):
+                        permissions.extend(claim_value)
+            
+            # Remove duplicates while preserving order
+            permissions = list(dict.fromkeys(permissions))
+            
+            # Get or fetch user profile data
+            user_profile = await self._get_user_profile(user_id, token_claims)
+            
+            # Create authenticated user object
+            authenticated_user = AuthenticatedUser(
                 user_id=user_id,
-                required_permissions=required_permissions,
-                use_cache=use_cache
+                token_claims=token_claims,
+                permissions=permissions,
+                profile=user_profile,
+                token=token,
+                authenticated_at=datetime.now(timezone.utc)
             )
             
-            # Add resource context if provided
-            if resource_id:
-                validation_result['resource_id'] = resource_id
-                validation_result['resource_specific'] = True
+            # Cache user session data
+            await self._cache_user_session(authenticated_user)
             
-            # Log authorization decision
-            logger.info(
-                "Permission validation completed",
+            # Update user context metrics
+            auth_operation_metrics['user_context_operations'].labels(
+                operation='create',
+                result='success'
+            ).inc()
+            
+            self.logger.debug(
+                "User context created successfully",
                 user_id=user_id,
-                has_permissions=validation_result['has_permissions'],
-                required_permissions=required_permissions,
-                resource_id=resource_id,
-                validation_source=validation_result.get('validation_source')
+                permissions_count=len(permissions),
+                has_profile=user_profile is not None
             )
             
-            return validation_result
+            return authenticated_user
             
-        except ValidationException:
-            # Re-raise validation exceptions
+        except AuthenticationException:
+            auth_operation_metrics['user_context_operations'].labels(
+                operation='create',
+                result='failure'
+            ).inc()
             raise
         except Exception as e:
-            logger.error(
-                "Permission validation failed",
-                user_id=user_id,
-                required_permissions=required_permissions,
-                error=str(e)
+            auth_operation_metrics['user_context_operations'].labels(
+                operation='create',
+                result='error'
+            ).inc()
+            
+            self.logger.error(
+                "Failed to create user context",
+                error=str(e),
+                error_type=type(e).__name__,
+                user_id=token_claims.get('sub')
             )
+            
             raise AuthenticationException(
-                message=f"Permission validation error: {str(e)}",
-                error_code=SecurityErrorCode.AUTHZ_PERMISSION_DENIED,
-                user_id=user_id
+                message="User context creation failed",
+                error_code=SecurityErrorCode.AUTH_TOKEN_INVALID,
+                user_id=token_claims.get('sub'),
+                metadata={'error_type': type(e).__name__}
             )
     
-    async def refresh_user_token(self, refresh_token: str) -> Dict[str, Any]:
-        """Refresh user JWT token using Auth0 refresh token
-        
-        Args:
-            refresh_token: Refresh token string
-            
-        Returns:
-            New token response with access_token and metadata
-            
-        Raises:
-            AuthenticationException: When token refresh fails
-        """
-        try:
-            # Validate refresh token format
-            if not refresh_token or len(refresh_token) < 10:
-                raise ValidationException(
-                    message="Invalid refresh token format",
-                    error_code=SecurityErrorCode.AUTH_TOKEN_INVALID
-                )
-            
-            # Refresh token with Auth0
-            token_response = await self.token_validator.refresh_token(refresh_token)
-            
-            # Enhance with metadata
-            refresh_result = {
-                **token_response,
-                'refresh_metadata': {
-                    'refreshed_at': datetime.utcnow().isoformat(),
-                    'refresh_method': 'auth0_refresh_token',
-                    'token_type': token_response.get('token_type', 'Bearer'),
-                    'expires_in': token_response.get('expires_in')
-                }
-            }
-            
-            logger.info(
-                "Token refreshed successfully",
-                token_type=token_response.get('token_type'),
-                expires_in=token_response.get('expires_in')
-            )
-            
-            return refresh_result
-            
-        except ValidationException:
-            # Re-raise validation exceptions
-            raise
-        except Auth0Exception:
-            # Re-raise Auth0 exceptions
-            raise
-        except Exception as e:
-            logger.error(
-                "Token refresh failed",
-                error=str(e)
-            )
-            raise AuthenticationException(
-                message=f"Token refresh error: {str(e)}",
-                error_code=SecurityErrorCode.AUTH_TOKEN_INVALID
-            )
-    
-    async def create_user_session(
+    async def _get_user_profile(
         self,
         user_id: str,
-        token_payload: Dict[str, Any],
-        session_data: Optional[Dict[str, Any]] = None,
-        ttl: int = 3600
-    ) -> Dict[str, Any]:
-        """Create user session with encrypted caching
+        token_claims: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve user profile data with caching and Auth0 integration.
         
         Args:
             user_id: User identifier
-            token_payload: JWT token payload
-            session_data: Optional additional session data
-            ttl: Session TTL in seconds
+            token_claims: JWT token claims containing basic profile data
             
         Returns:
-            Session creation result with session ID and metadata
-            
-        Raises:
-            SessionException: When session creation fails
+            User profile dictionary or None if unavailable
         """
         try:
-            # Generate secure session ID
-            session_id = generate_session_id()
+            # Check cache first
+            cached_profile = self.cache_manager.get_cached_session_data(f"profile:{user_id}")
+            if cached_profile:
+                return cached_profile
             
-            # Prepare session data
-            session_info = {
-                'session_id': session_id,
+            # Extract basic profile from token claims
+            profile = {
                 'user_id': user_id,
-                'token_payload': token_payload,
-                'additional_data': session_data or {},
-                'session_metadata': {
-                    'created_at': datetime.utcnow().isoformat(),
-                    'expires_at': (datetime.utcnow() + timedelta(seconds=ttl)).isoformat(),
-                    'user_agent': None,  # To be set by Flask request context
-                    'ip_address': None,  # To be set by Flask request context
-                    'session_type': 'jwt_authenticated'
-                }
+                'sub': token_claims.get('sub'),
+                'email': token_claims.get('email'),
+                'name': token_claims.get('name'),
+                'picture': token_claims.get('picture'),
+                'updated_at': token_claims.get('updated_at'),
+                'email_verified': token_claims.get('email_verified', False)
             }
             
-            # Cache session with encryption
-            success = self.cache.cache_user_session(session_id, session_info, ttl)
+            # Add custom claims to profile
+            for claim_name, claim_value in token_claims.items():
+                if claim_name.startswith('https://'):
+                    profile[claim_name] = claim_value
             
-            if not success:
-                raise SessionException(
-                    message="Failed to create user session",
-                    error_code=SecurityErrorCode.AUTH_SESSION_INVALID,
-                    session_id=session_id,
-                    user_id=user_id
+            # Try to get additional profile data from Auth0 if management client is available
+            try:
+                if self._should_fetch_extended_profile(user_id):
+                    extended_profile = await self._fetch_auth0_user_profile(user_id)
+                    if extended_profile:
+                        profile.update(extended_profile)
+            except Exception as e:
+                # Don't fail authentication if extended profile fetch fails
+                self.logger.warning(
+                    "Failed to fetch extended user profile",
+                    user_id=user_id,
+                    error=str(e)
                 )
             
-            # Prepare result
-            session_result = {
-                'session_id': session_id,
-                'user_id': user_id,
-                'created_at': session_info['session_metadata']['created_at'],
-                'expires_at': session_info['session_metadata']['expires_at'],
-                'ttl': ttl,
-                'session_created': True
-            }
-            
-            logger.info(
-                "User session created successfully",
-                session_id=session_id,
-                user_id=user_id,
-                ttl=ttl
+            # Cache profile data
+            self.cache_manager.cache_session_data(
+                f"profile:{user_id}",
+                profile,
+                ttl=600  # Cache profile for 10 minutes
             )
             
-            return session_result
+            return profile
             
-        except SessionException:
-            # Re-raise session exceptions
-            raise
         except Exception as e:
-            logger.error(
-                "Session creation failed",
+            self.logger.warning(
+                "Failed to get user profile",
+                user_id=user_id,
+                error=str(e),
+                error_type=type(e).__name__
+            )
+            
+            # Return minimal profile from token claims
+            return {
+                'user_id': user_id,
+                'sub': token_claims.get('sub'),
+                'email': token_claims.get('email'),
+                'name': token_claims.get('name')
+            }
+    
+    def _should_fetch_extended_profile(self, user_id: str) -> bool:
+        """
+        Determine if extended profile should be fetched from Auth0.
+        
+        Args:
+            user_id: User identifier
+            
+        Returns:
+            Boolean indicating if extended profile fetch should be attempted
+        """
+        # Skip extended profile fetch if circuit breaker is open
+        if self._auth0_circuit_breaker_state == 'open':
+            return False
+        
+        # Check if we've recently attempted to fetch this user's profile
+        cache_key = f"profile_fetch_attempt:{user_id}"
+        recent_attempt = self.cache_manager.redis_client.get(cache_key)
+        
+        if recent_attempt:
+            return False
+        
+        # Record attempt to prevent frequent API calls
+        self.cache_manager.redis_client.setex(cache_key, 300, "1")  # 5 minute cooldown
+        
+        return True
+    
+    async def _fetch_auth0_user_profile(self, user_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Fetch extended user profile from Auth0 Management API.
+        
+        Args:
+            user_id: Auth0 user identifier
+            
+        Returns:
+            Extended user profile data or None if unavailable
+        """
+        try:
+            # Initialize Auth0 management client if needed
+            if not self._auth0_management_client:
+                await self._initialize_auth0_management_client()
+            
+            if not self._auth0_management_client:
+                return None
+            
+            # Fetch user profile from Auth0
+            user_profile = self._auth0_management_client.users.get(user_id)
+            
+            auth_operation_metrics['auth0_operations_total'].labels(
+                operation='get_user_profile',
+                result='success'
+            ).inc()
+            
+            # Extract relevant profile fields
+            extended_profile = {
+                'last_login': user_profile.get('last_login'),
+                'login_count': user_profile.get('logins_count', 0),
+                'created_at': user_profile.get('created_at'),
+                'app_metadata': user_profile.get('app_metadata', {}),
+                'user_metadata': user_profile.get('user_metadata', {})
+            }
+            
+            return extended_profile
+            
+        except Auth0Error as e:
+            auth_operation_metrics['auth0_operations_total'].labels(
+                operation='get_user_profile',
+                result='failure'
+            ).inc()
+            
+            self.logger.warning(
+                "Auth0 user profile fetch failed",
                 user_id=user_id,
                 error=str(e)
             )
-            raise SessionException(
-                message=f"Session creation error: {str(e)}",
-                error_code=SecurityErrorCode.AUTH_SESSION_INVALID,
-                user_id=user_id
+            return None
+        except Exception as e:
+            self.logger.error(
+                "Unexpected error fetching Auth0 user profile",
+                user_id=user_id,
+                error=str(e),
+                error_type=type(e).__name__
             )
+            return None
     
-    async def get_user_session(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Retrieve user session with decryption
+    async def _initialize_auth0_management_client(self) -> None:
+        """Initialize Auth0 management client for user operations."""
+        try:
+            if not all([self.auth0_domain, self.auth0_client_id, self.auth0_client_secret]):
+                self.logger.warning("Auth0 credentials incomplete, skipping management client initialization")
+                return
+            
+            # Get management API token
+            get_token = GetToken(self.auth0_domain, self.auth0_client_id, self.auth0_client_secret)
+            token_response = get_token.client_credentials(f"https://{self.auth0_domain}/api/v2/")
+            
+            # Initialize management client
+            self._auth0_management_client = Auth0(
+                self.auth0_domain,
+                token_response['access_token']
+            )
+            
+            self.logger.info("Auth0 management client initialized successfully")
+            
+        except Exception as e:
+            self.logger.error(
+                "Failed to initialize Auth0 management client",
+                error=str(e),
+                error_type=type(e).__name__
+            )
+            self._auth0_management_client = None
+    
+    async def _cache_user_session(self, user: 'AuthenticatedUser') -> None:
+        """
+        Cache user session data for performance optimization.
         
         Args:
-            session_id: Session identifier
-            
-        Returns:
-            Session data or None if not found/expired
-            
-        Raises:
-            SessionException: When session retrieval fails
+            user: Authenticated user object to cache
         """
         try:
-            # Get session from cache
-            session_data = self.cache.get_user_session(session_id)
+            session_data = {
+                'user_id': user.user_id,
+                'permissions': user.permissions,
+                'profile': user.profile,
+                'authenticated_at': user.authenticated_at.isoformat(),
+                'token_type': user.token_claims.get('type', 'access_token')
+            }
             
-            if session_data:
-                # Validate session expiration
-                expires_at_str = session_data.get('session_metadata', {}).get('expires_at')
-                if expires_at_str:
-                    expires_at = parse_iso8601_date(expires_at_str)
-                    if expires_at and datetime.utcnow() > expires_at:
-                        # Session expired, remove from cache
-                        self.cache.invalidate_user_session(session_id)
-                        logger.warning(
-                            "Retrieved expired session, removed from cache",
-                            session_id=session_id,
-                            expires_at=expires_at_str
-                        )
-                        return None
-                
-                logger.debug(
-                    "User session retrieved successfully",
-                    session_id=session_id,
-                    user_id=session_data.get('user_id')
+            # Cache user permissions
+            if user.permissions:
+                self.cache_manager.cache_user_permissions(
+                    user.user_id,
+                    set(user.permissions),
+                    ttl=self.cache_ttl_seconds
                 )
-                
-                return session_data
+            
+            # Cache session data
+            session_id = secrets.token_urlsafe(32)
+            self.cache_manager.cache_session_data(
+                session_id,
+                session_data,
+                ttl=3600  # 1 hour session cache
+            )
+            
+            self.logger.debug(
+                "User session cached successfully",
+                user_id=user.user_id,
+                session_id=session_id,
+                cache_ttl=self.cache_ttl_seconds
+            )
+            
+        except Exception as e:
+            # Don't fail authentication if caching fails
+            self.logger.warning(
+                "Failed to cache user session",
+                user_id=user.user_id,
+                error=str(e),
+                error_type=type(e).__name__
+            )
+    
+    async def _verify_user_permissions(
+        self,
+        user: 'AuthenticatedUser',
+        required_permissions: List[str]
+    ) -> bool:
+        """
+        Verify user has required permissions for the operation.
+        
+        Args:
+            user: Authenticated user object
+            required_permissions: List of required permissions
+            
+        Returns:
+            Boolean indicating if user has all required permissions
+        """
+        try:
+            if not required_permissions:
+                return True
+            
+            if not user.permissions:
+                return False
+            
+            user_permissions = set(user.permissions)
+            required_permissions_set = set(required_permissions)
+            
+            # Check if user has all required permissions
+            has_permissions = required_permissions_set.issubset(user_permissions)
+            
+            if not has_permissions:
+                missing_permissions = required_permissions_set - user_permissions
+                self.logger.debug(
+                    "Permission verification failed",
+                    user_id=user.user_id,
+                    required_permissions=required_permissions,
+                    missing_permissions=list(missing_permissions)
+                )
+            
+            return has_permissions
+            
+        except Exception as e:
+            self.logger.error(
+                "Error verifying user permissions",
+                user_id=user.user_id,
+                error=str(e),
+                error_type=type(e).__name__
+            )
+            return False
+    
+    def _extract_token_from_request(self) -> Optional[str]:
+        """
+        Extract JWT token from Flask request headers.
+        
+        Returns:
+            JWT token string or None if not found
+        """
+        try:
+            # Check Authorization header
+            auth_header = request.headers.get('Authorization', '')
+            if auth_header.startswith('Bearer '):
+                return auth_header[7:]  # Remove 'Bearer ' prefix
+            
+            # Check for token in cookies (if configured)
+            token_cookie = request.cookies.get('access_token')
+            if token_cookie:
+                return token_cookie
+            
+            # Check for token in query parameters (less secure, for specific use cases)
+            token_param = request.args.get('access_token')
+            if token_param:
+                self.logger.warning(
+                    "Token extracted from query parameter",
+                    endpoint=request.endpoint,
+                    remote_addr=request.remote_addr
+                )
+                return token_param
             
             return None
             
         except Exception as e:
-            logger.error(
-                "Session retrieval failed",
-                session_id=session_id,
-                error=str(e)
+            self.logger.error(
+                "Error extracting token from request",
+                error=str(e),
+                error_type=type(e).__name__
             )
-            raise SessionException(
-                message=f"Session retrieval error: {str(e)}",
-                error_code=SecurityErrorCode.AUTH_SESSION_INVALID,
-                session_id=session_id
-            )
+            return None
     
-    async def invalidate_user_session(self, session_id: str) -> bool:
-        """Invalidate user session and clear cache
+    async def refresh_token(
+        self,
+        refresh_token: str,
+        current_access_token: Optional[str] = None
+    ) -> Tuple[str, str]:
+        """
+        Refresh JWT access token using refresh token.
         
         Args:
-            session_id: Session identifier to invalidate
+            refresh_token: Valid refresh token
+            current_access_token: Current access token (for validation)
             
         Returns:
-            Success status
+            Tuple of (new_access_token, new_refresh_token)
+            
+        Raises:
+            JWTException: When refresh token is invalid
+            Auth0Exception: When Auth0 service is unavailable
         """
         try:
-            # Get session data for logging before invalidation
-            session_data = self.cache.get_user_session(session_id)
-            user_id = session_data.get('user_id') if session_data else None
-            
-            # Invalidate session
-            success = self.cache.invalidate_user_session(session_id)
-            
-            logger.info(
-                "User session invalidated",
-                session_id=session_id,
-                user_id=user_id,
-                success=success
+            # Validate refresh token (allow expired access tokens)
+            refresh_claims = await self._validate_jwt_token(
+                refresh_token,
+                allow_expired=False
             )
             
-            return success
+            if refresh_claims.get('type') != 'refresh_token':
+                raise JWTException(
+                    message="Invalid token type for refresh operation",
+                    error_code=SecurityErrorCode.AUTH_TOKEN_INVALID,
+                    validation_context={'token_type': refresh_claims.get('type')}
+                )
+            
+            user_id = refresh_claims.get('sub')
+            
+            # Use JWT manager to refresh tokens
+            new_access_token, new_refresh_token = self.jwt_manager.refresh_access_token(refresh_token)
+            
+            # Invalidate cached validation results for old tokens
+            if current_access_token:
+                old_token_hash = create_token_hash(current_access_token)
+                # Note: Cache invalidation would be implemented here
+            
+            # Log successful token refresh
+            self.logger.info(
+                "Token refreshed successfully",
+                user_id=user_id,
+                operation='token_refresh'
+            )
+            
+            log_security_event(
+                'token_refresh_success',
+                user_id=user_id,
+                metadata={'refresh_method': 'jwt_refresh_token'}
+            )
+            
+            return new_access_token, new_refresh_token
+            
+        except (JWTException, Auth0Exception):
+            raise
+        except Exception as e:
+            self.logger.error(
+                "Token refresh failed",
+                error=str(e),
+                error_type=type(e).__name__
+            )
+            
+            raise JWTException(
+                message="Token refresh failed",
+                error_code=SecurityErrorCode.AUTH_TOKEN_INVALID,
+                jwt_error=e
+            )
+    
+    async def revoke_token(
+        self,
+        token: str,
+        reason: str = "user_logout"
+    ) -> bool:
+        """
+        Revoke JWT token and invalidate associated sessions.
+        
+        Args:
+            token: JWT token to revoke
+            reason: Reason for revocation (for audit logging)
+            
+        Returns:
+            Boolean indicating successful revocation
+        """
+        try:
+            # Validate token to get claims
+            token_claims = await self._validate_jwt_token(token, allow_expired=True)
+            if not token_claims:
+                return False
+            
+            user_id = token_claims.get('sub')
+            
+            # Revoke token using JWT manager
+            revocation_success = self.jwt_manager.revoke_token(token, reason)
+            
+            if revocation_success:
+                # Invalidate user caches
+                self.cache_manager.bulk_invalidate_user_cache(user_id)
+                
+                # Log token revocation
+                self.logger.info(
+                    "Token revoked successfully",
+                    user_id=user_id,
+                    reason=reason,
+                    token_type=token_claims.get('type', 'access_token')
+                )
+                
+                log_security_event(
+                    'token_revocation',
+                    user_id=user_id,
+                    metadata={'reason': reason, 'revocation_method': 'manual'}
+                )
+            
+            return revocation_success
             
         except Exception as e:
-            logger.error(
-                "Session invalidation failed",
-                session_id=session_id,
-                error=str(e)
+            self.logger.error(
+                "Token revocation failed",
+                error=str(e),
+                error_type=type(e).__name__,
+                reason=reason
             )
             return False
     
-    def _validate_token_format(self, token: str) -> None:
-        """Validate JWT token format and structure
-        
-        Args:
-            token: JWT token string
-            
-        Raises:
-            AuthenticationException: When token format is invalid
+    def get_health_status(self) -> Dict[str, Any]:
         """
-        if not token:
-            raise AuthenticationException(
-                message="Token is required",
-                error_code=SecurityErrorCode.AUTH_TOKEN_MISSING
-            )
-        
-        # Basic JWT format validation (3 parts separated by dots)
-        parts = token.split('.')
-        if len(parts) != 3:
-            raise AuthenticationException(
-                message="Invalid JWT token format",
-                error_code=SecurityErrorCode.AUTH_TOKEN_MALFORMED
-            )
-        
-        # Validate each part is base64url encoded
-        for i, part in enumerate(parts):
-            try:
-                # Add padding if needed
-                padding = 4 - len(part) % 4
-                if padding != 4:
-                    part += '=' * padding
-                base64.urlsafe_b64decode(part)
-            except Exception:
-                raise AuthenticationException(
-                    message=f"Invalid JWT token encoding in part {i + 1}",
-                    error_code=SecurityErrorCode.AUTH_TOKEN_MALFORMED
-                )
-    
-    async def get_health_status(self) -> Dict[str, Any]:
-        """Get authentication system health status
+        Get comprehensive health status of authentication system.
         
         Returns:
-            Health status with component details
+            Health status dictionary with component statuses
         """
         try:
             health_status = {
                 'status': 'healthy',
-                'timestamp': datetime.utcnow().isoformat(),
+                'timestamp': datetime.now(timezone.utc).isoformat(),
                 'components': {}
             }
             
-            # Check cache health
-            try:
-                cache_health = self.cache.health_check()
-                health_status['components']['cache'] = cache_health
-            except Exception as e:
-                health_status['components']['cache'] = {
-                    'status': 'unhealthy',
-                    'error': str(e)
-                }
-                health_status['status'] = 'degraded'
-            
-            # Check Auth0 connectivity
-            try:
-                # Simple JWKS fetch test
-                jwks_response = await self.token_validator.http_client.get(
-                    self.auth0_config.jwks_url,
-                    timeout=10.0
-                )
-                if jwks_response.status_code == 200:
-                    health_status['components']['auth0'] = {
-                        'status': 'healthy',
-                        'response_time': jwks_response.elapsed.total_seconds(),
-                        'jwks_url': self.auth0_config.jwks_url
-                    }
-                else:
-                    health_status['components']['auth0'] = {
-                        'status': 'unhealthy',
-                        'status_code': jwks_response.status_code
-                    }
-                    health_status['status'] = 'degraded'
-            except Exception as e:
-                health_status['components']['auth0'] = {
-                    'status': 'unhealthy',
-                    'error': str(e)
-                }
-                health_status['status'] = 'degraded'
-            
-            # Check circuit breaker states
-            health_status['components']['circuit_breakers'] = {
-                'token_validator': self.token_validator.circuit_breaker.get_state(),
-                'user_manager': self.user_manager.circuit_breaker.get_state()
+            # Check JWT manager health
+            health_status['components']['jwt_manager'] = {
+                'status': 'healthy' if self.jwt_manager else 'unhealthy',
+                'details': 'JWT token processing available'
             }
             
-            logger.info(
-                "Authentication health check completed",
-                status=health_status['status'],
-                cache_status=health_status['components'].get('cache', {}).get('status'),
-                auth0_status=health_status['components'].get('auth0', {}).get('status')
-            )
+            # Check cache manager health
+            cache_health = self.cache_manager.perform_health_check()
+            health_status['components']['cache_manager'] = cache_health
+            
+            # Check Auth0 connectivity
+            auth0_status = 'healthy'
+            if self._auth0_circuit_breaker_state == 'open':
+                auth0_status = 'degraded'
+            elif self._auth0_failure_count > 0:
+                auth0_status = 'warning'
+            
+            health_status['components']['auth0_service'] = {
+                'status': auth0_status,
+                'circuit_breaker_state': self._auth0_circuit_breaker_state,
+                'failure_count': self._auth0_failure_count
+            }
+            
+            # Determine overall status
+            component_statuses = [comp['status'] for comp in health_status['components'].values()]
+            if 'unhealthy' in component_statuses:
+                health_status['status'] = 'unhealthy'
+            elif 'degraded' in component_statuses:
+                health_status['status'] = 'degraded'
             
             return health_status
             
         except Exception as e:
-            logger.error(
-                "Health check failed",
-                error=str(e)
-            )
             return {
                 'status': 'unhealthy',
-                'timestamp': datetime.utcnow().isoformat(),
-                'error': str(e)
+                'error': str(e),
+                'timestamp': datetime.now(timezone.utc).isoformat()
             }
+
+
+class AuthenticatedUser:
+    """
+    Authenticated user context containing user information, permissions, and session data.
     
-    async def close(self) -> None:
-        """Close authentication manager and cleanup resources"""
-        try:
-            await self.token_validator.close()
-            await self.user_manager.close()
-            logger.info("Authentication manager closed successfully")
-        except Exception as e:
-            logger.error("Error closing authentication manager", error=str(e))
+    This class represents a successfully authenticated user with all relevant context
+    information including JWT token claims, user profile data, permissions, and
+    authentication metadata required for authorization decisions.
+    
+    Attributes:
+        user_id: Unique user identifier from Auth0
+        token_claims: Complete JWT token claims
+        permissions: List of user permissions for authorization
+        profile: User profile information
+        token: Original JWT token string
+        authenticated_at: Timestamp of authentication
+    """
+    
+    def __init__(
+        self,
+        user_id: str,
+        token_claims: Dict[str, Any],
+        permissions: List[str],
+        profile: Optional[Dict[str, Any]] = None,
+        token: Optional[str] = None,
+        authenticated_at: Optional[datetime] = None
+    ):
+        """
+        Initialize authenticated user context.
+        
+        Args:
+            user_id: Unique user identifier
+            token_claims: JWT token claims
+            permissions: User permissions list
+            profile: User profile data
+            token: Original JWT token
+            authenticated_at: Authentication timestamp
+        """
+        self.user_id = user_id
+        self.token_claims = token_claims
+        self.permissions = permissions or []
+        self.profile = profile or {}
+        self.token = token
+        self.authenticated_at = authenticated_at or datetime.now(timezone.utc)
+    
+    def has_permission(self, permission: str) -> bool:
+        """
+        Check if user has specific permission.
+        
+        Args:
+            permission: Permission to check
+            
+        Returns:
+            Boolean indicating if user has the permission
+        """
+        return permission in self.permissions
+    
+    def has_any_permission(self, permissions: List[str]) -> bool:
+        """
+        Check if user has any of the specified permissions.
+        
+        Args:
+            permissions: List of permissions to check
+            
+        Returns:
+            Boolean indicating if user has any of the permissions
+        """
+        return any(perm in self.permissions for perm in permissions)
+    
+    def has_all_permissions(self, permissions: List[str]) -> bool:
+        """
+        Check if user has all of the specified permissions.
+        
+        Args:
+            permissions: List of permissions to check
+            
+        Returns:
+            Boolean indicating if user has all permissions
+        """
+        return all(perm in self.permissions for perm in permissions)
+    
+    def get_profile_value(self, key: str, default: Any = None) -> Any:
+        """
+        Get value from user profile with default fallback.
+        
+        Args:
+            key: Profile key to retrieve
+            default: Default value if key not found
+            
+        Returns:
+            Profile value or default
+        """
+        return self.profile.get(key, default)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Convert authenticated user to dictionary representation.
+        
+        Returns:
+            Dictionary representation of authenticated user
+        """
+        return {
+            'user_id': self.user_id,
+            'permissions': self.permissions,
+            'profile': self.profile,
+            'authenticated_at': self.authenticated_at.isoformat(),
+            'token_claims': {
+                'sub': self.token_claims.get('sub'),
+                'iss': self.token_claims.get('iss'),
+                'aud': self.token_claims.get('aud'),
+                'exp': self.token_claims.get('exp'),
+                'iat': self.token_claims.get('iat')
+            }
+        }
 
 
-# Global authentication manager instance
-_auth_manager: Optional[AuthenticationManager] = None
+# Global authenticator instance
+_core_authenticator: Optional[CoreJWTAuthenticator] = None
 
 
-def get_auth_manager() -> AuthenticationManager:
-    """Get or create global authentication manager instance
+def get_core_authenticator() -> CoreJWTAuthenticator:
+    """
+    Get global core JWT authenticator instance.
     
     Returns:
-        Authentication manager instance
-        
-    Raises:
-        AuthenticationException: When manager initialization fails
+        CoreJWTAuthenticator: Global authenticator instance
     """
-    global _auth_manager
+    global _core_authenticator
     
-    if _auth_manager is None:
-        try:
-            _auth_manager = AuthenticationManager()
-            logger.info("Global authentication manager initialized")
-        except Exception as e:
-            logger.error("Failed to initialize authentication manager", error=str(e))
-            raise AuthenticationException(
-                message=f"Authentication manager initialization failed: {str(e)}",
-                error_code=SecurityErrorCode.AUTH_CREDENTIALS_INVALID
-            )
+    if _core_authenticator is None:
+        _core_authenticator = CoreJWTAuthenticator()
     
-    return _auth_manager
+    return _core_authenticator
 
 
-async def init_auth_manager(cache: Optional[AuthenticationCache] = None) -> AuthenticationManager:
-    """Initialize authentication manager with custom configuration
+def require_authentication(
+    required_permissions: Optional[List[str]] = None,
+    allow_expired: bool = False
+):
+    """
+    Decorator for routes requiring JWT authentication with permission validation.
+    
+    This decorator provides comprehensive authentication and authorization for Flask
+    routes, equivalent to Node.js authentication middleware patterns with enhanced
+    security features including permission validation and audit logging.
     
     Args:
-        cache: Optional authentication cache instance
+        required_permissions: List of required permissions for authorization
+        allow_expired: Whether to allow expired tokens (for refresh operations)
         
     Returns:
-        Initialized authentication manager instance
+        Decorated function with authentication enforcement
+        
+    Example:
+        @app.route('/api/protected')
+        @require_authentication(['read:documents'])
+        def protected_endpoint():
+            user = g.authenticated_user
+            return jsonify({'user_id': user.user_id})
     """
-    global _auth_manager
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            try:
+                authenticator = get_core_authenticator()
+                
+                # Authenticate request
+                authenticated_user = await authenticator.authenticate_request(
+                    required_permissions=required_permissions,
+                    allow_expired=allow_expired
+                )
+                
+                if not authenticated_user:
+                    return jsonify({
+                        'error': 'Authentication required',
+                        'error_code': SecurityErrorCode.AUTH_TOKEN_MISSING.value
+                    }), 401
+                
+                # Store authenticated user in Flask g context
+                g.authenticated_user = authenticated_user
+                g.current_user_id = authenticated_user.user_id
+                g.current_user_permissions = authenticated_user.permissions
+                
+                # Execute the protected function
+                return await func(*args, **kwargs) if asyncio.iscoroutinefunction(func) else func(*args, **kwargs)
+                
+            except (AuthenticationException, JWTException, Auth0Exception) as e:
+                error_response = create_safe_error_response(e)
+                return jsonify(error_response), e.http_status
+            except Exception as e:
+                logger.error(
+                    "Unexpected authentication decorator error",
+                    error=str(e),
+                    error_type=type(e).__name__,
+                    endpoint=request.endpoint
+                )
+                
+                return jsonify({
+                    'error': 'Authentication system error',
+                    'error_code': SecurityErrorCode.AUTH_TOKEN_INVALID.value
+                }), 500
+        
+        return wrapper
+    return decorator
+
+
+def get_authenticated_user() -> Optional[AuthenticatedUser]:
+    """
+    Get current authenticated user from Flask request context.
     
+    Returns:
+        AuthenticatedUser object if available, None otherwise
+        
+    Example:
+        user = get_authenticated_user()
+        if user:
+            print(f"Current user: {user.user_id}")
+    """
+    return getattr(g, 'authenticated_user', None)
+
+
+async def authenticate_token(token: str) -> Optional[AuthenticatedUser]:
+    """
+    Standalone token authentication function for external use.
+    
+    Args:
+        token: JWT token string to authenticate
+        
+    Returns:
+        AuthenticatedUser object if authentication succeeds, None otherwise
+        
+    Example:
+        user = await authenticate_token(jwt_token)
+        if user:
+            print(f"Token is valid for user: {user.user_id}")
+    """
     try:
-        _auth_manager = AuthenticationManager(cache)
-        logger.info("Authentication manager initialized with custom configuration")
-        return _auth_manager
+        authenticator = get_core_authenticator()
+        return await authenticator.authenticate_request(token=token)
     except Exception as e:
-        logger.error("Failed to initialize authentication manager", error=str(e))
-        raise AuthenticationException(
-            message=f"Authentication manager initialization failed: {str(e)}",
-            error_code=SecurityErrorCode.AUTH_CREDENTIALS_INVALID
+        logger.warning(
+            "Standalone token authentication failed",
+            error=str(e),
+            error_type=type(e).__name__
         )
+        return None
 
 
-async def close_auth_manager() -> None:
-    """Close global authentication manager instance"""
-    global _auth_manager
-    
-    if _auth_manager is not None:
-        await _auth_manager.close()
-        _auth_manager = None
-        logger.info("Global authentication manager closed")
-
-
-# Convenience functions for common authentication operations
-
-async def authenticate_jwt_token(
-    token: str,
-    verify_signature: bool = True,
-    verify_expiration: bool = True,
-    cache_result: bool = True
-) -> Dict[str, Any]:
-    """Authenticate user with JWT token validation
-    
-    Args:
-        token: JWT token string
-        verify_signature: Whether to verify token signature
-        verify_expiration: Whether to verify token expiration  
-        cache_result: Whether to cache validation result
-        
-    Returns:
-        Authentication result with user context
+def create_auth_health_check() -> Dict[str, Any]:
     """
-    auth_manager = get_auth_manager()
-    return await auth_manager.authenticate_user(
-        token=token,
-        verify_signature=verify_signature,
-        verify_expiration=verify_expiration,
-        cache_result=cache_result
-    )
-
-
-async def validate_user_permissions(
-    user_id: str,
-    required_permissions: List[str],
-    resource_id: Optional[str] = None,
-    use_cache: bool = True
-) -> Dict[str, Any]:
-    """Validate user permissions for authorization
+    Create comprehensive authentication system health check.
     
-    Args:
-        user_id: User identifier
-        required_permissions: List of required permissions
-        resource_id: Optional resource identifier
-        use_cache: Whether to use cache
-        
     Returns:
-        Permission validation result
-    """
-    auth_manager = get_auth_manager()
-    return await auth_manager.validate_permissions(
-        user_id=user_id,
-        required_permissions=required_permissions,
-        resource_id=resource_id,
-        use_cache=use_cache
-    )
-
-
-async def refresh_jwt_token(refresh_token: str) -> Dict[str, Any]:
-    """Refresh JWT token using refresh token
-    
-    Args:
-        refresh_token: Refresh token string
+        Health check status dictionary
         
-    Returns:
-        New token response
+    Example:
+        health = create_auth_health_check()
+        print(f"Auth system status: {health['status']}")
     """
-    auth_manager = get_auth_manager()
-    return await auth_manager.refresh_user_token(refresh_token)
+    try:
+        authenticator = get_core_authenticator()
+        return authenticator.get_health_status()
+    except Exception as e:
+        return {
+            'status': 'unhealthy',
+            'error': str(e),
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
 
 
-async def create_authenticated_session(
-    user_id: str,
-    token_payload: Dict[str, Any],
-    session_data: Optional[Dict[str, Any]] = None,
-    ttl: int = 3600
-) -> Dict[str, Any]:
-    """Create authenticated user session
-    
-    Args:
-        user_id: User identifier
-        token_payload: JWT token payload
-        session_data: Optional session data
-        ttl: Session TTL in seconds
-        
-    Returns:
-        Session creation result
-    """
-    auth_manager = get_auth_manager()
-    return await auth_manager.create_user_session(
-        user_id=user_id,
-        token_payload=token_payload,
-        session_data=session_data,
-        ttl=ttl
-    )
-
-
-async def get_authenticated_session(session_id: str) -> Optional[Dict[str, Any]]:
-    """Get authenticated user session
-    
-    Args:
-        session_id: Session identifier
-        
-    Returns:
-        Session data or None if not found
-    """
-    auth_manager = get_auth_manager()
-    return await auth_manager.get_user_session(session_id)
-
-
-async def invalidate_authenticated_session(session_id: str) -> bool:
-    """Invalidate authenticated user session
-    
-    Args:
-        session_id: Session identifier
-        
-    Returns:
-        Success status
-    """
-    auth_manager = get_auth_manager()
-    return await auth_manager.invalidate_user_session(session_id)
+# Export public interface
+__all__ = [
+    'CoreJWTAuthenticator',
+    'AuthenticatedUser',
+    'get_core_authenticator',
+    'require_authentication',
+    'get_authenticated_user',
+    'authenticate_token',
+    'create_auth_health_check',
+    'auth_operation_metrics'
+]
