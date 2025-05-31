@@ -1,705 +1,970 @@
 """
 Production Environment Configuration Module
 
-This module provides production-specific configuration settings with enterprise-grade
-security controls, performance optimizations, and comprehensive monitoring integration.
-Implements full security controls for production deployment per technical specifications.
+This module implements production-specific configuration with enterprise-grade security settings,
+performance optimizations, production database configurations, and comprehensive monitoring
+integration for the Flask application migration from Node.js.
 
-Security Features:
-- TLS 1.3 enforcement with Flask-Talisman
-- AWS KMS integration for encryption key management
-- Comprehensive security headers and HSTS
-- Production database encryption and connection pooling
-- Enterprise APM and monitoring integration
-- Production deployment compliance and security controls
+This configuration extends the base configuration with production-specific overrides that ensure:
+- Enterprise security compliance per Section 6.4.3 (TLS 1.3, security headers)
+- Production database performance and encryption per Section 3.4.1
+- Enterprise APM and monitoring integration per Section 3.6.1
+- Comprehensive production security controls per Section 6.4.1
+- Production deployment compliance per Section 8.1.2
 
-Performance Features:
-- Optimized connection pooling for MongoDB and Redis
-- Production-grade WSGI server configuration
-- Memory and CPU optimization settings
-- ≤10% variance monitoring compliance
+Key Features:
+- Flask-Talisman 1.1.0+ for TLS 1.3 enforcement and HTTP security headers
+- AWS KMS integration for encryption key management (Section 6.4.3)
+- Production-optimized MongoDB and Redis connection pooling
+- Comprehensive Prometheus metrics and APM integration
+- Rate limiting and CORS policies for production security
+- Enterprise audit logging with structured JSON output
+- Container orchestration health check endpoints
+- Blue-green deployment and feature flag support
 
-Technical Requirements:
-- Section 8.1.2: Production environment configuration with enterprise security
-- Section 6.4.3: TLS 1.3 enforcement and comprehensive security headers
-- Section 3.4.1: Production database performance and encryption
-- Section 3.6.1: Enterprise APM and monitoring integration
-- Section 6.4.1: Production deployment compliance and security controls
+Dependencies:
+- Flask 2.3+ with production WSGI configuration
+- Flask-Talisman 1.1.0+ for security header enforcement
+- PyMongo 4.5+ and Motor 3.3+ for MongoDB with production pooling
+- redis-py 5.0+ with production connection optimization
+- prometheus-client 0.17+ for comprehensive metrics collection
+- structlog 23.1+ for enterprise audit logging
+- boto3 1.28+ for AWS KMS and S3 integration
+
+Author: Flask Migration Team
+Version: 1.0.0
+Environment: Production
+Security Level: Enterprise
 """
 
 import os
+import sys
+import ssl
 import logging
-from typing import Dict, Any, Optional, List
-from datetime import timedelta
-from dotenv import load_dotenv
-from cryptography.fernet import Fernet
+import secrets
 import base64
+from datetime import datetime, timedelta, timezone
+from typing import Dict, Any, Optional, List, Union
+from pathlib import Path
 
-# Load environment variables with production security validation
-load_dotenv()
+# Configuration base classes
+from config.settings import BaseConfig, EnvironmentManager, ConfigurationError
+from config.database import DatabaseManager, AWSKMSKeyManager
+from config.security import SecurityConfig
+from config.monitoring import MonitoringConfig
 
-class ProductionConfig:
+# Production-specific security libraries
+try:
+    import boto3
+    from botocore.exceptions import ClientError, BotoCoreError
+    AWS_AVAILABLE = True
+except ImportError:
+    AWS_AVAILABLE = False
+
+try:
+    from cryptography.fernet import Fernet
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+    CRYPTOGRAPHY_AVAILABLE = True
+except ImportError:
+    CRYPTOGRAPHY_AVAILABLE = False
+
+# APM and monitoring libraries
+try:
+    import ddtrace
+    from ddtrace import tracer, patch_all
+    DATADOG_APM_AVAILABLE = True
+except ImportError:
+    DATADOG_APM_AVAILABLE = False
+
+try:
+    import newrelic.agent
+    NEWRELIC_APM_AVAILABLE = True
+except ImportError:
+    NEWRELIC_APM_AVAILABLE = False
+
+# Prometheus metrics
+try:
+    from prometheus_client import Counter, Histogram, Gauge, CollectorRegistry
+    PROMETHEUS_AVAILABLE = True
+except ImportError:
+    PROMETHEUS_AVAILABLE = False
+
+# Configure production logging
+logging.basicConfig(
+    level=logging.WARNING,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+
+class ProductionSecurityEnforcer:
     """
-    Production environment configuration class implementing enterprise-grade
-    security settings, performance optimizations, and comprehensive monitoring.
+    Production security enforcement with comprehensive validation and enterprise controls.
     
-    This configuration class provides:
-    - Flask-Talisman TLS 1.3 enforcement and security headers
-    - AWS KMS integration for encryption key management
-    - Production database connection pooling and encryption
-    - Enterprise APM and monitoring integration
-    - Comprehensive production security controls
-    - ≤10% performance variance compliance monitoring
+    This class implements production-specific security validations beyond the base
+    configuration, ensuring enterprise compliance and security standard adherence.
     """
     
-    # ============================================================================
-    # CORE FLASK APPLICATION SETTINGS
-    # ============================================================================
-    
-    # Environment identification
-    ENV = 'production'
-    DEBUG = False
-    TESTING = False
-    
-    # Secret key management with secure environment loading
-    SECRET_KEY = os.getenv('SECRET_KEY')
-    if not SECRET_KEY:
-        raise ValueError("SECRET_KEY environment variable is required for production")
-    
-    # Application instance configuration
-    JSON_SORT_KEYS = True
-    JSONIFY_PRETTYPRINT_REGULAR = False
-    
-    # Session configuration for production security
-    PERMANENT_SESSION_LIFETIME = timedelta(hours=8)  # 8-hour session timeout
-    SESSION_COOKIE_SECURE = True  # HTTPS only
-    SESSION_COOKIE_HTTPONLY = True  # XSS protection
-    SESSION_COOKIE_SAMESITE = 'Lax'  # CSRF protection
-    SESSION_COOKIE_NAME = 'flask_session_prod'
-    
-    # ============================================================================
-    # FLASK-TALISMAN SECURITY CONFIGURATION (Section 6.4.3)
-    # ============================================================================
-    
-    # TLS 1.3 enforcement and HTTPS security
-    TALISMAN_CONFIG = {
-        'force_https': True,
-        'force_https_permanent': True,
-        'strict_transport_security': True,
-        'strict_transport_security_max_age': 31536000,  # 1 year
-        'strict_transport_security_include_subdomains': True,
-        'strict_transport_security_preload': True,
-        
-        # Content Security Policy for comprehensive protection
-        'content_security_policy': {
-            'default-src': "'self'",
-            'script-src': "'self' 'unsafe-inline' https://cdn.auth0.com",
-            'style-src': "'self' 'unsafe-inline'",
-            'img-src': "'self' data: https:",
-            'connect-src': "'self' https://*.auth0.com https://*.amazonaws.com",
-            'font-src': "'self'",
-            'object-src': "'none'",
-            'base-uri': "'self'",
-            'frame-ancestors': "'none'",
-            'upgrade-insecure-requests': True
-        },
-        
-        # Additional security headers
-        'referrer_policy': 'strict-origin-when-cross-origin',
-        'feature_policy': {
-            'geolocation': "'none'",
-            'microphone': "'none'",
-            'camera': "'none'",
-            'accelerometer': "'none'",
-            'gyroscope': "'none'"
-        },
-        
-        # Session cookie security enforcement
-        'session_cookie_secure': True,
-        'session_cookie_http_only': True,
-        'session_cookie_samesite': 'Strict'
-    }
-    
-    # ============================================================================
-    # DATABASE CONFIGURATION (Section 3.4.1)
-    # ============================================================================
-    
-    # MongoDB production configuration with PyMongo 4.5+ and Motor 3.3+
-    MONGODB_CONFIG = {
-        'uri': os.getenv('MONGODB_URI'),
-        'database_name': os.getenv('MONGODB_DATABASE', 'production_db'),
-        
-        # Production connection pooling settings
-        'max_pool_size': 100,
-        'min_pool_size': 10,
-        'max_idle_time_ms': 30000,
-        'wait_queue_timeout_ms': 5000,
-        'server_selection_timeout_ms': 30000,
-        'socket_timeout_ms': 30000,
-        'connect_timeout_ms': 10000,
-        
-        # TLS encryption for database connections
-        'tls': True,
-        'tls_cert_reqs': 'required',
-        'tls_ca_file': os.getenv('MONGODB_CA_CERT_PATH'),
-        'tls_cert_file': os.getenv('MONGODB_CLIENT_CERT_PATH'),
-        'tls_private_key_file': os.getenv('MONGODB_CLIENT_KEY_PATH'),
-        
-        # Authentication and security
-        'auth_source': 'admin',
-        'auth_mechanism': 'SCRAM-SHA-256',
-        'retry_writes': True,
-        'read_preference': 'primaryPreferred',
-        'write_concern': {'w': 'majority', 'j': True},
-        
-        # Connection monitoring and health checks
-        'heartbeat_frequency_ms': 10000,
-        'server_monitoring_mode': 'stream'
-    }
-    
-    # Motor async MongoDB configuration for high-performance operations
-    MOTOR_CONFIG = {
-        'uri': os.getenv('MONGODB_URI'),
-        'database_name': os.getenv('MONGODB_DATABASE', 'production_db'),
-        'max_pool_size': 50,
-        'min_pool_size': 5,
-        'max_idle_time_ms': 30000,
-        'tls': True,
-        'tls_cert_reqs': 'required',
-        'auth_source': 'admin'
-    }
-    
-    # Redis production configuration with redis-py 5.0+
-    REDIS_CONFIG = {
-        'host': os.getenv('REDIS_HOST', 'localhost'),
-        'port': int(os.getenv('REDIS_PORT', 6379)),
-        'password': os.getenv('REDIS_PASSWORD'),
-        'db': int(os.getenv('REDIS_DB', 0)),
-        
-        # Production connection pooling
-        'max_connections': 100,
-        'retry_on_timeout': True,
-        'socket_timeout': 30.0,
-        'socket_connect_timeout': 10.0,
-        'socket_keepalive': True,
-        'socket_keepalive_options': {},
-        'health_check_interval': 30,
-        
-        # TLS encryption for Redis connections
-        'ssl': True,
-        'ssl_cert_reqs': 'required',
-        'ssl_ca_certs': os.getenv('REDIS_CA_CERT_PATH'),
-        'ssl_certfile': os.getenv('REDIS_CLIENT_CERT_PATH'),
-        'ssl_keyfile': os.getenv('REDIS_CLIENT_KEY_PATH'),
-        
-        # Redis key configuration patterns
-        'key_prefix': 'prod:',
-        'decode_responses': True
-    }
-    
-    # Flask-Session Redis backend configuration for distributed sessions
-    SESSION_TYPE = 'redis'
-    SESSION_REDIS_HOST = os.getenv('REDIS_HOST', 'localhost')
-    SESSION_REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
-    SESSION_REDIS_PASSWORD = os.getenv('REDIS_PASSWORD')
-    SESSION_REDIS_DB = int(os.getenv('REDIS_SESSION_DB', 1))
-    SESSION_PERMANENT = False
-    SESSION_USE_SIGNER = True
-    SESSION_KEY_PREFIX = 'session:'
-    
-    # ============================================================================
-    # AWS KMS ENCRYPTION CONFIGURATION (Section 6.4.3)
-    # ============================================================================
-    
-    # AWS KMS configuration for encryption key management
-    AWS_KMS_CONFIG = {
-        'region_name': os.getenv('AWS_REGION', 'us-east-1'),
-        'aws_access_key_id': os.getenv('AWS_ACCESS_KEY_ID'),
-        'aws_secret_access_key': os.getenv('AWS_SECRET_ACCESS_KEY'),
-        'cmk_arn': os.getenv('AWS_KMS_CMK_ARN'),
-        'key_spec': 'AES_256',
-        'encryption_context': {
-            'application': 'flask-production-app',
-            'environment': 'production',
-            'purpose': 'data-encryption'
-        }
-    }
-    
-    # Encryption configuration for session data with AES-256-GCM
-    ENCRYPTION_CONFIG = {
-        'algorithm': 'AES-256-GCM',
-        'key_rotation_interval_days': 90,
-        'session_encryption_key': os.getenv('SESSION_ENCRYPTION_KEY'),
-        'redis_encryption_key': os.getenv('REDIS_ENCRYPTION_KEY')
-    }
-    
-    # ============================================================================
-    # AUTHENTICATION AND AUTHORIZATION (Section 6.4.1)
-    # ============================================================================
-    
-    # Auth0 enterprise integration configuration
-    AUTH0_CONFIG = {
-        'domain': os.getenv('AUTH0_DOMAIN'),
-        'client_id': os.getenv('AUTH0_CLIENT_ID'),
-        'client_secret': os.getenv('AUTH0_CLIENT_SECRET'),
-        'audience': os.getenv('AUTH0_AUDIENCE'),
-        'algorithms': ['RS256'],
-        'issuer': f"https://{os.getenv('AUTH0_DOMAIN')}/",
-        
-        # Production security settings
-        'require_https': True,
-        'require_aud': True,
-        'verify_signature': True,
-        'verify_aud': True,
-        'verify_iat': True,
-        'verify_exp': True,
-        'verify_nbf': True,
-        'verify_iss': True,
-        'verify_sub': True,
-        'require_sub': True,
-        'leeway': 10  # 10-second clock skew tolerance
-    }
-    
-    # JWT token configuration with PyJWT 2.8+
-    JWT_CONFIG = {
-        'secret_key': os.getenv('JWT_SECRET_KEY'),
-        'algorithm': 'RS256',
-        'access_token_expires': timedelta(hours=1),
-        'refresh_token_expires': timedelta(days=30),
-        'verify_signature': True,
-        'verify_exp': True,
-        'verify_aud': True,
-        'verify_iss': True,
-        'require': ['exp', 'aud', 'iss', 'sub']
-    }
-    
-    # Permission caching configuration for Redis
-    PERMISSION_CACHE_CONFIG = {
-        'user_permissions_ttl': 300,  # 5 minutes
-        'role_definitions_ttl': 600,  # 10 minutes
-        'resource_ownership_ttl': 180,  # 3 minutes
-        'permission_hierarchy_ttl': 900,  # 15 minutes
-        'cache_key_patterns': {
-            'user_permissions': 'perm_cache:{user_id}',
-            'role_definitions': 'role_cache:{role_id}',
-            'resource_ownership': 'owner_cache:{resource_type}:{resource_id}',
-            'permission_hierarchy': 'hierarchy_cache:{permission_path}',
-            'session_permissions': 'session_perm:{session_id}'
-        }
-    }
-    
-    # ============================================================================
-    # FLASK-LIMITER RATE LIMITING CONFIGURATION
-    # ============================================================================
-    
-    # Rate limiting configuration for production
-    RATELIMIT_CONFIG = {
-        'storage_uri': f"redis://{os.getenv('REDIS_HOST', 'localhost')}:{os.getenv('REDIS_PORT', 6379)}/{os.getenv('REDIS_LIMITER_DB', 2)}",
-        'strategy': 'moving-window',
-        'default_limits': [
-            '1000 per hour',    # Sustained rate limit
-            '100 per minute',   # Burst protection
-            '10 per second'     # Spike protection
-        ],
-        'headers_enabled': True,
-        'header_name_mapping': {
-            'X-RateLimit-Limit': 'X-RateLimit-Limit',
-            'X-RateLimit-Remaining': 'X-RateLimit-Remaining',
-            'X-RateLimit-Reset': 'X-RateLimit-Reset'
-        }
-    }
-    
-    # ============================================================================
-    # FLASK-CORS PRODUCTION CONFIGURATION
-    # ============================================================================
-    
-    # CORS configuration for production origins
-    CORS_CONFIG = {
-        'origins': [
-            'https://app.company.com',
-            'https://admin.company.com',
-            'https://api.company.com'
-        ],
-        'methods': ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-        'allow_headers': [
-            'Authorization',
-            'Content-Type',
-            'X-Requested-With',
-            'X-CSRF-Token',
-            'Accept',
-            'Origin'
-        ],
-        'expose_headers': [
-            'X-RateLimit-Limit',
-            'X-RateLimit-Remaining',
-            'X-RateLimit-Reset'
-        ],
-        'supports_credentials': True,
-        'max_age': 600,  # 10 minutes preflight cache
-        'send_wildcard': False,
-        'vary_header': True
-    }
-    
-    # ============================================================================
-    # MONITORING AND OBSERVABILITY (Section 3.6.1)
-    # ============================================================================
-    
-    # Prometheus metrics configuration
-    PROMETHEUS_CONFIG = {
-        'metrics_path': '/metrics',
-        'enable_default_metrics': True,
-        'registry': None,  # Use default registry
-        'multiprocess_mode': 'all',
-        'buckets': [0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0]
-    }
-    
-    # APM integration configuration for enterprise monitoring
-    APM_CONFIG = {
-        'service_name': os.getenv('APM_SERVICE_NAME', 'flask-production-app'),
-        'environment': 'production',
-        'version': os.getenv('APP_VERSION', '1.0.0'),
-        'server_url': os.getenv('APM_SERVER_URL'),
-        'secret_token': os.getenv('APM_SECRET_TOKEN'),
-        'capture_body': 'errors',
-        'capture_headers': True,
-        'transaction_sample_rate': 0.1,  # 10% sampling for performance
-        'error_sample_rate': 1.0,  # 100% error capture
-        'span_frames_min_duration': 5,  # 5ms minimum span duration
-        'stack_trace_limit': 50
-    }
-    
-    # Health check endpoints configuration
-    HEALTH_CHECK_CONFIG = {
-        'endpoints': {
-            '/health': 'basic_health',
-            '/health/ready': 'readiness_probe',
-            '/health/live': 'liveness_probe'
-        },
-        'checks': [
-            'database_connectivity',
-            'redis_connectivity',
-            'external_service_health',
-            'memory_usage',
-            'disk_space'
-        ],
-        'timeout_seconds': 30,
-        'cache_duration_seconds': 10
-    }
-    
-    # ============================================================================
-    # STRUCTURED LOGGING CONFIGURATION (Section 3.6.1)
-    # ============================================================================
-    
-    # Structlog configuration for JSON-formatted logging
-    LOGGING_CONFIG = {
-        'version': 1,
-        'disable_existing_loggers': False,
-        'formatters': {
-            'json': {
-                'format': '%(asctime)s %(name)s %(levelname)s %(message)s',
-                'class': 'pythonjsonlogger.jsonlogger.JsonFormatter'
-            }
-        },
-        'handlers': {
-            'console': {
-                'class': 'logging.StreamHandler',
-                'formatter': 'json',
-                'level': 'INFO'
-            },
-            'file': {
-                'class': 'logging.handlers.RotatingFileHandler',
-                'filename': '/var/log/flask-app/production.log',
-                'formatter': 'json',
-                'level': 'INFO',
-                'maxBytes': 10485760,  # 10MB
-                'backupCount': 10
-            }
-        },
-        'loggers': {
-            'security.authorization': {
-                'handlers': ['console', 'file'],
-                'level': 'INFO',
-                'propagate': False
-            },
-            'security.authentication': {
-                'handlers': ['console', 'file'],
-                'level': 'INFO',
-                'propagate': False
-            },
-            'performance': {
-                'handlers': ['console', 'file'],
-                'level': 'INFO',
-                'propagate': False
-            }
-        },
-        'root': {
-            'handlers': ['console', 'file'],
-            'level': 'INFO'
-        }
-    }
-    
-    # Security audit logging configuration
-    SECURITY_LOGGING_CONFIG = {
-        'audit_events': [
-            'authentication_success',
-            'authentication_failure',
-            'authorization_granted',
-            'authorization_denied',
-            'session_created',
-            'session_destroyed',
-            'permission_escalation',
-            'security_violation',
-            'rate_limit_exceeded',
-            'suspicious_activity'
-        ],
-        'log_format': 'json',
-        'include_request_data': True,
-        'include_user_agent': True,
-        'include_ip_address': True,
-        'retention_days': 90
-    }
-    
-    # ============================================================================
-    # EXTERNAL SERVICES CONFIGURATION
-    # ============================================================================
-    
-    # AWS Services configuration with boto3 1.28+
-    AWS_CONFIG = {
-        'region_name': os.getenv('AWS_REGION', 'us-east-1'),
-        'aws_access_key_id': os.getenv('AWS_ACCESS_KEY_ID'),
-        'aws_secret_access_key': os.getenv('AWS_SECRET_ACCESS_KEY'),
-        'use_ssl': True,
-        'signature_version': 's3v4',
-        'config': {
-            'retries': {'max_attempts': 3, 'mode': 'adaptive'},
-            'read_timeout': 30,
-            'connect_timeout': 10,
-            'max_pool_connections': 50
-        }
-    }
-    
-    # S3 configuration for file storage
-    S3_CONFIG = {
-        'bucket_name': os.getenv('S3_BUCKET_NAME'),
-        'region': os.getenv('AWS_REGION', 'us-east-1'),
-        'encryption': 'AES256',
-        'versioning': True,
-        'lifecycle_rules': [
-            {
-                'id': 'production-lifecycle',
-                'status': 'Enabled',
-                'transitions': [
-                    {'days': 30, 'storage_class': 'STANDARD_IA'},
-                    {'days': 90, 'storage_class': 'GLACIER'},
-                    {'days': 365, 'storage_class': 'DEEP_ARCHIVE'}
-                ]
-            }
-        ]
-    }
-    
-    # HTTP client configuration with requests/httpx
-    HTTP_CLIENT_CONFIG = {
-        'timeout': {
-            'connect': 10.0,
-            'read': 30.0,
-            'write': 10.0,
-            'pool': 5.0
-        },
-        'limits': {
-            'max_connections': 100,
-            'max_keepalive_connections': 50,
-            'keepalive_expiry': 30.0
-        },
-        'retries': 3,
-        'backoff_factor': 1.0,
-        'status_forcelist': [429, 500, 502, 503, 504],
-        'verify_ssl': True,
-        'cert_verify': True
-    }
-    
-    # Circuit breaker configuration for external services
-    CIRCUIT_BREAKER_CONFIG = {
-        'failure_threshold': 5,
-        'recovery_timeout': 30,
-        'expected_exception': Exception,
-        'name': 'production-circuit-breaker'
-    }
-    
-    # ============================================================================
-    # PERFORMANCE OPTIMIZATION SETTINGS
-    # ============================================================================
-    
-    # WSGI server configuration for production
-    WSGI_CONFIG = {
-        'bind': '0.0.0.0:8000',
-        'workers': int(os.getenv('GUNICORN_WORKERS', 4)),
-        'worker_class': 'gevent',
-        'worker_connections': 1000,
-        'max_requests': 1000,
-        'max_requests_jitter': 100,
-        'timeout': 30,
-        'keepalive': 5,
-        'preload_app': True,
-        'capture_output': True,
-        'enable_stdio_inheritance': True,
-        'access_log_format': '%(h)s %(l)s %(u)s %(t)s "%(r)s" %(s)s %(b)s "%(f)s" "%(a)s" %(D)s'
-    }
-    
-    # Memory management configuration
-    MEMORY_CONFIG = {
-        'max_memory_usage_mb': int(os.getenv('MAX_MEMORY_MB', 1024)),
-        'gc_threshold': [700, 10, 10],
-        'enable_memory_profiling': True,
-        'memory_check_interval': 300  # 5 minutes
-    }
-    
-    # Cache configuration for performance optimization
-    CACHE_CONFIG = {
-        'cache_type': 'redis',
-        'cache_redis_host': os.getenv('REDIS_HOST', 'localhost'),
-        'cache_redis_port': int(os.getenv('REDIS_PORT', 6379)),
-        'cache_redis_password': os.getenv('REDIS_PASSWORD'),
-        'cache_redis_db': int(os.getenv('REDIS_CACHE_DB', 3)),
-        'cache_default_timeout': 300,  # 5 minutes
-        'cache_key_prefix': 'flask_cache:',
-        'cache_threshold': 500
-    }
-    
-    # ============================================================================
-    # PRODUCTION VALIDATION AND COMPLIANCE
-    # ============================================================================
-    
-    @classmethod
-    def validate_production_config(cls) -> Dict[str, Any]:
-        """
-        Validate production configuration for enterprise compliance and security.
-        
-        Returns:
-            Dict containing validation results and compliance status
-            
-        Raises:
-            ValueError: When required production settings are missing or invalid
-        """
-        validation_results = {
-            'valid': True,
-            'errors': [],
-            'warnings': [],
-            'compliance_checks': {}
-        }
-        
-        # Required environment variables validation
-        required_vars = [
+    def __init__(self):
+        """Initialize production security enforcer."""
+        self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
+        self.required_production_vars = [
             'SECRET_KEY',
+            'AUTH0_DOMAIN',
+            'AUTH0_CLIENT_ID', 
+            'AUTH0_CLIENT_SECRET',
             'MONGODB_URI',
             'REDIS_HOST',
-            'AUTH0_DOMAIN',
-            'AUTH0_CLIENT_ID',
-            'AUTH0_CLIENT_SECRET',
             'AWS_ACCESS_KEY_ID',
             'AWS_SECRET_ACCESS_KEY',
             'AWS_KMS_CMK_ARN'
         ]
         
-        missing_vars = [var for var in required_vars if not os.getenv(var)]
+    def validate_production_requirements(self) -> None:
+        """
+        Validate all production security requirements are met.
+        
+        Raises:
+            ConfigurationError: When production requirements are not satisfied
+        """
+        validation_errors = []
+        
+        # Check required environment variables
+        missing_vars = []
+        for var in self.required_production_vars:
+            if not os.getenv(var):
+                missing_vars.append(var)
+        
         if missing_vars:
-            validation_results['valid'] = False
-            validation_results['errors'].append(f"Missing required environment variables: {missing_vars}")
+            validation_errors.append(
+                f"Missing required production environment variables: {', '.join(missing_vars)}"
+            )
         
-        # Security configuration validation
-        if not cls.TALISMAN_CONFIG.get('force_https'):
-            validation_results['errors'].append("HTTPS enforcement is required for production")
-            validation_results['valid'] = False
+        # Validate secret key strength
+        secret_key = os.getenv('SECRET_KEY', '')
+        if len(secret_key) < 64:
+            validation_errors.append(
+                "Production SECRET_KEY must be at least 64 characters for enterprise security"
+            )
         
-        if not cls.SESSION_COOKIE_SECURE:
-            validation_results['errors'].append("Secure session cookies required for production")
-            validation_results['valid'] = False
+        # Validate TLS certificate paths if provided
+        tls_cert_path = os.getenv('TLS_CERT_PATH')
+        tls_key_path = os.getenv('TLS_KEY_PATH')
         
-        # Database security validation
-        if not cls.MONGODB_CONFIG.get('tls'):
-            validation_results['warnings'].append("MongoDB TLS encryption is recommended for production")
+        if tls_cert_path and not Path(tls_cert_path).exists():
+            validation_errors.append(f"TLS certificate file not found: {tls_cert_path}")
         
-        if not cls.REDIS_CONFIG.get('ssl'):
-            validation_results['warnings'].append("Redis SSL encryption is recommended for production")
+        if tls_key_path and not Path(tls_key_path).exists():
+            validation_errors.append(f"TLS private key file not found: {tls_key_path}")
         
-        # AWS KMS validation
-        if not cls.AWS_KMS_CONFIG.get('cmk_arn'):
-            validation_results['errors'].append("AWS KMS CMK ARN is required for production encryption")
-            validation_results['valid'] = False
+        # Validate AWS KMS configuration
+        if AWS_AVAILABLE:
+            try:
+                self._validate_aws_kms_access()
+            except Exception as e:
+                validation_errors.append(f"AWS KMS validation failed: {str(e)}")
         
-        # Compliance checks
-        validation_results['compliance_checks'] = {
-            'tls_1_3_enforced': cls.TALISMAN_CONFIG.get('force_https', False),
-            'session_security': cls.SESSION_COOKIE_SECURE and cls.SESSION_COOKIE_HTTPONLY,
-            'auth0_integration': bool(cls.AUTH0_CONFIG.get('domain')),
-            'aws_kms_encryption': bool(cls.AWS_KMS_CONFIG.get('cmk_arn')),
-            'structured_logging': bool(cls.LOGGING_CONFIG),
-            'prometheus_metrics': bool(cls.PROMETHEUS_CONFIG),
-            'security_headers': bool(cls.TALISMAN_CONFIG.get('content_security_policy')),
-            'rate_limiting': bool(cls.RATELIMIT_CONFIG),
-            'cors_configured': bool(cls.CORS_CONFIG.get('origins'))
-        }
+        # Check database connectivity requirements
+        mongodb_uri = os.getenv('MONGODB_URI', '')
+        if not mongodb_uri.startswith('mongodb://') and not mongodb_uri.startswith('mongodb+srv://'):
+            validation_errors.append("Invalid MongoDB URI format for production")
         
-        # Calculate compliance score
-        compliance_score = sum(validation_results['compliance_checks'].values()) / len(validation_results['compliance_checks'])
-        validation_results['compliance_score'] = compliance_score
+        # Validate Redis configuration
+        redis_host = os.getenv('REDIS_HOST')
+        if not redis_host or redis_host == 'localhost':
+            validation_errors.append("Production Redis host must not be localhost")
         
-        if compliance_score < 0.9:
-            validation_results['warnings'].append(f"Compliance score {compliance_score:.2%} is below 90% threshold")
+        if validation_errors:
+            error_message = "Production security validation failed:\n" + "\n".join(
+                f"- {error}" for error in validation_errors
+            )
+            self.logger.error(error_message)
+            raise ConfigurationError(error_message)
         
-        return validation_results
+        self.logger.info("Production security validation completed successfully")
     
-    @classmethod
-    def get_security_headers(cls) -> Dict[str, str]:
+    def _validate_aws_kms_access(self) -> None:
         """
-        Get production security headers for Flask-Talisman configuration.
+        Validate AWS KMS access and permissions.
+        
+        Raises:
+            ConfigurationError: When AWS KMS validation fails
+        """
+        try:
+            kms_client = boto3.client(
+                'kms',
+                region_name=os.getenv('AWS_REGION', 'us-east-1'),
+                aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
+                aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY')
+            )
+            
+            cmk_arn = os.getenv('AWS_KMS_CMK_ARN')
+            if cmk_arn:
+                # Test key access by describing the key
+                kms_client.describe_key(KeyId=cmk_arn)
+                self.logger.info("AWS KMS access validation successful")
+            
+        except (ClientError, BotoCoreError) as e:
+            raise ConfigurationError(f"AWS KMS access validation failed: {str(e)}")
+
+
+class ProductionPerformanceOptimizer:
+    """
+    Production performance optimization configuration for meeting ≤10% variance requirement.
+    
+    This class implements production-specific performance optimizations for database
+    connections, caching, and application server configuration to ensure the migration
+    meets the ≤10% performance variance requirement from Node.js baseline.
+    """
+    
+    def __init__(self):
+        """Initialize production performance optimizer."""
+        self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
+    
+    def get_optimized_mongodb_settings(self) -> Dict[str, Any]:
+        """
+        Get production-optimized MongoDB connection settings.
         
         Returns:
-            Dictionary of security headers for production deployment
+            Optimized MongoDB configuration for production performance
         """
         return {
-            'Strict-Transport-Security': f'max-age={cls.TALISMAN_CONFIG["strict_transport_security_max_age"]}; includeSubDomains; preload',
-            'Content-Security-Policy': '; '.join([f"{k} {v}" for k, v in cls.TALISMAN_CONFIG['content_security_policy'].items()]),
-            'X-Frame-Options': 'DENY',
-            'X-Content-Type-Options': 'nosniff',
-            'Referrer-Policy': cls.TALISMAN_CONFIG['referrer_policy'],
-            'X-XSS-Protection': '1; mode=block',
-            'Feature-Policy': '; '.join([f"{k}={v}" for k, v in cls.TALISMAN_CONFIG['feature_policy'].items()])
+            'maxPoolSize': int(os.getenv('MONGODB_MAX_POOL_SIZE', '100')),
+            'minPoolSize': int(os.getenv('MONGODB_MIN_POOL_SIZE', '20')),
+            'maxIdleTimeMS': int(os.getenv('MONGODB_MAX_IDLE_TIME_MS', '20000')),
+            'connectTimeoutMS': int(os.getenv('MONGODB_CONNECT_TIMEOUT_MS', '5000')),
+            'serverSelectionTimeoutMS': int(os.getenv('MONGODB_SERVER_SELECTION_TIMEOUT_MS', '3000')),
+            'socketTimeoutMS': int(os.getenv('MONGODB_SOCKET_TIMEOUT_MS', '20000')),
+            'maxConnecting': int(os.getenv('MONGODB_MAX_CONNECTING', '10')),
+            'retryWrites': True,
+            'retryReads': True,
+            'readPreference': 'primaryPreferred',
+            'readConcern': {'level': 'majority'},
+            'writeConcern': {'w': 'majority', 'j': True, 'wtimeout': 5000}
         }
     
-    @classmethod
-    def get_performance_targets(cls) -> Dict[str, Any]:
+    def get_optimized_redis_settings(self) -> Dict[str, Any]:
         """
-        Get performance monitoring targets for ≤10% variance compliance.
+        Get production-optimized Redis connection settings.
         
         Returns:
-            Dictionary of performance targets and monitoring thresholds
+            Optimized Redis configuration for production performance
         """
         return {
-            'response_time_p95_ms': 200,  # 95th percentile response time
-            'response_time_p99_ms': 500,  # 99th percentile response time
-            'memory_usage_threshold_mb': cls.MEMORY_CONFIG['max_memory_usage_mb'] * 0.8,
-            'database_connection_pool_utilization': 0.8,  # 80% max pool utilization
-            'redis_connection_pool_utilization': 0.8,
-            'error_rate_threshold': 0.01,  # 1% error rate threshold
-            'availability_target': 0.999,  # 99.9% availability
-            'variance_threshold': 0.1  # ≤10% variance from baseline
+            'max_connections': int(os.getenv('REDIS_MAX_CONNECTIONS', '100')),
+            'socket_timeout': float(os.getenv('REDIS_SOCKET_TIMEOUT', '20.0')),
+            'socket_connect_timeout': float(os.getenv('REDIS_SOCKET_CONNECT_TIMEOUT', '5.0')),
+            'socket_keepalive': True,
+            'socket_keepalive_options': {
+                'TCP_KEEPIDLE': 600,
+                'TCP_KEEPINTVL': 30,
+                'TCP_KEEPCNT': 3
+            },
+            'health_check_interval': int(os.getenv('REDIS_HEALTH_CHECK_INTERVAL', '60')),
+            'retry_on_timeout': True,
+            'decode_responses': True
         }
+    
+    def get_optimized_gunicorn_settings(self) -> Dict[str, Any]:
+        """
+        Get production-optimized Gunicorn WSGI server settings.
+        
+        Returns:
+            Optimized Gunicorn configuration for production performance
+        """
+        # Calculate optimal worker count based on CPU cores
+        cpu_count = os.cpu_count() or 1
+        worker_count = int(os.getenv('GUNICORN_WORKERS', str(2 * cpu_count + 1)))
+        
+        return {
+            'bind': f"0.0.0.0:{os.getenv('PORT', '8000')}",
+            'workers': worker_count,
+            'worker_class': 'sync',  # or 'gevent' for async workloads
+            'worker_connections': int(os.getenv('GUNICORN_WORKER_CONNECTIONS', '1000')),
+            'max_requests': int(os.getenv('GUNICORN_MAX_REQUESTS', '1000')),
+            'max_requests_jitter': int(os.getenv('GUNICORN_MAX_REQUESTS_JITTER', '100')),
+            'timeout': int(os.getenv('GUNICORN_TIMEOUT', '30')),
+            'keepalive': int(os.getenv('GUNICORN_KEEPALIVE', '5')),
+            'preload_app': True,
+            'enable_stdio_inheritance': True,
+            'access_log_format': '%(h)s %(l)s %(u)s %(t)s "%(r)s" %(s)s %(b)s "%(f)s" "%(a)s" %(D)s',
+            'accesslog': '-',
+            'errorlog': '-',
+            'loglevel': 'warning',
+            'capture_output': True
+        }
+
+
+class ProductionMonitoringIntegrator:
+    """
+    Production monitoring and observability integration.
+    
+    This class configures enterprise APM integration, Prometheus metrics collection,
+    and comprehensive monitoring capabilities for production deployment.
+    """
+    
+    def __init__(self):
+        """Initialize production monitoring integrator."""
+        self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
+        self.apm_enabled = os.getenv('APM_ENABLED', 'true').lower() == 'true'
+        self.prometheus_enabled = os.getenv('PROMETHEUS_METRICS_ENABLED', 'true').lower() == 'true'
+    
+    def configure_datadog_apm(self) -> Dict[str, Any]:
+        """
+        Configure Datadog APM for production monitoring.
+        
+        Returns:
+            Datadog APM configuration settings
+        """
+        if not DATADOG_APM_AVAILABLE or not self.apm_enabled:
+            return {}
+        
+        config = {
+            'enabled': True,
+            'service_name': os.getenv('DATADOG_SERVICE_NAME', 'flask-migration-app'),
+            'env': os.getenv('DATADOG_ENV', 'production'),
+            'version': os.getenv('DATADOG_VERSION', '1.0.0'),
+            'sample_rate': float(os.getenv('DATADOG_SAMPLE_RATE', '0.1')),
+            'agent_hostname': os.getenv('DATADOG_AGENT_HOST', 'localhost'),
+            'agent_port': int(os.getenv('DATADOG_AGENT_PORT', '8126')),
+            'distributed_tracing': True,
+            'priority_sampling': True,
+            'analytics_enabled': True,
+            'trace_sampling_rules': [
+                {'service': 'flask-migration-app', 'sample_rate': 0.1},
+                {'service': 'flask-migration-app', 'name': 'flask.request', 'sample_rate': 0.5}
+            ]
+        }
+        
+        self.logger.info("Datadog APM configuration initialized for production")
+        return config
+    
+    def configure_newrelic_apm(self) -> Dict[str, Any]:
+        """
+        Configure New Relic APM for production monitoring.
+        
+        Returns:
+            New Relic APM configuration settings
+        """
+        if not NEWRELIC_APM_AVAILABLE or not self.apm_enabled:
+            return {}
+        
+        config = {
+            'enabled': True,
+            'app_name': os.getenv('NEW_RELIC_APP_NAME', 'Flask Migration App (Production)'),
+            'license_key': os.getenv('NEW_RELIC_LICENSE_KEY'),
+            'environment': 'production',
+            'distributed_tracing': {'enabled': True},
+            'cross_application_tracer': {'enabled': True},
+            'error_collector': {
+                'enabled': True,
+                'ignore_status_codes': [404, 405]
+            },
+            'browser_monitoring': {'auto_instrument': True},
+            'application_logging': {
+                'enabled': True,
+                'forwarding': {'enabled': True},
+                'metrics': {'enabled': True}
+            }
+        }
+        
+        self.logger.info("New Relic APM configuration initialized for production")
+        return config
+    
+    def get_prometheus_metrics_config(self) -> Dict[str, Any]:
+        """
+        Get Prometheus metrics configuration for production.
+        
+        Returns:
+            Prometheus metrics collection configuration
+        """
+        if not PROMETHEUS_AVAILABLE or not self.prometheus_enabled:
+            return {}
+        
+        return {
+            'enabled': True,
+            'multiproc_dir': os.getenv('PROMETHEUS_MULTIPROC_DIR', '/tmp/prometheus_multiproc'),
+            'metrics_path': '/metrics',
+            'registry': CollectorRegistry(),
+            'collect_default_metrics': True,
+            'include_gunicorn_metrics': True,
+            'custom_metrics': {
+                'flask_requests_total': Counter(
+                    'flask_requests_total',
+                    'Total Flask requests',
+                    ['method', 'endpoint', 'status']
+                ),
+                'flask_request_duration_seconds': Histogram(
+                    'flask_request_duration_seconds',
+                    'Flask request duration in seconds',
+                    ['method', 'endpoint']
+                ),
+                'flask_database_operations_total': Counter(
+                    'flask_database_operations_total',
+                    'Total database operations',
+                    ['operation', 'collection', 'status']
+                ),
+                'flask_cache_operations_total': Counter(
+                    'flask_cache_operations_total',
+                    'Total cache operations',
+                    ['operation', 'cache_type', 'status']
+                ),
+                'flask_active_sessions': Gauge(
+                    'flask_active_sessions',
+                    'Number of active user sessions'
+                )
+            }
+        }
+
+
+class ProductionConfig(BaseConfig):
+    """
+    Production environment configuration with enterprise-grade security, performance
+    optimization, and comprehensive monitoring integration.
+    
+    This configuration class extends BaseConfig with production-specific settings that:
+    - Enforce TLS 1.3 and comprehensive security headers (Section 6.4.3)
+    - Optimize database and cache performance for ≤10% variance (Section 3.4.1)
+    - Integrate enterprise APM and monitoring (Section 3.6.1)
+    - Implement comprehensive security controls (Section 6.4.1)
+    - Support production deployment requirements (Section 8.1.2)
+    """
+    
+    def __init__(self):
+        """Initialize production configuration with enterprise settings."""
+        # Initialize security enforcer first
+        self.security_enforcer = ProductionSecurityEnforcer()
+        self.performance_optimizer = ProductionPerformanceOptimizer()
+        self.monitoring_integrator = ProductionMonitoringIntegrator()
+        
+        # Validate production requirements before configuration
+        self.security_enforcer.validate_production_requirements()
+        
+        # Initialize base configuration
+        super().__init__()
+        
+        # Apply production-specific configurations
+        self._configure_production_security()
+        self._configure_production_performance()
+        self._configure_production_monitoring()
+        self._configure_production_database()
+        self._configure_production_cache()
+        self._configure_production_external_services()
+        self._configure_production_logging()
+        self._configure_production_deployment()
+        
+        # Final production validation
+        self._validate_production_configuration()
+        
+        logger.info("Production configuration initialized with enterprise security and performance settings")
+    
+    def _configure_production_security(self) -> None:
+        """Configure production-specific security settings."""
+        # Strict production security enforcement
+        self.DEBUG = False
+        self.TESTING = False
+        self.FLASK_ENV = 'production'
+        
+        # Enhanced HTTPS enforcement (Flask-Talisman)
+        self.FORCE_HTTPS = True
+        self.SSL_DISABLE = False
+        
+        # TLS 1.3 enforcement configuration
+        self.TLS_VERSION = 'TLSv1_3'
+        self.TLS_CIPHERS = 'ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:DHE+CHACHA20:!aNULL:!MD5:!DSS'
+        self.TLS_CERT_PATH = os.getenv('TLS_CERT_PATH')
+        self.TLS_KEY_PATH = os.getenv('TLS_KEY_PATH')
+        self.TLS_CA_PATH = os.getenv('TLS_CA_PATH')
+        
+        # Enhanced Flask-Talisman configuration for production
+        self.TALISMAN_CONFIG = {
+            'force_https': True,
+            'force_https_permanent': True,
+            'strict_transport_security': True,
+            'strict_transport_security_max_age': 63072000,  # 2 years for production
+            'strict_transport_security_include_subdomains': True,
+            'strict_transport_security_preload': True,
+            'content_security_policy': {
+                'default-src': "'self'",
+                'script-src': [
+                    "'self'",
+                    "'nonce-{nonce}'",  # Dynamic nonce for scripts
+                    "https://cdn.auth0.com"
+                ],
+                'style-src': [
+                    "'self'",
+                    "'nonce-{nonce}'"  # Dynamic nonce for styles
+                ],
+                'img-src': [
+                    "'self'",
+                    "data:",
+                    "https:"
+                ],
+                'connect-src': [
+                    "'self'",
+                    "https://*.auth0.com",
+                    "https://*.amazonaws.com",
+                    "https://*.datadoghq.com"  # APM endpoints
+                ],
+                'font-src': "'self'",
+                'object-src': "'none'",
+                'base-uri': "'self'",
+                'frame-ancestors': "'none'",
+                'upgrade-insecure-requests': True,
+                'block-all-mixed-content': True
+            },
+            'content_security_policy_nonce_in': ['script-src', 'style-src'],
+            'content_security_policy_report_only': False,
+            'content_security_policy_report_uri': '/csp-report',
+            'referrer_policy': 'strict-origin-when-cross-origin',
+            'feature_policy': {
+                'geolocation': "'none'",
+                'microphone': "'none'",
+                'camera': "'none'",
+                'accelerometer': "'none'",
+                'gyroscope': "'none'",
+                'payment': "'none'",
+                'usb': "'none'"
+            },
+            'permissions_policy': {
+                'geolocation': '()',
+                'microphone': '()',
+                'camera': '()',
+                'payment': '()',
+                'usb': '()'
+            }
+        }
+        
+        # Production session security
+        self.SESSION_COOKIE_SECURE = True
+        self.SESSION_COOKIE_HTTPONLY = True
+        self.SESSION_COOKIE_SAMESITE = 'Strict'
+        self.SESSION_COOKIE_DOMAIN = os.getenv('SESSION_COOKIE_DOMAIN')
+        self.PERMANENT_SESSION_LIFETIME = timedelta(
+            hours=int(os.getenv('SESSION_LIFETIME_HOURS', '8'))  # Shorter for production
+        )
+        
+        # Enhanced rate limiting for production
+        self.RATELIMIT_ENABLED = True
+        self.RATELIMIT_DEFAULT = '1000 per hour, 100 per minute, 10 per second'
+        self.RATELIMIT_HEADERS_ENABLED = True
+        
+        # Strict CORS policy for production
+        self.CORS_ORIGINS = [
+            'https://app.company.com',
+            'https://admin.company.com'
+        ]
+        
+        # Add environment-specific origins
+        custom_origins = os.getenv('CORS_ALLOWED_ORIGINS')
+        if custom_origins:
+            self.CORS_ORIGINS.extend([origin.strip() for origin in custom_origins.split(',')])
+        
+        # Production JWT settings
+        self.JWT_EXPIRATION_DELTA = timedelta(hours=8)  # Shorter expiration for production
+        self.JWT_REFRESH_EXPIRATION_DELTA = timedelta(days=7)  # Reduced refresh window
+        
+        logger.info("Production security configuration applied with TLS 1.3 and enhanced headers")
+    
+    def _configure_production_performance(self) -> None:
+        """Configure production performance optimizations."""
+        # WSGI server optimization
+        self.GUNICORN_CONFIG = self.performance_optimizer.get_optimized_gunicorn_settings()
+        
+        # Request handling optimization
+        self.MAX_CONTENT_LENGTH = 50 * 1024 * 1024  # 50MB for production file uploads
+        
+        # JSON response optimization
+        self.JSON_SORT_KEYS = False  # Disable for performance
+        self.JSONIFY_PRETTYPRINT_REGULAR = False  # Disable for bandwidth optimization
+        
+        # Connection timeout optimization
+        self.HTTP_TIMEOUT = 20.0  # Reduced timeout for production
+        self.HTTP_RETRIES = 2  # Reduced retries for faster failure detection
+        
+        # Circuit breaker configuration for production reliability
+        self.CIRCUIT_BREAKER_ENABLED = True
+        self.CIRCUIT_BREAKER_FAILURE_THRESHOLD = 3  # Lower threshold for production
+        self.CIRCUIT_BREAKER_TIMEOUT = 30  # Faster recovery attempts
+        
+        logger.info("Production performance optimizations applied for ≤10% variance requirement")
+    
+    def _configure_production_monitoring(self) -> None:
+        """Configure production monitoring and observability."""
+        # Enable comprehensive monitoring
+        self.PROMETHEUS_METRICS_ENABLED = True
+        self.APM_ENABLED = True
+        self.HEALTH_CHECK_ENABLED = True
+        
+        # Datadog APM configuration
+        if DATADOG_APM_AVAILABLE:
+            self.DATADOG_CONFIG = self.monitoring_integrator.configure_datadog_apm()
+        
+        # New Relic APM configuration
+        if NEWRELIC_APM_AVAILABLE:
+            self.NEWRELIC_CONFIG = self.monitoring_integrator.configure_newrelic_apm()
+        
+        # Prometheus metrics configuration
+        if PROMETHEUS_AVAILABLE:
+            self.PROMETHEUS_CONFIG = self.monitoring_integrator.get_prometheus_metrics_config()
+        
+        # Performance monitoring for migration variance tracking
+        self.PERFORMANCE_MONITORING = {
+            'enabled': True,
+            'baseline_tracking': True,
+            'variance_threshold': 0.10,  # 10% variance limit
+            'metrics_collection_interval': 60,  # 1 minute
+            'performance_alerts_enabled': True,
+            'alert_thresholds': {
+                'response_time_p95': 500,  # milliseconds
+                'error_rate': 0.01,  # 1%
+                'database_connection_time': 100,  # milliseconds
+                'cache_hit_ratio': 0.90  # 90%
+            }
+        }
+        
+        # Health check configuration for Kubernetes
+        self.HEALTH_CHECK_CONFIG = {
+            'liveness_endpoint': '/health/live',
+            'readiness_endpoint': '/health/ready',
+            'startup_endpoint': '/health/startup',
+            'metrics_endpoint': '/metrics',
+            'timeout': 5,
+            'include_database_check': True,
+            'include_cache_check': True,
+            'include_external_services_check': True
+        }
+        
+        logger.info("Production monitoring configuration applied with APM and metrics collection")
+    
+    def _configure_production_database(self) -> None:
+        """Configure production database settings with optimization."""
+        # Production MongoDB configuration
+        mongodb_settings = self.performance_optimizer.get_optimized_mongodb_settings()
+        self.MONGODB_SETTINGS.update(mongodb_settings)
+        
+        # Enhanced MongoDB TLS configuration for production
+        if os.getenv('MONGODB_TLS_ENABLED', 'true').lower() == 'true':
+            self.MONGODB_SETTINGS.update({
+                'tls': True,
+                'tlsAllowInvalidCertificates': False,
+                'tlsAllowInvalidHostnames': False,
+                'tlsCAFile': os.getenv('MONGODB_TLS_CA_FILE'),
+                'tlsCertificateKeyFile': os.getenv('MONGODB_TLS_CERT_FILE'),
+                'tlsInsecure': False
+            })
+        
+        # Production connection validation
+        mongodb_uri = os.getenv('MONGODB_URI')
+        if not mongodb_uri:
+            raise ConfigurationError("MONGODB_URI is required for production")
+        
+        # Validate MongoDB URI format
+        if not (mongodb_uri.startswith('mongodb://') or mongodb_uri.startswith('mongodb+srv://')):
+            raise ConfigurationError("Invalid MongoDB URI format for production")
+        
+        self.MONGODB_URI = mongodb_uri
+        
+        logger.info("Production database configuration applied with enhanced security and performance")
+    
+    def _configure_production_cache(self) -> None:
+        """Configure production Redis caching with optimization."""
+        # Production Redis configuration
+        redis_settings = self.performance_optimizer.get_optimized_redis_settings()
+        self.REDIS_CONNECTION_POOL_KWARGS.update(redis_settings)
+        
+        # Enhanced Redis TLS configuration for production
+        if os.getenv('REDIS_TLS_ENABLED', 'false').lower() == 'true':
+            self.REDIS_CONNECTION_POOL_KWARGS.update({
+                'ssl': True,
+                'ssl_cert_reqs': ssl.CERT_REQUIRED,
+                'ssl_ca_certs': os.getenv('REDIS_TLS_CA_FILE'),
+                'ssl_certfile': os.getenv('REDIS_TLS_CERT_FILE'),
+                'ssl_keyfile': os.getenv('REDIS_TLS_KEY_FILE'),
+                'ssl_check_hostname': True
+            })
+        
+        # Production Redis host validation
+        redis_host = os.getenv('REDIS_HOST')
+        if not redis_host or redis_host == 'localhost':
+            raise ConfigurationError("Production Redis host must not be localhost")
+        
+        self.REDIS_HOST = redis_host
+        
+        # Session encryption configuration for production
+        self.SESSION_ENCRYPTION_ENABLED = True
+        self.SESSION_ENCRYPTION_KEY = os.getenv('SESSION_ENCRYPTION_KEY')
+        
+        if not self.SESSION_ENCRYPTION_KEY and not os.getenv('AWS_KMS_CMK_ARN'):
+            raise ConfigurationError(
+                "Session encryption requires either SESSION_ENCRYPTION_KEY or AWS_KMS_CMK_ARN"
+            )
+        
+        logger.info("Production cache configuration applied with TLS and session encryption")
+    
+    def _configure_production_external_services(self) -> None:
+        """Configure production external service integration."""
+        # AWS services configuration with enhanced security
+        self.AWS_ACCESS_KEY_ID = self.env_manager.get_required_env('AWS_ACCESS_KEY_ID')
+        self.AWS_SECRET_ACCESS_KEY = self.env_manager.get_required_env('AWS_SECRET_ACCESS_KEY')
+        self.AWS_DEFAULT_REGION = os.getenv('AWS_DEFAULT_REGION', 'us-east-1')
+        self.AWS_KMS_KEY_ARN = self.env_manager.get_required_env('AWS_KMS_CMK_ARN')
+        
+        # S3 configuration for production
+        self.S3_BUCKET_NAME = os.getenv('S3_BUCKET_NAME')
+        self.S3_REGION = os.getenv('S3_REGION', self.AWS_DEFAULT_REGION)
+        self.S3_SERVER_SIDE_ENCRYPTION = 'AES256'
+        self.S3_USE_SSL = True
+        
+        # Auth0 production configuration
+        self.AUTH0_DOMAIN = self.env_manager.get_required_env('AUTH0_DOMAIN')
+        self.AUTH0_CLIENT_ID = self.env_manager.get_required_env('AUTH0_CLIENT_ID')
+        self.AUTH0_CLIENT_SECRET = self.env_manager.get_required_env('AUTH0_CLIENT_SECRET')
+        self.AUTH0_AUDIENCE = os.getenv('AUTH0_AUDIENCE')
+        
+        # Production HTTP client configuration
+        self.HTTP_TIMEOUT = 20.0
+        self.HTTP_RETRIES = 2
+        self.HTTP_BACKOFF_FACTOR = 0.5
+        
+        # SSL/TLS verification for external services
+        self.VERIFY_SSL = True
+        self.SSL_CERT_PATH = os.getenv('SSL_CERT_PATH')
+        
+        logger.info("Production external services configuration applied with enhanced security")
+    
+    def _configure_production_logging(self) -> None:
+        """Configure production logging with structured output."""
+        # Production logging configuration
+        self.LOG_LEVEL = os.getenv('LOG_LEVEL', 'WARNING')
+        self.LOG_FORMAT = 'json'  # Structured JSON logging for production
+        
+        # Audit logging configuration
+        self.AUDIT_LOGGING_ENABLED = True
+        self.AUDIT_LOG_LEVEL = 'INFO'
+        self.AUDIT_LOG_FILE = os.getenv('AUDIT_LOG_FILE', '/var/log/flask-app/audit.log')
+        
+        # Security event logging
+        self.SECURITY_LOGGING_ENABLED = True
+        self.SECURITY_LOG_LEVEL = 'WARNING'
+        self.SECURITY_LOG_FILE = os.getenv('SECURITY_LOG_FILE', '/var/log/flask-app/security.log')
+        
+        # Performance logging
+        self.PERFORMANCE_LOGGING_ENABLED = True
+        self.PERFORMANCE_LOG_LEVEL = 'INFO'
+        self.PERFORMANCE_LOG_FILE = os.getenv('PERFORMANCE_LOG_FILE', '/var/log/flask-app/performance.log')
+        
+        # Log rotation configuration
+        self.LOG_ROTATION_ENABLED = True
+        self.LOG_MAX_SIZE = int(os.getenv('LOG_MAX_SIZE', '100')) * 1024 * 1024  # 100MB
+        self.LOG_BACKUP_COUNT = int(os.getenv('LOG_BACKUP_COUNT', '5'))
+        
+        # External log aggregation
+        self.LOG_AGGREGATION_ENABLED = os.getenv('LOG_AGGREGATION_ENABLED', 'false').lower() == 'true'
+        self.LOG_AGGREGATION_ENDPOINT = os.getenv('LOG_AGGREGATION_ENDPOINT')
+        
+        logger.info("Production logging configuration applied with structured JSON output")
+    
+    def _configure_production_deployment(self) -> None:
+        """Configure production deployment settings."""
+        # Container configuration
+        self.CONTAINER_PORT = int(os.getenv('PORT', '8000'))
+        self.CONTAINER_HEALTH_CHECK_PATH = '/health/live'
+        
+        # Blue-green deployment support
+        self.DEPLOYMENT_VERSION = os.getenv('DEPLOYMENT_VERSION', '1.0.0')
+        self.DEPLOYMENT_ENVIRONMENT = 'production'
+        self.FEATURE_FLAGS_ENABLED = os.getenv('FEATURE_FLAGS_ENABLED', 'true').lower() == 'true'
+        
+        # Kubernetes configuration
+        self.KUBERNETES_NAMESPACE = os.getenv('KUBERNETES_NAMESPACE', 'default')
+        self.KUBERNETES_SERVICE_NAME = os.getenv('KUBERNETES_SERVICE_NAME', 'flask-migration-app')
+        
+        # Load balancer configuration
+        self.LOAD_BALANCER_HEALTH_CHECK = '/health/ready'
+        self.LOAD_BALANCER_TIMEOUT = int(os.getenv('LOAD_BALANCER_TIMEOUT', '30'))
+        
+        # Graceful shutdown configuration
+        self.GRACEFUL_SHUTDOWN_TIMEOUT = int(os.getenv('GRACEFUL_SHUTDOWN_TIMEOUT', '30'))
+        self.SHUTDOWN_SIGNALS = ['SIGTERM', 'SIGINT']
+        
+        # Auto-scaling configuration
+        self.AUTOSCALING_ENABLED = os.getenv('AUTOSCALING_ENABLED', 'true').lower() == 'true'
+        self.AUTOSCALING_MIN_REPLICAS = int(os.getenv('AUTOSCALING_MIN_REPLICAS', '3'))
+        self.AUTOSCALING_MAX_REPLICAS = int(os.getenv('AUTOSCALING_MAX_REPLICAS', '20'))
+        
+        logger.info("Production deployment configuration applied with container orchestration support")
+    
+    def _validate_production_configuration(self) -> None:
+        """Validate complete production configuration."""
+        validation_errors = []
+        
+        # Validate TLS configuration
+        if self.FORCE_HTTPS and not self.TLS_CERT_PATH:
+            self.logger.warning("TLS certificate path not specified - using system defaults")
+        
+        # Validate monitoring configuration
+        if not self.PROMETHEUS_METRICS_ENABLED and not self.APM_ENABLED:
+            validation_errors.append("Production requires either Prometheus or APM monitoring enabled")
+        
+        # Validate security headers
+        if not hasattr(self, 'TALISMAN_CONFIG'):
+            validation_errors.append("Flask-Talisman configuration missing for production security")
+        
+        # Validate encryption configuration
+        if not self.SESSION_ENCRYPTION_KEY and not self.AWS_KMS_KEY_ARN:
+            validation_errors.append("Session encryption configuration missing")
+        
+        # Validate external service configuration
+        required_aws_config = ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_KMS_KEY_ARN']
+        missing_aws_config = [key for key in required_aws_config if not getattr(self, key, None)]
+        if missing_aws_config:
+            validation_errors.append(f"Missing AWS configuration: {', '.join(missing_aws_config)}")
+        
+        if validation_errors:
+            error_message = "Production configuration validation failed:\n" + "\n".join(
+                f"- {error}" for error in validation_errors
+            )
+            logger.error(error_message)
+            raise ConfigurationError(error_message)
+        
+        logger.info("Production configuration validation completed successfully")
+    
+    def get_security_headers_config(self) -> Dict[str, Any]:
+        """
+        Get Flask-Talisman security headers configuration for production.
+        
+        Returns:
+            Complete Flask-Talisman configuration with enterprise security headers
+        """
+        return self.TALISMAN_CONFIG
+    
+    def get_monitoring_config(self) -> Dict[str, Any]:
+        """
+        Get comprehensive monitoring configuration for production.
+        
+        Returns:
+            Complete monitoring configuration including APM and metrics
+        """
+        config = {
+            'prometheus': getattr(self, 'PROMETHEUS_CONFIG', {}),
+            'performance_monitoring': getattr(self, 'PERFORMANCE_MONITORING', {}),
+            'health_checks': getattr(self, 'HEALTH_CHECK_CONFIG', {})
+        }
+        
+        if hasattr(self, 'DATADOG_CONFIG'):
+            config['datadog'] = self.DATADOG_CONFIG
+        
+        if hasattr(self, 'NEWRELIC_CONFIG'):
+            config['newrelic'] = self.NEWRELIC_CONFIG
+        
+        return config
+    
+    def get_deployment_config(self) -> Dict[str, Any]:
+        """
+        Get deployment configuration for container orchestration.
+        
+        Returns:
+            Complete deployment configuration for Kubernetes and load balancer integration
+        """
+        return {
+            'container_port': self.CONTAINER_PORT,
+            'health_check_path': self.CONTAINER_HEALTH_CHECK_PATH,
+            'deployment_version': self.DEPLOYMENT_VERSION,
+            'kubernetes_namespace': self.KUBERNETES_NAMESPACE,
+            'kubernetes_service_name': self.KUBERNETES_SERVICE_NAME,
+            'load_balancer_health_check': self.LOAD_BALANCER_HEALTH_CHECK,
+            'load_balancer_timeout': self.LOAD_BALANCER_TIMEOUT,
+            'graceful_shutdown_timeout': self.GRACEFUL_SHUTDOWN_TIMEOUT,
+            'autoscaling_enabled': self.AUTOSCALING_ENABLED,
+            'autoscaling_min_replicas': self.AUTOSCALING_MIN_REPLICAS,
+            'autoscaling_max_replicas': self.AUTOSCALING_MAX_REPLICAS
+        }
+    
+    def export_environment_template(self) -> str:
+        """
+        Export production environment variable template.
+        
+        Returns:
+            Environment variable template for production deployment
+        """
+        template = """
+# Flask Application Configuration
+SECRET_KEY=your-production-secret-key-64-chars-minimum
+FLASK_ENV=production
+FLASK_DEBUG=false
+
+# Database Configuration
+MONGODB_URI=mongodb://username:password@host:port/database?ssl=true
+MONGODB_TLS_ENABLED=true
+MONGODB_TLS_CERT_FILE=/path/to/mongodb-client.pem
+MONGODB_TLS_CA_FILE=/path/to/mongodb-ca.pem
+MONGODB_MAX_POOL_SIZE=100
+MONGODB_MIN_POOL_SIZE=20
+
+# Redis Configuration
+REDIS_HOST=production-redis-host
+REDIS_PORT=6379
+REDIS_PASSWORD=your-redis-password
+REDIS_TLS_ENABLED=false
+REDIS_MAX_CONNECTIONS=100
+
+# AWS Configuration
+AWS_ACCESS_KEY_ID=your-aws-access-key
+AWS_SECRET_ACCESS_KEY=your-aws-secret-key
+AWS_DEFAULT_REGION=us-east-1
+AWS_KMS_CMK_ARN=arn:aws:kms:region:account:key/key-id
+
+# Auth0 Configuration
+AUTH0_DOMAIN=your-domain.auth0.com
+AUTH0_CLIENT_ID=your-client-id
+AUTH0_CLIENT_SECRET=your-client-secret
+AUTH0_AUDIENCE=your-api-audience
+
+# TLS Configuration
+TLS_CERT_PATH=/path/to/certificate.pem
+TLS_KEY_PATH=/path/to/private-key.pem
+TLS_CA_PATH=/path/to/ca-certificate.pem
+
+# Session Configuration
+SESSION_ENCRYPTION_KEY=base64-encoded-32-byte-key
+SESSION_LIFETIME_HOURS=8
+SESSION_COOKIE_DOMAIN=.company.com
+
+# Monitoring Configuration
+APM_ENABLED=true
+PROMETHEUS_METRICS_ENABLED=true
+DATADOG_APM_ENABLED=true
+DATADOG_SERVICE_NAME=flask-migration-app
+DATADOG_ENV=production
+
+# Performance Configuration
+GUNICORN_WORKERS=9
+GUNICORN_MAX_REQUESTS=1000
+GUNICORN_TIMEOUT=30
+
+# Security Configuration
+CORS_ALLOWED_ORIGINS=https://app.company.com,https://admin.company.com
+
+# Deployment Configuration
+PORT=8000
+KUBERNETES_NAMESPACE=production
+DEPLOYMENT_VERSION=1.0.0
+AUTOSCALING_MIN_REPLICAS=3
+AUTOSCALING_MAX_REPLICAS=20
+"""
+        return template.strip()
 
 
 # Production configuration instance
 production_config = ProductionConfig()
 
-# Validate production configuration on import
-try:
-    validation_results = ProductionConfig.validate_production_config()
-    if not validation_results['valid']:
-        logger = logging.getLogger(__name__)
-        logger.error(f"Production configuration validation failed: {validation_results['errors']}")
-        for warning in validation_results['warnings']:
-            logger.warning(warning)
-except Exception as e:
-    logger = logging.getLogger(__name__)
-    logger.error(f"Production configuration validation error: {str(e)}")
-
-# Export configuration for application factory
-__all__ = ['ProductionConfig', 'production_config']
+# Export production configuration
+__all__ = [
+    'ProductionConfig',
+    'ProductionSecurityEnforcer',
+    'ProductionPerformanceOptimizer', 
+    'ProductionMonitoringIntegrator',
+    'production_config'
+]
