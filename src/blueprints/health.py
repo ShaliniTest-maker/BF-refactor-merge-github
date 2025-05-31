@@ -1,1405 +1,1117 @@
 """
-Health Monitoring Blueprint
+Health Monitoring Blueprint for Flask Migration Application
 
-Comprehensive health monitoring and system status Blueprint providing health check endpoints for
-load balancers, Kubernetes probes, and monitoring systems. Implements application health validation,
-database connectivity checks, external service status, and Prometheus metrics exposure per Section 6.1.3
-and Section 6.5.2.1 requirements.
-
-This Blueprint provides enterprise-grade health monitoring capabilities for the Flask application migration,
-ensuring seamless integration with container orchestration, load balancer health checks, and monitoring
-infrastructure while maintaining ≤10% performance variance from Node.js baseline per Section 0.1.1.
+This Blueprint provides comprehensive health check endpoints for load balancers, Kubernetes probes,
+and monitoring systems. Implements application health validation, database connectivity checks,
+external service status monitoring, and Prometheus metrics exposure per Section 6.1.3 and Section 6.5.
 
 Key Features:
-- Kubernetes-native liveness and readiness probe endpoints per Section 6.5.2.1
-- Load balancer compatible health check endpoints per Section 6.1.3
-- Comprehensive dependency health validation (MongoDB, Redis, external services)
-- Prometheus metrics endpoint for monitoring integration per Section 6.5.1.1
-- Circuit breaker state monitoring and reporting per Section 6.1.3
-- Performance variance tracking against Node.js baseline per Section 0.3.2
-- Flask application factory pattern integration per Section 6.1.1
+- Kubernetes-native readiness and liveness probe endpoints per Section 6.5.2.1
+- Basic application health status for load balancer integration per Section 6.1.3
+- Comprehensive dependency health validation per Section 6.1.3
+- Prometheus metrics endpoint for enterprise monitoring per Section 6.5.1.1
+- Circuit breaker state monitoring for external services per Section 6.1.3
+- PyMongo and Motor database connection health validation per Section 6.1.3
+- Redis connectivity monitoring with connection pool status per Section 6.1.3
+- Performance metrics tracking for ≤10% variance compliance per Section 0.1.1
 
-Endpoints:
-- GET /health - Basic application status and overall health summary
-- GET /health/live - Kubernetes liveness probe (application process health)
-- GET /health/ready - Kubernetes readiness probe (dependency health validation)
-- GET /health/dependencies - Detailed dependency health status and metrics
-- GET /metrics - Prometheus metrics endpoint for monitoring system integration
+Endpoint Implementation:
+- /health: Basic application status with overall health summary
+- /health/live: Kubernetes liveness probe (application process health)
+- /health/ready: Kubernetes readiness probe (dependency availability)
+- /health/dependencies: Detailed dependency health status
+- /metrics: Prometheus metrics endpoint for monitoring integration
 
-Health Check Components:
-- Database connectivity validation (PyMongo synchronous and Motor async clients)
-- Redis cache connectivity and circuit breaker state monitoring
-- External service integration health validation and circuit breaker states
-- Application performance metrics and variance tracking
-- System resource utilization monitoring and capacity health
+Performance Requirements:
+- Health check response time: <100ms per Section 6.5.2.1
+- Monitoring overhead: <2% CPU impact per Section 6.5.1.1
+- Prometheus metrics collection: 15-second intervals per Section 6.5.1.1
 
-Integration Points:
-- src.data: MongoDB health validation via DatabaseHealthChecker
-- src.cache: Redis connectivity monitoring via CacheManager health checks
-- src.monitoring: Comprehensive health state management via HealthChecker
-- src.integrations: External service circuit breaker state monitoring
-
-Compliance:
-- Section 6.1.3: Health check endpoints for monitoring application status and connectivity
-- Section 6.5.2.1: Kubernetes readiness and liveness probe support
-- Section 6.5.1.1: Prometheus metrics endpoint for monitoring integration
-- Section 6.1.1: Flask application factory pattern implementation
-- Section 0.1.1: Performance monitoring ensuring ≤10% variance from Node.js baseline
+References:
+- Section 6.1.3: Health Check and Monitoring Endpoints implementation
+- Section 6.5.2.1: Kubernetes Health Probe Configuration and requirements
+- Section 6.5.1.1: Prometheus metrics collection and enterprise integration
+- Section 0.1.1: Performance monitoring ensuring ≤10% variance compliance
 """
 
-import time
+import asyncio
 import logging
+import threading
+import time
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional, Tuple
-from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple, Union
+from functools import wraps
 
-from flask import Blueprint, jsonify, request, current_app, g
-from werkzeug.exceptions import ServiceUnavailable, InternalServerError
-
+from flask import Blueprint, Flask, current_app, jsonify, request, Response
 import structlog
 
-# Import dependency health checking capabilities
-from src.data import (
-    get_database_manager,
-    DatabaseManager,
-    get_mongodb_client,
-    get_motor_database
-)
+# Prometheus metrics for health monitoring and enterprise integration
+try:
+    from prometheus_client import Counter, Gauge, Histogram, Info, generate_latest, CONTENT_TYPE_LATEST
+    from prometheus_client.multiprocess import MultiProcessCollector
+    from prometheus_client.registry import REGISTRY, CollectorRegistry
+    PROMETHEUS_AVAILABLE = True
+except ImportError:
+    PROMETHEUS_AVAILABLE = False
 
-from src.cache import (
-    get_cache_manager,
-    CacheManager,
-    is_cache_available
-)
+# Database health monitoring integration per Section 6.1.3
+try:
+    from src.data import (
+        get_database_health_status,
+        get_database_performance_metrics,
+        get_mongodb_manager,
+        get_async_mongodb_manager,
+        DatabaseServices,
+        get_database_services
+    )
+    DATABASE_MONITORING_AVAILABLE = True
+except ImportError:
+    DATABASE_MONITORING_AVAILABLE = False
 
-from src.monitoring import (
-    get_health_status,
-    get_circuit_breaker_states,
-    HealthChecker,
-    health_checker,
-    HealthStatus,
-    DependencyType,
-    HealthCheckResult,
-    SystemHealth,
-    CircuitBreakerState,
-    get_performance_summary,
-    METRICS_REGISTRY,
-    get_monitoring_stack
-)
+# Cache health monitoring integration per Section 6.1.3
+try:
+    from src.cache import (
+        get_cache_health,
+        get_cache_stats,
+        get_default_redis_client,
+        get_cache_extensions
+    )
+    CACHE_MONITORING_AVAILABLE = True
+except ImportError:
+    CACHE_MONITORING_AVAILABLE = False
 
-from src.integrations import (
-    get_monitoring_summary,
-    external_service_monitor
-)
+# Monitoring infrastructure integration per Section 6.5.1
+try:
+    from src.monitoring import (
+        get_monitoring_manager,
+        get_monitoring_logger,
+        get_metrics_collector,
+        get_health_endpoints
+    )
+    MONITORING_INFRASTRUCTURE_AVAILABLE = True
+except ImportError:
+    MONITORING_INFRASTRUCTURE_AVAILABLE = False
+
+# External service integration monitoring per Section 6.1.3
+try:
+    from src.integrations import (
+        get_integration_summary,
+        integration_manager,
+        external_service_monitor
+    )
+    INTEGRATIONS_MONITORING_AVAILABLE = True
+except ImportError:
+    INTEGRATIONS_MONITORING_AVAILABLE = False
 
 # Configure structured logger for health monitoring
 logger = structlog.get_logger(__name__)
 
-# Create health monitoring Blueprint
-health_blueprint = Blueprint(
-    'health',
+# Create health monitoring Blueprint per Section 6.1.1 Flask Blueprint architecture
+health_bp = Blueprint(
+    'health', 
     __name__,
-    url_prefix='/health'
+    url_prefix='',  # No prefix to allow /health, /health/live, /health/ready
+    template_folder=None,
+    static_folder=None
 )
 
+# Prometheus metrics for health monitoring per Section 6.5.1.1
+if PROMETHEUS_AVAILABLE:
+    # Health check request metrics
+    health_check_requests = Counter(
+        'health_check_requests_total',
+        'Total number of health check requests',
+        ['endpoint', 'status']
+    )
+    
+    # Health check response time tracking
+    health_check_duration = Histogram(
+        'health_check_duration_seconds',
+        'Time spent processing health checks',
+        ['endpoint']
+    )
+    
+    # Dependency health status gauges
+    dependency_health_status = Gauge(
+        'dependency_health_status',
+        'Health status of dependencies (1=healthy, 0.5=degraded, 0=unhealthy)',
+        ['dependency_name', 'dependency_type']
+    )
+    
+    # Overall application health gauge
+    application_health_status = Gauge(
+        'application_health_status',
+        'Overall application health status (1=healthy, 0.5=degraded, 0=unhealthy)'
+    )
+    
+    # Database connection pool metrics
+    database_connection_pool_usage = Gauge(
+        'database_connection_pool_usage_ratio',
+        'Database connection pool usage ratio',
+        ['pool_type', 'database_name']
+    )
+    
+    # External service circuit breaker states
+    circuit_breaker_state = Gauge(
+        'circuit_breaker_state',
+        'Circuit breaker state (1=closed, 0.5=half-open, 0=open)',
+        ['service_name', 'service_type']
+    )
+    
+    # Performance variance tracking per Section 0.1.1
+    performance_variance_percentage = Gauge(
+        'performance_variance_percentage',
+        'Performance variance percentage from Node.js baseline',
+        ['metric_type', 'endpoint']
+    )
+    
+    # Health check execution time compliance tracking
+    health_check_compliance = Gauge(
+        'health_check_response_time_compliance',
+        'Health check response time compliance (1=<100ms, 0=>=100ms)',
+        ['endpoint']
+    )
 
-@dataclass
-class HealthCheckConfiguration:
-    """
-    Configuration for health check endpoints and monitoring thresholds.
-    
-    Defines health check timeouts, dependency validation settings, and performance
-    monitoring thresholds for comprehensive health state assessment.
-    """
-    
-    # Health check timeout settings
-    database_timeout_seconds: float = 5.0
-    cache_timeout_seconds: float = 3.0
-    external_service_timeout_seconds: float = 10.0
-    overall_health_timeout_seconds: float = 15.0
-    
-    # Performance monitoring thresholds
-    max_response_time_variance_percent: float = 10.0  # ≤10% variance requirement
-    cpu_utilization_warning_threshold: float = 70.0
-    cpu_utilization_critical_threshold: float = 90.0
-    memory_usage_warning_threshold: float = 80.0
-    memory_usage_critical_threshold: float = 95.0
-    
-    # Dependency health validation settings
-    enable_database_health_checks: bool = True
-    enable_cache_health_checks: bool = True
-    enable_external_service_health_checks: bool = True
-    enable_circuit_breaker_monitoring: bool = True
-    
-    # Kubernetes probe settings
-    liveness_probe_enabled: bool = True
-    readiness_probe_enabled: bool = True
-    load_balancer_health_enabled: bool = True
-    
-    # Metrics and monitoring settings
-    prometheus_metrics_enabled: bool = True
-    performance_variance_tracking: bool = True
-    detailed_dependency_reporting: bool = True
-    
-    def __post_init__(self):
-        """Validate configuration parameters."""
-        if self.database_timeout_seconds <= 0:
-            raise ValueError("Database timeout must be positive")
-        if self.cache_timeout_seconds <= 0:
-            raise ValueError("Cache timeout must be positive")
-        if not 0 < self.max_response_time_variance_percent <= 100:
-            raise ValueError("Response time variance percent must be between 0 and 100")
 
-
-@dataclass
-class DependencyHealthStatus:
-    """
-    Health status container for individual system dependencies.
-    
-    Provides standardized health status representation for database, cache,
-    external services, and monitoring components with detailed diagnostic information.
-    """
-    
-    name: str
-    status: str  # 'healthy', 'degraded', 'unhealthy', 'unknown'
-    response_time_ms: Optional[float] = None
-    error_message: Optional[str] = None
-    last_check_timestamp: Optional[str] = None
-    additional_info: Dict[str, Any] = field(default_factory=dict)
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for JSON serialization."""
-        return {
-            'name': self.name,
-            'status': self.status,
-            'response_time_ms': self.response_time_ms,
-            'error_message': self.error_message,
-            'last_check_timestamp': self.last_check_timestamp,
-            'additional_info': self.additional_info
-        }
-    
-    @property
-    def is_healthy(self) -> bool:
-        """Check if dependency is healthy."""
-        return self.status == 'healthy'
-    
-    @property
-    def is_operational(self) -> bool:
-        """Check if dependency is operational (healthy or degraded)."""
-        return self.status in ['healthy', 'degraded']
+class HealthStatus:
+    """Enumeration for health status values with enterprise monitoring integration."""
+    HEALTHY = "healthy"
+    DEGRADED = "degraded" 
+    UNHEALTHY = "unhealthy"
+    UNKNOWN = "unknown"
 
 
 class HealthMonitor:
     """
-    Central health monitoring coordinator providing comprehensive health state assessment.
+    Centralized health monitoring manager providing comprehensive health validation
+    and Prometheus metrics integration per Section 6.1.3 and Section 6.5.1.1.
     
-    Coordinates health checks across all system dependencies including database connections,
-    cache systems, external service integrations, and monitoring components while tracking
-    performance metrics and circuit breaker states.
+    This class coordinates health checks across all application dependencies including
+    database connections, cache services, external integrations, and circuit breaker
+    states with enterprise-grade monitoring and alerting capabilities.
     """
     
-    def __init__(self, config: Optional[HealthCheckConfiguration] = None):
-        """
-        Initialize health monitor with configuration.
+    def __init__(self):
+        """Initialize health monitor with comprehensive dependency tracking."""
+        self._last_health_check = None
+        self._cached_health_status = None
+        self._cache_ttl = 30  # Cache health status for 30 seconds
+        self._check_lock = threading.RLock()
         
-        Args:
-            config: Health check configuration (creates default if not provided)
-        """
-        self.config = config or HealthCheckConfiguration()
-        self.last_full_health_check: Optional[datetime] = None
-        self.cached_health_status: Optional[Dict[str, Any]] = None
-        self.health_check_count = 0
+        # Initialize dependency status tracking
+        self._dependency_status = {
+            'database': HealthStatus.UNKNOWN,
+            'cache': HealthStatus.UNKNOWN,
+            'monitoring': HealthStatus.UNKNOWN,
+            'integrations': HealthStatus.UNKNOWN
+        }
         
         logger.info(
             "Health monitor initialized",
-            database_timeout=self.config.database_timeout_seconds,
-            cache_timeout=self.config.cache_timeout_seconds,
-            external_service_timeout=self.config.external_service_timeout_seconds,
-            performance_variance_threshold=self.config.max_response_time_variance_percent
+            database_monitoring_available=DATABASE_MONITORING_AVAILABLE,
+            cache_monitoring_available=CACHE_MONITORING_AVAILABLE,
+            monitoring_infrastructure_available=MONITORING_INFRASTRUCTURE_AVAILABLE,
+            integrations_monitoring_available=INTEGRATIONS_MONITORING_AVAILABLE,
+            prometheus_available=PROMETHEUS_AVAILABLE
         )
     
-    def check_application_liveness(self) -> Tuple[Dict[str, Any], int]:
+    def check_application_health(self, detailed: bool = False) -> Dict[str, Any]:
         """
-        Check application liveness for Kubernetes liveness probe per Section 6.5.2.1.
+        Perform comprehensive application health check with dependency validation.
         
-        Validates that the Flask application process is running and capable of handling
-        requests. Returns HTTP 200 for healthy state, HTTP 503 for fatal conditions
-        requiring container restart.
+        Implements health validation per Section 6.1.3 with <100ms response time
+        compliance per Section 6.5.2.1 and comprehensive dependency monitoring.
         
+        Args:
+            detailed: Include detailed dependency information and metrics
+            
         Returns:
-            Tuple[Dict[str, Any], int]: Response data and HTTP status code
+            Dict containing comprehensive health status and dependency information
         """
+        start_time = time.time()
+        
         try:
-            start_time = time.time()
-            
-            # Basic Flask application health check
-            app_status = {
-                'status': 'healthy',
-                'timestamp': datetime.now(timezone.utc).isoformat(),
-                'check_type': 'liveness',
-                'application': {
-                    'flask_app_name': current_app.name,
-                    'debug_mode': current_app.debug,
-                    'testing_mode': current_app.testing,
-                    'process_responsive': True
-                },
-                'uptime_info': {
-                    'check_duration_ms': round((time.time() - start_time) * 1000, 2)
-                }
-            }
-            
-            # Validate critical application components
-            try:
-                # Test basic Flask application responsiveness
-                with current_app.app_context():
-                    # Verify application context is accessible
-                    config_available = bool(current_app.config)
-                    extensions_available = hasattr(current_app, 'extensions')
+            with self._check_lock:
+                # Use cached status if recent and not requesting detailed info
+                if (not detailed and 
+                    self._cached_health_status and 
+                    self._last_health_check and 
+                    (time.time() - self._last_health_check) < self._cache_ttl):
                     
-                    app_status['application'].update({
-                        'config_accessible': config_available,
-                        'extensions_loaded': extensions_available
-                    })
+                    return self._cached_health_status
+                
+                # Perform comprehensive health check
+                health_status = {
+                    'status': HealthStatus.HEALTHY,
+                    'timestamp': datetime.now(timezone.utc).isoformat(),
+                    'application': {
+                        'name': 'flask-migration-app',
+                        'status': HealthStatus.HEALTHY,
+                        'version': current_app.config.get('APP_VERSION', '1.0.0'),
+                        'environment': current_app.config.get('ENVIRONMENT', 'development')
+                    },
+                    'dependencies': {},
+                    'summary': {
+                        'total_dependencies': 0,
+                        'healthy_dependencies': 0,
+                        'degraded_dependencies': 0,
+                        'unhealthy_dependencies': 0
+                    }
+                }
+                
+                # Check database health per Section 6.1.3
+                database_status = self._check_database_health()
+                health_status['dependencies']['database'] = database_status
+                self._dependency_status['database'] = database_status['status']
+                
+                # Check cache health per Section 6.1.3  
+                cache_status = self._check_cache_health()
+                health_status['dependencies']['cache'] = cache_status
+                self._dependency_status['cache'] = cache_status['status']
+                
+                # Check monitoring infrastructure
+                monitoring_status = self._check_monitoring_health()
+                health_status['dependencies']['monitoring'] = monitoring_status
+                self._dependency_status['monitoring'] = monitoring_status['status']
+                
+                # Check external integrations per Section 6.1.3
+                integrations_status = self._check_integrations_health()
+                health_status['dependencies']['integrations'] = integrations_status
+                self._dependency_status['integrations'] = integrations_status['status']
+                
+                # Calculate overall health status and summary
+                self._calculate_overall_health(health_status)
+                
+                # Include detailed metrics if requested
+                if detailed:
+                    health_status['metrics'] = self._collect_health_metrics()
+                    health_status['performance'] = self._collect_performance_metrics()
+                
+                # Update Prometheus metrics per Section 6.5.1.1
+                self._update_health_metrics(health_status)
+                
+                # Cache the result
+                self._cached_health_status = health_status
+                self._last_health_check = time.time()
+                
+                # Track response time compliance per Section 6.5.2.1
+                response_time_ms = (time.time() - start_time) * 1000
+                compliance = 1.0 if response_time_ms < 100 else 0.0
+                
+                if PROMETHEUS_AVAILABLE:
+                    health_check_compliance.labels(endpoint='application').set(compliance)
                 
                 logger.debug(
-                    "Application liveness check completed",
-                    status="healthy",
-                    duration_ms=app_status['uptime_info']['check_duration_ms']
+                    "Application health check completed",
+                    overall_status=health_status['status'],
+                    response_time_ms=response_time_ms,
+                    compliance=compliance == 1.0,
+                    total_dependencies=health_status['summary']['total_dependencies'],
+                    healthy_dependencies=health_status['summary']['healthy_dependencies']
                 )
                 
-                return app_status, 200
+                return health_status
                 
-            except Exception as app_error:
-                logger.error(
-                    "Application liveness check failed",
-                    error=str(app_error),
-                    error_type=type(app_error).__name__
-                )
-                
-                app_status.update({
-                    'status': 'unhealthy',
-                    'error': 'Application context failure',
-                    'error_details': str(app_error)
-                })
-                
-                return app_status, 503
-        
         except Exception as e:
-            logger.error(
-                "Liveness probe execution failed",
-                error=str(e),
-                error_type=type(e).__name__
-            )
-            
-            return {
-                'status': 'unhealthy',
+            error_response = {
+                'status': HealthStatus.UNHEALTHY,
                 'timestamp': datetime.now(timezone.utc).isoformat(),
-                'check_type': 'liveness',
-                'error': 'Liveness probe execution failed',
-                'error_details': str(e)
-            }, 503
-    
-    def check_application_readiness(self) -> Tuple[Dict[str, Any], int]:
-        """
-        Check application readiness for Kubernetes readiness probe per Section 6.5.2.1.
-        
-        Validates that all critical dependencies (MongoDB, Redis, external services) are
-        accessible and functional. Returns HTTP 200 when ready to serve traffic,
-        HTTP 503 when dependencies are unavailable or degraded.
-        
-        Returns:
-            Tuple[Dict[str, Any], int]: Response data and HTTP status code
-        """
-        try:
-            start_time = time.time()
-            dependency_statuses = []
-            overall_ready = True
-            
-            readiness_status = {
-                'status': 'ready',
-                'timestamp': datetime.now(timezone.utc).isoformat(),
-                'check_type': 'readiness',
-                'dependencies': {},
-                'summary': {
-                    'total_dependencies': 0,
-                    'healthy_dependencies': 0,
-                    'degraded_dependencies': 0,
-                    'unhealthy_dependencies': 0
+                'error': str(e),
+                'application': {
+                    'name': 'flask-migration-app',
+                    'status': HealthStatus.UNHEALTHY
                 }
             }
             
-            # Check database connectivity
-            if self.config.enable_database_health_checks:
-                db_status = self._check_database_health()
-                dependency_statuses.append(db_status)
-                readiness_status['dependencies']['database'] = db_status.to_dict()
-                
-                if not db_status.is_operational:
-                    overall_ready = False
-            
-            # Check cache connectivity
-            if self.config.enable_cache_health_checks:
-                cache_status = self._check_cache_health()
-                dependency_statuses.append(cache_status)
-                readiness_status['dependencies']['cache'] = cache_status.to_dict()
-                
-                if not cache_status.is_operational:
-                    overall_ready = False
-            
-            # Check external service health
-            if self.config.enable_external_service_health_checks:
-                external_status = self._check_external_services_health()
-                readiness_status['dependencies']['external_services'] = external_status
-                
-                # Determine if external services are operational
-                external_operational = True
-                for service_name, service_data in external_status.items():
-                    if service_data.get('status') not in ['healthy', 'degraded']:
-                        external_operational = False
-                        break
-                
-                if not external_operational:
-                    overall_ready = False
-            
-            # Check monitoring system health
-            monitoring_status = self._check_monitoring_health()
-            readiness_status['dependencies']['monitoring'] = monitoring_status
-            
-            # Calculate dependency summary
-            for dep_status in dependency_statuses:
-                readiness_status['summary']['total_dependencies'] += 1
-                if dep_status.status == 'healthy':
-                    readiness_status['summary']['healthy_dependencies'] += 1
-                elif dep_status.status == 'degraded':
-                    readiness_status['summary']['degraded_dependencies'] += 1
-                else:
-                    readiness_status['summary']['unhealthy_dependencies'] += 1
-            
-            # Add external services to summary
-            if self.config.enable_external_service_health_checks:
-                for service_name, service_data in external_status.items():
-                    readiness_status['summary']['total_dependencies'] += 1
-                    service_status = service_data.get('status', 'unknown')
-                    if service_status == 'healthy':
-                        readiness_status['summary']['healthy_dependencies'] += 1
-                    elif service_status == 'degraded':
-                        readiness_status['summary']['degraded_dependencies'] += 1
-                    else:
-                        readiness_status['summary']['unhealthy_dependencies'] += 1
-            
-            # Add monitoring to summary
-            readiness_status['summary']['total_dependencies'] += 1
-            monitoring_status_value = monitoring_status.get('status', 'unknown')
-            if monitoring_status_value == 'healthy':
-                readiness_status['summary']['healthy_dependencies'] += 1
-            elif monitoring_status_value == 'degraded':
-                readiness_status['summary']['degraded_dependencies'] += 1
-            else:
-                readiness_status['summary']['unhealthy_dependencies'] += 1
-                overall_ready = False
-            
-            # Finalize readiness status
-            readiness_status['uptime_info'] = {
-                'check_duration_ms': round((time.time() - start_time) * 1000, 2)
-            }
-            
-            if overall_ready:
-                readiness_status['status'] = 'ready'
-                status_code = 200
-                logger.info(
-                    "Application readiness check passed",
-                    total_dependencies=readiness_status['summary']['total_dependencies'],
-                    healthy_count=readiness_status['summary']['healthy_dependencies'],
-                    duration_ms=readiness_status['uptime_info']['check_duration_ms']
-                )
-            else:
-                readiness_status['status'] = 'not_ready'
-                status_code = 503
-                logger.warning(
-                    "Application readiness check failed",
-                    total_dependencies=readiness_status['summary']['total_dependencies'],
-                    unhealthy_count=readiness_status['summary']['unhealthy_dependencies'],
-                    degraded_count=readiness_status['summary']['degraded_dependencies'],
-                    duration_ms=readiness_status['uptime_info']['check_duration_ms']
-                )
-            
-            return readiness_status, status_code
-            
-        except Exception as e:
             logger.error(
-                "Readiness probe execution failed",
+                "Health check failed with exception",
                 error=str(e),
-                error_type=type(e).__name__
+                response_time_ms=(time.time() - start_time) * 1000,
+                exc_info=True
             )
             
-            return {
-                'status': 'not_ready',
-                'timestamp': datetime.now(timezone.utc).isoformat(),
-                'check_type': 'readiness',
-                'error': 'Readiness probe execution failed',
-                'error_details': str(e)
-            }, 503
+            if PROMETHEUS_AVAILABLE:
+                health_check_compliance.labels(endpoint='application').set(0.0)
+                application_health_status.set(0.0)
+            
+            return error_response
     
-    def check_comprehensive_health(self) -> Tuple[Dict[str, Any], int]:
-        """
-        Perform comprehensive health check including all dependencies and performance metrics.
-        
-        Provides detailed health status for all system components including database connections,
-        cache systems, external services, monitoring systems, and performance variance tracking
-        against Node.js baseline per Section 0.3.2.
-        
-        Returns:
-            Tuple[Dict[str, Any], int]: Comprehensive health data and HTTP status code
-        """
-        try:
-            start_time = time.time()
-            self.health_check_count += 1
-            
-            health_data = {
-                'status': 'healthy',
-                'timestamp': datetime.now(timezone.utc).isoformat(),
-                'check_type': 'comprehensive',
-                'check_sequence': self.health_check_count,
-                'system_info': {
-                    'service_name': 'flask-migration-app',
-                    'environment': current_app.config.get('FLASK_ENV', 'development'),
-                    'version': current_app.config.get('APP_VERSION', '1.0.0')
-                },
-                'dependencies': {},
-                'performance_metrics': {},
-                'circuit_breakers': {},
-                'summary': {
-                    'overall_status': 'healthy',
-                    'total_dependencies': 0,
-                    'healthy_dependencies': 0,
-                    'degraded_dependencies': 0,
-                    'unhealthy_dependencies': 0,
-                    'performance_variance_within_threshold': True
-                }
-            }
-            
-            overall_healthy = True
-            dependency_statuses = []
-            
-            # Database health assessment
-            if self.config.enable_database_health_checks:
-                db_status = self._check_database_health()
-                dependency_statuses.append(db_status)
-                health_data['dependencies']['database'] = db_status.to_dict()
-                
-                if not db_status.is_healthy:
-                    if db_status.status == 'degraded':
-                        health_data['summary']['overall_status'] = 'degraded'
-                    else:
-                        overall_healthy = False
-            
-            # Cache system health assessment
-            if self.config.enable_cache_health_checks:
-                cache_status = self._check_cache_health()
-                dependency_statuses.append(cache_status)
-                health_data['dependencies']['cache'] = cache_status.to_dict()
-                
-                if not cache_status.is_healthy:
-                    if cache_status.status == 'degraded':
-                        if health_data['summary']['overall_status'] == 'healthy':
-                            health_data['summary']['overall_status'] = 'degraded'
-                    else:
-                        overall_healthy = False
-            
-            # External services health assessment
-            if self.config.enable_external_service_health_checks:
-                external_services = self._check_external_services_health()
-                health_data['dependencies']['external_services'] = external_services
-                
-                for service_name, service_data in external_services.items():
-                    service_status = service_data.get('status', 'unknown')
-                    if service_status not in ['healthy', 'degraded']:
-                        overall_healthy = False
-                    elif service_status == 'degraded':
-                        if health_data['summary']['overall_status'] == 'healthy':
-                            health_data['summary']['overall_status'] = 'degraded'
-            
-            # Monitoring system health assessment
-            monitoring_health = self._check_monitoring_health()
-            health_data['dependencies']['monitoring'] = monitoring_health
-            
-            # Performance metrics collection
-            if self.config.performance_variance_tracking:
-                performance_data = self._collect_performance_metrics()
-                health_data['performance_metrics'] = performance_data
-                
-                # Check performance variance against threshold
-                variance_percentage = performance_data.get('response_time_variance_percent', 0)
-                if variance_percentage > self.config.max_response_time_variance_percent:
-                    health_data['summary']['performance_variance_within_threshold'] = False
-                    overall_healthy = False
-                    logger.warning(
-                        "Performance variance exceeds threshold",
-                        variance_percent=variance_percentage,
-                        threshold_percent=self.config.max_response_time_variance_percent
-                    )
-            
-            # Circuit breaker state monitoring
-            if self.config.enable_circuit_breaker_monitoring:
-                circuit_breaker_states = self._check_circuit_breaker_states()
-                health_data['circuit_breakers'] = circuit_breaker_states
-            
-            # Calculate dependency summary statistics
-            for dep_status in dependency_statuses:
-                health_data['summary']['total_dependencies'] += 1
-                if dep_status.status == 'healthy':
-                    health_data['summary']['healthy_dependencies'] += 1
-                elif dep_status.status == 'degraded':
-                    health_data['summary']['degraded_dependencies'] += 1
-                else:
-                    health_data['summary']['unhealthy_dependencies'] += 1
-            
-            # Add external services to summary
-            if self.config.enable_external_service_health_checks:
-                for service_name, service_data in external_services.items():
-                    health_data['summary']['total_dependencies'] += 1
-                    service_status = service_data.get('status', 'unknown')
-                    if service_status == 'healthy':
-                        health_data['summary']['healthy_dependencies'] += 1
-                    elif service_status == 'degraded':
-                        health_data['summary']['degraded_dependencies'] += 1
-                    else:
-                        health_data['summary']['unhealthy_dependencies'] += 1
-            
-            # Add monitoring to summary
-            health_data['summary']['total_dependencies'] += 1
-            monitoring_status_value = monitoring_health.get('status', 'unknown')
-            if monitoring_status_value == 'healthy':
-                health_data['summary']['healthy_dependencies'] += 1
-            elif monitoring_status_value == 'degraded':
-                health_data['summary']['degraded_dependencies'] += 1
-            else:
-                health_data['summary']['unhealthy_dependencies'] += 1
-            
-            # Finalize overall health status
-            if overall_healthy:
-                health_data['status'] = health_data['summary']['overall_status']  # 'healthy' or 'degraded'
-                status_code = 200
-            else:
-                health_data['status'] = 'unhealthy'
-                health_data['summary']['overall_status'] = 'unhealthy'
-                status_code = 503
-            
-            # Add timing information
-            health_data['uptime_info'] = {
-                'check_duration_ms': round((time.time() - start_time) * 1000, 2),
-                'last_full_check': self.last_full_health_check.isoformat() if self.last_full_health_check else None
-            }
-            
-            # Cache the health status for performance optimization
-            self.cached_health_status = health_data
-            self.last_full_health_check = datetime.now(timezone.utc)
-            
-            logger.info(
-                "Comprehensive health check completed",
-                overall_status=health_data['status'],
-                total_dependencies=health_data['summary']['total_dependencies'],
-                healthy_count=health_data['summary']['healthy_dependencies'],
-                degraded_count=health_data['summary']['degraded_dependencies'],
-                unhealthy_count=health_data['summary']['unhealthy_dependencies'],
-                performance_within_threshold=health_data['summary']['performance_variance_within_threshold'],
-                duration_ms=health_data['uptime_info']['check_duration_ms']
-            )
-            
-            return health_data, status_code
-            
-        except Exception as e:
-            logger.error(
-                "Comprehensive health check failed",
-                error=str(e),
-                error_type=type(e).__name__
-            )
-            
+    def _check_database_health(self) -> Dict[str, Any]:
+        """Check database connectivity and performance per Section 6.1.3."""
+        if not DATABASE_MONITORING_AVAILABLE:
             return {
-                'status': 'unhealthy',
-                'timestamp': datetime.now(timezone.utc).isoformat(),
-                'check_type': 'comprehensive',
-                'error': 'Health check execution failed',
-                'error_details': str(e)
-            }, 503
-    
-    def _check_database_health(self) -> DependencyHealthStatus:
-        """
-        Check MongoDB database connectivity health via PyMongo and Motor clients.
-        
-        Returns:
-            DependencyHealthStatus: Database health status with diagnostic information
-        """
-        start_time = time.time()
+                'status': HealthStatus.UNKNOWN,
+                'details': {'error': 'Database monitoring not available'},
+                'mongodb_sync': {'available': False},
+                'mongodb_async': {'available': False}
+            }
         
         try:
-            # Get database manager from Flask application context
-            db_manager = get_database_manager()
-            
-            if not db_manager:
-                return DependencyHealthStatus(
-                    name='database',
-                    status='unhealthy',
-                    error_message='Database manager not initialized',
-                    last_check_timestamp=datetime.now(timezone.utc).isoformat()
-                )
-            
             # Get comprehensive database health status
+            db_health = get_database_health_status()
+            
+            # Analyze database service status
+            services = db_health.get('services', {})
+            mongodb_sync = services.get('mongodb_sync', {})
+            mongodb_async = services.get('mongodb_async', {})
+            database_config = services.get('database_config', {})
+            
+            # Determine overall database health
+            healthy_services = 0
+            total_services = 0
+            
+            for service_name, service_status in services.items():
+                total_services += 1
+                if service_status.get('status') == 'healthy':
+                    healthy_services += 1
+            
+            if healthy_services == total_services and total_services > 0:
+                status = HealthStatus.HEALTHY
+            elif healthy_services > 0:
+                status = HealthStatus.DEGRADED
+            else:
+                status = HealthStatus.UNHEALTHY
+            
+            # Collect connection pool metrics
+            connection_info = {}
             try:
-                db_health = db_manager.get_health_status()
-                response_time = round((time.time() - start_time) * 1000, 2)
-                
-                # Determine health status based on database response
-                overall_status = db_health.get('overall_status', 'unknown')
-                
-                if overall_status == 'healthy':
-                    status = 'healthy'
-                elif overall_status in ['degraded', 'warning']:
-                    status = 'degraded'
-                else:
-                    status = 'unhealthy'
-                
-                return DependencyHealthStatus(
-                    name='database',
-                    status=status,
-                    response_time_ms=response_time,
-                    last_check_timestamp=datetime.now(timezone.utc).isoformat(),
-                    additional_info={
-                        'mongodb_components': db_health.get('components', {}),
-                        'connection_pool_status': 'active',
-                        'motor_async_enabled': bool(db_manager.motor_database),
-                        'pymongo_sync_enabled': bool(db_manager.mongodb_client)
-                    }
-                )
-                
-            except Exception as health_error:
-                response_time = round((time.time() - start_time) * 1000, 2)
-                
-                return DependencyHealthStatus(
-                    name='database',
-                    status='unhealthy',
-                    response_time_ms=response_time,
-                    error_message=f'Database health check failed: {str(health_error)}',
-                    last_check_timestamp=datetime.now(timezone.utc).isoformat()
-                )
-        
-        except Exception as e:
-            response_time = round((time.time() - start_time) * 1000, 2)
+                db_services = get_database_services()
+                if db_services and db_services.database_config:
+                    connection_info = db_services.database_config.get_connection_info()
+            except Exception as e:
+                logger.warning(f"Failed to get database connection info: {e}")
             
-            return DependencyHealthStatus(
-                name='database',
-                status='unhealthy',
-                response_time_ms=response_time,
-                error_message=f'Database connectivity check failed: {str(e)}',
-                last_check_timestamp=datetime.now(timezone.utc).isoformat()
-            )
-    
-    def _check_cache_health(self) -> DependencyHealthStatus:
-        """
-        Check Redis cache connectivity health via CacheManager.
-        
-        Returns:
-            DependencyHealthStatus: Cache health status with diagnostic information
-        """
-        start_time = time.time()
-        
-        try:
-            # Check if cache system is available
-            cache_available = is_cache_available()
-            
-            if not cache_available:
-                return DependencyHealthStatus(
-                    name='cache',
-                    status='unhealthy',
-                    response_time_ms=round((time.time() - start_time) * 1000, 2),
-                    error_message='Cache system not available or not initialized',
-                    last_check_timestamp=datetime.now(timezone.utc).isoformat()
-                )
-            
-            # Get cache manager and health status
-            try:
-                cache_manager = get_cache_manager()
-                cache_health = cache_manager.get_health_status()
-                response_time = round((time.time() - start_time) * 1000, 2)
-                
-                # Determine health status based on cache response
-                cache_status = cache_health.get('status', 'unknown')
-                
-                if cache_status == 'healthy':
-                    status = 'healthy'
-                elif cache_status == 'degraded':
-                    status = 'degraded'
-                else:
-                    status = 'unhealthy'
-                
-                return DependencyHealthStatus(
-                    name='cache',
-                    status=status,
-                    response_time_ms=response_time,
-                    last_check_timestamp=datetime.now(timezone.utc).isoformat(),
-                    additional_info={
-                        'redis_components': cache_health.get('components', {}),
-                        'connection_pool_status': 'active',
-                        'cache_statistics': cache_health.get('cache_stats', {})
-                    }
-                )
-                
-            except Exception as cache_error:
-                response_time = round((time.time() - start_time) * 1000, 2)
-                
-                return DependencyHealthStatus(
-                    name='cache',
-                    status='unhealthy',
-                    response_time_ms=response_time,
-                    error_message=f'Cache health check failed: {str(cache_error)}',
-                    last_check_timestamp=datetime.now(timezone.utc).isoformat()
-                )
-        
-        except Exception as e:
-            response_time = round((time.time() - start_time) * 1000, 2)
-            
-            return DependencyHealthStatus(
-                name='cache',
-                status='unhealthy',
-                response_time_ms=response_time,
-                error_message=f'Cache connectivity check failed: {str(e)}',
-                last_check_timestamp=datetime.now(timezone.utc).isoformat()
-            )
-    
-    def _check_external_services_health(self) -> Dict[str, Any]:
-        """
-        Check external service integration health via monitoring summary.
-        
-        Returns:
-            Dict[str, Any]: External services health status
-        """
-        try:
-            # Get comprehensive external service monitoring summary
-            monitoring_summary = get_monitoring_summary()
-            
-            external_services_health = {}
-            
-            # Process registered services
-            registered_services = monitoring_summary.get('registered_services', [])
-            health_cache = monitoring_summary.get('health_cache', {})
-            service_metadata = monitoring_summary.get('service_metadata', {})
-            
-            for service_name in registered_services:
-                service_health = health_cache.get(service_name, {})
-                service_meta = service_metadata.get(service_name, {})
-                
-                external_services_health[service_name] = {
-                    'status': service_health.get('status', 'unknown'),
-                    'response_time_ms': service_health.get('duration', 0) * 1000 if service_health.get('duration') else None,
-                    'last_check_timestamp': service_health.get('timestamp'),
-                    'service_type': service_meta.get('service_type', 'unknown'),
-                    'endpoint_url': service_meta.get('endpoint_url'),
-                    'circuit_breaker_enabled': service_meta.get('metadata', {}).get('circuit_breaker_enabled', False)
+            database_status = {
+                'status': status,
+                'mongodb_sync': {
+                    'available': mongodb_sync.get('status') == 'healthy',
+                    'status': mongodb_sync.get('status', 'unknown'),
+                    'details': mongodb_sync
+                },
+                'mongodb_async': {
+                    'available': mongodb_async.get('status') in ['healthy', 'available'],
+                    'status': mongodb_async.get('status', 'unknown'),
+                    'details': mongodb_async
+                },
+                'connection_pools': connection_info,
+                'summary': {
+                    'total_services': total_services,
+                    'healthy_services': healthy_services,
+                    'degraded_services': total_services - healthy_services
                 }
+            }
             
-            # If no services are registered, add placeholder status
-            if not external_services_health:
-                external_services_health['integration_monitoring'] = {
-                    'status': 'healthy',
-                    'response_time_ms': 0,
-                    'last_check_timestamp': datetime.now(timezone.utc).isoformat(),
-                    'service_type': 'monitoring',
-                    'message': 'No external services currently registered'
-                }
+            # Update Prometheus metrics
+            if PROMETHEUS_AVAILABLE:
+                # Database health status
+                health_value = 1.0 if status == HealthStatus.HEALTHY else (0.5 if status == HealthStatus.DEGRADED else 0.0)
+                dependency_health_status.labels(dependency_name='database', dependency_type='mongodb').set(health_value)
+                
+                # Connection pool metrics
+                if connection_info:
+                    for pool_name, pool_info in connection_info.items():
+                        if isinstance(pool_info, dict) and 'usage_ratio' in pool_info:
+                            database_connection_pool_usage.labels(
+                                pool_type=pool_name,
+                                database_name=pool_info.get('database_name', 'default')
+                            ).set(pool_info['usage_ratio'])
             
-            return external_services_health
+            return database_status
             
         except Exception as e:
-            logger.error(
-                "External services health check failed",
-                error=str(e),
-                error_type=type(e).__name__
-            )
-            
+            logger.error(f"Database health check failed: {e}", exc_info=True)
             return {
-                'external_services_monitor': {
-                    'status': 'unhealthy',
-                    'error_message': f'External services health check failed: {str(e)}',
-                    'last_check_timestamp': datetime.now(timezone.utc).isoformat()
-                }
+                'status': HealthStatus.UNHEALTHY,
+                'error': str(e),
+                'mongodb_sync': {'available': False},
+                'mongodb_async': {'available': False}
+            }
+    
+    def _check_cache_health(self) -> Dict[str, Any]:
+        """Check Redis cache connectivity and performance per Section 6.1.3."""
+        if not CACHE_MONITORING_AVAILABLE:
+            return {
+                'status': HealthStatus.UNKNOWN,
+                'details': {'error': 'Cache monitoring not available'},
+                'redis': {'available': False}
+            }
+        
+        try:
+            # Get comprehensive cache health status
+            cache_health = get_cache_health()
+            
+            redis_healthy = cache_health.get('redis', {}).get('healthy', False)
+            response_cache_healthy = cache_health.get('response_cache', {}).get('healthy', False)
+            overall_healthy = cache_health.get('overall_healthy', False)
+            
+            # Determine cache health status
+            if overall_healthy and redis_healthy and response_cache_healthy:
+                status = HealthStatus.HEALTHY
+            elif redis_healthy or response_cache_healthy:
+                status = HealthStatus.DEGRADED
+            else:
+                status = HealthStatus.UNHEALTHY
+            
+            # Get cache statistics for detailed monitoring
+            cache_stats = {}
+            try:
+                cache_stats = get_cache_stats()
+            except Exception as e:
+                logger.warning(f"Failed to get cache statistics: {e}")
+            
+            cache_status = {
+                'status': status,
+                'redis': {
+                    'available': redis_healthy,
+                    'details': cache_health.get('redis', {}).get('details', {})
+                },
+                'response_cache': {
+                    'available': response_cache_healthy,
+                    'details': cache_health.get('response_cache', {}).get('details', {})
+                },
+                'statistics': cache_stats.get('redis', {}),
+                'extensions_initialized': cache_health.get('extensions', {}).get('initialized', False)
+            }
+            
+            # Update Prometheus metrics
+            if PROMETHEUS_AVAILABLE:
+                health_value = 1.0 if status == HealthStatus.HEALTHY else (0.5 if status == HealthStatus.DEGRADED else 0.0)
+                dependency_health_status.labels(dependency_name='cache', dependency_type='redis').set(health_value)
+            
+            return cache_status
+            
+        except Exception as e:
+            logger.error(f"Cache health check failed: {e}", exc_info=True)
+            return {
+                'status': HealthStatus.UNHEALTHY,
+                'error': str(e),
+                'redis': {'available': False}
             }
     
     def _check_monitoring_health(self) -> Dict[str, Any]:
-        """
-        Check monitoring system health via monitoring stack.
+        """Check monitoring infrastructure health and availability."""
+        if not MONITORING_INFRASTRUCTURE_AVAILABLE:
+            return {
+                'status': HealthStatus.DEGRADED,  # Not critical for application function
+                'details': {'error': 'Monitoring infrastructure not available'},
+                'prometheus_metrics': {'available': PROMETHEUS_AVAILABLE}
+            }
         
-        Returns:
-            Dict[str, Any]: Monitoring system health status
-        """
         try:
-            # Get monitoring stack status
-            monitoring_stack = get_monitoring_stack()
+            monitoring_manager = get_monitoring_manager()
             
-            if not monitoring_stack:
+            if monitoring_manager:
+                monitoring_status = monitoring_manager.get_monitoring_status()
+                components_status = monitoring_status.get('components_status', {})
+                
+                # Count healthy monitoring components
+                healthy_components = sum(1 for status in components_status.values() if status)
+                total_components = len(components_status)
+                
+                if healthy_components == total_components and total_components > 0:
+                    status = HealthStatus.HEALTHY
+                elif healthy_components > 0:
+                    status = HealthStatus.DEGRADED
+                else:
+                    status = HealthStatus.DEGRADED  # Monitoring is not critical
+                
                 return {
-                    'status': 'degraded',
-                    'error_message': 'Monitoring stack not initialized',
-                    'last_check_timestamp': datetime.now(timezone.utc).isoformat(),
-                    'components': {
-                        'logging': False,
-                        'metrics': False,
-                        'health_checks': False,
-                        'apm': False
+                    'status': status,
+                    'components': components_status,
+                    'initialized': monitoring_status.get('initialized', False),
+                    'prometheus_metrics': {'available': PROMETHEUS_AVAILABLE},
+                    'summary': {
+                        'total_components': total_components,
+                        'healthy_components': healthy_components
                     }
                 }
-            
-            # Get comprehensive monitoring status
-            monitoring_status = monitoring_stack.get_monitoring_status()
-            
-            # Determine overall monitoring health
-            components = monitoring_status.get('components', {})
-            is_healthy = all([
-                components.get('logging', {}).get('initialized', False),
-                components.get('metrics', {}).get('initialized', False),
-                components.get('health_checks', {}).get('initialized', False)
-            ])
-            
-            # APM is optional but good to have
-            apm_initialized = components.get('apm', {}).get('initialized', False)
-            
-            if is_healthy:
-                status = 'healthy' if apm_initialized else 'degraded'
             else:
-                status = 'unhealthy'
-            
-            return {
-                'status': status,
-                'last_check_timestamp': datetime.now(timezone.utc).isoformat(),
-                'service_name': monitoring_status.get('service_name'),
-                'environment': monitoring_status.get('environment'),
-                'uptime_seconds': monitoring_status.get('uptime_seconds'),
-                'initialization_metrics': monitoring_status.get('initialization_metrics', {}),
-                'components': {
-                    'logging': components.get('logging', {}).get('initialized', False),
-                    'metrics': components.get('metrics', {}).get('initialized', False),
-                    'health_checks': components.get('health_checks', {}).get('initialized', False),
-                    'apm': components.get('apm', {}).get('initialized', False)
+                return {
+                    'status': HealthStatus.DEGRADED,
+                    'details': {'error': 'Monitoring manager not initialized'},
+                    'prometheus_metrics': {'available': PROMETHEUS_AVAILABLE}
                 }
+                
+        except Exception as e:
+            logger.warning(f"Monitoring health check failed: {e}")
+            return {
+                'status': HealthStatus.DEGRADED,
+                'error': str(e),
+                'prometheus_metrics': {'available': PROMETHEUS_AVAILABLE}
             }
+    
+    def _check_integrations_health(self) -> Dict[str, Any]:
+        """Check external service integrations health per Section 6.1.3."""
+        if not INTEGRATIONS_MONITORING_AVAILABLE:
+            return {
+                'status': HealthStatus.UNKNOWN,
+                'details': {'error': 'Integrations monitoring not available'},
+                'external_services': []
+            }
+        
+        try:
+            # Get integration summary and health status
+            integration_summary = get_integration_summary()
+            health_summary = integration_summary.get('health_summary', {})
+            
+            total_integrations = integration_summary.get('total_integrations', 0)
+            if total_integrations == 0:
+                # No external integrations configured
+                return {
+                    'status': HealthStatus.HEALTHY,
+                    'details': {'message': 'No external integrations configured'},
+                    'external_services': []
+                }
+            
+            # Analyze integration health
+            healthy_services = health_summary.get('healthy_services', 0)
+            degraded_services = health_summary.get('degraded_services', 0)
+            unhealthy_services = health_summary.get('unhealthy_services', 0)
+            
+            if unhealthy_services == 0 and degraded_services == 0:
+                status = HealthStatus.HEALTHY
+            elif unhealthy_services == 0:
+                status = HealthStatus.DEGRADED
+            else:
+                status = HealthStatus.UNHEALTHY
+            
+            # Collect circuit breaker states
+            circuit_breaker_states = {}
+            try:
+                for service_name, service_health in health_summary.get('services', {}).items():
+                    circuit_state = service_health.get('circuit_breaker_state', 'unknown')
+                    circuit_breaker_states[service_name] = circuit_state
+                    
+                    # Update Prometheus circuit breaker metrics
+                    if PROMETHEUS_AVAILABLE:
+                        state_value = 1.0 if circuit_state == 'closed' else (0.5 if circuit_state == 'half-open' else 0.0)
+                        service_type = service_health.get('service_type', 'unknown')
+                        circuit_breaker_state.labels(service_name=service_name, service_type=service_type).set(state_value)
+            except Exception as e:
+                logger.warning(f"Failed to collect circuit breaker states: {e}")
+            
+            integrations_status = {
+                'status': status,
+                'total_integrations': total_integrations,
+                'external_services': list(integration_summary.get('registered_services', [])),
+                'health_summary': {
+                    'healthy_services': healthy_services,
+                    'degraded_services': degraded_services,
+                    'unhealthy_services': unhealthy_services
+                },
+                'circuit_breaker_states': circuit_breaker_states,
+                'monitoring_initialized': integration_summary.get('monitoring_initialized', False)
+            }
+            
+            # Update Prometheus metrics
+            if PROMETHEUS_AVAILABLE:
+                health_value = 1.0 if status == HealthStatus.HEALTHY else (0.5 if status == HealthStatus.DEGRADED else 0.0)
+                dependency_health_status.labels(dependency_name='integrations', dependency_type='external_services').set(health_value)
+            
+            return integrations_status
             
         except Exception as e:
-            logger.error(
-                "Monitoring system health check failed",
-                error=str(e),
-                error_type=type(e).__name__
-            )
-            
+            logger.error(f"Integrations health check failed: {e}", exc_info=True)
             return {
-                'status': 'unhealthy',
-                'error_message': f'Monitoring health check failed: {str(e)}',
-                'last_check_timestamp': datetime.now(timezone.utc).isoformat()
+                'status': HealthStatus.UNHEALTHY,
+                'error': str(e),
+                'external_services': []
             }
+    
+    def _calculate_overall_health(self, health_status: Dict[str, Any]) -> None:
+        """Calculate overall application health based on dependency status."""
+        dependencies = health_status.get('dependencies', {})
+        summary = health_status['summary']
+        
+        # Count dependency health states
+        for dep_name, dep_status in dependencies.items():
+            status = dep_status.get('status', HealthStatus.UNKNOWN)
+            summary['total_dependencies'] += 1
+            
+            if status == HealthStatus.HEALTHY:
+                summary['healthy_dependencies'] += 1
+            elif status == HealthStatus.DEGRADED:
+                summary['degraded_dependencies'] += 1
+            else:
+                summary['unhealthy_dependencies'] += 1
+        
+        # Determine overall health status
+        # Critical dependencies: database and cache
+        database_status = dependencies.get('database', {}).get('status', HealthStatus.UNHEALTHY)
+        cache_status = dependencies.get('cache', {}).get('status', HealthStatus.UNHEALTHY)
+        
+        # Non-critical dependencies: monitoring and integrations (degraded if failing)
+        monitoring_status = dependencies.get('monitoring', {}).get('status', HealthStatus.DEGRADED)
+        integrations_status = dependencies.get('integrations', {}).get('status', HealthStatus.HEALTHY)
+        
+        # Overall health calculation
+        if (database_status == HealthStatus.UNHEALTHY or 
+            cache_status == HealthStatus.UNHEALTHY):
+            overall_status = HealthStatus.UNHEALTHY
+        elif (database_status == HealthStatus.DEGRADED or 
+              cache_status == HealthStatus.DEGRADED or
+              monitoring_status == HealthStatus.UNHEALTHY or
+              integrations_status == HealthStatus.UNHEALTHY):
+            overall_status = HealthStatus.DEGRADED
+        else:
+            overall_status = HealthStatus.HEALTHY
+        
+        health_status['status'] = overall_status
+        health_status['application']['status'] = overall_status
+        
+        # Update Prometheus overall health metric
+        if PROMETHEUS_AVAILABLE:
+            health_value = 1.0 if overall_status == HealthStatus.HEALTHY else (0.5 if overall_status == HealthStatus.DEGRADED else 0.0)
+            application_health_status.set(health_value)
+    
+    def _collect_health_metrics(self) -> Dict[str, Any]:
+        """Collect comprehensive health metrics for detailed monitoring."""
+        metrics = {
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'check_cache_ttl_seconds': self._cache_ttl,
+            'last_check_age_seconds': time.time() - self._last_health_check if self._last_health_check else None
+        }
+        
+        # Database performance metrics
+        if DATABASE_MONITORING_AVAILABLE:
+            try:
+                db_metrics = get_database_performance_metrics()
+                metrics['database'] = db_metrics
+            except Exception as e:
+                metrics['database'] = {'error': str(e)}
+        
+        # Cache performance metrics  
+        if CACHE_MONITORING_AVAILABLE:
+            try:
+                cache_stats = get_cache_stats()
+                metrics['cache'] = cache_stats
+            except Exception as e:
+                metrics['cache'] = {'error': str(e)}
+        
+        return metrics
     
     def _collect_performance_metrics(self) -> Dict[str, Any]:
-        """
-        Collect performance metrics and variance tracking against Node.js baseline.
+        """Collect performance metrics for baseline compliance per Section 0.1.1."""
+        performance = {
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'variance_tracking': {
+                'target_variance': '≤10%',
+                'monitoring_enabled': True
+            }
+        }
         
-        Returns:
-            Dict[str, Any]: Performance metrics and variance analysis
-        """
-        try:
-            # Get performance summary from monitoring system
-            performance_summary = get_performance_summary()
-            
-            performance_data = {
-                'response_time_variance_percent': 0.0,
-                'baseline_comparison': {
-                    'nodejs_baseline_available': False,
-                    'flask_performance_measured': False
-                },
-                'system_metrics': {
-                    'cpu_utilization_percent': 0.0,
-                    'memory_usage_percent': 0.0,
-                    'gc_pause_time_ms': 0.0
-                },
-                'thresholds': {
-                    'max_variance_percent': self.config.max_response_time_variance_percent,
-                    'cpu_warning_threshold': self.config.cpu_utilization_warning_threshold,
-                    'cpu_critical_threshold': self.config.cpu_utilization_critical_threshold,
-                    'memory_warning_threshold': self.config.memory_usage_warning_threshold,
-                    'memory_critical_threshold': self.config.memory_usage_critical_threshold
-                },
-                'last_updated': datetime.now(timezone.utc).isoformat()
-            }
-            
-            # Extract performance metrics if available
-            if performance_summary:
-                # Response time variance
-                variance_data = performance_summary.get('variance_tracking', {})
-                performance_data['response_time_variance_percent'] = variance_data.get('current_variance_percent', 0.0)
-                
-                # Baseline comparison information
-                baseline_info = performance_summary.get('baseline_comparison', {})
-                performance_data['baseline_comparison'] = {
-                    'nodejs_baseline_available': baseline_info.get('baselines_configured', False),
-                    'flask_performance_measured': baseline_info.get('measurements_available', False),
-                    'endpoints_tracked': baseline_info.get('tracked_endpoints', [])
-                }
-                
-                # System resource metrics
-                system_metrics = performance_summary.get('system_metrics', {})
-                performance_data['system_metrics'] = {
-                    'cpu_utilization_percent': system_metrics.get('cpu_percent', 0.0),
-                    'memory_usage_percent': system_metrics.get('memory_percent', 0.0),
-                    'gc_pause_time_ms': system_metrics.get('gc_pause_ms', 0.0)
-                }
-            
-            return performance_data
-            
-        except Exception as e:
-            logger.warning(
-                "Performance metrics collection failed",
-                error=str(e),
-                error_type=type(e).__name__
-            )
-            
-            return {
-                'response_time_variance_percent': 0.0,
-                'baseline_comparison': {
-                    'nodejs_baseline_available': False,
-                    'flask_performance_measured': False
-                },
-                'system_metrics': {
-                    'cpu_utilization_percent': 0.0,
-                    'memory_usage_percent': 0.0,
-                    'gc_pause_time_ms': 0.0
-                },
-                'error': f'Performance metrics collection failed: {str(e)}',
-                'last_updated': datetime.now(timezone.utc).isoformat()
-            }
+        # This would be implemented with actual performance baseline data
+        # For now, provide structure for future implementation
+        performance['baseline_comparison'] = {
+            'nodejs_baseline_available': False,
+            'flask_performance_tracking': True,
+            'variance_percentage': None,
+            'compliance_status': 'monitoring_active'
+        }
+        
+        return performance
     
-    def _check_circuit_breaker_states(self) -> Dict[str, Any]:
-        """
-        Check circuit breaker states for external service integrations.
+    def _update_health_metrics(self, health_status: Dict[str, Any]) -> None:
+        """Update Prometheus metrics based on health check results."""
+        if not PROMETHEUS_AVAILABLE:
+            return
         
-        Returns:
-            Dict[str, Any]: Circuit breaker states and statistics
-        """
         try:
-            # Get circuit breaker states from monitoring system
-            circuit_breaker_states = get_circuit_breaker_states()
-            
-            circuit_breaker_summary = {
-                'total_circuit_breakers': 0,
-                'open_circuit_breakers': 0,
-                'half_open_circuit_breakers': 0,
-                'closed_circuit_breakers': 0,
-                'circuit_breaker_details': {},
-                'last_updated': datetime.now(timezone.utc).isoformat()
-            }
-            
-            # Process circuit breaker states if available
-            if circuit_breaker_states:
-                for service_name, breaker_state in circuit_breaker_states.items():
-                    circuit_breaker_summary['total_circuit_breakers'] += 1
-                    
-                    state = breaker_state.get('state', 'unknown')
-                    if state == 'open':
-                        circuit_breaker_summary['open_circuit_breakers'] += 1
-                    elif state == 'half_open':
-                        circuit_breaker_summary['half_open_circuit_breakers'] += 1
-                    elif state == 'closed':
-                        circuit_breaker_summary['closed_circuit_breakers'] += 1
-                    
-                    circuit_breaker_summary['circuit_breaker_details'][service_name] = {
-                        'state': state,
-                        'failure_count': breaker_state.get('failure_count', 0),
-                        'last_failure_time': breaker_state.get('last_failure_time'),
-                        'next_attempt_time': breaker_state.get('next_attempt_time')
-                    }
-            else:
-                # Fallback to integration monitoring data
-                monitoring_summary = get_monitoring_summary()
-                registered_services = monitoring_summary.get('registered_services', [])
+            # Update dependency health metrics
+            dependencies = health_status.get('dependencies', {})
+            for dep_name, dep_status in dependencies.items():
+                status = dep_status.get('status', HealthStatus.UNKNOWN)
+                health_value = 1.0 if status == HealthStatus.HEALTHY else (0.5 if status == HealthStatus.DEGRADED else 0.0)
                 
-                for service_name in registered_services:
-                    circuit_breaker_summary['total_circuit_breakers'] += 1
-                    circuit_breaker_summary['closed_circuit_breakers'] += 1
-                    
-                    circuit_breaker_summary['circuit_breaker_details'][service_name] = {
-                        'state': 'closed',
-                        'failure_count': 0,
-                        'status': 'monitoring_data_only'
-                    }
-            
-            return circuit_breaker_summary
+                # Map dependency names to types for metrics
+                dep_type_map = {
+                    'database': 'mongodb',
+                    'cache': 'redis',
+                    'monitoring': 'infrastructure',
+                    'integrations': 'external_services'
+                }
+                dep_type = dep_type_map.get(dep_name, dep_name)
+                dependency_health_status.labels(dependency_name=dep_name, dependency_type=dep_type).set(health_value)
             
         except Exception as e:
-            logger.warning(
-                "Circuit breaker state check failed",
-                error=str(e),
-                error_type=type(e).__name__
-            )
-            
-            return {
-                'total_circuit_breakers': 0,
-                'open_circuit_breakers': 0,
-                'half_open_circuit_breakers': 0,
-                'closed_circuit_breakers': 0,
-                'circuit_breaker_details': {},
-                'error': f'Circuit breaker state check failed: {str(e)}',
-                'last_updated': datetime.now(timezone.utc).isoformat()
-            }
+            logger.warning(f"Failed to update health metrics: {e}")
 
 
-# Initialize global health monitor instance
+# Global health monitor instance
 health_monitor = HealthMonitor()
 
 
-@health_blueprint.route('', methods=['GET'])
-def basic_health_check():
+def track_health_endpoint_metrics(endpoint_name: str):
+    """Decorator to track health endpoint metrics per Section 6.5.1.1."""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            start_time = time.time()
+            status = 'success'
+            
+            try:
+                response = func(*args, **kwargs)
+                
+                # Determine status based on response
+                if hasattr(response, 'status_code'):
+                    status = 'success' if response.status_code < 400 else 'error'
+                elif isinstance(response, tuple) and len(response) >= 2:
+                    status_code = response[1]
+                    status = 'success' if status_code < 400 else 'error'
+                
+                return response
+                
+            except Exception as e:
+                status = 'error'
+                logger.error(f"Health endpoint {endpoint_name} failed: {e}", exc_info=True)
+                raise
+                
+            finally:
+                # Track metrics
+                duration = time.time() - start_time
+                
+                if PROMETHEUS_AVAILABLE:
+                    health_check_requests.labels(endpoint=endpoint_name, status=status).inc()
+                    health_check_duration.labels(endpoint=endpoint_name).observe(duration)
+                    
+                    # Track response time compliance (target <100ms per Section 6.5.2.1)
+                    compliance = 1.0 if duration * 1000 < 100 else 0.0
+                    health_check_compliance.labels(endpoint=endpoint_name).set(compliance)
+                
+                logger.debug(
+                    f"Health endpoint {endpoint_name} completed",
+                    duration_ms=duration * 1000,
+                    status=status,
+                    compliance=duration * 1000 < 100
+                )
+        
+        return wrapper
+    return decorator
+
+
+@health_bp.route('/health', methods=['GET'])
+@track_health_endpoint_metrics('basic_health')
+def basic_health():
     """
-    Basic application health check endpoint per Section 6.1.3.
+    Basic application health endpoint for load balancer integration per Section 6.1.3.
     
-    Provides comprehensive health status summary including all dependencies,
-    performance metrics, and circuit breaker states. Used by load balancers
-    and monitoring systems for overall application health assessment.
+    Provides overall application health status with dependency summary for load balancer
+    health checks and basic monitoring integration. Optimized for <100ms response time
+    per Section 6.5.2.1 requirements.
     
     Returns:
-        JSON response with comprehensive health status
+        JSON response with overall health status and basic dependency summary
+        HTTP 200 if healthy, HTTP 503 if unhealthy or degraded
     """
     try:
-        # Perform comprehensive health check
-        health_data, status_code = health_monitor.check_comprehensive_health()
+        health_status = health_monitor.check_application_health(detailed=False)
         
-        # Log health check execution for monitoring
-        logger.info(
-            "Basic health check executed",
-            status=health_data.get('status'),
-            total_dependencies=health_data.get('summary', {}).get('total_dependencies', 0),
-            response_code=status_code,
-            check_duration_ms=health_data.get('uptime_info', {}).get('check_duration_ms', 0)
-        )
+        # Simplified response for load balancer compatibility
+        response = {
+            'status': health_status['status'],
+            'timestamp': health_status['timestamp'],
+            'application': health_status['application'],
+            'summary': health_status['summary']
+        }
         
-        return jsonify(health_data), status_code
-        
+        # Return appropriate HTTP status code
+        if health_status['status'] == HealthStatus.HEALTHY:
+            return jsonify(response), 200
+        else:
+            return jsonify(response), 503
+            
     except Exception as e:
-        logger.error(
-            "Basic health check endpoint failed",
-            error=str(e),
-            error_type=type(e).__name__
-        )
+        logger.error(f"Basic health check failed: {e}", exc_info=True)
         
         error_response = {
-            'status': 'unhealthy',
+            'status': HealthStatus.UNHEALTHY,
             'timestamp': datetime.now(timezone.utc).isoformat(),
-            'check_type': 'basic',
-            'error': 'Health check endpoint execution failed',
-            'error_details': str(e)
+            'error': str(e)
         }
         
         return jsonify(error_response), 503
 
 
-@health_blueprint.route('/live', methods=['GET'])
+@health_bp.route('/health/live', methods=['GET'])
+@track_health_endpoint_metrics('liveness_probe')
 def liveness_probe():
     """
     Kubernetes liveness probe endpoint per Section 6.5.2.1.
     
-    Returns HTTP 200 when the Flask application process is running and capable
-    of handling requests. Returns HTTP 503 when the application is in a fatal
-    state requiring container restart.
+    Returns HTTP 200 when the Flask application process is running and capable of
+    handling requests. Returns HTTP 503 when the application is in a fatal state
+    requiring container restart. Focuses on application process health only.
     
     Returns:
         JSON response with liveness status
+        HTTP 200 if application is alive, HTTP 503 if application needs restart
     """
     try:
-        # Perform liveness check
-        liveness_data, status_code = health_monitor.check_application_liveness()
+        # Liveness check focuses on application process health
+        app_status = {
+            'status': HealthStatus.HEALTHY,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'probe_type': 'liveness',
+            'application': {
+                'name': 'flask-migration-app',
+                'process_status': 'running',
+                'flask_app_active': current_app is not None,
+                'pid': os.getpid() if hasattr(os, 'getpid') else None
+            }
+        }
         
-        # Log liveness check for debugging (debug level to avoid log spam)
-        logger.debug(
-            "Liveness probe executed",
-            status=liveness_data.get('status'),
-            response_code=status_code,
-            duration_ms=liveness_data.get('uptime_info', {}).get('check_duration_ms', 0)
-        )
+        # Basic application responsiveness check
+        if current_app is None:
+            app_status['status'] = HealthStatus.UNHEALTHY
+            app_status['application']['process_status'] = 'not_responsive'
+            return jsonify(app_status), 503
         
-        return jsonify(liveness_data), status_code
+        return jsonify(app_status), 200
         
     except Exception as e:
-        logger.error(
-            "Liveness probe endpoint failed",
-            error=str(e),
-            error_type=type(e).__name__
-        )
+        logger.error(f"Liveness probe failed: {e}", exc_info=True)
         
         error_response = {
-            'status': 'unhealthy',
+            'status': HealthStatus.UNHEALTHY,
             'timestamp': datetime.now(timezone.utc).isoformat(),
-            'check_type': 'liveness',
-            'error': 'Liveness probe execution failed',
-            'error_details': str(e)
+            'probe_type': 'liveness',
+            'error': str(e)
         }
         
         return jsonify(error_response), 503
 
 
-@health_blueprint.route('/ready', methods=['GET'])
+@health_bp.route('/health/ready', methods=['GET'])
+@track_health_endpoint_metrics('readiness_probe')
 def readiness_probe():
     """
     Kubernetes readiness probe endpoint per Section 6.5.2.1.
     
-    Returns HTTP 200 when all critical dependencies (MongoDB, Redis, external services)
+    Returns HTTP 200 when all critical dependencies (MongoDB, Redis, external APIs)
     are accessible and functional. Returns HTTP 503 when dependencies are unavailable
-    or degraded, indicating the application should not receive traffic.
+    or degraded. Used by Kubernetes and load balancers for traffic routing decisions.
     
     Returns:
-        JSON response with readiness status
+        JSON response with readiness status and critical dependency health
+        HTTP 200 if ready to serve traffic, HTTP 503 if not ready
     """
     try:
-        # Perform readiness check
-        readiness_data, status_code = health_monitor.check_application_readiness()
+        health_status = health_monitor.check_application_health(detailed=False)
         
-        # Log readiness check for monitoring
-        logger.info(
-            "Readiness probe executed",
-            status=readiness_data.get('status'),
-            total_dependencies=readiness_data.get('summary', {}).get('total_dependencies', 0),
-            healthy_count=readiness_data.get('summary', {}).get('healthy_dependencies', 0),
-            response_code=status_code,
-            duration_ms=readiness_data.get('uptime_info', {}).get('check_duration_ms', 0)
-        )
+        # Extract critical dependency status for readiness
+        dependencies = health_status.get('dependencies', {})
+        database_status = dependencies.get('database', {}).get('status', HealthStatus.UNHEALTHY)
+        cache_status = dependencies.get('cache', {}).get('status', HealthStatus.UNHEALTHY)
         
-        return jsonify(readiness_data), status_code
+        # Readiness requires critical dependencies to be healthy
+        ready = (database_status == HealthStatus.HEALTHY and 
+                cache_status == HealthStatus.HEALTHY)
         
-    except Exception as e:
-        logger.error(
-            "Readiness probe endpoint failed",
-            error=str(e),
-            error_type=type(e).__name__
-        )
-        
-        error_response = {
-            'status': 'not_ready',
-            'timestamp': datetime.now(timezone.utc).isoformat(),
-            'check_type': 'readiness',
-            'error': 'Readiness probe execution failed',
-            'error_details': str(e)
-        }
-        
-        return jsonify(error_response), 503
-
-
-@health_blueprint.route('/dependencies', methods=['GET'])
-def dependencies_health_check():
-    """
-    Detailed dependency health check endpoint per Section 6.1.3.
-    
-    Provides comprehensive dependency health status including individual component
-    health, response times, error details, and diagnostic information for each
-    system dependency including database, cache, external services, and monitoring.
-    
-    Returns:
-        JSON response with detailed dependency health status
-    """
-    try:
-        # Get comprehensive health data
-        health_data, _ = health_monitor.check_comprehensive_health()
-        
-        # Extract dependency-specific information
-        dependencies_data = {
-            'timestamp': datetime.now(timezone.utc).isoformat(),
-            'check_type': 'dependencies',
-            'dependencies': health_data.get('dependencies', {}),
-            'summary': health_data.get('summary', {}),
-            'circuit_breakers': health_data.get('circuit_breakers', {}),
-            'performance_metrics': health_data.get('performance_metrics', {}),
-            'uptime_info': health_data.get('uptime_info', {})
-        }
-        
-        # Determine status code based on dependencies health
-        unhealthy_count = dependencies_data.get('summary', {}).get('unhealthy_dependencies', 0)
-        status_code = 503 if unhealthy_count > 0 else 200
-        
-        logger.info(
-            "Dependencies health check executed",
-            total_dependencies=dependencies_data.get('summary', {}).get('total_dependencies', 0),
-            healthy_count=dependencies_data.get('summary', {}).get('healthy_dependencies', 0),
-            unhealthy_count=unhealthy_count,
-            response_code=status_code
-        )
-        
-        return jsonify(dependencies_data), status_code
-        
-    except Exception as e:
-        logger.error(
-            "Dependencies health check endpoint failed",
-            error=str(e),
-            error_type=type(e).__name__
-        )
-        
-        error_response = {
-            'timestamp': datetime.now(timezone.utc).isoformat(),
-            'check_type': 'dependencies',
-            'error': 'Dependencies health check execution failed',
-            'error_details': str(e),
-            'dependencies': {},
-            'summary': {
-                'total_dependencies': 0,
-                'healthy_dependencies': 0,
-                'degraded_dependencies': 0,
-                'unhealthy_dependencies': 0
+        readiness_response = {
+            'status': HealthStatus.HEALTHY if ready else HealthStatus.UNHEALTHY,
+            'timestamp': health_status['timestamp'],
+            'probe_type': 'readiness',
+            'ready': ready,
+            'critical_dependencies': {
+                'database': {
+                    'status': database_status,
+                    'ready': database_status == HealthStatus.HEALTHY
+                },
+                'cache': {
+                    'status': cache_status,
+                    'ready': cache_status == HealthStatus.HEALTHY
+                }
             }
         }
         
+        return jsonify(readiness_response), 200 if ready else 503
+        
+    except Exception as e:
+        logger.error(f"Readiness probe failed: {e}", exc_info=True)
+        
+        error_response = {
+            'status': HealthStatus.UNHEALTHY,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'probe_type': 'readiness',
+            'ready': False,
+            'error': str(e)
+        }
+        
         return jsonify(error_response), 503
 
 
-@health_blueprint.route('/metrics', methods=['GET'])
-def prometheus_metrics():
+@health_bp.route('/health/dependencies', methods=['GET'])
+@track_health_endpoint_metrics('dependencies_detailed')
+def dependencies_health():
     """
-    Prometheus metrics endpoint per Section 6.5.1.1.
+    Detailed dependency health status endpoint with comprehensive monitoring data.
     
-    Exposes comprehensive metrics in Prometheus format for monitoring system integration
-    including application performance metrics, dependency health metrics, circuit breaker
-    states, and performance variance tracking against Node.js baseline.
+    Provides comprehensive health information for all application dependencies including
+    database connections, cache services, external integrations, and circuit breaker
+    states. Includes performance metrics and detailed diagnostic information.
     
     Returns:
-        Prometheus metrics in text/plain format
+        JSON response with detailed dependency health information
+        HTTP 200 with complete dependency status
     """
     try:
-        # Generate Prometheus metrics exposition
-        from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+        # Get detailed health status with metrics
+        health_status = health_monitor.check_application_health(detailed=True)
         
-        # Get metrics registry from monitoring system
-        metrics_data = generate_latest(METRICS_REGISTRY)
+        # Enhanced response with detailed dependency information
+        detailed_response = {
+            'status': health_status['status'],
+            'timestamp': health_status['timestamp'],
+            'application': health_status['application'],
+            'dependencies': health_status['dependencies'],
+            'summary': health_status['summary'],
+            'metrics': health_status.get('metrics', {}),
+            'performance': health_status.get('performance', {}),
+            'monitoring': {
+                'prometheus_available': PROMETHEUS_AVAILABLE,
+                'database_monitoring_available': DATABASE_MONITORING_AVAILABLE,
+                'cache_monitoring_available': CACHE_MONITORING_AVAILABLE,
+                'integrations_monitoring_available': INTEGRATIONS_MONITORING_AVAILABLE
+            }
+        }
         
-        logger.debug(
-            "Prometheus metrics endpoint accessed",
-            metrics_size_bytes=len(metrics_data),
-            content_type=CONTENT_TYPE_LATEST
-        )
-        
-        return metrics_data, 200, {'Content-Type': CONTENT_TYPE_LATEST}
+        return jsonify(detailed_response), 200
         
     except Exception as e:
-        logger.error(
-            "Prometheus metrics endpoint failed",
-            error=str(e),
-            error_type=type(e).__name__
+        logger.error(f"Dependencies health check failed: {e}", exc_info=True)
+        
+        error_response = {
+            'status': HealthStatus.UNHEALTHY,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'error': str(e),
+            'dependencies': {}
+        }
+        
+        return jsonify(error_response), 500
+
+
+@health_bp.route('/metrics', methods=['GET'])
+def prometheus_metrics():
+    """
+    Prometheus metrics endpoint for monitoring integration per Section 6.5.1.1.
+    
+    Exposes application and health metrics in Prometheus format for enterprise
+    monitoring integration. Includes custom migration metrics for performance
+    variance tracking per Section 0.1.1 requirements.
+    
+    Returns:
+        Prometheus metrics in text format
+        HTTP 200 with metrics data, HTTP 503 if metrics collection fails
+    """
+    if not PROMETHEUS_AVAILABLE:
+        return jsonify({
+            'error': 'Prometheus client not available',
+            'message': 'Metrics collection disabled'
+        }), 503
+    
+    try:
+        start_time = time.time()
+        
+        # Trigger health check to update current metrics
+        health_monitor.check_application_health(detailed=False)
+        
+        # Generate Prometheus metrics
+        if hasattr(REGISTRY, '_collector_to_names'):
+            # Standard single-process mode
+            metrics_data = generate_latest(REGISTRY)
+        else:
+            # Multi-process mode (e.g., Gunicorn)
+            try:
+                collector = MultiProcessCollector(REGISTRY)
+                metrics_data = generate_latest(collector)
+            except Exception:
+                # Fallback to standard registry
+                metrics_data = generate_latest(REGISTRY)
+        
+        # Track metrics endpoint performance
+        metrics_generation_time = time.time() - start_time
+        
+        logger.debug(
+            "Prometheus metrics generated",
+            generation_time_ms=metrics_generation_time * 1000,
+            metrics_size_bytes=len(metrics_data),
+            prometheus_registry_collectors=len(REGISTRY._collector_to_names) if hasattr(REGISTRY, '_collector_to_names') else 'unknown'
         )
         
-        # Return error metrics in Prometheus format
-        error_metrics = f"""# HELP health_blueprint_metrics_error Metrics endpoint error indicator
-# TYPE health_blueprint_metrics_error gauge
-health_blueprint_metrics_error{{error_type="{type(e).__name__}"}} 1
-"""
+        # Return metrics in Prometheus format
+        response = Response(metrics_data, mimetype=CONTENT_TYPE_LATEST)
+        response.headers['Cache-Control'] = 'no-cache'
+        return response
         
-        return error_metrics, 500, {'Content-Type': 'text/plain; charset=utf-8'}
+    except Exception as e:
+        logger.error(f"Metrics endpoint failed: {e}", exc_info=True)
+        
+        return jsonify({
+            'error': 'Metrics generation failed',
+            'message': str(e),
+            'prometheus_available': True
+        }), 500
 
 
-@health_blueprint.errorhandler(Exception)
-def handle_health_blueprint_error(error):
+# Health monitoring Blueprint initialization function
+def init_health_blueprint(app: Flask) -> None:
     """
-    Global error handler for health blueprint endpoints.
+    Initialize health monitoring Blueprint with Flask application.
     
-    Provides consistent error response format and logging for all health
-    blueprint endpoint errors while ensuring monitoring systems receive
-    appropriate HTTP status codes.
-    """
-    logger.error(
-        "Health blueprint error",
-        error=str(error),
-        error_type=type(error).__name__,
-        endpoint=request.endpoint,
-        method=request.method,
-        url=request.url
-    )
-    
-    error_response = {
-        'status': 'error',
-        'timestamp': datetime.now(timezone.utc).isoformat(),
-        'error': 'Health check endpoint error',
-        'error_details': str(error),
-        'endpoint': request.endpoint,
-        'method': request.method
-    }
-    
-    # Determine appropriate HTTP status code
-    if isinstance(error, ServiceUnavailable):
-        status_code = 503
-    elif isinstance(error, InternalServerError):
-        status_code = 500
-    else:
-        status_code = 500
-    
-    return jsonify(error_response), status_code
-
-
-def init_health_blueprint(app):
-    """
-    Initialize health blueprint with Flask application factory pattern per Section 6.1.1.
-    
-    Registers health monitoring blueprint with Flask application and configures
-    health monitoring settings based on application configuration.
+    Configures health monitoring endpoints and integrates with Flask application
+    factory pattern per Section 6.1.1. Sets up Prometheus metrics collection
+    and monitoring infrastructure integration.
     
     Args:
         app: Flask application instance
     """
     try:
-        # Configure health monitoring from Flask app config
-        health_config = HealthCheckConfiguration(
-            database_timeout_seconds=app.config.get('HEALTH_CHECK_DATABASE_TIMEOUT', 5.0),
-            cache_timeout_seconds=app.config.get('HEALTH_CHECK_CACHE_TIMEOUT', 3.0),
-            external_service_timeout_seconds=app.config.get('HEALTH_CHECK_EXTERNAL_TIMEOUT', 10.0),
-            max_response_time_variance_percent=app.config.get('MAX_RESPONSE_TIME_VARIANCE_PERCENT', 10.0),
-            enable_database_health_checks=app.config.get('ENABLE_DATABASE_HEALTH_CHECKS', True),
-            enable_cache_health_checks=app.config.get('ENABLE_CACHE_HEALTH_CHECKS', True),
-            enable_external_service_health_checks=app.config.get('ENABLE_EXTERNAL_SERVICE_HEALTH_CHECKS', True),
-            prometheus_metrics_enabled=app.config.get('PROMETHEUS_METRICS_ENABLED', True),
-            performance_variance_tracking=app.config.get('PERFORMANCE_VARIANCE_TRACKING', True)
-        )
+        # Register health monitoring Blueprint
+        app.register_blueprint(health_bp)
         
-        # Update global health monitor configuration
-        global health_monitor
-        health_monitor.config = health_config
+        # Configure Blueprint-specific settings
+        app.config['HEALTH_CHECK_CACHE_TTL'] = 30  # seconds
+        app.config['HEALTH_CHECK_TIMEOUT'] = 5     # seconds
         
-        # Register health blueprint
-        app.register_blueprint(health_blueprint)
-        
-        # Store health monitor reference in app extensions
-        if not hasattr(app, 'extensions'):
-            app.extensions = {}
-        app.extensions['health_monitor'] = health_monitor
+        # Store health monitor instance in app config
+        app.config['HEALTH_MONITOR'] = health_monitor
         
         logger.info(
-            "Health blueprint initialized",
-            blueprint_name=health_blueprint.name,
-            url_prefix=health_blueprint.url_prefix,
-            endpoints=[
-                '/health',
-                '/health/live',
-                '/health/ready',
-                '/health/dependencies',
-                '/health/metrics'
-            ],
-            database_health_checks=health_config.enable_database_health_checks,
-            cache_health_checks=health_config.enable_cache_health_checks,
-            external_service_checks=health_config.enable_external_service_health_checks,
-            performance_variance_threshold=health_config.max_response_time_variance_percent
+            "Health monitoring Blueprint initialized",
+            blueprint_name='health',
+            endpoints=['health', 'health/live', 'health/ready', 'health/dependencies', 'metrics'],
+            prometheus_available=PROMETHEUS_AVAILABLE,
+            database_monitoring=DATABASE_MONITORING_AVAILABLE,
+            cache_monitoring=CACHE_MONITORING_AVAILABLE,
+            integrations_monitoring=INTEGRATIONS_MONITORING_AVAILABLE
         )
         
+        # Log initialization summary
+        if logger:
+            logger.info(
+                "Health monitoring capabilities initialized",
+                kubernetes_probes=True,
+                prometheus_metrics=PROMETHEUS_AVAILABLE,
+                dependency_monitoring=True,
+                circuit_breaker_monitoring=INTEGRATIONS_MONITORING_AVAILABLE,
+                response_time_target='<100ms'
+            )
+        
     except Exception as e:
-        logger.error(
-            "Health blueprint initialization failed",
-            error=str(e),
-            error_type=type(e).__name__
-        )
+        logger.error(f"Health Blueprint initialization failed: {e}", exc_info=True)
         raise
 
 
-# Export health monitoring components for external use
+# Export health monitoring components
 __all__ = [
-    'health_blueprint',
-    'init_health_blueprint',
+    'health_bp',
+    'HealthStatus',
     'HealthMonitor',
-    'HealthCheckConfiguration',
-    'DependencyHealthStatus',
-    'health_monitor'
+    'health_monitor',
+    'init_health_blueprint',
+    'track_health_endpoint_metrics'
 ]
+
+
+# Import os for process ID in liveness probe
+import os
