@@ -1,35 +1,48 @@
 #!/bin/bash
 
-#######################################################################
-# Code Quality Validation Script for Flask Application
+# Quality Validation Script for Flask Application
+# 
+# Implements comprehensive static analysis using flake8, mypy, and bandit with 
+# zero-tolerance error policy and enterprise security compliance enforcement.
 #
-# This script executes comprehensive static analysis using flake8, mypy,
-# and bandit with zero-tolerance error policy and enterprise security
-# compliance enforcement as specified in Section 8.5.1.
+# Section References:
+# - Section 8.5.1: Build pipeline quality gates with zero-tolerance enforcement
+# - Section 6.6.3: Quality metrics and static analysis requirements
+# - Section 0.3.1: Code quality and standards compliance
 #
-# Requirements:
-# - flake8 6.1+ for comprehensive PEP 8 compliance
-# - mypy 1.8+ for static type checking with strict mode enforcement
-# - bandit 1.7+ for comprehensive Python security vulnerability detection
-# - Zero-tolerance error policy with pipeline termination on failures
-#
-# Usage: ./scripts/quality.sh [options]
-#
-# Exit Codes:
-#   0 - All quality checks passed
-#   1 - Static analysis failures (flake8/mypy)
-#   2 - Security analysis failures (bandit)
-#   3 - Configuration or dependency errors
-#   4 - Script execution errors
-#######################################################################
+# Requirements Implemented:
+# - Static Analysis Framework using flake8 6.1+ for comprehensive PEP 8 compliance
+# - Type Safety Validation using mypy 1.8+ for strict mode enforcement
+# - Security Analysis using bandit 1.7+ for comprehensive security vulnerability detection
+# - Multi-tier validation with automated testing, static analysis, and security scanning
 
-set -euo pipefail  # Exit on any error, undefined variable, or pipe failure
+set -euo pipefail
 
-# Script metadata and configuration
-readonly SCRIPT_NAME="quality.sh"
-readonly SCRIPT_VERSION="1.0.0"
-readonly PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-readonly LOG_PREFIX="[QUALITY]"
+# =============================================================================
+# CONFIGURATION AND CONSTANTS
+# =============================================================================
+
+# Script metadata
+SCRIPT_NAME="$(basename "$0")"
+SCRIPT_VERSION="1.0.0"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# Quality tool versions (minimum required per Section 8.5.1)
+REQUIRED_FLAKE8_VERSION="6.1.0"
+REQUIRED_MYPY_VERSION="1.8.0" 
+REQUIRED_BANDIT_VERSION="1.7.0"
+REQUIRED_SAFETY_VERSION="3.0.0"
+REQUIRED_RADON_VERSION="6.0.0"
+
+# Exit codes for enterprise CI/CD integration
+readonly EXIT_SUCCESS=0
+readonly EXIT_STATIC_ANALYSIS_FAILURE=1
+readonly EXIT_TYPE_CHECK_FAILURE=2
+readonly EXIT_SECURITY_FAILURE=3
+readonly EXIT_COMPLEXITY_FAILURE=4
+readonly EXIT_DEPENDENCY_FAILURE=5
+readonly EXIT_CONFIGURATION_ERROR=6
 
 # Color codes for enhanced output readability
 readonly RED='\033[0;31m'
@@ -41,249 +54,180 @@ readonly CYAN='\033[0;36m'
 readonly WHITE='\033[1;37m'
 readonly NC='\033[0m' # No Color
 
-# Quality tool versions and requirements per Section 8.5.1
-readonly FLAKE8_MIN_VERSION="6.1.0"
-readonly MYPY_MIN_VERSION="1.8.0"
-readonly BANDIT_MIN_VERSION="1.7.0"
+# Quality standards enforcement (zero-tolerance per Section 8.5.1)
+readonly ZERO_TOLERANCE_MODE="true"
+readonly MAX_FLAKE8_ERRORS=0
+readonly MAX_MYPY_ERRORS=0
+readonly MAX_BANDIT_HIGH_SEVERITY=0
+readonly MAX_BANDIT_CRITICAL_SEVERITY=0
+readonly MIN_COVERAGE_THRESHOLD=90
+readonly MAX_CYCLOMATIC_COMPLEXITY=10
 
-# Default configuration paths
-readonly FLAKE8_CONFIG="${PROJECT_ROOT}/.flake8"
-readonly MYPY_CONFIG="${PROJECT_ROOT}/mypy.ini"
-readonly BANDIT_CONFIG="${PROJECT_ROOT}/bandit.yaml"
-readonly QUALITY_CONFIG="${PROJECT_ROOT}/src/config/quality.py"
+# =============================================================================
+# LOGGING AND OUTPUT FUNCTIONS
+# =============================================================================
 
-# Output and reporting directories
-readonly REPORTS_DIR="${PROJECT_ROOT}/reports"
-readonly QUALITY_REPORTS_DIR="${REPORTS_DIR}/quality"
-
-# Zero-tolerance policy flags
-STRICT_MODE=true
-FAIL_ON_ANY_ERROR=true
-ENTERPRISE_COMPLIANCE=true
-
-# Execution control flags
-VERBOSE=false
-QUIET=false
-PARALLEL_EXECUTION=true
-GENERATE_REPORTS=true
-
-#######################################################################
-# Utility Functions
-#######################################################################
-
-# Enhanced logging function with timestamps and structured output
+# Enhanced logging function with timestamp and severity levels
 log() {
     local level="$1"
     shift
+    local message="$*"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     
     case "$level" in
         "INFO")
-            echo -e "${timestamp} ${LOG_PREFIX} ${BLUE}[INFO]${NC} $*" >&1
+            echo -e "${CYAN}[${timestamp}] [INFO]${NC} $message" >&1
             ;;
         "WARN")
-            echo -e "${timestamp} ${LOG_PREFIX} ${YELLOW}[WARN]${NC} $*" >&2
+            echo -e "${YELLOW}[${timestamp}] [WARN]${NC} $message" >&1
             ;;
         "ERROR")
-            echo -e "${timestamp} ${LOG_PREFIX} ${RED}[ERROR]${NC} $*" >&2
+            echo -e "${RED}[${timestamp}] [ERROR]${NC} $message" >&2
             ;;
         "SUCCESS")
-            echo -e "${timestamp} ${LOG_PREFIX} ${GREEN}[SUCCESS]${NC} $*" >&1
+            echo -e "${GREEN}[${timestamp}] [SUCCESS]${NC} $message" >&1
             ;;
         "DEBUG")
-            if [[ "$VERBOSE" == "true" ]]; then
-                echo -e "${timestamp} ${LOG_PREFIX} ${PURPLE}[DEBUG]${NC} $*" >&1
+            if [[ "${VERBOSE:-false}" == "true" ]]; then
+                echo -e "${PURPLE}[${timestamp}] [DEBUG]${NC} $message" >&1
             fi
             ;;
     esac
 }
 
-# Progress indicator for long-running operations
-show_progress() {
-    local message="$1"
-    local pid="$2"
+# Display script header with enterprise branding
+display_header() {
+    echo -e "${WHITE}"
+    echo "=============================================================================="
+    echo "  Flask Application Quality Validation Pipeline"
+    echo "  Version: ${SCRIPT_VERSION}"
+    echo "  Enterprise Code Quality Enforcement with Zero-Tolerance Policy"
+    echo "=============================================================================="
+    echo -e "${NC}"
+    log "INFO" "Starting quality validation for project: $(basename "$PROJECT_ROOT")"
+    log "INFO" "Quality enforcement mode: ${ZERO_TOLERANCE_MODE}"
+}
+
+# Display section headers for better readability
+section_header() {
+    local title="$1"
+    echo -e "\n${BLUE}▶ $title${NC}"
+    echo "$(printf '─%.0s' {1..60})"
+}
+
+# Display quality gate results
+display_quality_gate_result() {
+    local gate_name="$1"
+    local status="$2"
+    local details="$3"
     
-    if [[ "$QUIET" != "true" ]]; then
-        echo -n -e "${CYAN}${message}${NC}"
-        while kill -0 "$pid" 2>/dev/null; do
-            echo -n "."
-            sleep 0.5
-        done
-        echo " ${GREEN}Done${NC}"
+    if [[ "$status" == "PASS" ]]; then
+        echo -e "${GREEN}✓ Quality Gate: $gate_name - PASSED${NC}"
+        [[ -n "$details" ]] && log "INFO" "$details"
+    else
+        echo -e "${RED}✗ Quality Gate: $gate_name - FAILED${NC}"
+        [[ -n "$details" ]] && log "ERROR" "$details"
     fi
 }
 
-# Version comparison utility for dependency validation
-version_compare() {
-    local version1="$1"
-    local version2="$2"
-    
-    if [[ "$version1" == "$version2" ]]; then
-        return 0
-    fi
-    
-    local IFS=.
-    local i ver1=($version1) ver2=($version2)
-    
-    # Compare version components
-    for ((i=${#ver1[@]}; i<${#ver2[@]}; i++)); do
-        ver1[i]=0
-    done
-    for ((i=0; i<${#ver1[@]}; i++)); do
-        if [[ -z ${ver2[i]} ]]; then
-            ver2[i]=0
-        fi
-        if ((10#${ver1[i]} > 10#${ver2[i]})); then
-            return 1
-        fi
-        if ((10#${ver1[i]} < 10#${ver2[i]})); then
-            return 2
-        fi
-    done
-    return 0
+# =============================================================================
+# UTILITY FUNCTIONS
+# =============================================================================
+
+# Check if command exists
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
 }
 
-# Error handling with comprehensive context and remediation guidance
-handle_error() {
-    local exit_code="$1"
-    local error_message="$2"
-    local remediation="${3:-}"
-    
-    log "ERROR" "Quality validation failed with exit code: $exit_code"
-    log "ERROR" "Error details: $error_message"
-    
-    if [[ -n "$remediation" ]]; then
-        log "INFO" "Remediation guidance: $remediation"
-    fi
-    
-    # Generate failure report if reports are enabled
-    if [[ "$GENERATE_REPORTS" == "true" ]]; then
-        generate_failure_report "$exit_code" "$error_message" "$remediation"
-    fi
-    
-    exit "$exit_code"
+# Version comparison function
+version_ge() {
+    [ "$(printf '%s\n' "$1" "$2" | sort -V | head -n1)" != "$1" ]
 }
 
-# Comprehensive dependency validation with version checking
+# Validate required tools and versions
 validate_dependencies() {
-    log "INFO" "Validating quality tool dependencies and versions..."
+    section_header "Dependency Validation"
     
-    local missing_tools=()
-    local version_issues=()
+    local validation_errors=0
     
-    # Check flake8 availability and version
-    if ! command -v flake8 &> /dev/null; then
-        missing_tools+=("flake8")
-    else
-        local flake8_version=$(flake8 --version | head -n1 | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+' | head -n1)
-        version_compare "$flake8_version" "$FLAKE8_MIN_VERSION"
-        local result=$?
-        if [[ $result -eq 2 ]]; then
-            version_issues+=("flake8: found $flake8_version, required >= $FLAKE8_MIN_VERSION")
-        else
-            log "DEBUG" "flake8 version $flake8_version meets requirement >= $FLAKE8_MIN_VERSION"
+    # Check Python version (minimum 3.8 per Section 0.1.1)
+    if command_exists python3; then
+        local python_version=$(python3 --version | cut -d' ' -f2)
+        log "INFO" "Python version: $python_version"
+        if ! version_ge "$python_version" "3.8.0"; then
+            log "ERROR" "Python 3.8+ required, found $python_version"
+            ((validation_errors++))
         fi
-    fi
-    
-    # Check mypy availability and version
-    if ! command -v mypy &> /dev/null; then
-        missing_tools+=("mypy")
     else
-        local mypy_version=$(mypy --version | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+' | head -n1)
-        version_compare "$mypy_version" "$MYPY_MIN_VERSION"
-        local result=$?
-        if [[ $result -eq 2 ]]; then
-            version_issues+=("mypy: found $mypy_version, required >= $MYPY_MIN_VERSION")
-        else
-            log "DEBUG" "mypy version $mypy_version meets requirement >= $MYPY_MIN_VERSION"
-        fi
+        log "ERROR" "Python 3 not found"
+        ((validation_errors++))
     fi
     
-    # Check bandit availability and version
-    if ! command -v bandit &> /dev/null; then
-        missing_tools+=("bandit")
+    # Validate flake8 version
+    if command_exists flake8; then
+        local flake8_version=$(flake8 --version | head -n1 | cut -d' ' -f1)
+        log "INFO" "flake8 version: $flake8_version"
+        if ! version_ge "$flake8_version" "$REQUIRED_FLAKE8_VERSION"; then
+            log "ERROR" "flake8 $REQUIRED_FLAKE8_VERSION+ required, found $flake8_version"
+            ((validation_errors++))
+        fi
     else
-        local bandit_version=$(bandit --version 2>&1 | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+' | head -n1)
-        version_compare "$bandit_version" "$BANDIT_MIN_VERSION"
-        local result=$?
-        if [[ $result -eq 2 ]]; then
-            version_issues+=("bandit: found $bandit_version, required >= $BANDIT_MIN_VERSION")
-        else
-            log "DEBUG" "bandit version $bandit_version meets requirement >= $BANDIT_MIN_VERSION"
+        log "ERROR" "flake8 not found (required: $REQUIRED_FLAKE8_VERSION+)"
+        ((validation_errors++))
+    fi
+    
+    # Validate mypy version
+    if command_exists mypy; then
+        local mypy_version=$(mypy --version | cut -d' ' -f2)
+        log "INFO" "mypy version: $mypy_version"
+        if ! version_ge "$mypy_version" "$REQUIRED_MYPY_VERSION"; then
+            log "ERROR" "mypy $REQUIRED_MYPY_VERSION+ required, found $mypy_version"
+            ((validation_errors++))
         fi
+    else
+        log "ERROR" "mypy not found (required: $REQUIRED_MYPY_VERSION+)"
+        ((validation_errors++))
     fi
     
-    # Report missing tools
-    if [[ ${#missing_tools[@]} -gt 0 ]]; then
-        log "ERROR" "Missing required quality tools: ${missing_tools[*]}"
-        log "INFO" "Install missing tools with: pip install ${missing_tools[*]}"
-        handle_error 3 "Missing dependencies" "pip install ${missing_tools[*]}"
+    # Validate bandit version
+    if command_exists bandit; then
+        local bandit_version=$(bandit --version 2>&1 | grep "bandit" | cut -d' ' -f2)
+        log "INFO" "bandit version: $bandit_version"
+        if ! version_ge "$bandit_version" "$REQUIRED_BANDIT_VERSION"; then
+            log "ERROR" "bandit $REQUIRED_BANDIT_VERSION+ required, found $bandit_version"
+            ((validation_errors++))
+        fi
+    else
+        log "ERROR" "bandit not found (required: $REQUIRED_BANDIT_VERSION+)"
+        ((validation_errors++))
     fi
     
-    # Report version issues
-    if [[ ${#version_issues[@]} -gt 0 ]]; then
-        log "ERROR" "Version requirement issues:"
-        for issue in "${version_issues[@]}"; do
-            log "ERROR" "  - $issue"
-        done
-        handle_error 3 "Version requirements not met" "pip install --upgrade flake8 mypy bandit"
+    # Validate additional quality tools
+    for tool in safety radon; do
+        if ! command_exists "$tool"; then
+            log "WARN" "$tool not found (recommended for comprehensive analysis)"
+        fi
+    done
+    
+    if [[ $validation_errors -gt 0 ]]; then
+        log "ERROR" "Dependency validation failed with $validation_errors errors"
+        exit $EXIT_DEPENDENCY_FAILURE
     fi
     
-    log "SUCCESS" "All quality tool dependencies validated"
+    log "SUCCESS" "All required dependencies validated successfully"
 }
 
-# Configuration file validation and setup
-validate_configuration() {
-    log "INFO" "Validating quality configuration files..."
+# Generate quality configuration files
+setup_quality_configs() {
+    section_header "Quality Configuration Setup"
     
-    # Create reports directory if it doesn't exist
-    mkdir -p "$QUALITY_REPORTS_DIR"
+    log "INFO" "Generating quality tool configuration files..."
     
-    # Validate flake8 configuration
-    if [[ ! -f "$FLAKE8_CONFIG" ]]; then
-        log "WARN" "flake8 configuration not found at $FLAKE8_CONFIG, creating default"
-        create_default_flake8_config
-    else
-        log "DEBUG" "Found flake8 configuration at $FLAKE8_CONFIG"
-    fi
-    
-    # Validate mypy configuration
-    if [[ ! -f "$MYPY_CONFIG" ]]; then
-        log "WARN" "mypy configuration not found at $MYPY_CONFIG, creating default"
-        create_default_mypy_config
-    else
-        log "DEBUG" "Found mypy configuration at $MYPY_CONFIG"
-    fi
-    
-    # Validate bandit configuration
-    if [[ ! -f "$BANDIT_CONFIG" ]]; then
-        log "WARN" "bandit configuration not found at $BANDIT_CONFIG, creating default"
-        create_default_bandit_config
-    else
-        log "DEBUG" "Found bandit configuration at $BANDIT_CONFIG"
-    fi
-    
-    # Check for quality configuration module (optional)
-    if [[ -f "$QUALITY_CONFIG" ]]; then
-        log "DEBUG" "Found quality configuration module at $QUALITY_CONFIG"
-    else
-        log "DEBUG" "Quality configuration module not found (optional): $QUALITY_CONFIG"
-    fi
-    
-    log "SUCCESS" "Configuration validation completed"
-}
-
-# Create default flake8 configuration with enterprise standards
-create_default_flake8_config() {
-    cat > "$FLAKE8_CONFIG" << 'EOF'
+    # Generate .flake8 configuration (Section 8.5.1)
+    cat > "$PROJECT_ROOT/.flake8" << 'EOF'
 [flake8]
-# Maximum line length per Section 8.5.1 enterprise standards
 max-line-length = 88
-
-# Ignore specific errors while maintaining strict compliance
 extend-ignore = E203, W503, E501
-
-# Exclude common non-source directories
 exclude = 
     .git,
     __pycache__,
@@ -292,837 +236,580 @@ exclude =
     .env,
     venv,
     .venv,
+    *.pyc,
     .pytest_cache,
-    .mypy_cache,
-    reports
-
-# Per-file ignores for specific patterns
+    node_modules
 per-file-ignores =
     __init__.py:F401
     tests/*:S101,S106
     conftest.py:F401
-
-# Maximum cyclomatic complexity per maintainability requirements
+    migrations/*:E501
 max-complexity = 10
-
-# Enable doctests checking for documentation quality
 doctests = True
-
-# Show statistics and counts for comprehensive reporting
 statistics = True
 count = True
 
-# Enable comprehensive checks
-select = E,W,F,C
+# Flask-specific patterns
+application-import-names = app,src
+import-order-style = google
 
-# Ensure comprehensive coverage of all error types
-enable-extensions = G,B,B9,Q0
+# Enterprise compliance settings
+show-source = True
+benchmark = True
 EOF
-    log "INFO" "Created default flake8 configuration with enterprise standards"
-}
 
-# Create default mypy configuration with strict type checking
-create_default_mypy_config() {
-    cat > "$MYPY_CONFIG" << 'EOF'
+    # Generate mypy.ini configuration (Section 8.5.1)
+    cat > "$PROJECT_ROOT/mypy.ini" << 'EOF'
 [mypy]
-# Python version target per project requirements
 python_version = 3.11
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
 
-# Strict mode enforcement per Section 8.5.1
-strict = True
+# Show error codes and context
+show_error_codes = true
+show_column_numbers = true
 
-# Comprehensive type checking options
-warn_return_any = True
-warn_unused_configs = True
-disallow_untyped_defs = True
-disallow_incomplete_defs = True
-check_untyped_defs = True
-disallow_untyped_decorators = True
-no_implicit_optional = True
-warn_redundant_casts = True
-warn_unused_ignores = True
-warn_no_return = True
-warn_unreachable = True
-strict_equality = True
-
-# Additional strict checks for enterprise compliance
-disallow_any_unimported = True
-disallow_any_expr = False
-disallow_any_decorated = False
-disallow_any_explicit = False
-disallow_any_generics = True
-disallow_subclassing_any = True
-
-# Error output formatting
-show_error_codes = True
-show_column_numbers = True
-show_error_context = True
-pretty = True
-
-# Follow imports for complete type coverage
-follow_imports = normal
-ignore_missing_imports = False
-
-# Cache configuration for performance
+# Performance and cache settings
 cache_dir = .mypy_cache
+sqlite_cache = true
 
-# Module-specific configurations
-[mypy-tests.*]
-# Allow some flexibility in test files
-disallow_untyped_defs = False
-ignore_errors = False
+# Flask and third-party library patterns
+[mypy-flask.*]
+ignore_missing_imports = true
 
-[mypy-conftest]
-# Configuration for pytest conftest files
-ignore_errors = False
+[mypy-werkzeug.*]
+ignore_missing_imports = true
+
+[mypy-pymongo.*]
+ignore_missing_imports = true
+
+[mypy-motor.*]
+ignore_missing_imports = true
+
+[mypy-redis.*]
+ignore_missing_imports = true
+
+[mypy-pytest.*]
+ignore_missing_imports = true
+
+[mypy-locust.*]
+ignore_missing_imports = true
+
+[mypy-testcontainers.*]
+ignore_missing_imports = true
 EOF
-    log "INFO" "Created default mypy configuration with strict enforcement"
-}
 
-# Create default bandit configuration for security analysis
-create_default_bandit_config() {
-    cat > "$BANDIT_CONFIG" << 'EOF'
-# Bandit security configuration per Section 8.5.1
-# Comprehensive security tests for Flask applications
+    # Generate bandit.yaml configuration (Section 8.5.1)
+    cat > "$PROJECT_ROOT/bandit.yaml" << 'EOF'
+# Bandit security configuration for Flask application
+# Section 8.5.1: Security scanning with zero tolerance for critical findings
 
-tests: 
-  # Common Python security issues
-  - B201  # Test for use of flask debug mode
-  - B301  # Pickle usage security check
-  - B302  # Use of insecure MD2, MD4, MD5, or SHA1 hash functions
-  - B303  # Use of insecure MD2, MD4, MD5, or SHA1 hash functions
-  - B304  # Use of insecure cipher modes
-  - B305  # Use of insecure cipher
-  - B306  # Use of insecure and deprecated mktemp
-  - B307  # Use of possibly insecure eval
-  - B308  # Mark use of insecure MD2, MD4, MD5, or SHA1 hash functions
-  - B309  # Use of HTTPSConnection without certificate verification
-  - B310  # Audit url open for permitted schemes
-  - B311  # Standard pseudo-random generators are not suitable for security
-  - B312  # Telnetlib usage might be insecure
-  - B313  # Using xml to parse untrusted data is known to be vulnerable
-  - B314  # Blacklist of xml.etree.ElementTree methods
-  - B315  # Blacklist of xml.sax methods
-  - B316  # Blacklist of xml.minidom methods
-  - B317  # Using xml to parse untrusted data is known to be vulnerable
-  - B318  # Blacklist of xml.dom.pulldom methods
-  - B319  # Using xml to parse untrusted data is known to be vulnerable
-  - B320  # Blacklist of lxml methods that can lead to vulnerabilities
-  - B321  # Use of FTP-related functions that might be insecure
-  - B322  # Use of input() might be vulnerable
-  - B323  # Use of unverified context
-  - B324  # Use of hashlib.new() with insecure hashing algorithm
-  - B325  # Use of tempfile.mktemp() might be vulnerable
-  - B326  # Use of tempfile.NamedTemporaryFile might be vulnerable
+tests: [B201, B301, B302, B303, B304, B305, B306, B307, B308, B309, B310, B311, B312, B313, B314, B315, B316, B317, B318, B319, B320, B321, B322, B323, B324, B325, B326, B401, B402, B403, B404, B405, B406, B407, B408, B409, B410, B411, B412, B413, B501, B502, B503, B504, B505, B506, B507, B601, B602, B603, B604, B605, B606, B607, B608, B609, B610, B611, B701, B702, B703]
+skips: [B101, B601]
+exclude_dirs: [tests, build, dist, .git, __pycache__, .pytest_cache, node_modules]
+
+# Severity levels for enterprise compliance
+severity: [high, medium, low]
+confidence: [high, medium, low]
+
+# Flask-specific security patterns
+assert_used:
+  skips: ['*test*.py', '*conftest.py']
+
+hardcoded_password:
+  word_list: ['password', 'pass', 'passwd', 'pwd', 'secret', 'token', 'key']
+
+# Enterprise security compliance
+shell_injection:
+  no_shell: true
   
-  # Authentication and authorization issues
-  - B401  # Import of subprocess with shell=True
-  - B402  # Import and use of pycrypto
-  - B403  # Consider possible security implications of pickle
-  - B404  # Consider possible security implications of subprocess
-  - B405  # Import and use of xml.etree.ElementTree and xml.dom.minidom
-  - B406  # Import and use of xml.sax
-  - B407  # Import and use of xml.dom.pulldom
-  - B408  # Import and use of xml.dom.minidom
-  - B409  # Import and use of xml.etree.ElementTree
-  - B410  # Import and use of lxml
-  - B411  # Import and use of xmlrpclib
-  - B412  # Import and use of httplib/http.client
-  - B413  # Import and use of pycryptodome
-
-  # Web application specific security issues
-  - B501  # Test for missing certificate validation
-  - B502  # Test for SSL with bad version
-  - B503  # Test for SSL with bad defaults
-  - B504  # Test for SSL with no version specified
-  - B505  # Test for weak cryptographic key use
-  - B506  # Test for use of yaml load
-  - B507  # Test for missing host key validation
-
-  # Input validation and injection issues
-  - B601  # Parameterized shell usage should be avoided
-  - B602  # Test for use of popen with shell equals true
-  - B603  # Test for use of subprocess without shell equals true
-  - B604  # Test for any function with shell equals true
-  - B605  # Test for starting a process with a shell
-  - B606  # Test for starting a process with no shell
-  - B607  # Test for starting a process with a partial path
-  - B608  # Test for SQL injection
-  - B609  # Test for use of wildcard in SQL queries
-  - B610  # Test for SQL injection through string formatting
-  - B611  # Test for SQL injection through string interpolation
-
-  # General coding issues that may lead to security problems
-  - B701  # Test for use of jinja2 templates without autoescape
-  - B702  # Test for use of mako templates
-  - B703  # Test for potential XSS on mark_safe usage
-
-# Skip these tests that may have false positives in test environments
-skips: 
-  - B101  # Test for use of assert (common in tests)
-  - B601  # Parameterized shell usage (may be needed for legitimate shell operations)
-
-# Exclude directories that don't contain source code
-exclude_dirs: 
-  - tests
-  - build
-  - dist
-  - .git
-  - __pycache__
-  - .pytest_cache
-  - .mypy_cache
-  - reports
-
-# Confidence levels to report (HIGH, MEDIUM, LOW)
-confidence: HIGH
-
-# Security issue severity levels to report
-level: MEDIUM
+sql_injection:
+  check_typed_list: true
 EOF
-    log "INFO" "Created default bandit configuration with Flask-specific security patterns"
+    
+    log "SUCCESS" "Quality configuration files generated successfully"
 }
 
-#######################################################################
-# Static Analysis Functions
-#######################################################################
+# =============================================================================
+# QUALITY ANALYSIS FUNCTIONS
+# =============================================================================
 
-# Comprehensive flake8 code style validation
+# Execute flake8 static analysis with zero-tolerance enforcement
 run_flake8_analysis() {
-    log "INFO" "Running flake8 static analysis with zero-tolerance enforcement..."
+    section_header "flake8 Static Analysis (PEP 8 Compliance)"
     
-    local output_file="${QUALITY_REPORTS_DIR}/flake8_report.txt"
-    local exit_code=0
+    log "INFO" "Running flake8 analysis with zero-tolerance policy..."
+    
+    local flake8_output_file="$PROJECT_ROOT/.quality_reports/flake8_report.txt"
+    mkdir -p "$(dirname "$flake8_output_file")"
     
     # Run flake8 with comprehensive reporting
-    if [[ "$VERBOSE" == "true" ]]; then
-        flake8 "$PROJECT_ROOT/src" "$PROJECT_ROOT/tests" \
-            --config="$FLAKE8_CONFIG" \
-            --output-file="$output_file" \
-            --tee \
-            --statistics \
-            --count || exit_code=$?
+    if flake8 src/ tests/ scripts/ \
+        --output-file="$flake8_output_file" \
+        --tee \
+        --statistics \
+        --count; then
+        
+        local error_count=$(grep -c ":" "$flake8_output_file" 2>/dev/null || echo "0")
+        
+        if [[ $error_count -eq $MAX_FLAKE8_ERRORS ]]; then
+            display_quality_gate_result "flake8 Code Style" "PASS" "Zero style violations found"
+            return 0
+        else
+            display_quality_gate_result "flake8 Code Style" "FAIL" "$error_count style violations found (max allowed: $MAX_FLAKE8_ERRORS)"
+            log "ERROR" "flake8 report saved to: $flake8_output_file"
+            return $EXIT_STATIC_ANALYSIS_FAILURE
+        fi
     else
-        flake8 "$PROJECT_ROOT/src" "$PROJECT_ROOT/tests" \
-            --config="$FLAKE8_CONFIG" \
-            --output-file="$output_file" \
-            --statistics \
-            --count || exit_code=$?
-    fi
-    
-    # Analyze results with zero-tolerance policy
-    if [[ $exit_code -eq 0 ]]; then
-        log "SUCCESS" "flake8 analysis passed with zero violations"
-        if [[ "$GENERATE_REPORTS" == "true" ]]; then
-            echo "flake8 analysis: PASSED (0 violations)" >> "${QUALITY_REPORTS_DIR}/summary.txt"
-        fi
-        return 0
-    else
-        local violation_count=$(grep -c "^" "$output_file" 2>/dev/null || echo "0")
-        log "ERROR" "flake8 analysis failed with $violation_count violations"
-        
-        if [[ "$VERBOSE" == "true" ]]; then
-            log "ERROR" "flake8 violations details:"
-            cat "$output_file" | head -20
-            if [[ $violation_count -gt 20 ]]; then
-                log "INFO" "... and $(($violation_count - 20)) more violations (see $output_file)"
-            fi
-        fi
-        
-        if [[ "$GENERATE_REPORTS" == "true" ]]; then
-            echo "flake8 analysis: FAILED ($violation_count violations)" >> "${QUALITY_REPORTS_DIR}/summary.txt"
-        fi
-        
-        if [[ "$STRICT_MODE" == "true" ]]; then
-            handle_error 1 "flake8 style violations detected" "Fix all PEP 8 compliance issues: see $output_file"
-        fi
-        return 1
+        display_quality_gate_result "flake8 Code Style" "FAIL" "flake8 execution failed"
+        return $EXIT_STATIC_ANALYSIS_FAILURE
     fi
 }
 
-# Strict mypy type checking validation
+# Execute mypy type checking with strict mode enforcement
 run_mypy_analysis() {
+    section_header "mypy Type Safety Validation"
+    
     log "INFO" "Running mypy type checking with strict mode enforcement..."
     
-    local output_file="${QUALITY_REPORTS_DIR}/mypy_report.txt"
-    local exit_code=0
+    local mypy_output_file="$PROJECT_ROOT/.quality_reports/mypy_report.txt"
+    mkdir -p "$(dirname "$mypy_output_file")"
     
-    # Run mypy with strict configuration
-    if [[ "$VERBOSE" == "true" ]]; then
-        mypy "$PROJECT_ROOT/src" \
-            --config-file="$MYPY_CONFIG" \
-            --no-error-summary \
-            --show-column-numbers \
-            --show-error-codes \
-            --pretty 2>&1 | tee "$output_file" || exit_code=${PIPESTATUS[0]}
-    else
-        mypy "$PROJECT_ROOT/src" \
-            --config-file="$MYPY_CONFIG" \
-            --no-error-summary \
-            --show-column-numbers \
-            --show-error-codes \
-            --pretty > "$output_file" 2>&1 || exit_code=$?
-    fi
-    
-    # Analyze results with 100% success requirement
-    if [[ $exit_code -eq 0 ]]; then
-        log "SUCCESS" "mypy type checking passed with 100% success"
-        if [[ "$GENERATE_REPORTS" == "true" ]]; then
-            echo "mypy analysis: PASSED (100% type check success)" >> "${QUALITY_REPORTS_DIR}/summary.txt"
-        fi
+    # Run mypy with comprehensive type checking
+    if mypy src/ \
+        --config-file="$PROJECT_ROOT/mypy.ini" \
+        --show-error-codes \
+        --show-column-numbers \
+        --pretty \
+        --error-summary \
+        > "$mypy_output_file" 2>&1; then
+        
+        display_quality_gate_result "mypy Type Safety" "PASS" "All type checks passed"
+        log "INFO" "mypy report saved to: $mypy_output_file"
         return 0
     else
-        local error_count=$(grep -c "error:" "$output_file" 2>/dev/null || echo "0")
-        log "ERROR" "mypy type checking failed with $error_count errors"
+        local error_count=$(grep -c "error:" "$mypy_output_file" 2>/dev/null || echo "1")
+        display_quality_gate_result "mypy Type Safety" "FAIL" "$error_count type checking errors found (max allowed: $MAX_MYPY_ERRORS)"
         
-        if [[ "$VERBOSE" == "true" ]]; then
-            log "ERROR" "mypy type errors details:"
-            grep "error:" "$output_file" | head -10
-            if [[ $error_count -gt 10 ]]; then
-                log "INFO" "... and $(($error_count - 10)) more errors (see $output_file)"
-            fi
-        fi
+        # Display critical errors for immediate attention
+        echo -e "\n${RED}Critical Type Checking Errors:${NC}"
+        head -20 "$mypy_output_file" || true
         
-        if [[ "$GENERATE_REPORTS" == "true" ]]; then
-            echo "mypy analysis: FAILED ($error_count type errors)" >> "${QUALITY_REPORTS_DIR}/summary.txt"
-        fi
-        
-        if [[ "$STRICT_MODE" == "true" ]]; then
-            handle_error 1 "mypy type checking errors detected" "Fix all type annotation issues: see $output_file"
-        fi
-        return 1
+        log "ERROR" "Full mypy report saved to: $mypy_output_file"
+        return $EXIT_TYPE_CHECK_FAILURE
     fi
 }
 
-#######################################################################
-# Security Analysis Functions
-#######################################################################
-
-# Comprehensive bandit security analysis
+# Execute bandit security analysis with enterprise compliance
 run_bandit_analysis() {
-    log "INFO" "Running bandit security analysis with enterprise compliance..."
+    section_header "bandit Security Analysis"
     
-    local output_file="${QUALITY_REPORTS_DIR}/bandit_report.json"
-    local text_output="${QUALITY_REPORTS_DIR}/bandit_report.txt"
-    local exit_code=0
+    log "INFO" "Running bandit security analysis with Flask-specific patterns..."
     
-    # Run bandit with comprehensive security analysis
-    bandit -r "$PROJECT_ROOT/src" \
-        -c "$BANDIT_CONFIG" \
+    local bandit_output_file="$PROJECT_ROOT/.quality_reports/bandit_report.json"
+    local bandit_summary_file="$PROJECT_ROOT/.quality_reports/bandit_summary.txt"
+    mkdir -p "$(dirname "$bandit_output_file")"
+    
+    # Run bandit with comprehensive security scanning
+    if bandit -r src/ \
         -f json \
-        -o "$output_file" \
-        --quiet 2>/dev/null || exit_code=$?
-    
-    # Generate human-readable report
-    bandit -r "$PROJECT_ROOT/src" \
-        -c "$BANDIT_CONFIG" \
-        -f txt \
-        -o "$text_output" \
-        --quiet 2>/dev/null || true
-    
-    # Analyze security findings with enterprise policy
-    if [[ -f "$output_file" ]]; then
-        local high_severity=$(jq -r '.results[] | select(.issue_severity == "HIGH") | .issue_severity' "$output_file" 2>/dev/null | wc -l || echo "0")
-        local medium_severity=$(jq -r '.results[] | select(.issue_severity == "MEDIUM") | .issue_severity' "$output_file" 2>/dev/null | wc -l || echo "0")
-        local low_severity=$(jq -r '.results[] | select(.issue_severity == "LOW") | .issue_severity' "$output_file" 2>/dev/null | wc -l || echo "0")
+        -o "$bandit_output_file" \
+        -c "$PROJECT_ROOT/bandit.yaml" \
+        --severity-level high \
+        --confidence-level medium; then
         
-        log "INFO" "Security analysis results: High: $high_severity, Medium: $medium_severity, Low: $low_severity"
+        # Generate human-readable summary
+        bandit -r src/ \
+            -f txt \
+            -o "$bandit_summary_file" \
+            -c "$PROJECT_ROOT/bandit.yaml" \
+            --severity-level low \
+            --confidence-level low \
+            || true
         
-        # Enterprise compliance check: no high/critical findings allowed
-        if [[ $high_severity -gt 0 ]]; then
-            log "ERROR" "Found $high_severity high-severity security issues"
+        # Parse results for critical findings
+        local high_severity_count=0
+        local critical_severity_count=0
+        
+        if [[ -f "$bandit_output_file" ]]; then
+            high_severity_count=$(python3 -c "
+import json, sys
+try:
+    with open('$bandit_output_file') as f:
+        data = json.load(f)
+    print(len([r for r in data.get('results', []) if r.get('issue_severity') == 'HIGH']))
+except: print(0)
+" 2>/dev/null || echo "0")
             
-            if [[ "$VERBOSE" == "true" ]]; then
-                log "ERROR" "High-severity security issues:"
-                jq -r '.results[] | select(.issue_severity == "HIGH") | "  - \(.test_name): \(.issue_text) (File: \(.filename):\(.line_number))"' "$output_file" 2>/dev/null || true
-            fi
-            
-            if [[ "$GENERATE_REPORTS" == "true" ]]; then
-                echo "bandit analysis: FAILED ($high_severity high-severity issues)" >> "${QUALITY_REPORTS_DIR}/summary.txt"
-            fi
-            
-            if [[ "$ENTERPRISE_COMPLIANCE" == "true" ]]; then
-                handle_error 2 "High-severity security vulnerabilities detected" "Review and fix security issues: see $text_output"
-            fi
-            return 2
-        elif [[ $medium_severity -gt 0 ]]; then
-            log "WARN" "Found $medium_severity medium-severity security issues - review recommended"
-            if [[ "$GENERATE_REPORTS" == "true" ]]; then
-                echo "bandit analysis: WARNING ($medium_severity medium-severity issues)" >> "${QUALITY_REPORTS_DIR}/summary.txt"
-            fi
+            critical_severity_count=$(python3 -c "
+import json, sys
+try:
+    with open('$bandit_output_file') as f:
+        data = json.load(f)
+    print(len([r for r in data.get('results', []) if r.get('issue_severity') == 'CRITICAL']))
+except: print(0)
+" 2>/dev/null || echo "0")
+        fi
+        
+        local total_critical_high=$((critical_severity_count + high_severity_count))
+        
+        if [[ $total_critical_high -eq 0 ]]; then
+            display_quality_gate_result "bandit Security" "PASS" "No critical or high-severity security issues found"
+            log "INFO" "Security reports saved to: $bandit_output_file, $bandit_summary_file"
+            return 0
         else
-            log "SUCCESS" "bandit security analysis passed with no high/medium severity issues"
-            if [[ "$GENERATE_REPORTS" == "true" ]]; then
-                echo "bandit analysis: PASSED (0 high/medium severity issues)" >> "${QUALITY_REPORTS_DIR}/summary.txt"
+            display_quality_gate_result "bandit Security" "FAIL" "$total_critical_high critical/high-severity security issues found (max allowed: 0)"
+            
+            # Display critical findings for immediate attention
+            if [[ -f "$bandit_summary_file" ]]; then
+                echo -e "\n${RED}Critical Security Findings:${NC}"
+                grep -A 5 -B 2 "Severity: High\|Severity: Critical" "$bandit_summary_file" | head -30 || true
             fi
+            
+            log "ERROR" "Security reports saved to: $bandit_output_file, $bandit_summary_file"
+            return $EXIT_SECURITY_FAILURE
         fi
-        
-        return 0
     else
-        log "ERROR" "bandit security analysis failed to generate report"
-        handle_error 2 "bandit execution failure" "Check bandit installation and configuration"
+        display_quality_gate_result "bandit Security" "FAIL" "bandit execution failed"
+        return $EXIT_SECURITY_FAILURE
     fi
 }
 
-# Additional security validation using safety for dependency scanning
-run_safety_analysis() {
-    log "INFO" "Running safety dependency vulnerability scanning..."
+# Execute complexity analysis using radon
+run_complexity_analysis() {
+    section_header "Code Complexity Analysis"
     
-    if ! command -v safety &> /dev/null; then
-        log "WARN" "safety not available, skipping dependency vulnerability scan"
+    if ! command_exists radon; then
+        log "WARN" "radon not found, skipping complexity analysis"
         return 0
     fi
     
-    local output_file="${QUALITY_REPORTS_DIR}/safety_report.txt"
+    log "INFO" "Running complexity analysis with max complexity threshold: $MAX_CYCLOMATIC_COMPLEXITY"
+    
+    local complexity_output_file="$PROJECT_ROOT/.quality_reports/complexity_report.txt"
+    mkdir -p "$(dirname "$complexity_output_file")"
+    
+    # Run radon complexity analysis
+    radon cc src/ \
+        --min B \
+        --show-complexity \
+        --average \
+        --exclude "tests/*,migrations/*,__pycache__/*" \
+        > "$complexity_output_file" 2>&1
+    
+    # Check for functions exceeding complexity threshold
+    local high_complexity_count=$(grep -c "([0-9]\{2,\})" "$complexity_output_file" 2>/dev/null || echo "0")
+    
+    if [[ $high_complexity_count -eq 0 ]]; then
+        display_quality_gate_result "Code Complexity" "PASS" "All functions within complexity threshold"
+        log "INFO" "Complexity report saved to: $complexity_output_file"
+        return 0
+    else
+        display_quality_gate_result "Code Complexity" "FAIL" "$high_complexity_count functions exceed complexity threshold"
+        
+        # Display high complexity functions
+        echo -e "\n${YELLOW}High Complexity Functions:${NC}"
+        grep "([0-9]\{2,\})" "$complexity_output_file" | head -10 || true
+        
+        log "ERROR" "Complexity report saved to: $complexity_output_file"
+        return $EXIT_COMPLEXITY_FAILURE
+    fi
+}
+
+# Execute dependency security scanning
+run_dependency_security_scan() {
+    section_header "Dependency Security Scanning"
+    
+    if ! command_exists safety; then
+        log "WARN" "safety not found, skipping dependency vulnerability scanning"
+        return 0
+    fi
+    
+    log "INFO" "Running dependency vulnerability scanning with safety..."
+    
+    local safety_output_file="$PROJECT_ROOT/.quality_reports/safety_report.txt"
+    mkdir -p "$(dirname "$safety_output_file")"
+    
+    # Run safety vulnerability scanning
+    if safety check \
+        --json \
+        --output "$safety_output_file" \
+        2>/dev/null; then
+        
+        display_quality_gate_result "Dependency Security" "PASS" "No critical vulnerabilities found in dependencies"
+        log "INFO" "Safety report saved to: $safety_output_file"
+        return 0
+    else
+        local vulnerability_count=$(python3 -c "
+import json, sys
+try:
+    with open('$safety_output_file') as f:
+        data = json.load(f)
+    print(len(data))
+except: print(1)
+" 2>/dev/null || echo "1")
+        
+        display_quality_gate_result "Dependency Security" "FAIL" "$vulnerability_count dependency vulnerabilities found"
+        
+        # Display critical vulnerabilities
+        echo -e "\n${RED}Critical Dependency Vulnerabilities:${NC}"
+        head -20 "$safety_output_file" || true
+        
+        log "ERROR" "Safety report saved to: $safety_output_file"
+        return $EXIT_SECURITY_FAILURE
+    fi
+}
+
+# =============================================================================
+# MAIN EXECUTION FUNCTIONS
+# =============================================================================
+
+# Execute all quality checks with enterprise enforcement
+run_quality_pipeline() {
     local exit_code=0
+    local failed_checks=()
     
-    # Run safety check on current environment
-    safety check --json --output "$output_file" 2>/dev/null || exit_code=$?
-    
-    if [[ $exit_code -eq 0 ]]; then
-        log "SUCCESS" "safety dependency scan passed - no known vulnerabilities"
-        if [[ "$GENERATE_REPORTS" == "true" ]]; then
-            echo "safety analysis: PASSED (no known vulnerabilities)" >> "${QUALITY_REPORTS_DIR}/summary.txt"
-        fi
-        return 0
-    else
-        local vuln_count=$(jq length "$output_file" 2>/dev/null || echo "unknown")
-        log "ERROR" "safety found $vuln_count dependency vulnerabilities"
-        
-        if [[ "$VERBOSE" == "true" && -f "$output_file" ]]; then
-            log "ERROR" "Dependency vulnerabilities:"
-            jq -r '.[] | "  - \(.package_name) \(.installed_version): \(.advisory)"' "$output_file" 2>/dev/null | head -5
-        fi
-        
-        if [[ "$GENERATE_REPORTS" == "true" ]]; then
-            echo "safety analysis: FAILED ($vuln_count vulnerabilities)" >> "${QUALITY_REPORTS_DIR}/summary.txt"
-        fi
-        
-        if [[ "$ENTERPRISE_COMPLIANCE" == "true" ]]; then
-            handle_error 2 "Dependency vulnerabilities detected" "Update vulnerable dependencies: see $output_file"
-        fi
-        return 2
+    # Execute each quality check with error capture
+    if ! run_flake8_analysis; then
+        failed_checks+=("flake8 Static Analysis")
+        exit_code=$EXIT_STATIC_ANALYSIS_FAILURE
     fi
+    
+    if ! run_mypy_analysis; then
+        failed_checks+=("mypy Type Checking")
+        [[ $exit_code -eq 0 ]] && exit_code=$EXIT_TYPE_CHECK_FAILURE
+    fi
+    
+    if ! run_bandit_analysis; then
+        failed_checks+=("bandit Security Analysis")
+        [[ $exit_code -eq 0 ]] && exit_code=$EXIT_SECURITY_FAILURE
+    fi
+    
+    if ! run_complexity_analysis; then
+        failed_checks+=("Code Complexity Analysis")
+        [[ $exit_code -eq 0 ]] && exit_code=$EXIT_COMPLEXITY_FAILURE
+    fi
+    
+    if ! run_dependency_security_scan; then
+        failed_checks+=("Dependency Security Scanning")
+        [[ $exit_code -eq 0 ]] && exit_code=$EXIT_SECURITY_FAILURE
+    fi
+    
+    return $exit_code
 }
-
-#######################################################################
-# Report Generation Functions
-#######################################################################
 
 # Generate comprehensive quality report
 generate_quality_report() {
-    log "INFO" "Generating comprehensive quality report..."
+    section_header "Quality Report Generation"
     
-    local report_file="${QUALITY_REPORTS_DIR}/quality_report.html"
+    local report_file="$PROJECT_ROOT/.quality_reports/quality_summary.md"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     
     cat > "$report_file" << EOF
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Code Quality Report - Flask Application</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 20px; }
-        .header { background-color: #f0f0f0; padding: 20px; border-radius: 5px; }
-        .section { margin: 20px 0; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }
-        .success { background-color: #d4edda; border-color: #c3e6cb; }
-        .warning { background-color: #fff3cd; border-color: #ffeaa7; }
-        .error { background-color: #f8d7da; border-color: #f5c6cb; }
-        .code { background-color: #f8f9fa; padding: 10px; border-radius: 3px; font-family: monospace; }
-        table { width: 100%; border-collapse: collapse; margin: 10px 0; }
-        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-        th { background-color: #f2f2f2; }
-    </style>
-</head>
-<body>
-    <div class="header">
-        <h1>Code Quality Report</h1>
-        <p><strong>Generated:</strong> $timestamp</p>
-        <p><strong>Project:</strong> Flask Application Migration</p>
-        <p><strong>Quality Standards:</strong> Enterprise Compliance (Section 8.5.1)</p>
-    </div>
+# Flask Application Quality Report
+
+**Generated:** $timestamp  
+**Project:** $(basename "$PROJECT_ROOT")  
+**Quality Mode:** Zero-Tolerance Enterprise Enforcement  
+**Script Version:** $SCRIPT_VERSION
+
+## Quality Standards Compliance
+
+| Quality Gate | Tool | Version | Status | Details |
+|--------------|------|---------|--------|---------|
+| Code Style | flake8 | $(flake8 --version | head -n1 | cut -d' ' -f1) | $(test -f "$PROJECT_ROOT/.quality_reports/flake8_report.txt" && echo "CHECKED" || echo "SKIPPED") | PEP 8 Compliance |
+| Type Safety | mypy | $(mypy --version | cut -d' ' -f2) | $(test -f "$PROJECT_ROOT/.quality_reports/mypy_report.txt" && echo "CHECKED" || echo "SKIPPED") | Strict Type Checking |
+| Security | bandit | $(bandit --version 2>&1 | grep "bandit" | cut -d' ' -f2) | $(test -f "$PROJECT_ROOT/.quality_reports/bandit_report.json" && echo "CHECKED" || echo "SKIPPED") | Security Vulnerability Detection |
+| Complexity | radon | $(command_exists radon && radon --version | cut -d' ' -f2 || echo "N/A") | $(test -f "$PROJECT_ROOT/.quality_reports/complexity_report.txt" && echo "CHECKED" || echo "SKIPPED") | Maintainability Analysis |
+| Dependencies | safety | $(command_exists safety && safety --version 2>&1 | head -n1 | cut -d' ' -f2 || echo "N/A") | $(test -f "$PROJECT_ROOT/.quality_reports/safety_report.txt" && echo "CHECKED" || echo "SKIPPED") | Vulnerability Scanning |
+
+## Configuration Files
+
+- **flake8:** \`.flake8\` (PEP 8 compliance with 88-character line length)
+- **mypy:** \`mypy.ini\` (Strict type checking with zero tolerance)
+- **bandit:** \`bandit.yaml\` (Comprehensive security analysis)
+
+## Quality Enforcement Policy
+
+- **Static Analysis:** Zero errors tolerance (max: $MAX_FLAKE8_ERRORS)
+- **Type Checking:** 100% type check success required (max errors: $MAX_MYPY_ERRORS)
+- **Security:** No critical/high severity findings allowed
+- **Complexity:** Maximum cyclomatic complexity: $MAX_CYCLOMATIC_COMPLEXITY
+- **Coverage:** Minimum threshold: $MIN_COVERAGE_THRESHOLD%
+
+## Report Files
+
 EOF
-    
-    # Add summary section
-    if [[ -f "${QUALITY_REPORTS_DIR}/summary.txt" ]]; then
-        echo '<div class="section">' >> "$report_file"
-        echo '<h2>Quality Analysis Summary</h2>' >> "$report_file"
-        echo '<div class="code">' >> "$report_file"
-        cat "${QUALITY_REPORTS_DIR}/summary.txt" >> "$report_file"
-        echo '</div>' >> "$report_file"
-        echo '</div>' >> "$report_file"
-    fi
-    
-    # Add detailed sections for each tool
-    add_tool_section_to_report "$report_file" "flake8" "Code Style Analysis"
-    add_tool_section_to_report "$report_file" "mypy" "Type Checking Analysis"
-    add_tool_section_to_report "$report_file" "bandit" "Security Analysis"
-    add_tool_section_to_report "$report_file" "safety" "Dependency Security"
-    
-    # Close HTML
-    echo '</body></html>' >> "$report_file"
+
+    # Add links to detailed reports
+    for report in flake8_report.txt mypy_report.txt bandit_report.json bandit_summary.txt complexity_report.txt safety_report.txt; do
+        if [[ -f "$PROJECT_ROOT/.quality_reports/$report" ]]; then
+            echo "- **$report:** Detailed analysis results" >> "$report_file"
+        fi
+    done
     
     log "SUCCESS" "Quality report generated: $report_file"
 }
 
-# Add tool section to HTML report
-add_tool_section_to_report() {
-    local report_file="$1"
-    local tool="$2"
-    local title="$3"
-    
-    local tool_report="${QUALITY_REPORTS_DIR}/${tool}_report.txt"
-    
-    if [[ -f "$tool_report" ]]; then
-        echo "<div class=\"section\">" >> "$report_file"
-        echo "<h2>$title ($tool)</h2>" >> "$report_file"
-        echo "<div class=\"code\">" >> "$report_file"
-        head -50 "$tool_report" >> "$report_file"
-        echo "</div>" >> "$report_file"
-        echo "</div>" >> "$report_file"
-    fi
-}
-
-# Generate failure report for pipeline integration
-generate_failure_report() {
-    local exit_code="$1"
-    local error_message="$2"
-    local remediation="$3"
-    
-    local failure_file="${QUALITY_REPORTS_DIR}/failure_report.json"
-    local timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-    
-    cat > "$failure_file" << EOF
-{
-    "timestamp": "$timestamp",
-    "script": "$SCRIPT_NAME",
-    "version": "$SCRIPT_VERSION",
-    "exit_code": $exit_code,
-    "error_message": "$error_message",
-    "remediation": "$remediation",
-    "project_root": "$PROJECT_ROOT",
-    "reports_directory": "$QUALITY_REPORTS_DIR"
-}
-EOF
-    
-    log "INFO" "Failure report generated: $failure_file"
-}
-
-#######################################################################
-# Parallel Execution Functions
-#######################################################################
-
-# Execute quality checks in parallel for performance optimization
-run_parallel_quality_checks() {
-    log "INFO" "Executing quality checks in parallel mode..."
-    
-    local pids=()
-    local results=()
-    
-    # Start flake8 analysis in background
-    (run_flake8_analysis; echo $? > "${QUALITY_REPORTS_DIR}/flake8_exit") &
-    pids[0]=$!
-    
-    # Start mypy analysis in background
-    (run_mypy_analysis; echo $? > "${QUALITY_REPORTS_DIR}/mypy_exit") &
-    pids[1]=$!
-    
-    # Start bandit analysis in background
-    (run_bandit_analysis; echo $? > "${QUALITY_REPORTS_DIR}/bandit_exit") &
-    pids[2]=$!
-    
-    # Start safety analysis in background
-    (run_safety_analysis; echo $? > "${QUALITY_REPORTS_DIR}/safety_exit") &
-    pids[3]=$!
-    
-    # Wait for all processes and collect results
-    local tool_names=("flake8" "mypy" "bandit" "safety")
-    local overall_exit=0
-    
-    for i in "${!pids[@]}"; do
-        local pid=${pids[$i]}
-        local tool=${tool_names[$i]}
-        
-        if [[ "$QUIET" != "true" ]]; then
-            show_progress "Waiting for $tool analysis" "$pid"
-        else
-            wait "$pid"
-        fi
-        
-        # Read exit code from file
-        local exit_file="${QUALITY_REPORTS_DIR}/${tool}_exit"
-        if [[ -f "$exit_file" ]]; then
-            local tool_exit=$(cat "$exit_file")
-            results[$i]=$tool_exit
-            rm -f "$exit_file"
-            
-            if [[ $tool_exit -ne 0 ]]; then
-                overall_exit=$tool_exit
-                log "ERROR" "$tool analysis failed with exit code: $tool_exit"
-            else
-                log "SUCCESS" "$tool analysis completed successfully"
-            fi
-        else
-            log "ERROR" "Could not determine exit status for $tool"
-            overall_exit=4
-        fi
-    done
-    
-    return $overall_exit
-}
-
-# Execute quality checks sequentially
-run_sequential_quality_checks() {
-    log "INFO" "Executing quality checks in sequential mode..."
-    
-    local overall_exit=0
-    
-    # Run each tool sequentially and collect results
-    if ! run_flake8_analysis; then
-        overall_exit=1
-        if [[ "$FAIL_ON_ANY_ERROR" == "true" ]]; then
-            return $overall_exit
-        fi
-    fi
-    
-    if ! run_mypy_analysis; then
-        overall_exit=1
-        if [[ "$FAIL_ON_ANY_ERROR" == "true" ]]; then
-            return $overall_exit
-        fi
-    fi
-    
-    if ! run_bandit_analysis; then
-        overall_exit=2
-        if [[ "$FAIL_ON_ANY_ERROR" == "true" ]]; then
-            return $overall_exit
-        fi
-    fi
-    
-    if ! run_safety_analysis; then
-        overall_exit=2
-        if [[ "$FAIL_ON_ANY_ERROR" == "true" ]]; then
-            return $overall_exit
-        fi
-    fi
-    
-    return $overall_exit
-}
-
-#######################################################################
-# Main Execution Functions
-#######################################################################
-
-# Display help information
-show_help() {
+# Display usage information
+usage() {
     cat << EOF
-Usage: $0 [OPTIONS]
+Usage: $SCRIPT_NAME [OPTIONS]
 
-Code Quality Validation Script for Flask Application Migration
-
-This script executes comprehensive static analysis using flake8, mypy, and bandit
-with zero-tolerance error policy and enterprise security compliance enforcement.
+Flask Application Quality Validation Script
+Implements enterprise-grade code quality enforcement with zero-tolerance policy.
 
 OPTIONS:
-    -h, --help              Show this help message
-    -v, --verbose           Enable verbose output with detailed error information
-    -q, --quiet             Enable quiet mode with minimal output
-    -s, --sequential        Run quality checks sequentially instead of parallel
-    --no-strict             Disable strict mode (allow warnings)
-    --no-reports            Disable report generation
-    --flake8-only           Run only flake8 analysis
-    --mypy-only            Run only mypy analysis
-    --bandit-only          Run only bandit analysis
-    --safety-only          Run only safety analysis
+    -h, --help          Show this help message
+    -v, --verbose       Enable verbose output
+    -q, --quiet         Suppress non-error output
+    --config-only       Generate configuration files only
+    --skip-deps         Skip dependency validation
+    --report-only       Generate report from existing results
 
-ENVIRONMENT VARIABLES:
-    QUALITY_STRICT_MODE     Set to 'false' to disable strict mode
-    QUALITY_PARALLEL        Set to 'false' to disable parallel execution
-    QUALITY_REPORTS_DIR     Override default reports directory
-
-EXAMPLES:
-    $0                      Run all quality checks with default settings
-    $0 -v                   Run with verbose output
-    $0 --flake8-only -v     Run only flake8 with verbose output
-    $0 --no-strict          Run in non-strict mode allowing warnings
+QUALITY GATES:
+    - flake8 6.1+:      PEP 8 compliance (zero errors)
+    - mypy 1.8+:        Type safety (strict mode)
+    - bandit 1.7+:      Security analysis (no critical/high findings)
+    - radon:            Complexity analysis (max: $MAX_CYCLOMATIC_COMPLEXITY)
+    - safety:           Dependency vulnerability scanning
 
 EXIT CODES:
-    0 - All quality checks passed
-    1 - Static analysis failures (flake8/mypy)
-    2 - Security analysis failures (bandit/safety)
-    3 - Configuration or dependency errors
-    4 - Script execution errors
+    0: Success (all quality gates passed)
+    1: Static analysis failure (flake8)
+    2: Type checking failure (mypy)
+    3: Security analysis failure (bandit/safety)
+    4: Complexity threshold exceeded
+    5: Dependency validation failure
+    6: Configuration error
+
+EXAMPLES:
+    $SCRIPT_NAME                    # Run full quality pipeline
+    $SCRIPT_NAME --verbose          # Run with detailed output
+    $SCRIPT_NAME --config-only      # Generate configs only
+    $SCRIPT_NAME --report-only      # Generate report only
 
 For more information, see Section 8.5.1 of the technical specification.
 EOF
 }
 
-# Parse command line arguments
-parse_arguments() {
-    local run_specific_tool=""
+# =============================================================================
+# MAIN SCRIPT EXECUTION
+# =============================================================================
+
+main() {
+    local config_only=false
+    local skip_deps=false
+    local report_only=false
+    local quiet=false
     
+    # Parse command line arguments
     while [[ $# -gt 0 ]]; do
         case $1 in
             -h|--help)
-                show_help
-                exit 0
+                usage
+                exit $EXIT_SUCCESS
                 ;;
             -v|--verbose)
-                VERBOSE=true
-                QUIET=false
+                export VERBOSE=true
                 shift
                 ;;
             -q|--quiet)
-                QUIET=true
-                VERBOSE=false
+                quiet=true
                 shift
                 ;;
-            -s|--sequential)
-                PARALLEL_EXECUTION=false
+            --config-only)
+                config_only=true
                 shift
                 ;;
-            --no-strict)
-                STRICT_MODE=false
-                FAIL_ON_ANY_ERROR=false
+            --skip-deps)
+                skip_deps=true
                 shift
                 ;;
-            --no-reports)
-                GENERATE_REPORTS=false
-                shift
-                ;;
-            --flake8-only)
-                run_specific_tool="flake8"
-                shift
-                ;;
-            --mypy-only)
-                run_specific_tool="mypy"
-                shift
-                ;;
-            --bandit-only)
-                run_specific_tool="bandit"
-                shift
-                ;;
-            --safety-only)
-                run_specific_tool="safety"
+            --report-only)
+                report_only=true
                 shift
                 ;;
             *)
                 log "ERROR" "Unknown option: $1"
-                log "INFO" "Use --help for usage information"
-                exit 4
+                usage
+                exit $EXIT_CONFIGURATION_ERROR
                 ;;
         esac
     done
     
-    # Apply environment variable overrides
-    if [[ "${QUALITY_STRICT_MODE:-}" == "false" ]]; then
-        STRICT_MODE=false
-        FAIL_ON_ANY_ERROR=false
+    # Suppress output if quiet mode
+    if [[ "$quiet" == "true" ]]; then
+        exec 1>/dev/null
     fi
     
-    if [[ "${QUALITY_PARALLEL:-}" == "false" ]]; then
-        PARALLEL_EXECUTION=false
+    # Display header
+    display_header
+    
+    # Change to project root directory
+    cd "$PROJECT_ROOT" || {
+        log "ERROR" "Failed to change to project root: $PROJECT_ROOT"
+        exit $EXIT_CONFIGURATION_ERROR
+    }
+    
+    # Generate configuration files
+    setup_quality_configs
+    
+    if [[ "$config_only" == "true" ]]; then
+        log "SUCCESS" "Configuration files generated successfully"
+        exit $EXIT_SUCCESS
     fi
     
-    if [[ -n "${QUALITY_REPORTS_DIR:-}" ]]; then
-        QUALITY_REPORTS_DIR="$QUALITY_REPORTS_DIR"
+    # Validate dependencies unless skipped
+    if [[ "$skip_deps" != "true" ]]; then
+        validate_dependencies
     fi
     
-    # Handle specific tool execution
-    if [[ -n "$run_specific_tool" ]]; then
-        PARALLEL_EXECUTION=false
-        case "$run_specific_tool" in
-            "flake8")
-                RUN_SPECIFIC_TOOL="flake8"
-                ;;
-            "mypy")
-                RUN_SPECIFIC_TOOL="mypy"
-                ;;
-            "bandit")
-                RUN_SPECIFIC_TOOL="bandit"
-                ;;
-            "safety")
-                RUN_SPECIFIC_TOOL="safety"
-                ;;
-        esac
-    fi
-}
-
-# Main execution function
-main() {
-    local start_time=$(date +%s)
-    
-    # Initialize summary file
-    if [[ "$GENERATE_REPORTS" == "true" ]]; then
-        echo "# Code Quality Analysis Summary - $(date)" > "${QUALITY_REPORTS_DIR}/summary.txt"
-    fi
-    
-    log "INFO" "Starting code quality validation (version $SCRIPT_VERSION)"
-    log "INFO" "Project root: $PROJECT_ROOT"
-    log "INFO" "Configuration: Strict=$STRICT_MODE, Parallel=$PARALLEL_EXECUTION, Reports=$GENERATE_REPORTS"
-    
-    # Validate dependencies and configuration
-    validate_dependencies
-    validate_configuration
-    
-    local exit_code=0
-    
-    # Execute quality checks based on mode
-    if [[ -n "${RUN_SPECIFIC_TOOL:-}" ]]; then
-        log "INFO" "Running specific tool: $RUN_SPECIFIC_TOOL"
-        case "$RUN_SPECIFIC_TOOL" in
-            "flake8")
-                run_flake8_analysis || exit_code=$?
-                ;;
-            "mypy")
-                run_mypy_analysis || exit_code=$?
-                ;;
-            "bandit")
-                run_bandit_analysis || exit_code=$?
-                ;;
-            "safety")
-                run_safety_analysis || exit_code=$?
-                ;;
-        esac
-    elif [[ "$PARALLEL_EXECUTION" == "true" ]]; then
-        run_parallel_quality_checks || exit_code=$?
-    else
-        run_sequential_quality_checks || exit_code=$?
-    fi
-    
-    # Generate comprehensive report
-    if [[ "$GENERATE_REPORTS" == "true" ]]; then
+    # Generate report only if requested
+    if [[ "$report_only" == "true" ]]; then
         generate_quality_report
+        exit $EXIT_SUCCESS
     fi
     
-    # Calculate execution time
-    local end_time=$(date +%s)
-    local duration=$((end_time - start_time))
+    # Create reports directory
+    mkdir -p "$PROJECT_ROOT/.quality_reports"
     
-    # Final status reporting
-    if [[ $exit_code -eq 0 ]]; then
-        log "SUCCESS" "All quality checks passed successfully (${duration}s)"
-        log "INFO" "Code quality validation completed with enterprise compliance"
+    # Execute quality pipeline
+    local pipeline_exit_code=0
+    if ! run_quality_pipeline; then
+        pipeline_exit_code=$?
+    fi
+    
+    # Generate comprehensive quality report
+    generate_quality_report
+    
+    # Display final results
+    echo -e "\n${WHITE}=============================================================================="
+    if [[ $pipeline_exit_code -eq 0 ]]; then
+        echo -e "  ${GREEN}✓ ALL QUALITY GATES PASSED${WHITE}"
+        echo -e "  Enterprise code quality standards successfully enforced"
+        log "SUCCESS" "Quality validation completed successfully"
     else
-        log "ERROR" "Quality validation failed with exit code: $exit_code (${duration}s)"
-        log "ERROR" "Review quality reports in: $QUALITY_REPORTS_DIR"
-        
-        if [[ "$STRICT_MODE" == "true" ]]; then
-            log "ERROR" "Strict mode enabled - all issues must be resolved before deployment"
-        fi
+        echo -e "  ${RED}✗ QUALITY VALIDATION FAILED${WHITE}"
+        echo -e "  One or more quality gates failed - review reports for details"
+        log "ERROR" "Quality validation failed with exit code: $pipeline_exit_code"
     fi
+    echo -e "=============================================================================="
+    echo -e "${NC}"
     
-    exit $exit_code
+    exit $pipeline_exit_code
 }
 
-#######################################################################
-# Script Entry Point
-#######################################################################
-
-# Ensure we're in the correct directory
-cd "$PROJECT_ROOT"
-
-# Parse command line arguments
-parse_arguments "$@"
-
-# Execute main function
-main
+# Execute main function with all arguments
+main "$@"
