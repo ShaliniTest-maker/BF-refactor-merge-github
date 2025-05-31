@@ -1,975 +1,1381 @@
-#!/usr/bin/env python3
 """
-Prometheus Metrics Collection Module
+Prometheus Metrics Collection Implementation
 
-Comprehensive application performance monitoring using prometheus-client 0.17+ providing
-WSGI server instrumentation, custom migration metrics, and business logic throughput tracking.
-Implements specialized metrics for ≤10% performance variance compliance and enterprise monitoring integration.
+This module implements comprehensive Prometheus metrics collection for the Flask migration
+application using prometheus-client 0.17+, providing enterprise-grade monitoring, WSGI server
+instrumentation, custom migration performance tracking, and business logic throughput analysis.
 
 Key Features:
-- WSGI server instrumentation with Gunicorn prometheus_multiproc_dir
-- Custom migration performance metrics for Node.js baseline comparison
+- prometheus-client 0.17+ metrics collection for enterprise Prometheus integration
+- WSGI server instrumentation with Gunicorn prometheus_multiproc_dir support
+- Custom migration performance metrics for Node.js baseline comparison (≤10% variance)
 - Flask request/response hooks for comprehensive request lifecycle monitoring
-- Performance variance tracking with Prometheus Gauge metrics
+- Performance variance tracking with real-time Prometheus Gauge metrics
 - Endpoint-specific histogram metrics for response time distribution analysis
 - Business logic throughput counters for migration quality assurance
+- Container resource correlation and system performance monitoring
 
-Compliance:
-- Section 0.1.1: Performance monitoring to ensure ≤10% variance from Node.js baseline
-- Section 0.2.4: prometheus-client 0.17+ dependency decisions
-- Section 6.5.4.1: WSGI server instrumentation for enterprise monitoring
-- Section 6.5.4.5: Custom migration performance metrics implementation
+Architecture Integration:
+- Flask application factory pattern integration for centralized metrics collection
+- Prometheus Alertmanager integration for automated threshold-based alerting
+- Enterprise APM correlation for comprehensive performance monitoring
+- Container orchestration integration via /metrics endpoint for Kubernetes monitoring
+- WSGI worker-level metrics aggregation for horizontal scaling decision support
+
+Performance Requirements:
+- Real-time performance variance tracking: ≤10% from Node.js baseline (critical requirement)
+- Response time distribution analysis: P50, P95, P99 percentile tracking with histogram buckets
+- CPU utilization monitoring: Warning >70%, Critical >90% with 15-second collection intervals
+- Memory usage tracking: Warning >80%, Critical >95% heap usage with Python GC correlation
+- Business logic throughput comparison: Direct Flask vs Node.js request rate analysis
+
+References:
+- Section 3.6.2 Performance Monitoring: prometheus-client 0.17+ requirements
+- Section 6.5.1.1 Metrics Collection: WSGI server instrumentation and enterprise integration
+- Section 6.5.4.5 Custom Migration Performance Metrics: Node.js baseline comparison framework
+- Section 0.1.1 Primary Objective: ≤10% performance variance requirement compliance
+- Section 6.5.4.1 Enhanced WSGI Server Monitoring: Gunicorn metrics collection implementation
 """
 
+import gc
 import os
 import time
-import functools
 import threading
-from typing import Dict, List, Optional, Callable, Any, Union
-from collections import defaultdict
-import logging
+from datetime import datetime, timezone
+from functools import wraps
+from typing import Any, Dict, List, Optional, Callable, Union
 
 import psutil
-import gc
 from prometheus_client import (
-    Counter, Histogram, Gauge, Summary, Info, Enum,
-    CollectorRegistry, CONTENT_TYPE_LATEST, generate_latest,
-    multiprocess, start_http_server
+    Counter,
+    Histogram,
+    Gauge,
+    Info,
+    Summary,
+    CollectorRegistry,
+    multiprocess,
+    generate_latest,
+    CONTENT_TYPE_LATEST,
+    REGISTRY,
+    start_http_server,
 )
-from prometheus_client.openmetrics.exposition import CONTENT_TYPE_LATEST as OPENMETRICS_CONTENT_TYPE
-from flask import Flask, request, g, jsonify, Response
-from werkzeug.exceptions import HTTPException
+from flask import Flask, g, request, Response
 
 from src.config.monitoring import MonitoringConfig
 
-# Initialize logger for metrics collection
-logger = logging.getLogger(__name__)
 
-# Global metrics registry for multiprocess support
-METRICS_REGISTRY = CollectorRegistry()
-
-class FlaskMetricsCollector:
+class PrometheusMetricsCollector:
     """
-    Comprehensive Flask application metrics collector implementing enterprise-grade
-    monitoring with specialized migration performance tracking.
+    Comprehensive Prometheus metrics collector implementing enterprise-grade performance
+    monitoring for Flask migration application with Node.js baseline comparison capabilities.
     
-    Provides WSGI server instrumentation, custom performance variance metrics,
-    and business logic throughput analysis for Node.js baseline comparison.
+    This collector provides:
+    - HTTP request/response performance tracking with P50/P95/P99 percentiles
+    - Database operation performance monitoring with query-level granularity
+    - External service integration metrics with circuit breaker correlation
+    - Resource utilization (CPU, memory, GC) tracking with container integration
+    - Custom migration performance comparison metrics for baseline compliance
+    - Business logic throughput analysis for migration quality assurance
+    - WSGI server instrumentation for worker-level performance monitoring
     """
     
-    def __init__(self, app: Optional[Flask] = None, registry: Optional[CollectorRegistry] = None):
+    def __init__(self, config: MonitoringConfig = None):
         """
-        Initialize Flask metrics collector with comprehensive monitoring capabilities.
+        Initialize Prometheus metrics collector with enterprise configuration.
         
         Args:
-            app: Flask application instance for initialization
-            registry: Prometheus metrics registry (defaults to global multiprocess registry)
+            config: MonitoringConfig instance with enterprise monitoring settings
         """
-        self.app = app
-        self.registry = registry or METRICS_REGISTRY
-        self.config = MonitoringConfig()
+        self.config = config or MonitoringConfig()
+        self._lock = threading.Lock()
+        self._initialized = False
         
-        # Thread-local storage for request metrics
-        self._local = threading.local()
+        # Setup multiprocess metrics collection for Gunicorn
+        self._setup_multiprocess_registry()
         
-        # Performance baseline tracking
-        self._nodejs_baseline: Dict[str, float] = {}
-        self._performance_cache: Dict[str, List[float]] = defaultdict(list)
-        self._performance_lock = threading.Lock()
+        # Initialize core HTTP metrics
+        self._init_http_metrics()
         
-        # Initialize core metrics collections
-        self._init_request_metrics()
-        self._init_performance_metrics()
-        self._init_system_metrics()
+        # Initialize database performance metrics
+        self._init_database_metrics()
+        
+        # Initialize external service metrics
+        self._init_external_service_metrics()
+        
+        # Initialize system resource metrics
+        self._init_resource_metrics()
+        
+        # Initialize custom migration metrics
         self._init_migration_metrics()
-        self._init_business_metrics()
         
-        if app:
-            self.init_app(app)
+        # Initialize business logic metrics
+        self._init_business_logic_metrics()
+        
+        # Initialize WSGI server metrics
+        self._init_wsgi_server_metrics()
+        
+        # Initialize circuit breaker metrics
+        self._init_circuit_breaker_metrics()
+        
+        # Setup garbage collection monitoring
+        self._init_garbage_collection_metrics()
+        
+        self._initialized = True
     
-    def _init_request_metrics(self) -> None:
-        """
-        Initialize comprehensive request lifecycle metrics for Flask application monitoring.
-        
-        Implements Section 6.5.1.1 Flask request/response hooks for request lifecycle monitoring.
-        """
-        # Request duration histogram with detailed percentile tracking
-        self.request_duration = Histogram(
-            'flask_request_duration_seconds',
-            'Time spent processing Flask requests by endpoint and method',
-            ['method', 'endpoint', 'status_code'],
-            buckets=[
-                0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5,
-                1.0, 2.5, 5.0, 10.0, 30.0, 60.0, float('inf')
-            ],
-            registry=self.registry
+    def _setup_multiprocess_registry(self):
+        """Setup multiprocess metrics registry for Gunicorn worker coordination."""
+        if self.config.PROMETHEUS_MULTIPROC_DIR:
+            # Ensure multiprocess directory exists
+            os.makedirs(self.config.PROMETHEUS_MULTIPROC_DIR, exist_ok=True)
+            
+            # Set environment variable for prometheus_client
+            os.environ['PROMETHEUS_MULTIPROC_DIR'] = self.config.PROMETHEUS_MULTIPROC_DIR
+    
+    def _init_http_metrics(self):
+        """Initialize HTTP request/response performance metrics."""
+        # HTTP request counter with comprehensive labels
+        self.http_requests_total = Counter(
+            'flask_http_requests_total',
+            'Total number of HTTP requests processed by Flask application',
+            ['method', 'endpoint', 'status_code', 'user_type'],
+            registry=REGISTRY
         )
         
-        # Request count counter with comprehensive labeling
-        self.request_count = Counter(
-            'flask_requests_total',
-            'Total number of Flask requests processed',
-            ['method', 'endpoint', 'status_code', 'client_type'],
-            registry=self.registry
+        # HTTP request duration histogram with optimized buckets for web applications
+        self.http_request_duration_seconds = Histogram(
+            'flask_http_request_duration_seconds',
+            'HTTP request processing duration in seconds',
+            ['method', 'endpoint', 'status_class'],
+            buckets=[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, float('inf')],
+            registry=REGISTRY
         )
         
-        # Request size tracking for performance analysis
-        self.request_size = Histogram(
-            'flask_request_size_bytes',
-            'Size of Flask request payloads in bytes',
+        # HTTP request size histogram for bandwidth analysis
+        self.http_request_size_bytes = Histogram(
+            'flask_http_request_size_bytes',
+            'Size of HTTP request in bytes',
             ['method', 'endpoint'],
             buckets=[64, 256, 1024, 4096, 16384, 65536, 262144, 1048576, float('inf')],
-            registry=self.registry
+            registry=REGISTRY
         )
         
-        # Response size tracking for bandwidth analysis
-        self.response_size = Histogram(
-            'flask_response_size_bytes',
-            'Size of Flask response payloads in bytes',
-            ['method', 'endpoint', 'status_code'],
+        # HTTP response size histogram for response optimization
+        self.http_response_size_bytes = Histogram(
+            'flask_http_response_size_bytes',
+            'Size of HTTP response in bytes',
+            ['method', 'endpoint', 'status_class'],
             buckets=[64, 256, 1024, 4096, 16384, 65536, 262144, 1048576, float('inf')],
-            registry=self.registry
+            registry=REGISTRY
         )
         
-        # Active request gauge for concurrent load monitoring
-        self.active_requests = Gauge(
-            'flask_active_requests',
-            'Number of requests currently being processed',
-            registry=self.registry
+        # Active HTTP requests gauge for concurrency monitoring
+        self.http_requests_active = Gauge(
+            'flask_http_requests_active',
+            'Number of HTTP requests currently being processed',
+            registry=REGISTRY
         )
         
-        # Request processing stages for detailed timing analysis
-        self.request_stages = Histogram(
-            'flask_request_stage_duration_seconds',
-            'Time spent in different request processing stages',
-            ['stage', 'endpoint'],
-            buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, float('inf')],
-            registry=self.registry
+        # HTTP request rate summary for throughput analysis
+        self.http_request_rate = Summary(
+            'flask_http_request_rate_per_second',
+            'Rate of HTTP requests per second',
+            registry=REGISTRY
         )
     
-    def _init_performance_metrics(self) -> None:
-        """
-        Initialize performance monitoring metrics for Node.js baseline comparison.
-        
-        Implements Section 6.5.4.5 performance variance tracking with Prometheus Gauge metrics.
-        """
-        # Real-time performance variance tracking against Node.js baseline
-        self.performance_variance = Gauge(
-            'flask_performance_variance_percentage',
-            'Performance variance percentage from Node.js baseline by endpoint',
-            ['endpoint', 'metric_type'],
-            registry=self.registry
+    def _init_database_metrics(self):
+        """Initialize database operation performance metrics."""
+        # Database operation counter with operation granularity
+        self.database_operations_total = Counter(
+            'flask_database_operations_total',
+            'Total number of database operations executed',
+            ['operation', 'collection', 'status', 'connection_pool'],
+            registry=REGISTRY
         )
         
-        # Response time comparison metrics
-        self.baseline_comparison = Histogram(
-            'flask_baseline_response_comparison_seconds',
-            'Response time comparison between Flask and Node.js baseline',
-            ['endpoint', 'comparison_type'],
-            buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, float('inf')],
-            registry=self.registry
-        )
-        
-        # Performance threshold violation tracking
-        self.variance_violations = Counter(
-            'flask_performance_variance_violations_total',
-            'Count of performance variance threshold violations',
-            ['endpoint', 'threshold_type', 'severity'],
-            registry=self.registry
-        )
-        
-        # Performance trend analysis
-        self.performance_trend = Gauge(
-            'flask_performance_trend_score',
-            'Performance trend score indicating improvement or degradation',
-            ['endpoint', 'time_window'],
-            registry=self.registry
-        )
-        
-        # Memory usage correlation with performance
-        self.memory_performance_correlation = Gauge(
-            'flask_memory_performance_correlation',
-            'Correlation between memory usage and response time performance',
-            ['endpoint'],
-            registry=self.registry
-        )
-    
-    def _init_system_metrics(self) -> None:
-        """
-        Initialize comprehensive system resource monitoring metrics.
-        
-        Implements Section 6.5.1.1 CPU utilization monitoring with psutil integration.
-        """
-        # Process-level CPU utilization tracking
-        self.cpu_usage = Gauge(
-            'flask_process_cpu_usage_percentage',
-            'CPU utilization percentage for Flask process',
-            ['cpu_type'],
-            registry=self.registry
-        )
-        
-        # Memory usage comprehensive tracking
-        self.memory_usage = Gauge(
-            'flask_process_memory_bytes',
-            'Memory usage in bytes for Flask process',
-            ['memory_type'],
-            registry=self.registry
-        )
-        
-        # Python garbage collection metrics
-        self.gc_collections = Counter(
-            'flask_gc_collections_total',
-            'Total number of garbage collection cycles by generation',
-            ['generation'],
-            registry=self.registry
-        )
-        
-        # GC pause time tracking for performance impact analysis
-        self.gc_pause_time = Histogram(
-            'flask_gc_pause_seconds',
-            'Garbage collection pause time in seconds',
-            ['generation'],
-            buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, float('inf')],
-            registry=self.registry
-        )
-        
-        # Thread and connection pool monitoring
-        self.thread_count = Gauge(
-            'flask_active_threads',
-            'Number of active threads in Flask application',
-            registry=self.registry
-        )
-        
-        # WSGI worker process metrics
-        self.worker_metrics = Gauge(
-            'flask_wsgi_worker_status',
-            'WSGI worker process status and utilization',
-            ['worker_id', 'status'],
-            registry=self.registry
-        )
-        
-        # File descriptor usage tracking
-        self.fd_usage = Gauge(
-            'flask_file_descriptors_used',
-            'Number of file descriptors currently in use',
-            registry=self.registry
-        )
-    
-    def _init_migration_metrics(self) -> None:
-        """
-        Initialize specialized migration-specific performance metrics.
-        
-        Implements Section 6.5.4.5 custom migration performance metrics for Node.js baseline comparison.
-        """
-        # Business logic throughput comparison counters
-        self.nodejs_baseline_requests = Counter(
-            'nodejs_baseline_requests_total',
-            'Total requests processed by Node.js baseline implementation',
-            ['endpoint', 'operation_type'],
-            registry=self.registry
-        )
-        
-        self.flask_migration_requests = Counter(
-            'flask_migration_requests_total',
-            'Total requests processed by Flask migration implementation',
-            ['endpoint', 'operation_type'],
-            registry=self.registry
-        )
-        
-        # Migration quality assurance metrics
-        self.migration_compliance = Gauge(
-            'flask_migration_compliance_score',
-            'Migration compliance score based on performance and functionality',
-            ['compliance_type'],
-            registry=self.registry
-        )
-        
-        # Feature parity tracking
-        self.feature_parity = Gauge(
-            'flask_feature_parity_percentage',
-            'Percentage of Node.js features successfully migrated',
-            ['feature_category'],
-            registry=self.registry
-        )
-        
-        # Migration rollback metrics
-        self.rollback_triggers = Counter(
-            'flask_migration_rollback_triggers_total',
-            'Count of migration rollback triggers by cause',
-            ['trigger_cause', 'severity'],
-            registry=self.registry
-        )
-        
-        # Performance improvement tracking
-        self.performance_improvements = Counter(
-            'flask_performance_improvements_total',
-            'Count of performance improvements over Node.js baseline',
-            ['improvement_type', 'endpoint'],
-            registry=self.registry
-        )
-    
-    def _init_business_metrics(self) -> None:
-        """
-        Initialize business logic and application-specific metrics.
-        
-        Provides comprehensive tracking of business operations and user interactions.
-        """
-        # API endpoint performance by business function
-        self.business_operation_duration = Histogram(
-            'flask_business_operation_duration_seconds',
-            'Time spent processing specific business operations',
-            ['operation', 'module', 'success'],
-            buckets=[0.001, 0.01, 0.1, 0.5, 1.0, 5.0, 10.0, 30.0, float('inf')],
-            registry=self.registry
-        )
-        
-        # Database operation metrics
-        self.db_operation_duration = Histogram(
+        # Database operation duration histogram for query performance analysis
+        self.database_operation_duration_seconds = Histogram(
             'flask_database_operation_duration_seconds',
-            'Database operation execution time',
-            ['operation_type', 'collection', 'status'],
-            buckets=[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, float('inf')],
-            registry=self.registry
+            'Database operation execution duration in seconds',
+            ['operation', 'collection', 'index_used'],
+            buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, float('inf')],
+            registry=REGISTRY
         )
         
-        # External service integration metrics
-        self.external_service_calls = Counter(
-            'flask_external_service_calls_total',
-            'Total external service API calls',
-            ['service', 'method', 'status_code'],
-            registry=self.registry
+        # Database connection pool metrics
+        self.database_connections_active = Gauge(
+            'flask_database_connections_active',
+            'Number of active database connections',
+            ['pool_name', 'database'],
+            registry=REGISTRY
         )
         
-        self.external_service_duration = Histogram(
+        self.database_connections_pool_size = Gauge(
+            'flask_database_connections_pool_size',
+            'Total database connection pool size',
+            ['pool_name', 'database'],
+            registry=REGISTRY
+        )
+        
+        # Database query result size for optimization analysis
+        self.database_query_result_size = Histogram(
+            'flask_database_query_result_size_documents',
+            'Number of documents returned by database queries',
+            ['operation', 'collection'],
+            buckets=[1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, float('inf')],
+            registry=REGISTRY
+        )
+    
+    def _init_external_service_metrics(self):
+        """Initialize external service integration performance metrics."""
+        # External service request counter with service identification
+        self.external_service_requests_total = Counter(
+            'flask_external_service_requests_total',
+            'Total number of external service requests made',
+            ['service', 'operation', 'status_code', 'circuit_breaker_state'],
+            registry=REGISTRY
+        )
+        
+        # External service request duration histogram
+        self.external_service_duration_seconds = Histogram(
             'flask_external_service_duration_seconds',
-            'External service call duration',
-            ['service', 'endpoint'],
-            buckets=[0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 30.0, float('inf')],
-            registry=self.registry
+            'External service request duration in seconds',
+            ['service', 'operation', 'endpoint'],
+            buckets=[0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, float('inf')],
+            registry=REGISTRY
         )
         
-        # User session and authentication metrics
-        self.auth_operations = Counter(
-            'flask_auth_operations_total',
-            'Authentication and authorization operations',
-            ['operation_type', 'result', 'provider'],
-            registry=self.registry
+        # External service timeout counter for reliability analysis
+        self.external_service_timeouts_total = Counter(
+            'flask_external_service_timeouts_total',
+            'Total number of external service request timeouts',
+            ['service', 'operation'],
+            registry=REGISTRY
         )
         
-        # Cache performance metrics
-        self.cache_operations = Counter(
-            'flask_cache_operations_total',
-            'Cache operations count',
-            ['operation', 'result', 'cache_type'],
-            registry=self.registry
-        )
-        
-        self.cache_hit_ratio = Gauge(
-            'flask_cache_hit_ratio',
-            'Cache hit ratio percentage',
-            ['cache_type'],
-            registry=self.registry
+        # External service retry attempts for resilience tracking
+        self.external_service_retries_total = Counter(
+            'flask_external_service_retries_total',
+            'Total number of external service retry attempts',
+            ['service', 'operation', 'retry_reason'],
+            registry=REGISTRY
         )
     
-    def init_app(self, app: Flask) -> None:
+    def _init_resource_metrics(self):
+        """Initialize system resource utilization metrics."""
+        # CPU utilization gauge with process-level granularity
+        self.cpu_utilization_percent = Gauge(
+            'flask_cpu_utilization_percent',
+            'Current CPU utilization percentage of Flask application process',
+            ['process_type'],  # main, worker
+            registry=REGISTRY
+        )
+        
+        # Memory usage gauges with detailed breakdown
+        self.memory_usage_bytes = Gauge(
+            'flask_memory_usage_bytes',
+            'Current memory usage in bytes',
+            ['memory_type'],  # rss, vms, heap, shared
+            registry=REGISTRY
+        )
+        
+        # Memory usage percentage for alerting
+        self.memory_utilization_percent = Gauge(
+            'flask_memory_utilization_percent',
+            'Current memory utilization percentage of available memory',
+            ['memory_type'],
+            registry=REGISTRY
+        )
+        
+        # Disk I/O metrics for performance correlation
+        self.disk_io_bytes_total = Counter(
+            'flask_disk_io_bytes_total',
+            'Total disk I/O bytes processed',
+            ['operation'],  # read, write
+            registry=REGISTRY
+        )
+        
+        # Network I/O metrics for bandwidth analysis
+        self.network_io_bytes_total = Counter(
+            'flask_network_io_bytes_total',
+            'Total network I/O bytes processed',
+            ['direction'],  # sent, received
+            registry=REGISTRY
+        )
+        
+        # File descriptor usage for resource leak detection
+        self.file_descriptors_open = Gauge(
+            'flask_file_descriptors_open',
+            'Number of open file descriptors',
+            registry=REGISTRY
+        )
+    
+    def _init_migration_metrics(self):
+        """Initialize custom migration performance comparison metrics."""
+        # Node.js baseline request counter for comparison
+        self.nodejs_baseline_requests_total = Counter(
+            'nodejs_baseline_requests_total',
+            'Total Node.js baseline requests for performance comparison',
+            ['endpoint', 'status_code'],
+            registry=REGISTRY
+        )
+        
+        # Flask migration request counter for comparison
+        self.flask_migration_requests_total = Counter(
+            'flask_migration_requests_total',
+            'Total Flask migration requests for performance comparison',
+            ['endpoint', 'status_code'],
+            registry=REGISTRY
+        )
+        
+        # Performance variance gauge (critical ≤10% requirement)
+        self.performance_variance_percent = Gauge(
+            'flask_performance_variance_percent',
+            'Performance variance percentage against Node.js baseline',
+            ['endpoint', 'metric_type', 'variance_direction'],  # response_time, memory_usage, cpu_usage; positive, negative
+            registry=REGISTRY
+        )
+        
+        # Endpoint response time comparison histogram
+        self.endpoint_response_time_comparison_seconds = Histogram(
+            'flask_endpoint_response_time_comparison_seconds',
+            'Endpoint response time comparison between implementations',
+            ['endpoint', 'implementation', 'percentile'],  # nodejs, flask; p50, p95, p99
+            buckets=[0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, float('inf')],
+            registry=REGISTRY
+        )
+        
+        # Migration baseline compliance gauge
+        self.migration_baseline_compliance = Gauge(
+            'flask_migration_baseline_compliance',
+            'Migration baseline compliance score (1.0 = full compliance)',
+            ['compliance_category'],  # performance, functionality, security
+            registry=REGISTRY
+        )
+        
+        # Performance regression detection counter
+        self.performance_regressions_total = Counter(
+            'flask_performance_regressions_total',
+            'Total number of performance regressions detected',
+            ['endpoint', 'regression_type', 'severity'],  # response_time, memory_leak, cpu_spike; warning, critical
+            registry=REGISTRY
+        )
+    
+    def _init_business_logic_metrics(self):
+        """Initialize business logic performance and throughput metrics."""
+        # Business logic operation counter for throughput analysis
+        self.business_logic_operations_total = Counter(
+            'flask_business_logic_operations_total',
+            'Total business logic operations processed',
+            ['operation', 'module', 'status', 'complexity'],  # simple, moderate, complex
+            registry=REGISTRY
+        )
+        
+        # Business logic operation duration histogram
+        self.business_logic_duration_seconds = Histogram(
+            'flask_business_logic_duration_seconds',
+            'Business logic operation execution duration in seconds',
+            ['operation', 'module', 'optimization_level'],  # baseline, optimized, cached
+            buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, float('inf')],
+            registry=REGISTRY
+        )
+        
+        # Business logic cache hit ratio for optimization tracking
+        self.business_logic_cache_hits_total = Counter(
+            'flask_business_logic_cache_hits_total',
+            'Total business logic cache hits',
+            ['cache_type', 'operation'],  # memory, redis, database
+            registry=REGISTRY
+        )
+        
+        self.business_logic_cache_misses_total = Counter(
+            'flask_business_logic_cache_misses_total',
+            'Total business logic cache misses',
+            ['cache_type', 'operation'],
+            registry=REGISTRY
+        )
+        
+        # Data processing throughput for migration validation
+        self.data_processing_throughput_records_per_second = Gauge(
+            'flask_data_processing_throughput_records_per_second',
+            'Current data processing throughput in records per second',
+            ['processor_type', 'data_type'],
+            registry=REGISTRY
+        )
+        
+        # Business rule execution metrics
+        self.business_rules_executed_total = Counter(
+            'flask_business_rules_executed_total',
+            'Total number of business rules executed',
+            ['rule_type', 'rule_category', 'execution_result'],  # validation, transformation, enrichment; success, failure, skipped
+            registry=REGISTRY
+        )
+    
+    def _init_wsgi_server_metrics(self):
+        """Initialize WSGI server instrumentation metrics."""
+        # Worker process metrics for Gunicorn monitoring
+        self.wsgi_workers_active = Gauge(
+            'flask_wsgi_workers_active',
+            'Number of active WSGI worker processes',
+            registry=REGISTRY
+        )
+        
+        self.wsgi_workers_total = Gauge(
+            'flask_wsgi_workers_total',
+            'Total number of configured WSGI worker processes',
+            registry=REGISTRY
+        )
+        
+        # Worker utilization percentage for scaling decisions
+        self.wsgi_worker_utilization_percent = Gauge(
+            'flask_wsgi_worker_utilization_percent',
+            'WSGI worker utilization percentage',
+            ['worker_id', 'worker_type'],  # sync, async
+            registry=REGISTRY
+        )
+        
+        # Request queue depth for performance analysis
+        self.wsgi_request_queue_depth = Gauge(
+            'flask_wsgi_request_queue_depth',
+            'Number of requests waiting in WSGI queue',
+            registry=REGISTRY
+        )
+        
+        # Worker request processing rate
+        self.wsgi_worker_requests_per_second = Gauge(
+            'flask_wsgi_worker_requests_per_second',
+            'Requests processed per second by WSGI workers',
+            ['worker_id'],
+            registry=REGISTRY
+        )
+        
+        # Worker lifecycle events
+        self.wsgi_worker_lifecycle_events_total = Counter(
+            'flask_wsgi_worker_lifecycle_events_total',
+            'Total WSGI worker lifecycle events',
+            ['event_type', 'worker_id'],  # started, stopped, restarted, crashed
+            registry=REGISTRY
+        )
+        
+        # Connection handling metrics
+        self.wsgi_connections_active = Gauge(
+            'flask_wsgi_connections_active',
+            'Number of active WSGI connections',
+            ['connection_type'],  # keep_alive, new
+            registry=REGISTRY
+        )
+    
+    def _init_circuit_breaker_metrics(self):
+        """Initialize circuit breaker pattern monitoring metrics."""
+        # Circuit breaker state gauge
+        self.circuit_breaker_state = Gauge(
+            'flask_circuit_breaker_state',
+            'Circuit breaker state (0=closed, 1=open, 2=half_open)',
+            ['service', 'operation'],
+            registry=REGISTRY
+        )
+        
+        # Circuit breaker state transition counter
+        self.circuit_breaker_state_transitions_total = Counter(
+            'flask_circuit_breaker_state_transitions_total',
+            'Total circuit breaker state transitions',
+            ['service', 'operation', 'from_state', 'to_state'],
+            registry=REGISTRY
+        )
+        
+        # Circuit breaker failure counter
+        self.circuit_breaker_failures_total = Counter(
+            'flask_circuit_breaker_failures_total',
+            'Total circuit breaker failures',
+            ['service', 'operation', 'failure_type'],  # timeout, error, threshold_exceeded
+            registry=REGISTRY
+        )
+        
+        # Circuit breaker recovery attempts
+        self.circuit_breaker_recovery_attempts_total = Counter(
+            'flask_circuit_breaker_recovery_attempts_total',
+            'Total circuit breaker recovery attempts',
+            ['service', 'operation', 'recovery_result'],  # success, failure
+            registry=REGISTRY
+        )
+    
+    def _init_garbage_collection_metrics(self):
+        """Initialize Python garbage collection performance metrics."""
+        # GC collection counter by generation
+        self.gc_collections_total = Counter(
+            'flask_gc_collections_total',
+            'Total number of garbage collection cycles',
+            ['generation'],  # 0, 1, 2
+            registry=REGISTRY
+        )
+        
+        # GC pause time histogram for performance impact analysis
+        self.gc_pause_time_seconds = Histogram(
+            'flask_gc_pause_time_seconds',
+            'Python garbage collection pause time in seconds',
+            ['generation', 'collection_type'],  # full, incremental
+            buckets=[0.0001, 0.0005, 0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, float('inf')],
+            registry=REGISTRY
+        )
+        
+        # GC object count gauges for memory analysis
+        self.gc_objects_tracked = Gauge(
+            'flask_gc_objects_tracked',
+            'Number of objects tracked by garbage collector',
+            ['object_type'],  # dict, list, tuple, custom
+            registry=REGISTRY
+        )
+        
+        # GC memory recovered histogram
+        self.gc_memory_recovered_bytes = Histogram(
+            'flask_gc_memory_recovered_bytes',
+            'Memory recovered by garbage collection in bytes',
+            ['generation'],
+            buckets=[1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216, float('inf')],
+            registry=REGISTRY
+        )
+        
+        # GC efficiency metrics
+        self.gc_efficiency_ratio = Gauge(
+            'flask_gc_efficiency_ratio',
+            'Garbage collection efficiency ratio (objects_collected / objects_examined)',
+            ['generation'],
+            registry=REGISTRY
+        )
+    
+    def record_http_request(self, method: str, endpoint: str, status_code: int, 
+                           duration: float, request_size: int = None, response_size: int = None,
+                           user_type: str = 'anonymous'):
         """
-        Initialize metrics collection for Flask application with comprehensive hooks.
+        Record HTTP request metrics with comprehensive tracking.
         
         Args:
-            app: Flask application instance to instrument
-        """
-        self.app = app
-        
-        # Configure multiprocess metrics support for WSGI deployment
-        self._configure_multiprocess_metrics()
-        
-        # Register Flask request/response hooks
-        self._register_flask_hooks(app)
-        
-        # Initialize system resource monitoring
-        self._start_system_monitoring()
-        
-        # Register metrics endpoint
-        self._register_metrics_endpoint(app)
-        
-        logger.info("Flask metrics collection initialized with enterprise monitoring support")
-    
-    def _configure_multiprocess_metrics(self) -> None:
-        """
-        Configure Prometheus multiprocess metrics for WSGI server deployment.
-        
-        Implements Section 6.5.4.1 Gunicorn prometheus_multiproc_dir configuration.
-        """
-        # Set up multiprocess metrics directory for Gunicorn workers
-        multiprocess_dir = os.environ.get('prometheus_multiproc_dir')
-        if multiprocess_dir:
-            # Configure multiprocess registry for worker aggregation
-            self.registry = CollectorRegistry()
-            multiprocess.MultiProcessCollector(self.registry)
-            logger.info(f"Configured multiprocess metrics with directory: {multiprocess_dir}")
-        else:
-            logger.warning("prometheus_multiproc_dir not configured - multiprocess metrics unavailable")
-    
-    def _register_flask_hooks(self, app: Flask) -> None:
-        """
-        Register comprehensive Flask request/response hooks for monitoring.
-        
-        Implements Section 6.5.1.1 Flask request/response hooks for request lifecycle monitoring.
-        """
-        @app.before_request
-        def before_request():
-            """Track request start time and initialize monitoring context."""
-            g.start_time = time.time()
-            g.request_id = request.headers.get('X-Request-ID', f"req_{int(time.time() * 1000)}")
-            
-            # Increment active request counter
-            self.active_requests.inc()
-            
-            # Track request size for performance analysis
-            if request.content_length:
-                self.request_size.labels(
-                    method=request.method,
-                    endpoint=request.endpoint or 'unknown'
-                ).observe(request.content_length)
-        
-        @app.after_request
-        def after_request(response):
-            """Collect comprehensive request metrics after processing."""
-            try:
-                request_duration = time.time() - g.start_time
-                endpoint = request.endpoint or 'unknown'
-                status_code = str(response.status_code)
-                
-                # Record request duration with detailed labeling
-                self.request_duration.labels(
-                    method=request.method,
-                    endpoint=endpoint,
-                    status_code=status_code
-                ).observe(request_duration)
-                
-                # Count requests with client type detection
-                client_type = self._detect_client_type(request)
-                self.request_count.labels(
-                    method=request.method,
-                    endpoint=endpoint,
-                    status_code=status_code,
-                    client_type=client_type
-                ).inc()
-                
-                # Track response size
-                if response.content_length:
-                    self.response_size.labels(
-                        method=request.method,
-                        endpoint=endpoint,
-                        status_code=status_code
-                    ).observe(response.content_length)
-                
-                # Update performance variance tracking
-                self._update_performance_variance(endpoint, request_duration)
-                
-                # Track migration-specific metrics
-                self._track_migration_metrics(endpoint, request_duration, status_code)
-                
-                # Decrement active request counter
-                self.active_requests.dec()
-                
-            except Exception as e:
-                logger.error(f"Error collecting request metrics: {e}")
-            
-            return response
-        
-        @app.teardown_request
-        def teardown_request(exception):
-            """Clean up request-specific monitoring context."""
-            if exception:
-                # Track request exceptions for error analysis
-                endpoint = request.endpoint or 'unknown'
-                self.request_count.labels(
-                    method=request.method,
-                    endpoint=endpoint,
-                    status_code='500',
-                    client_type='error'
-                ).inc()
-    
-    def _detect_client_type(self, request) -> str:
-        """
-        Detect client type from request headers for detailed analytics.
-        
-        Args:
-            request: Flask request object
-            
-        Returns:
-            Client type classification string
-        """
-        user_agent = request.headers.get('User-Agent', '').lower()
-        
-        if 'postman' in user_agent or 'insomnia' in user_agent:
-            return 'api_client'
-        elif 'curl' in user_agent or 'wget' in user_agent:
-            return 'cli_tool'
-        elif 'python' in user_agent or 'requests' in user_agent:
-            return 'python_client'
-        elif 'monitoring' in user_agent or 'probe' in user_agent:
-            return 'health_check'
-        elif 'bot' in user_agent or 'crawler' in user_agent:
-            return 'bot'
-        else:
-            return 'browser'
-    
-    def _update_performance_variance(self, endpoint: str, duration: float) -> None:
-        """
-        Update performance variance metrics against Node.js baseline.
-        
-        Implements Section 6.5.4.5 performance variance tracking for compliance monitoring.
-        
-        Args:
-            endpoint: API endpoint name
-            duration: Request duration in seconds
-        """
-        with self._performance_lock:
-            # Add current measurement to performance cache
-            self._performance_cache[endpoint].append(duration)
-            
-            # Maintain rolling window of last 100 measurements
-            if len(self._performance_cache[endpoint]) > 100:
-                self._performance_cache[endpoint] = self._performance_cache[endpoint][-100:]
-            
-            # Calculate performance variance if baseline exists
-            if endpoint in self._nodejs_baseline:
-                baseline_duration = self._nodejs_baseline[endpoint]
-                current_avg = sum(self._performance_cache[endpoint]) / len(self._performance_cache[endpoint])
-                
-                # Calculate variance percentage
-                variance_pct = ((current_avg - baseline_duration) / baseline_duration) * 100
-                
-                # Update variance gauge
-                self.performance_variance.labels(
-                    endpoint=endpoint,
-                    metric_type='response_time'
-                ).set(variance_pct)
-                
-                # Track variance violations
-                if abs(variance_pct) > 5.0:  # Warning threshold
-                    severity = 'critical' if abs(variance_pct) > 10.0 else 'warning'
-                    threshold_type = 'performance_degradation' if variance_pct > 0 else 'performance_improvement'
-                    
-                    self.variance_violations.labels(
-                        endpoint=endpoint,
-                        threshold_type=threshold_type,
-                        severity=severity
-                    ).inc()
-                    
-                    if severity == 'critical':
-                        logger.warning(f"Critical performance variance detected for {endpoint}: {variance_pct:.2f}%")
-                
-                # Record baseline comparison
-                comparison_type = 'flask_current' if variance_pct >= 0 else 'flask_improved'
-                self.baseline_comparison.labels(
-                    endpoint=endpoint,
-                    comparison_type=comparison_type
-                ).observe(current_avg)
-    
-    def _track_migration_metrics(self, endpoint: str, duration: float, status_code: str) -> None:
-        """
-        Track migration-specific metrics for quality assurance.
-        
-        Args:
-            endpoint: API endpoint name
-            duration: Request duration in seconds
+            method: HTTP method (GET, POST, PUT, DELETE, etc.)
+            endpoint: Flask endpoint name or route pattern
             status_code: HTTP response status code
+            duration: Request processing duration in seconds
+            request_size: Size of request body in bytes
+            response_size: Size of response body in bytes
+            user_type: Type of user making request (authenticated, anonymous, service)
         """
-        # Increment Flask migration request counter
-        operation_type = 'read' if request.method == 'GET' else 'write'
-        self.flask_migration_requests.labels(
+        status_class = f"{status_code // 100}xx"
+        
+        # Record request counter
+        self.http_requests_total.labels(
+            method=method,
             endpoint=endpoint,
-            operation_type=operation_type
+            status_code=str(status_code),
+            user_type=user_type
         ).inc()
         
-        # Update migration compliance score
-        compliance_score = self._calculate_compliance_score(endpoint, duration, status_code)
-        self.migration_compliance.labels(
-            compliance_type='overall'
-        ).set(compliance_score)
+        # Record request duration
+        self.http_request_duration_seconds.labels(
+            method=method,
+            endpoint=endpoint,
+            status_class=status_class
+        ).observe(duration)
+        
+        # Record request size if provided
+        if request_size is not None:
+            self.http_request_size_bytes.labels(
+                method=method,
+                endpoint=endpoint
+            ).observe(request_size)
+        
+        # Record response size if provided
+        if response_size is not None:
+            self.http_response_size_bytes.labels(
+                method=method,
+                endpoint=endpoint,
+                status_class=status_class
+            ).observe(response_size)
+        
+        # Update request rate
+        self.http_request_rate.observe(1.0)
     
-    def _calculate_compliance_score(self, endpoint: str, duration: float, status_code: str) -> float:
+    def record_database_operation(self, operation: str, collection: str, duration: float,
+                                 status: str = 'success', connection_pool: str = 'default',
+                                 result_count: int = None, index_used: bool = True):
         """
-        Calculate migration compliance score based on performance and functionality.
+        Record database operation metrics with performance tracking.
         
         Args:
-            endpoint: API endpoint name
+            operation: Database operation type (find, insert, update, delete, aggregate)
+            collection: MongoDB collection name
+            duration: Operation execution duration in seconds
+            status: Operation status (success, error, timeout)
+            connection_pool: Connection pool identifier
+            result_count: Number of documents returned/affected
+            index_used: Whether database index was used for the operation
+        """
+        # Record operation counter
+        self.database_operations_total.labels(
+            operation=operation,
+            collection=collection,
+            status=status,
+            connection_pool=connection_pool
+        ).inc()
+        
+        # Record operation duration
+        self.database_operation_duration_seconds.labels(
+            operation=operation,
+            collection=collection,
+            index_used='yes' if index_used else 'no'
+        ).observe(duration)
+        
+        # Record query result size if provided
+        if result_count is not None:
+            self.database_query_result_size.labels(
+                operation=operation,
+                collection=collection
+            ).observe(result_count)
+    
+    def record_external_service_request(self, service: str, operation: str, duration: float,
+                                       status_code: int, endpoint: str = 'default',
+                                       circuit_breaker_state: str = 'closed',
+                                       timeout_occurred: bool = False,
+                                       retry_count: int = 0):
+        """
+        Record external service request metrics with resilience tracking.
+        
+        Args:
+            service: External service name (auth0, aws_s3, redis)
+            operation: Service operation identifier
             duration: Request duration in seconds
-            status_code: HTTP response status code
-            
-        Returns:
-            Compliance score between 0.0 and 1.0
+            status_code: HTTP status code or equivalent
+            endpoint: Specific endpoint or resource accessed
+            circuit_breaker_state: Current circuit breaker state
+            timeout_occurred: Whether request timed out
+            retry_count: Number of retry attempts made
         """
-        score = 1.0
+        # Record service request counter
+        self.external_service_requests_total.labels(
+            service=service,
+            operation=operation,
+            status_code=str(status_code),
+            circuit_breaker_state=circuit_breaker_state
+        ).inc()
         
-        # Performance compliance factor
-        if endpoint in self._nodejs_baseline:
-            baseline_duration = self._nodejs_baseline[endpoint]
-            variance_pct = ((duration - baseline_duration) / baseline_duration) * 100
-            
-            if abs(variance_pct) <= 5.0:
-                performance_factor = 1.0
-            elif abs(variance_pct) <= 10.0:
-                performance_factor = 0.8
-            else:
-                performance_factor = 0.5
-            
-            score *= performance_factor
+        # Record service request duration
+        self.external_service_duration_seconds.labels(
+            service=service,
+            operation=operation,
+            endpoint=endpoint
+        ).observe(duration)
         
-        # Functionality compliance factor
-        if status_code.startswith('2'):
-            functionality_factor = 1.0
-        elif status_code.startswith('4'):
-            functionality_factor = 0.9
+        # Record timeout if occurred
+        if timeout_occurred:
+            self.external_service_timeouts_total.labels(
+                service=service,
+                operation=operation
+            ).inc()
+        
+        # Record retry attempts
+        if retry_count > 0:
+            for _ in range(retry_count):
+                self.external_service_retries_total.labels(
+                    service=service,
+                    operation=operation,
+                    retry_reason='timeout' if timeout_occurred else 'error'
+                ).inc()
+    
+    def update_resource_utilization(self):
+        """Update system resource utilization metrics."""
+        try:
+            # Get current process
+            process = psutil.Process()
+            
+            # CPU utilization
+            cpu_percent = process.cpu_percent(interval=None)
+            self.cpu_utilization_percent.labels(process_type='main').set(cpu_percent)
+            
+            # Memory information
+            memory_info = process.memory_info()
+            memory_percent = process.memory_percent()
+            
+            self.memory_usage_bytes.labels(memory_type='rss').set(memory_info.rss)
+            self.memory_usage_bytes.labels(memory_type='vms').set(memory_info.vms)
+            
+            # Get shared memory if available
+            if hasattr(memory_info, 'shared'):
+                self.memory_usage_bytes.labels(memory_type='shared').set(memory_info.shared)
+            
+            # Memory utilization percentage
+            self.memory_utilization_percent.labels(memory_type='total').set(memory_percent)
+            
+            # Python heap size estimation
+            gc.collect()  # Force garbage collection for accurate measurement
+            heap_size = sum(len(obj) if hasattr(obj, '__len__') else 1 for obj in gc.get_objects())
+            self.memory_usage_bytes.labels(memory_type='heap').set(heap_size)
+            
+            # Disk I/O counters
+            io_counters = process.io_counters()
+            self.disk_io_bytes_total.labels(operation='read')._value._value = io_counters.read_bytes
+            self.disk_io_bytes_total.labels(operation='write')._value._value = io_counters.write_bytes
+            
+            # Network I/O counters (system-wide)
+            net_io = psutil.net_io_counters()
+            if net_io:
+                self.network_io_bytes_total.labels(direction='sent')._value._value = net_io.bytes_sent
+                self.network_io_bytes_total.labels(direction='received')._value._value = net_io.bytes_recv
+            
+            # File descriptors
+            try:
+                num_fds = process.num_fds()
+                self.file_descriptors_open.set(num_fds)
+            except AttributeError:
+                # Windows doesn't support num_fds
+                pass
+            
+        except Exception as e:
+            # Log error but don't fail metrics collection
+            print(f"Error updating resource utilization metrics: {e}")
+    
+    def record_performance_variance(self, endpoint: str, metric_type: str, 
+                                   flask_value: float, nodejs_baseline: float):
+        """
+        Record performance variance against Node.js baseline (critical ≤10% requirement).
+        
+        Args:
+            endpoint: API endpoint identifier
+            metric_type: Type of metric being compared (response_time, memory_usage, cpu_usage)
+            flask_value: Current Flask implementation metric value
+            nodejs_baseline: Node.js baseline metric value for comparison
+        """
+        if nodejs_baseline == 0:
+            variance_percent = 0.0
         else:
-            functionality_factor = 0.7
+            variance_percent = ((flask_value - nodejs_baseline) / nodejs_baseline) * 100
         
-        score *= functionality_factor
+        variance_direction = 'positive' if variance_percent >= 0 else 'negative'
         
-        return max(0.0, min(1.0, score))
+        # Record performance variance gauge
+        self.performance_variance_percent.labels(
+            endpoint=endpoint,
+            metric_type=metric_type,
+            variance_direction=variance_direction
+        ).set(variance_percent)
+        
+        # Check for performance regression (>10% variance)
+        if abs(variance_percent) > 10.0:
+            severity = 'critical' if abs(variance_percent) > 20.0 else 'warning'
+            
+            self.performance_regressions_total.labels(
+                endpoint=endpoint,
+                regression_type=metric_type,
+                severity=severity
+            ).inc()
+        
+        # Update migration baseline compliance
+        compliance_score = max(0.0, 1.0 - (abs(variance_percent) / 100.0))
+        self.migration_baseline_compliance.labels(
+            compliance_category='performance'
+        ).set(compliance_score)
     
-    def _start_system_monitoring(self) -> None:
+    def record_endpoint_comparison(self, endpoint: str, implementation: str, 
+                                  response_time: float, percentile: str = 'p50'):
         """
-        Start background system resource monitoring thread.
+        Record endpoint response time for Node.js baseline comparison.
         
-        Implements Section 6.5.1.1 CPU utilization monitoring with psutil integration.
+        Args:
+            endpoint: API endpoint identifier
+            implementation: Implementation type (nodejs, flask)
+            response_time: Response time in seconds
+            percentile: Percentile category (p50, p95, p99)
         """
-        def monitor_system_resources():
-            """Background thread for continuous system resource monitoring."""
-            while True:
-                try:
-                    # CPU utilization monitoring
-                    cpu_percent = psutil.cpu_percent(interval=1)
-                    self.cpu_usage.labels(cpu_type='total').set(cpu_percent)
-                    
-                    process = psutil.Process()
-                    process_cpu = process.cpu_percent()
-                    self.cpu_usage.labels(cpu_type='process').set(process_cpu)
-                    
-                    # Memory usage monitoring
-                    memory_info = process.memory_info()
-                    self.memory_usage.labels(memory_type='rss').set(memory_info.rss)
-                    self.memory_usage.labels(memory_type='vms').set(memory_info.vms)
-                    
-                    # Memory percentage
-                    memory_percent = process.memory_percent()
-                    self.memory_usage.labels(memory_type='percent').set(memory_percent)
-                    
-                    # Thread count monitoring
-                    thread_count = threading.active_count()
-                    self.thread_count.set(thread_count)
-                    
-                    # File descriptor usage
-                    try:
-                        fd_count = process.num_fds()
-                        self.fd_usage.set(fd_count)
-                    except AttributeError:
-                        # Windows doesn't support num_fds
-                        pass
-                    
-                    # Garbage collection metrics
-                    gc_stats = gc.get_stats()
-                    for generation, stats in enumerate(gc_stats):
-                        self.gc_collections.labels(generation=str(generation)).inc(stats.get('collections', 0))
-                    
-                    time.sleep(15)  # Monitor every 15 seconds
-                    
-                except Exception as e:
-                    logger.error(f"Error monitoring system resources: {e}")
-                    time.sleep(30)  # Wait longer on error
+        self.endpoint_response_time_comparison_seconds.labels(
+            endpoint=endpoint,
+            implementation=implementation,
+            percentile=percentile
+        ).observe(response_time)
         
-        # Start monitoring thread as daemon
-        monitor_thread = threading.Thread(target=monitor_system_resources, daemon=True)
-        monitor_thread.start()
-        logger.info("Started background system resource monitoring")
+        # Increment corresponding request counter
+        if implementation == 'nodejs':
+            self.nodejs_baseline_requests_total.labels(
+                endpoint=endpoint,
+                status_code='200'  # Assume success for baseline
+            ).inc()
+        else:
+            self.flask_migration_requests_total.labels(
+                endpoint=endpoint,
+                status_code='200'  # Will be updated with actual status
+            ).inc()
     
-    def _register_metrics_endpoint(self, app: Flask) -> None:
+    def record_business_logic_operation(self, operation: str, module: str, duration: float,
+                                      status: str = 'success', complexity: str = 'moderate',
+                                      optimization_level: str = 'baseline'):
         """
-        Register Prometheus metrics endpoint for scraping.
+        Record business logic operation metrics for throughput analysis.
+        
+        Args:
+            operation: Business operation identifier
+            module: Business module name
+            duration: Operation execution duration in seconds
+            status: Operation status (success, error, skipped)
+            complexity: Operation complexity level (simple, moderate, complex)
+            optimization_level: Optimization level applied (baseline, optimized, cached)
+        """
+        # Record operation counter
+        self.business_logic_operations_total.labels(
+            operation=operation,
+            module=module,
+            status=status,
+            complexity=complexity
+        ).inc()
+        
+        # Record operation duration
+        self.business_logic_duration_seconds.labels(
+            operation=operation,
+            module=module,
+            optimization_level=optimization_level
+        ).observe(duration)
+    
+    def record_cache_hit(self, cache_type: str, operation: str, hit: bool = True):
+        """
+        Record cache hit/miss for optimization tracking.
+        
+        Args:
+            cache_type: Type of cache (memory, redis, database)
+            operation: Operation that accessed cache
+            hit: Whether cache hit (True) or miss (False) occurred
+        """
+        if hit:
+            self.business_logic_cache_hits_total.labels(
+                cache_type=cache_type,
+                operation=operation
+            ).inc()
+        else:
+            self.business_logic_cache_misses_total.labels(
+                cache_type=cache_type,
+                operation=operation
+            ).inc()
+    
+    def update_wsgi_worker_metrics(self, worker_id: str = None, worker_type: str = 'sync',
+                                  utilization: float = None, queue_depth: int = None,
+                                  requests_per_second: float = None):
+        """
+        Update WSGI worker performance metrics.
+        
+        Args:
+            worker_id: Worker process identifier
+            worker_type: Worker type (sync, async)
+            utilization: Worker utilization percentage (0-100)
+            queue_depth: Current request queue depth
+            requests_per_second: Requests processed per second by worker
+        """
+        if worker_id and utilization is not None:
+            self.wsgi_worker_utilization_percent.labels(
+                worker_id=worker_id,
+                worker_type=worker_type
+            ).set(utilization)
+        
+        if queue_depth is not None:
+            self.wsgi_request_queue_depth.set(queue_depth)
+        
+        if worker_id and requests_per_second is not None:
+            self.wsgi_worker_requests_per_second.labels(
+                worker_id=worker_id
+            ).set(requests_per_second)
+    
+    def record_circuit_breaker_event(self, service: str, operation: str, 
+                                    state: str, event_type: str = 'state_change',
+                                    failure_type: str = None):
+        """
+        Record circuit breaker state and events.
+        
+        Args:
+            service: External service name
+            operation: Service operation
+            state: Current circuit breaker state (closed, open, half_open)
+            event_type: Type of event (state_change, failure, recovery_attempt)
+            failure_type: Type of failure if applicable (timeout, error, threshold_exceeded)
+        """
+        # Map state to numeric value
+        state_values = {'closed': 0, 'open': 1, 'half_open': 2}
+        state_value = state_values.get(state, 0)
+        
+        self.circuit_breaker_state.labels(
+            service=service,
+            operation=operation
+        ).set(state_value)
+        
+        if event_type == 'failure' and failure_type:
+            self.circuit_breaker_failures_total.labels(
+                service=service,
+                operation=operation,
+                failure_type=failure_type
+            ).inc()
+    
+    def record_gc_event(self, generation: int, pause_time: float, 
+                       objects_collected: int = None, memory_recovered: int = None,
+                       collection_type: str = 'incremental'):
+        """
+        Record garbage collection event metrics.
+        
+        Args:
+            generation: GC generation (0, 1, 2)
+            pause_time: GC pause time in seconds
+            objects_collected: Number of objects collected
+            memory_recovered: Memory recovered in bytes
+            collection_type: Collection type (incremental, full)
+        """
+        generation_str = str(generation)
+        
+        # Record GC collection
+        self.gc_collections_total.labels(generation=generation_str).inc()
+        
+        # Record pause time
+        self.gc_pause_time_seconds.labels(
+            generation=generation_str,
+            collection_type=collection_type
+        ).observe(pause_time)
+        
+        # Record memory recovered if provided
+        if memory_recovered is not None:
+            self.gc_memory_recovered_bytes.labels(
+                generation=generation_str
+            ).observe(memory_recovered)
+        
+        # Update GC efficiency if data available
+        if objects_collected is not None and objects_collected > 0:
+            # This is a simplified efficiency calculation
+            efficiency_ratio = min(1.0, objects_collected / 1000.0)  # Normalized example
+            self.gc_efficiency_ratio.labels(generation=generation_str).set(efficiency_ratio)
+    
+    def get_metrics_registry(self) -> CollectorRegistry:
+        """
+        Get the Prometheus metrics registry.
+        
+        Returns:
+            CollectorRegistry: The metrics registry instance
+        """
+        if self.config.PROMETHEUS_MULTIPROC_DIR:
+            # Create new registry for multiprocess collection
+            registry = CollectorRegistry()
+            multiprocess.MultiProcessCollector(registry)
+            return registry
+        else:
+            return REGISTRY
+    
+    def generate_metrics_output(self) -> str:
+        """
+        Generate Prometheus metrics output in text format.
+        
+        Returns:
+            str: Prometheus metrics in text exposition format
+        """
+        # Update resource metrics before generating output
+        self.update_resource_utilization()
+        
+        # Get appropriate registry
+        registry = self.get_metrics_registry()
+        
+        # Generate metrics output
+        return generate_latest(registry)
+
+
+class MetricsMiddleware:
+    """
+    Flask middleware for automatic HTTP request metrics collection with comprehensive
+    performance tracking and Node.js baseline comparison integration.
+    """
+    
+    def __init__(self, metrics_collector: PrometheusMetricsCollector):
+        """
+        Initialize metrics middleware.
+        
+        Args:
+            metrics_collector: PrometheusMetricsCollector instance
+        """
+        self.metrics = metrics_collector
+    
+    def init_app(self, app: Flask):
+        """
+        Initialize middleware with Flask application.
         
         Args:
             app: Flask application instance
         """
-        @app.route('/metrics')
-        def metrics():
-            """Prometheus metrics endpoint supporting OpenMetrics format."""
-            try:
-                # Support both Prometheus and OpenMetrics formats
-                accept_header = request.headers.get('Accept', '')
-                
-                if 'application/openmetrics-text' in accept_header:
-                    content_type = OPENMETRICS_CONTENT_TYPE
-                else:
-                    content_type = CONTENT_TYPE_LATEST
-                
-                # Generate metrics data
-                metrics_data = generate_latest(self.registry)
-                
-                return Response(
-                    metrics_data,
-                    mimetype=content_type,
-                    headers={'Cache-Control': 'no-cache, no-store, must-revalidate'}
+        app.before_request(self._before_request)
+        app.after_request(self._after_request)
+        app.teardown_appcontext(self._teardown_request)
+    
+    def _before_request(self):
+        """Pre-request metrics collection setup."""
+        # Store request start time
+        g.metrics_start_time = time.perf_counter()
+        
+        # Increment active requests counter
+        self.metrics.http_requests_active.inc()
+        
+        # Store request size if available
+        g.metrics_request_size = request.content_length or 0
+    
+    def _after_request(self, response: Response) -> Response:
+        """Post-request metrics collection and recording."""
+        if hasattr(g, 'metrics_start_time'):
+            # Calculate request duration
+            duration = time.perf_counter() - g.metrics_start_time
+            
+            # Get request information
+            method = request.method
+            endpoint = request.endpoint or 'unknown'
+            status_code = response.status_code
+            request_size = getattr(g, 'metrics_request_size', 0)
+            response_size = response.content_length or 0
+            
+            # Determine user type
+            user_type = 'authenticated' if hasattr(g, 'current_user') else 'anonymous'
+            
+            # Record HTTP request metrics
+            self.metrics.record_http_request(
+                method=method,
+                endpoint=endpoint,
+                status_code=status_code,
+                duration=duration,
+                request_size=request_size,
+                response_size=response_size,
+                user_type=user_type
+            )
+            
+            # Record endpoint comparison for migration tracking
+            self.metrics.record_endpoint_comparison(
+                endpoint=endpoint,
+                implementation='flask',
+                response_time=duration
+            )
+            
+            # Check for performance variance if baseline available
+            if hasattr(g, 'nodejs_baseline_time'):
+                self.metrics.record_performance_variance(
+                    endpoint=endpoint,
+                    metric_type='response_time',
+                    flask_value=duration,
+                    nodejs_baseline=g.nodejs_baseline_time
                 )
-                
-            except Exception as e:
-                logger.error(f"Error generating metrics: {e}")
-                return jsonify({'error': 'Metrics generation failed'}), 500
+        
+        return response
     
-    def set_nodejs_baseline(self, endpoint: str, baseline_duration: float) -> None:
-        """
-        Set Node.js baseline performance for comparison tracking.
-        
-        Args:
-            endpoint: API endpoint name
-            baseline_duration: Baseline duration in seconds from Node.js implementation
-        """
-        self._nodejs_baseline[endpoint] = baseline_duration
-        logger.info(f"Set Node.js baseline for {endpoint}: {baseline_duration:.3f}s")
-    
-    def track_business_operation(self, operation: str, module: str = 'unknown') -> Callable:
-        """
-        Decorator for tracking business operation metrics.
-        
-        Args:
-            operation: Business operation name
-            module: Module or component name
-            
-        Returns:
-            Decorator function for business operation tracking
-        """
-        def decorator(func: Callable) -> Callable:
-            @functools.wraps(func)
-            def wrapper(*args, **kwargs):
-                start_time = time.time()
-                success = True
-                
-                try:
-                    result = func(*args, **kwargs)
-                    return result
-                except Exception as e:
-                    success = False
-                    raise
-                finally:
-                    duration = time.time() - start_time
-                    self.business_operation_duration.labels(
-                        operation=operation,
-                        module=module,
-                        success=str(success).lower()
-                    ).observe(duration)
-            
-            return wrapper
-        return decorator
-    
-    def track_external_service_call(self, service: str, endpoint: str = 'unknown') -> Callable:
-        """
-        Decorator for tracking external service call metrics.
-        
-        Args:
-            service: External service name
-            endpoint: Service endpoint name
-            
-        Returns:
-            Decorator function for external service tracking
-        """
-        def decorator(func: Callable) -> Callable:
-            @functools.wraps(func)
-            def wrapper(*args, **kwargs):
-                start_time = time.time()
-                
-                try:
-                    result = func(*args, **kwargs)
-                    # Track successful call
-                    self.external_service_calls.labels(
-                        service=service,
-                        method='unknown',
-                        status_code='200'
-                    ).inc()
-                    
-                    return result
-                except Exception as e:
-                    # Track failed call
-                    self.external_service_calls.labels(
-                        service=service,
-                        method='unknown',
-                        status_code='error'
-                    ).inc()
-                    raise
-                finally:
-                    duration = time.time() - start_time
-                    self.external_service_duration.labels(
-                        service=service,
-                        endpoint=endpoint
-                    ).observe(duration)
-            
-            return wrapper
-        return decorator
-    
-    def track_database_operation(self, operation_type: str, collection: str = 'unknown') -> Callable:
-        """
-        Decorator for tracking database operation metrics.
-        
-        Args:
-            operation_type: Database operation type (find, insert, update, delete)
-            collection: MongoDB collection name
-            
-        Returns:
-            Decorator function for database operation tracking
-        """
-        def decorator(func: Callable) -> Callable:
-            @functools.wraps(func)
-            def wrapper(*args, **kwargs):
-                start_time = time.time()
-                status = 'success'
-                
-                try:
-                    result = func(*args, **kwargs)
-                    return result
-                except Exception as e:
-                    status = 'error'
-                    raise
-                finally:
-                    duration = time.time() - start_time
-                    self.db_operation_duration.labels(
-                        operation_type=operation_type,
-                        collection=collection,
-                        status=status
-                    ).observe(duration)
-            
-            return wrapper
-        return decorator
-    
-    def update_cache_metrics(self, operation: str, result: str, cache_type: str = 'redis') -> None:
-        """
-        Update cache operation metrics.
-        
-        Args:
-            operation: Cache operation (get, set, delete, etc.)
-            result: Operation result (hit, miss, success, error)
-            cache_type: Type of cache system
-        """
-        self.cache_operations.labels(
-            operation=operation,
-            result=result,
-            cache_type=cache_type
-        ).inc()
-    
-    def update_auth_metrics(self, operation_type: str, result: str, provider: str = 'local') -> None:
-        """
-        Update authentication operation metrics.
-        
-        Args:
-            operation_type: Authentication operation (login, logout, validate, etc.)
-            result: Operation result (success, failure, error)
-            provider: Authentication provider (local, auth0, etc.)
-        """
-        self.auth_operations.labels(
-            operation_type=operation_type,
-            result=result,
-            provider=provider
-        ).inc()
-    
-    def get_performance_summary(self) -> Dict[str, Any]:
-        """
-        Get comprehensive performance summary for monitoring dashboards.
-        
-        Returns:
-            Dictionary containing performance metrics summary
-        """
-        summary = {
-            'endpoints_monitored': len(self._performance_cache),
-            'nodejs_baselines_set': len(self._nodejs_baseline),
-            'performance_compliance': {},
-            'system_health': {}
-        }
-        
-        # Calculate performance compliance for each endpoint
-        for endpoint in self._nodejs_baseline:
-            if endpoint in self._performance_cache and self._performance_cache[endpoint]:
-                baseline = self._nodejs_baseline[endpoint]
-                current_avg = sum(self._performance_cache[endpoint]) / len(self._performance_cache[endpoint])
-                variance_pct = ((current_avg - baseline) / baseline) * 100
-                
-                summary['performance_compliance'][endpoint] = {
-                    'variance_percentage': round(variance_pct, 2),
-                    'compliant': abs(variance_pct) <= 10.0,
-                    'current_avg_ms': round(current_avg * 1000, 2),
-                    'baseline_ms': round(baseline * 1000, 2)
-                }
-        
-        # Add system health indicators
-        try:
-            process = psutil.Process()
-            summary['system_health'] = {
-                'cpu_percent': process.cpu_percent(),
-                'memory_percent': process.memory_percent(),
-                'thread_count': threading.active_count(),
-                'gc_generation_0': gc.get_count()[0],
-                'gc_generation_1': gc.get_count()[1],
-                'gc_generation_2': gc.get_count()[2]
-            }
-        except Exception as e:
-            logger.error(f"Error gathering system health metrics: {e}")
-        
-        return summary
+    def _teardown_request(self, exception=None):
+        """Request teardown metrics cleanup."""
+        # Decrement active requests counter
+        self.metrics.http_requests_active.dec()
 
 
-# Global metrics collector instance for application-wide use
-metrics_collector = FlaskMetricsCollector(registry=METRICS_REGISTRY)
-
-# Convenience decorators for common operations
-track_business_operation = metrics_collector.track_business_operation
-track_external_service_call = metrics_collector.track_external_service_call
-track_database_operation = metrics_collector.track_database_operation
-
-# Metrics update functions
-update_cache_metrics = metrics_collector.update_cache_metrics
-update_auth_metrics = metrics_collector.update_auth_metrics
-
-# Performance management functions
-set_nodejs_baseline = metrics_collector.set_nodejs_baseline
-get_performance_summary = metrics_collector.get_performance_summary
-
-def init_metrics(app: Flask) -> FlaskMetricsCollector:
+def create_metrics_endpoint(app: Flask, metrics_collector: PrometheusMetricsCollector, 
+                          endpoint_path: str = '/metrics'):
     """
-    Initialize metrics collection for Flask application.
+    Create Prometheus metrics endpoint for monitoring system integration.
     
     Args:
         app: Flask application instance
+        metrics_collector: PrometheusMetricsCollector instance
+        endpoint_path: URL path for metrics endpoint (default: /metrics)
+    """
+    @app.route(endpoint_path, methods=['GET'])
+    def prometheus_metrics():
+        """
+        Prometheus metrics endpoint for monitoring system integration.
         
-    Returns:
-        Configured metrics collector instance
-    """
-    metrics_collector.init_app(app)
-    return metrics_collector
+        Returns:
+            Response: Prometheus metrics in text exposition format with appropriate headers
+        """
+        try:
+            # Generate metrics output
+            metrics_output = metrics_collector.generate_metrics_output()
+            
+            # Return metrics with appropriate content type
+            return Response(
+                metrics_output,
+                mimetype=CONTENT_TYPE_LATEST,
+                status=200
+            )
+            
+        except Exception as e:
+            # Log error and return error response
+            error_message = f"Error generating Prometheus metrics: {str(e)}"
+            return Response(
+                error_message,
+                mimetype='text/plain',
+                status=500
+            )
 
-def start_metrics_server(port: int = 8000) -> None:
+
+def setup_metrics_collection(app: Flask, config: MonitoringConfig = None) -> PrometheusMetricsCollector:
     """
-    Start standalone Prometheus metrics server.
+    Setup comprehensive Prometheus metrics collection for Flask application.
+    
+    This function initializes enterprise-grade metrics collection including:
+    - HTTP request/response performance tracking
+    - Database operation monitoring
+    - External service integration metrics
+    - System resource utilization tracking
+    - Custom migration performance comparison
+    - Business logic throughput analysis
+    - WSGI server instrumentation
+    - Garbage collection monitoring
     
     Args:
-        port: Port number for metrics server
+        app: Flask application instance
+        config: MonitoringConfig instance with enterprise settings
+        
+    Returns:
+        PrometheusMetricsCollector: Configured metrics collector instance
     """
-    try:
-        start_http_server(port, registry=METRICS_REGISTRY)
-        logger.info(f"Started Prometheus metrics server on port {port}")
-    except Exception as e:
-        logger.error(f"Failed to start metrics server: {e}")
+    # Initialize configuration
+    if config is None:
+        config = MonitoringConfig()
+    
+    # Create metrics collector
+    metrics_collector = PrometheusMetricsCollector(config)
+    
+    # Setup metrics middleware
+    metrics_middleware = MetricsMiddleware(metrics_collector)
+    metrics_middleware.init_app(app)
+    
+    # Create metrics endpoint
+    create_metrics_endpoint(app, metrics_collector, config.PROMETHEUS_METRICS_PATH)
+    
+    # Store metrics collector in app config for access by other components
+    app.config['PROMETHEUS_METRICS'] = metrics_collector
+    
+    # Setup periodic resource metrics updates
+    if config.PERFORMANCE_MONITORING_ENABLED:
+        import threading
+        import time
+        
+        def update_resource_metrics():
+            """Background thread for periodic resource metrics updates."""
+            while True:
+                try:
+                    metrics_collector.update_resource_utilization()
+                    time.sleep(15)  # Update every 15 seconds
+                except Exception as e:
+                    print(f"Error in resource metrics update: {e}")
+                    time.sleep(60)  # Wait longer on error
+        
+        # Start background thread for resource monitoring
+        resource_thread = threading.Thread(target=update_resource_metrics, daemon=True)
+        resource_thread.start()
+    
+    return metrics_collector
 
-# Export key components for external use
+
+# Performance monitoring decorators for business logic instrumentation
+def monitor_performance(endpoint: str = None, nodejs_baseline: float = None):
+    """
+    Decorator for monitoring business logic performance with Node.js baseline comparison.
+    
+    Args:
+        endpoint: Endpoint identifier for metrics labeling
+        nodejs_baseline: Node.js baseline response time for variance calculation
+        
+    Returns:
+        Callable: Decorated function with performance monitoring
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            start_time = time.perf_counter()
+            
+            try:
+                result = func(*args, **kwargs)
+                status = 'success'
+            except Exception as e:
+                status = 'error'
+                raise
+            finally:
+                duration = time.perf_counter() - start_time
+                
+                # Get metrics collector from Flask app config
+                if hasattr(g, 'app') and 'PROMETHEUS_METRICS' in g.app.config:
+                    metrics = g.app.config['PROMETHEUS_METRICS']
+                    
+                    # Record business logic operation
+                    metrics.record_business_logic_operation(
+                        operation=endpoint or func.__name__,
+                        module=func.__module__ or 'unknown',
+                        duration=duration,
+                        status=status
+                    )
+                    
+                    # Store baseline time for request monitoring if provided
+                    if nodejs_baseline:
+                        g.nodejs_baseline_time = nodejs_baseline
+            
+            return result
+        return wrapper
+    return decorator
+
+
+def monitor_database_operation(operation: str, collection: str):
+    """
+    Decorator for monitoring database operations with performance tracking.
+    
+    Args:
+        operation: Database operation type (find, insert, update, delete)
+        collection: MongoDB collection name
+        
+    Returns:
+        Callable: Decorated function with database monitoring
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            start_time = time.perf_counter()
+            
+            try:
+                result = func(*args, **kwargs)
+                status = 'success'
+                
+                # Try to extract result count from result
+                result_count = None
+                if hasattr(result, 'count'):
+                    result_count = result.count()
+                elif isinstance(result, (list, tuple)):
+                    result_count = len(result)
+                
+            except Exception as e:
+                status = 'error'
+                result_count = None
+                raise
+            finally:
+                duration = time.perf_counter() - start_time
+                
+                # Get metrics collector from Flask app config
+                if hasattr(g, 'app') and 'PROMETHEUS_METRICS' in g.app.config:
+                    metrics = g.app.config['PROMETHEUS_METRICS']
+                    
+                    # Record database operation
+                    metrics.record_database_operation(
+                        operation=operation,
+                        collection=collection,
+                        duration=duration,
+                        status=status,
+                        result_count=result_count
+                    )
+            
+            return result
+        return wrapper
+    return decorator
+
+
+def monitor_external_service(service: str, operation: str):
+    """
+    Decorator for monitoring external service calls with circuit breaker integration.
+    
+    Args:
+        service: External service name (auth0, aws_s3, redis)
+        operation: Service operation identifier
+        
+    Returns:
+        Callable: Decorated function with external service monitoring
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            start_time = time.perf_counter()
+            status_code = 200
+            timeout_occurred = False
+            retry_count = 0
+            
+            try:
+                result = func(*args, **kwargs)
+                
+                # Extract status code from result if available
+                if hasattr(result, 'status_code'):
+                    status_code = result.status_code
+                elif hasattr(result, 'status'):
+                    status_code = result.status
+                
+                # Extract retry information if available
+                if hasattr(result, 'retry_count'):
+                    retry_count = result.retry_count
+                
+            except TimeoutError:
+                status_code = 408
+                timeout_occurred = True
+                raise
+            except Exception as e:
+                status_code = 500
+                raise
+            finally:
+                duration = time.perf_counter() - start_time
+                
+                # Get metrics collector from Flask app config
+                if hasattr(g, 'app') and 'PROMETHEUS_METRICS' in g.app.config:
+                    metrics = g.app.config['PROMETHEUS_METRICS']
+                    
+                    # Record external service request
+                    metrics.record_external_service_request(
+                        service=service,
+                        operation=operation,
+                        duration=duration,
+                        status_code=status_code,
+                        timeout_occurred=timeout_occurred,
+                        retry_count=retry_count
+                    )
+            
+            return result
+        return wrapper
+    return decorator
+
+
+def monitor_cache_operation(cache_type: str, operation: str):
+    """
+    Decorator for monitoring cache operations with hit/miss tracking.
+    
+    Args:
+        cache_type: Type of cache (memory, redis, database)
+        operation: Cache operation identifier
+        
+    Returns:
+        Callable: Decorated function with cache monitoring
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            try:
+                result = func(*args, **kwargs)
+                
+                # Determine if cache hit or miss occurred
+                cache_hit = result is not None and result != False
+                
+                # Get metrics collector from Flask app config
+                if hasattr(g, 'app') and 'PROMETHEUS_METRICS' in g.app.config:
+                    metrics = g.app.config['PROMETHEUS_METRICS']
+                    
+                    # Record cache hit/miss
+                    metrics.record_cache_hit(
+                        cache_type=cache_type,
+                        operation=operation,
+                        hit=cache_hit
+                    )
+                
+                return result
+            
+            except Exception as e:
+                # Record cache miss on exception
+                if hasattr(g, 'app') and 'PROMETHEUS_METRICS' in g.app.config:
+                    metrics = g.app.config['PROMETHEUS_METRICS']
+                    metrics.record_cache_hit(
+                        cache_type=cache_type,
+                        operation=operation,
+                        hit=False
+                    )
+                raise
+        
+        return wrapper
+    return decorator
+
+
+# Export monitoring components for application integration
 __all__ = [
-    'FlaskMetricsCollector',
-    'metrics_collector',
-    'init_metrics',
-    'start_metrics_server',
-    'track_business_operation',
-    'track_external_service_call', 
-    'track_database_operation',
-    'update_cache_metrics',
-    'update_auth_metrics',
-    'set_nodejs_baseline',
-    'get_performance_summary',
-    'METRICS_REGISTRY'
+    'PrometheusMetricsCollector',
+    'MetricsMiddleware',
+    'setup_metrics_collection',
+    'create_metrics_endpoint',
+    'monitor_performance',
+    'monitor_database_operation',
+    'monitor_external_service',
+    'monitor_cache_operation',
 ]
