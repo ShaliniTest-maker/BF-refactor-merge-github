@@ -1,32 +1,43 @@
 """
 Bandit Security Analysis Automation
 
-Comprehensive Python code security scanning using bandit 1.7+ for vulnerability detection,
-automated security reporting, and CI/CD integration with zero-tolerance security enforcement.
+This module provides comprehensive Python code security scanning through automated Bandit analysis,
+vulnerability detection, and security reporting with CI/CD integration for zero-tolerance security
+enforcement. Implements enterprise-grade security scanning requirements per Section 6.4.5 and 6.6.3
+of the technical specification.
 
-This module implements enterprise-grade security analysis automation including:
-- Bandit 1.7+ integration for comprehensive Python security pattern scanning per Section 6.4.5
-- Critical and high-severity vulnerability detection with zero-tolerance enforcement per Section 6.6.3
-- Automated security report generation and metrics collection per Section 6.6.2
+Key Components:
+- Automated Bandit 1.7+ security analysis for Python code vulnerability scanning per Section 6.4.5
+- Comprehensive security pattern detection covering all Python modules per Section 6.4.5
+- Critical and high-severity vulnerability detection per Section 6.6.3 with zero tolerance policy
+- Automated security report generation per Section 6.6.2 with structured JSON output
 - CI/CD pipeline integration for security gate enforcement per Section 6.6.2
-- Comprehensive security analysis covering all Python modules per Section 6.4.5
-- Security posture monitoring and trend analysis per Section 6.4.6
+- Zero-tolerance policy enforcement for critical security findings per Section 6.6.3
 
-Integration with Security Infrastructure:
-- Builds on security testing fixtures from tests/security/conftest.py per Section 6.6.1
-- Integrates with enterprise security monitoring and SIEM systems per Section 6.4.5
-- Supports automated security incident response and remediation workflows per Section 6.4.6
-- Provides comprehensive security metrics for compliance reporting per Section 6.4.6
+Architecture Integration:
+- Section 6.4.5: Security Controls Matrix with comprehensive security validation
+- Section 6.6.2: Test Automation with CI/CD security checks integration
+- Section 6.6.3: Quality Metrics with security scan requirements and enforcement
+- Section 6.4.5: Static Application Security Testing (SAST) with Bandit 1.7+ integration
+- Section 6.6.3: Security gate enforcement with deployment blocking capabilities
 
-Dependencies:
-- bandit 1.7+ for comprehensive Python security analysis and vulnerability detection
-- subprocess for bandit execution and result collection with secure parameter handling
-- json for security finding parsing and structured data management
-- pathlib for secure file system operations and path validation
-- typing for comprehensive type safety and runtime validation
-- logging for structured security event logging and audit trail generation
+Security Analysis Coverage:
+- SQL injection vulnerability patterns and database security assessment
+- XSS prevention validation and output sanitization compliance
+- Authentication and authorization security pattern analysis
+- Cryptographic implementation validation and key management security
+- Input validation security assessment and sanitization effectiveness
+- Session management security analysis and secure cookie validation
+- Error handling security review and information disclosure prevention
+- Configuration security assessment and environment variable protection
+
+Author: Flask Migration Team  
+Version: 1.0.0
+Security Compliance: OWASP Top 10, SANS Top 25, Section 6.6.3 Requirements
+Dependencies: bandit 1.7+, safety 3.0+, pytest 7.4+, structlog 23.1+
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -34,1964 +45,1800 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Tuple, Set, Union
-from dataclasses import dataclass, asdict
-from enum import Enum
-import hashlib
-import secrets
+from typing import Any, Dict, List, Optional, Tuple, Union, Set
+from unittest.mock import patch, MagicMock
 
-# Import security testing infrastructure
+import pytest
+import structlog
+from bandit import manager as bandit_manager
+from bandit.core import config as bandit_config
+from bandit.core import node_visitor
+from bandit.formatters import json as bandit_json
+
+# Import security testing framework from conftest
 from tests.security.conftest import (
-    SecurityTestConfig,
-    SecurityMonitor,
-    SecurityMetricsCollector
+    security_config,
+    security_audit_logger,
+    security_performance_monitor,
+    comprehensive_security_environment
 )
+
+# Configure security analysis logger
+logging.basicConfig(level=logging.INFO)
+security_analysis_logger = logging.getLogger(__name__)
 
 # Configure structured logging for security analysis
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+structlog.configure(
+    processors=[
+        structlog.stdlib.filter_by_level,
+        structlog.stdlib.add_logger_name,
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.PositionalArgumentsFormatter(),
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.StackInfoRenderer(),
+        structlog.processors.format_exc_info,
+        structlog.processors.UnicodeDecoder(),
+        structlog.processors.JSONRenderer()
+    ],
+    wrapper_class=structlog.stdlib.LoggerFactory(),
+    context_class=dict,
+    logger_factory=structlog.stdlib.LoggerFactory(),
+    cache_logger_on_first_use=True,
 )
-logger = logging.getLogger('security.bandit_analysis')
 
 
-class SecuritySeverity(Enum):
-    """Security finding severity levels with enforcement policies."""
-    
-    LOW = "LOW"
-    MEDIUM = "MEDIUM"
-    HIGH = "HIGH"
-    CRITICAL = "CRITICAL"
-    
-    @property
-    def enforcement_level(self) -> str:
-        """Get enforcement level for severity."""
-        enforcement_map = {
-            self.LOW: "warning",
-            self.MEDIUM: "warning",
-            self.HIGH: "blocking",
-            self.CRITICAL: "blocking"
-        }
-        return enforcement_map[self]
-    
-    @property
-    def numeric_value(self) -> int:
-        """Get numeric value for severity comparison."""
-        severity_values = {
-            self.LOW: 1,
-            self.MEDIUM: 2,
-            self.HIGH: 3,
-            self.CRITICAL: 4
-        }
-        return severity_values[self]
+# =============================================================================
+# Bandit Security Analysis Configuration
+# =============================================================================
 
-
-class SecurityRuleCategory(Enum):
-    """Security rule categories for comprehensive analysis."""
-    
-    HARDCODED_PASSWORD = "hardcoded_password_default_argument"
-    SQL_INJECTION = "hardcoded_sql_expressions"
-    SHELL_INJECTION = "subprocess_popen_with_shell_equals_true"
-    CRYPTO_WEAK = "weak_cryptographic_key"
-    RANDOM_WEAK = "standard_pseudorandom_generators"
-    INPUT_VALIDATION = "try_except_pass"
-    INSECURE_TRANSPORT = "request_without_timeout"
-    PATH_TRAVERSAL = "path_traversal"
-    DESERIALIZATION = "pickle_load"
-    EXEC_INJECTION = "exec_used"
-    EVAL_INJECTION = "use_of_eval"
-    YAML_LOAD = "yaml_load"
-    XML_VULNERABILITY = "xml_bad_tree"
-    LDAP_INJECTION = "ldap_injection"
-    HTTP_INSECURE = "request_with_no_cert_validation"
-    
-    @property
-    def default_severity(self) -> SecuritySeverity:
-        """Get default severity for rule category."""
-        high_severity_rules = {
-            self.HARDCODED_PASSWORD,
-            self.SQL_INJECTION,
-            self.SHELL_INJECTION,
-            self.EXEC_INJECTION,
-            self.EVAL_INJECTION,
-            self.DESERIALIZATION
-        }
-        
-        critical_severity_rules = {
-            self.CRYPTO_WEAK,
-            self.PATH_TRAVERSAL,
-            self.XML_VULNERABILITY
-        }
-        
-        if self in critical_severity_rules:
-            return SecuritySeverity.CRITICAL
-        elif self in high_severity_rules:
-            return SecuritySeverity.HIGH
-        else:
-            return SecuritySeverity.MEDIUM
-
-
-@dataclass
-class SecurityFinding:
+class BanditAnalysisConfig:
     """
-    Comprehensive security finding data structure for vulnerability tracking.
-    
-    Represents individual security vulnerabilities identified by bandit analysis
-    with complete metadata for remediation, reporting, and compliance tracking.
+    Comprehensive Bandit security analysis configuration providing enterprise-grade
+    security scanning parameters, vulnerability detection settings, and CI/CD integration
+    configuration per Section 6.6.3 security requirements.
     """
     
-    # Core finding identification
-    finding_id: str
-    rule_id: str
-    test_name: str
-    category: SecurityRuleCategory
+    # Bandit Analysis Configuration
+    BANDIT_VERSION_REQUIRED = "1.7.0"
+    BANDIT_CONFIG_FILE = ".bandit"
+    BANDIT_BASELINE_FILE = ".bandit_baseline"
     
-    # Severity and risk assessment
-    severity: SecuritySeverity
-    confidence: str
-    risk_score: float
+    # Security Analysis Scope
+    ANALYSIS_SCOPE_COMPLETE = True
+    INCLUDE_TEST_FILES = True
+    RECURSIVE_ANALYSIS = True
+    FOLLOW_SYMLINKS = False
     
-    # Location and context information
-    file_path: str
-    line_number: int
-    column_number: int
-    code_snippet: str
+    # Vulnerability Severity Configuration per Section 6.6.3
+    CRITICAL_SEVERITY_BLOCKING = True
+    HIGH_SEVERITY_BLOCKING = True
+    MEDIUM_SEVERITY_WARNING = True
+    LOW_SEVERITY_INFORMATIONAL = True
     
-    # Vulnerability details
-    issue_text: str
-    issue_description: str
-    cwe_id: Optional[str] = None
-    owasp_category: Optional[str] = None
+    # Zero-Tolerance Policy Configuration per Section 6.6.3
+    ZERO_TOLERANCE_CRITICAL = True
+    ZERO_TOLERANCE_HIGH = True
+    MAX_CRITICAL_FINDINGS = 0
+    MAX_HIGH_FINDINGS = 0
     
-    # Remediation and guidance
-    remediation_guidance: Optional[str] = None
-    mitigation_priority: str = "medium"
-    estimated_fix_time: Optional[str] = None
+    # CI/CD Integration Configuration per Section 6.6.2
+    CI_CD_INTEGRATION_ENABLED = True
+    PIPELINE_BLOCKING_ENABLED = True
+    AUTOMATED_REPORTING_ENABLED = True
+    SECURITY_GATE_ENFORCEMENT = True
     
-    # Metadata and tracking
-    scan_timestamp: str
-    analyzer_version: str
-    baseline_status: str = "new"
-    suppression_status: str = "active"
-    false_positive: bool = False
+    # Report Generation Configuration
+    GENERATE_JSON_REPORT = True
+    GENERATE_HTML_REPORT = True
+    GENERATE_TXT_REPORT = True
+    GENERATE_BASELINE_REPORT = True
     
-    # Compliance and reporting
-    compliance_impact: List[str] = None
-    reporting_tags: List[str] = None
+    # Performance Configuration
+    PARALLEL_ANALYSIS_ENABLED = True
+    MAX_ANALYSIS_TIME_SECONDS = 300  # 5 minutes
+    MEMORY_LIMIT_MB = 512
     
-    def __post_init__(self):
-        """Post-initialization processing for security finding."""
-        if self.compliance_impact is None:
-            self.compliance_impact = []
-        if self.reporting_tags is None:
-            self.reporting_tags = []
-            
-        # Generate unique finding ID if not provided
-        if not self.finding_id:
-            self.finding_id = self._generate_finding_id()
-            
-        # Set mitigation priority based on severity
-        self.mitigation_priority = self._calculate_mitigation_priority()
-        
-        # Add OWASP categorization
-        self.owasp_category = self._map_to_owasp_category()
-        
-        # Add compliance impact assessment
-        self.compliance_impact = self._assess_compliance_impact()
+    # Security Rule Configuration
+    ENABLE_ALL_SECURITY_RULES = True
+    CUSTOM_SECURITY_RULES_ENABLED = True
+    FLASK_SPECIFIC_RULES_ENABLED = True
+    CRYPTO_RULES_ENABLED = True
     
-    def _generate_finding_id(self) -> str:
-        """Generate unique finding identifier."""
-        content = f"{self.rule_id}:{self.file_path}:{self.line_number}:{self.test_name}"
-        return hashlib.sha256(content.encode()).hexdigest()[:16]
+    # Audit Configuration
+    AUDIT_ALL_FINDINGS = True
+    AUDIT_SCAN_EXECUTION = True
+    AUDIT_PERFORMANCE_METRICS = True
+    AUDIT_COMPLIANCE_STATUS = True
     
-    def _calculate_mitigation_priority(self) -> str:
-        """Calculate mitigation priority based on severity and confidence."""
-        if self.severity in [SecuritySeverity.CRITICAL, SecuritySeverity.HIGH]:
-            if self.confidence in ["HIGH", "MEDIUM"]:
-                return "critical"
-            else:
-                return "high"
-        elif self.severity == SecuritySeverity.MEDIUM:
-            return "medium"
-        else:
-            return "low"
-    
-    def _map_to_owasp_category(self) -> str:
-        """Map security finding to OWASP Top 10 category."""
-        owasp_mapping = {
-            SecurityRuleCategory.SQL_INJECTION: "A03:2021 – Injection",
-            SecurityRuleCategory.SHELL_INJECTION: "A03:2021 – Injection",
-            SecurityRuleCategory.EXEC_INJECTION: "A03:2021 – Injection",
-            SecurityRuleCategory.EVAL_INJECTION: "A03:2021 – Injection",
-            SecurityRuleCategory.LDAP_INJECTION: "A03:2021 – Injection",
-            SecurityRuleCategory.HARDCODED_PASSWORD: "A07:2021 – Identification and Authentication Failures",
-            SecurityRuleCategory.CRYPTO_WEAK: "A02:2021 – Cryptographic Failures",
-            SecurityRuleCategory.INSECURE_TRANSPORT: "A02:2021 – Cryptographic Failures",
-            SecurityRuleCategory.HTTP_INSECURE: "A02:2021 – Cryptographic Failures",
-            SecurityRuleCategory.INPUT_VALIDATION: "A03:2021 – Injection",
-            SecurityRuleCategory.PATH_TRAVERSAL: "A01:2021 – Broken Access Control",
-            SecurityRuleCategory.DESERIALIZATION: "A08:2021 – Software and Data Integrity Failures",
-            SecurityRuleCategory.XML_VULNERABILITY: "A05:2021 – Security Misconfiguration",
-            SecurityRuleCategory.YAML_LOAD: "A08:2021 – Software and Data Integrity Failures"
-        }
-        return owasp_mapping.get(self.category, "A10:2021 – Server-Side Request Forgery")
-    
-    def _assess_compliance_impact(self) -> List[str]:
-        """Assess compliance framework impact."""
-        impact = []
-        
-        # Critical and High severity findings impact multiple frameworks
-        if self.severity in [SecuritySeverity.CRITICAL, SecuritySeverity.HIGH]:
-            impact.extend(["SOC 2", "ISO 27001", "PCI DSS"])
-            
-        # Specific rule category impacts
-        if self.category in [SecurityRuleCategory.HARDCODED_PASSWORD, SecurityRuleCategory.CRYPTO_WEAK]:
-            impact.extend(["FIPS 140-2", "GDPR"])
-            
-        if self.category in [SecurityRuleCategory.SQL_INJECTION, SecurityRuleCategory.INPUT_VALIDATION]:
-            impact.extend(["OWASP Top 10", "SANS Top 25"])
-            
-        return list(set(impact))  # Remove duplicates
-    
-    def is_blocking(self) -> bool:
-        """Determine if finding should block deployment."""
-        return (
-            self.severity in [SecuritySeverity.CRITICAL, SecuritySeverity.HIGH] and
-            not self.false_positive and
-            self.suppression_status == "active"
-        )
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert finding to dictionary for serialization."""
-        return asdict(self)
+    # Compliance Configuration
+    OWASP_TOP_10_COMPLIANCE = True
+    SANS_TOP_25_COMPLIANCE = True
+    PCI_DSS_COMPLIANCE = True
+    SOC2_COMPLIANCE = True
 
 
-@dataclass
-class BanditScanResult:
+class BanditSecurityProfile:
     """
-    Comprehensive bandit scan result with metrics and analysis.
-    
-    Aggregates security findings from bandit analysis with comprehensive
-    metrics, compliance assessment, and remediation guidance for enterprise
-    security reporting and decision making.
+    Comprehensive security profile configuration for Flask application security analysis
+    with specific focus on authentication, authorization, data protection, and input validation
+    security patterns per Section 6.4.5 Security Controls Matrix.
     """
     
-    # Scan metadata
-    scan_id: str
-    scan_timestamp: str
-    scan_duration: float
-    analyzer_version: str
+    # Flask Security Patterns
+    FLASK_SECURITY_PATTERNS = {
+        'authentication_patterns': [
+            'hardcoded_password',
+            'hardcoded_bind_all_interfaces',
+            'request_without_validation',
+            'weak_cryptographic_key',
+            'insecure_random_generator'
+        ],
+        'authorization_patterns': [
+            'django_extra_used',
+            'exec_used',
+            'eval_used',
+            'subprocess_without_shell_escape'
+        ],
+        'data_protection_patterns': [
+            'hardcoded_sql_expressions',
+            'sql_injection_risk',
+            'pickle_usage',
+            'yaml_load',
+            'ssl_with_no_version'
+        ],
+        'input_validation_patterns': [
+            'jinja2_autoescape_false',
+            'use_of_mako_templates',
+            'django_mark_safe',
+            'request_without_timeout'
+        ]
+    }
     
-    # Scan configuration
-    target_paths: List[str]
-    excluded_paths: List[str]
-    rules_used: List[str]
-    confidence_levels: List[str]
+    # Security Rule Weights per Section 6.6.3
+    SECURITY_RULE_WEIGHTS = {
+        'B101': 'HIGH',    # Test for use of assert
+        'B102': 'MEDIUM',  # Test for exec used
+        'B103': 'HIGH',    # Test for set bad file permissions
+        'B104': 'MEDIUM',  # Test for binding to all interfaces
+        'B105': 'HIGH',    # Test for hardcoded password strings
+        'B106': 'HIGH',    # Test for hardcoded password funcarg
+        'B107': 'HIGH',    # Test for hardcoded password default
+        'B108': 'MEDIUM',  # Test for insecure temp file
+        'B110': 'MEDIUM',  # Test for try/except pass
+        'B112': 'MEDIUM',  # Test for try/except continue
+        'B201': 'HIGH',    # Test for Flask debug mode
+        'B301': 'HIGH',    # Test for pickle usage
+        'B302': 'HIGH',    # Test for marshal usage
+        'B303': 'MEDIUM',  # Test for MD5 usage
+        'B304': 'MEDIUM',  # Test for insecure cipher usage
+        'B305': 'HIGH',    # Test for cipher modes
+        'B306': 'HIGH',    # Test for mktemp usage
+        'B307': 'HIGH',    # Test for eval usage
+        'B308': 'MEDIUM',  # Test for mark_safe usage
+        'B309': 'MEDIUM',  # Test for HTTPSConnection
+        'B310': 'HIGH',    # Test for urllib urlopen
+        'B311': 'MEDIUM',  # Test for random usage
+        'B312': 'HIGH',    # Test for telnetlib usage
+        'B313': 'HIGH',    # Test for XML injection
+        'B314': 'HIGH',    # Test for XML external entity
+        'B315': 'HIGH',    # Test for XML external entity
+        'B316': 'HIGH',    # Test for XML external entity
+        'B317': 'HIGH',    # Test for XML external entity
+        'B318': 'HIGH',    # Test for XML external entity
+        'B319': 'HIGH',    # Test for XML external entity
+        'B320': 'HIGH',    # Test for XML external entity
+        'B321': 'HIGH',    # Test for FTP related functions
+        'B322': 'MEDIUM',  # Test for input function
+        'B323': 'MEDIUM',  # Test for unverified context
+        'B324': 'HIGH',    # Test for hashlib insecure functions
+        'B325': 'MEDIUM',  # Test for tempfile
+        'B501': 'MEDIUM',  # Test for SSL/TLS insecure defaults
+        'B502': 'HIGH',    # Test for SSL/TLS insecure defaults
+        'B503': 'HIGH',    # Test for SSL/TLS insecure defaults
+        'B504': 'HIGH',    # Test for SSL/TLS insecure defaults
+        'B505': 'HIGH',    # Test for weak cryptographic key
+        'B506': 'HIGH',    # Test for yaml_load
+        'B507': 'HIGH',    # Test for SSH connection
+        'B601': 'HIGH',    # Test for shell injection
+        'B602': 'HIGH',    # Test for subprocess popen
+        'B603': 'HIGH',    # Test for subprocess without shell
+        'B604': 'HIGH',    # Test for subprocess call
+        'B605': 'HIGH',    # Test for start_process_with_shell
+        'B606': 'HIGH',    # Test for start_process_with_no_shell
+        'B607': 'MEDIUM',  # Test for start_process_with_partial_path
+        'B608': 'HIGH',    # Test for hardcoded SQL expressions
+        'B609': 'HIGH',    # Test for wildcard injection
+        'B610': 'HIGH',    # Test for linux commands injection
+        'B611': 'HIGH',    # Test for injection
+        'B701': 'MEDIUM',  # Test for jinja2 autoescape
+        'B702': 'MEDIUM',  # Test for use of mako templates
+        'B703': 'MEDIUM'   # Test for django mark safe
+    }
     
-    # Scan results
-    findings: List[SecurityFinding]
-    total_files_scanned: int
-    total_lines_scanned: int
-    
-    # Security metrics
-    critical_count: int = 0
-    high_count: int = 0
-    medium_count: int = 0
-    low_count: int = 0
-    
-    # Quality metrics
-    false_positive_rate: float = 0.0
-    suppressed_count: int = 0
-    new_findings_count: int = 0
-    
-    # Compliance assessment
-    compliance_status: str = "unknown"
-    blocking_findings: List[SecurityFinding] = None
-    compliance_violations: List[str] = None
-    
-    # Remediation metrics
-    estimated_remediation_time: str = "unknown"
-    priority_findings: List[SecurityFinding] = None
-    
-    def __post_init__(self):
-        """Post-initialization processing for scan result."""
-        if self.blocking_findings is None:
-            self.blocking_findings = []
-        if self.compliance_violations is None:
-            self.compliance_violations = []
-        if self.priority_findings is None:
-            self.priority_findings = []
-            
-        # Calculate severity counts
-        self._calculate_severity_counts()
-        
-        # Assess compliance status
-        self.compliance_status = self._assess_compliance_status()
-        
-        # Identify blocking findings
-        self.blocking_findings = [f for f in self.findings if f.is_blocking()]
-        
-        # Calculate priority findings
-        self.priority_findings = self._identify_priority_findings()
-        
-        # Estimate remediation time
-        self.estimated_remediation_time = self._estimate_remediation_time()
-        
-        # Assess compliance violations
-        self.compliance_violations = self._assess_compliance_violations()
-    
-    def _calculate_severity_counts(self):
-        """Calculate count of findings by severity level."""
-        severity_counts = {
-            SecuritySeverity.CRITICAL: 0,
-            SecuritySeverity.HIGH: 0,
-            SecuritySeverity.MEDIUM: 0,
-            SecuritySeverity.LOW: 0
-        }
-        
-        for finding in self.findings:
-            if not finding.false_positive and finding.suppression_status == "active":
-                severity_counts[finding.severity] += 1
-        
-        self.critical_count = severity_counts[SecuritySeverity.CRITICAL]
-        self.high_count = severity_counts[SecuritySeverity.HIGH]
-        self.medium_count = severity_counts[SecuritySeverity.MEDIUM]
-        self.low_count = severity_counts[SecuritySeverity.LOW]
-    
-    def _assess_compliance_status(self) -> str:
-        """Assess overall compliance status based on findings."""
-        if self.critical_count > 0:
-            return "critical_non_compliant"
-        elif self.high_count > 0:
-            return "non_compliant"
-        elif self.medium_count > 0:
-            return "conditional_compliant"
-        else:
-            return "compliant"
-    
-    def _identify_priority_findings(self) -> List[SecurityFinding]:
-        """Identify high-priority findings requiring immediate attention."""
-        priority_findings = []
-        
-        for finding in self.findings:
-            if (finding.severity in [SecuritySeverity.CRITICAL, SecuritySeverity.HIGH] and
-                not finding.false_positive and
-                finding.confidence in ["HIGH", "MEDIUM"]):
-                priority_findings.append(finding)
-        
-        # Sort by severity and confidence
-        priority_findings.sort(
-            key=lambda f: (f.severity.numeric_value, f.confidence == "HIGH"),
-            reverse=True
-        )
-        
-        return priority_findings
-    
-    def _estimate_remediation_time(self) -> str:
-        """Estimate total remediation time based on findings."""
-        total_hours = 0
-        
-        time_estimates = {
-            SecuritySeverity.CRITICAL: 8,  # 8 hours per critical finding
-            SecuritySeverity.HIGH: 4,      # 4 hours per high finding
-            SecuritySeverity.MEDIUM: 2,    # 2 hours per medium finding
-            SecuritySeverity.LOW: 1        # 1 hour per low finding
-        }
-        
-        for finding in self.findings:
-            if not finding.false_positive and finding.suppression_status == "active":
-                total_hours += time_estimates.get(finding.severity, 1)
-        
-        if total_hours == 0:
-            return "0 hours"
-        elif total_hours < 8:
-            return f"{total_hours} hours"
-        elif total_hours < 40:
-            return f"{total_hours // 8} days"
-        else:
-            return f"{total_hours // 40} weeks"
-    
-    def _assess_compliance_violations(self) -> List[str]:
-        """Assess compliance framework violations."""
-        violations = set()
-        
-        for finding in self.findings:
-            if finding.is_blocking():
-                violations.update(finding.compliance_impact)
-        
-        return list(violations)
-    
-    def is_deployment_ready(self) -> bool:
-        """Determine if scan results allow deployment."""
-        return len(self.blocking_findings) == 0
-    
-    def get_security_score(self) -> float:
-        """Calculate overall security score (0-100)."""
-        if not self.findings:
-            return 100.0
-        
-        # Weight findings by severity
-        severity_weights = {
-            SecuritySeverity.CRITICAL: 25,
-            SecuritySeverity.HIGH: 10,
-            SecuritySeverity.MEDIUM: 5,
-            SecuritySeverity.LOW: 1
-        }
-        
-        total_penalty = sum(
-            severity_weights[f.severity] for f in self.findings
-            if not f.false_positive and f.suppression_status == "active"
-        )
-        
-        # Calculate score based on penalty
-        max_penalty = len(self.findings) * severity_weights[SecuritySeverity.CRITICAL]
-        if max_penalty == 0:
-            return 100.0
-        
-        score = max(0, 100 - (total_penalty / max_penalty * 100))
-        return round(score, 2)
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert scan result to dictionary for serialization."""
-        result_dict = asdict(self)
-        # Convert SecurityFinding objects to dictionaries
-        result_dict['findings'] = [f.to_dict() for f in self.findings]
-        result_dict['blocking_findings'] = [f.to_dict() for f in self.blocking_findings]
-        result_dict['priority_findings'] = [f.to_dict() for f in self.priority_findings]
-        return result_dict
+    # Critical Security Categories per OWASP Top 10
+    CRITICAL_SECURITY_CATEGORIES = {
+        'injection_attacks': ['B608', 'B609', 'B610', 'B611'],
+        'authentication_flaws': ['B105', 'B106', 'B107', 'B201'],
+        'cryptographic_failures': ['B303', 'B304', 'B305', 'B324', 'B505'],
+        'xml_external_entities': ['B313', 'B314', 'B315', 'B316', 'B317', 'B318', 'B319', 'B320'],
+        'insecure_configuration': ['B104', 'B501', 'B502', 'B503', 'B504'],
+        'code_execution': ['B102', 'B307', 'B601', 'B602', 'B603', 'B604', 'B605', 'B606']
+    }
 
+
+# =============================================================================
+# Bandit Security Analysis Engine
+# =============================================================================
 
 class BanditSecurityAnalyzer:
     """
-    Comprehensive bandit security analysis automation with enterprise integration.
-    
-    Implements automated Python code security scanning using bandit 1.7+ with
-    comprehensive vulnerability detection, reporting, and CI/CD integration for
-    zero-tolerance security enforcement per Section 6.6.3.
+    Comprehensive Bandit security analysis engine providing automated Python code
+    vulnerability scanning, security pattern detection, and compliance validation
+    per Section 6.4.5 and 6.6.3 requirements.
     """
     
-    def __init__(
-        self,
-        project_root: Union[str, Path],
-        config_path: Optional[Union[str, Path]] = None,
-        security_monitor: Optional[SecurityMonitor] = None,
-        metrics_collector: Optional[SecurityMetricsCollector] = None
-    ):
+    def __init__(self, config: BanditAnalysisConfig = None, profile: BanditSecurityProfile = None):
         """
-        Initialize bandit security analyzer with comprehensive configuration.
+        Initialize Bandit security analyzer with comprehensive configuration.
         
         Args:
-            project_root: Root directory of project for security scanning
-            config_path: Optional path to bandit configuration file
-            security_monitor: Security event monitoring integration
-            metrics_collector: Security metrics collection integration
+            config: Bandit analysis configuration
+            profile: Security profile for Flask applications
         """
-        self.project_root = Path(project_root).resolve()
-        self.config_path = Path(config_path) if config_path else None
-        self.security_monitor = security_monitor
-        self.metrics_collector = metrics_collector
+        self.config = config or BanditAnalysisConfig()
+        self.profile = profile or BanditSecurityProfile()
+        self.audit_logger = structlog.get_logger("security.bandit")
         
-        # Validate project root exists and is accessible
-        if not self.project_root.exists():
-            raise FileNotFoundError(f"Project root not found: {self.project_root}")
+        # Analysis state
+        self.analysis_results = {}
+        self.security_findings = []
+        self.compliance_status = {}
+        self.performance_metrics = {}
         
-        # Initialize bandit configuration
-        self.bandit_config = self._initialize_bandit_config()
+        # Initialize Bandit manager
+        self.bandit_manager = None
+        self._initialize_bandit_manager()
         
-        # Security analysis configuration
-        self.excluded_paths = self._get_excluded_paths()
-        self.included_rules = self._get_included_rules()
-        self.confidence_levels = ["HIGH", "MEDIUM", "LOW"]
-        
-        # Initialize scan tracking
-        self.scan_history: List[BanditScanResult] = []
-        self.baseline_findings: Set[str] = set()
-        
-        # Configure logging
-        self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
-        
-        # Validate bandit installation
-        self._validate_bandit_installation()
-    
-    def _initialize_bandit_config(self) -> Dict[str, Any]:
-        """Initialize bandit configuration with security-focused settings."""
-        default_config = {
-            "tests": [
-                "B101", "B102", "B103", "B104", "B105", "B106", "B107",  # Assert and test issues
-                "B108", "B110", "B112",  # Hardcoded password checks
-                "B201", "B301", "B302", "B303", "B304", "B305", "B306",  # Flask/Django security
-                "B307", "B308", "B309", "B310", "B311", "B312", "B313",  # Crypto and random
-                "B314", "B315", "B316", "B317", "B318", "B319", "B320",  # XML and misc
-                "B321", "B322", "B323", "B324", "B325", "B501", "B502",  # Request/urllib issues
-                "B503", "B504", "B505", "B506", "B507", "B601", "B602",  # Shell injection
-                "B603", "B604", "B605", "B606", "B607", "B608", "B609",  # Process/subprocess
-                "B610", "B611", "B701", "B702", "B703"                   # Django/Jinja specific
-            ],
-            "skips": [],  # No tests skipped for comprehensive scanning
-            "exclude_dirs": [
-                "/.venv/", "/venv/", "/.tox/", "/node_modules/",
-                "/.git/", "/migrations/", "/__pycache__/"
-            ],
-            "severity": ["LOW", "MEDIUM", "HIGH"],
-            "confidence": ["LOW", "MEDIUM", "HIGH"],
-            "format": "json",
-            "output": None,  # Will be set per scan
-            "verbose": True,
-            "debug": False,
-            "quiet": False,
-            "ignore_nosec": False,  # Don't ignore # nosec comments
-            "baseline": None,       # Will be set if baseline exists
-            "ini_path": None       # Will be set if config file exists
+        # Security gate enforcement
+        self.security_gate_status = {
+            'critical_findings': 0,
+            'high_findings': 0,
+            'medium_findings': 0,
+            'low_findings': 0,
+            'gate_passed': False,
+            'blocking_issues': []
         }
-        
-        # Load custom configuration if provided
-        if self.config_path and self.config_path.exists():
-            try:
-                import configparser
-                config_parser = configparser.ConfigParser()
-                config_parser.read(self.config_path)
-                
-                if 'bandit' in config_parser:
-                    bandit_section = config_parser['bandit']
-                    
-                    # Update configuration from file
-                    if 'tests' in bandit_section:
-                        default_config['tests'] = bandit_section['tests'].split(',')
-                    if 'skips' in bandit_section:
-                        default_config['skips'] = bandit_section['skips'].split(',')
-                    if 'exclude_dirs' in bandit_section:
-                        default_config['exclude_dirs'].extend(
-                            bandit_section['exclude_dirs'].split(',')
-                        )
-                        
-            except Exception as e:
-                self.logger.warning(f"Failed to load bandit config from {self.config_path}: {e}")
-        
-        return default_config
     
-    def _get_excluded_paths(self) -> List[str]:
-        """Get list of paths to exclude from security scanning."""
-        excluded_patterns = [
-            # Standard exclusions
-            "__pycache__", "*.pyc", "*.pyo", "*.pyd",
-            ".git", ".svn", ".hg", ".bzr",
-            ".tox", ".coverage", "htmlcov",
-            "node_modules", "bower_components",
-            
-            # Virtual environments
-            "venv", ".venv", "env", ".env",
-            "virtualenv", ".virtualenv",
-            
-            # IDE and editor files
-            ".idea", ".vscode", "*.swp", "*.swo",
-            ".DS_Store", "Thumbs.db",
-            
-            # Build and distribution
-            "build", "dist", "*.egg-info",
-            ".pytest_cache", ".mypy_cache",
-            
-            # Database and temporary files
-            "*.db", "*.sqlite", "*.sqlite3",
-            "tmp", "temp", "*.tmp", "*.temp",
-            
-            # Documentation
-            "docs/_build", "site",
-            
-            # Test fixtures that may contain intentionally vulnerable code
-            "test_fixtures", "mock_data"
-        ]
-        
-        return excluded_patterns
-    
-    def _get_included_rules(self) -> List[str]:
-        """Get comprehensive list of bandit rules for security scanning."""
-        # Comprehensive rule set covering OWASP Top 10 and enterprise security
-        return [
-            # Hardcoded password and secret detection
-            "B105", "B106", "B107", "B108",
-            
-            # SQL injection and command injection
-            "B608", "B609", "B602", "B603", "B604", "B605", "B606", "B607",
-            
-            # Cryptographic issues
-            "B311", "B313", "B320", "B321", "B322", "B323", "B324", "B325",
-            
-            # Insecure randomness
-            "B311", "B506",
-            
-            # XML vulnerabilities
-            "B314", "B315", "B316", "B317", "B318", "B319",
-            
-            # Request/HTTP security
-            "B501", "B502", "B503", "B504", "B505", "B507",
-            
-            # Input validation and sanitization
-            "B301", "B302", "B303", "B304", "B305", "B306", "B307", "B308", "B309",
-            
-            # Deserialization vulnerabilities
-            "B301", "B302", "B pickle_load",
-            
-            # Shell injection
-            "B602", "B603", "B604", "B605", "B606", "B607", "B608", "B609", "B610",
-            
-            # Assert usage
-            "B101", "B112",
-            
-            # Flask/Django specific security
-            "B201", "B701", "B702", "B703",
-            
-            # General security issues
-            "B102", "B103", "B104", "B110", "B611"
-        ]
-    
-    def _validate_bandit_installation(self):
-        """Validate bandit installation and version requirements."""
+    def _initialize_bandit_manager(self) -> None:
+        """Initialize Bandit manager with comprehensive security configuration."""
         try:
-            # Check bandit installation
-            result = subprocess.run(
-                ["bandit", "--version"],
-                capture_output=True,
-                text=True,
-                timeout=30
+            # Load Bandit configuration
+            bandit_conf = bandit_config.BanditConfig()
+            
+            # Configure security rules based on profile
+            if self.config.ENABLE_ALL_SECURITY_RULES:
+                bandit_conf._init_plugins()
+            
+            # Initialize Bandit manager
+            self.bandit_manager = bandit_manager.BanditManager(
+                bandit_conf,
+                'file'
             )
             
-            if result.returncode != 0:
-                raise RuntimeError("Bandit not properly installed")
+            self.audit_logger.info(
+                "Bandit manager initialized successfully",
+                config_enabled=self.config.ENABLE_ALL_SECURITY_RULES,
+                custom_rules=self.config.CUSTOM_SECURITY_RULES_ENABLED
+            )
             
-            # Parse version
-            version_output = result.stdout.strip()
-            self.logger.info(f"Bandit version detected: {version_output}")
-            
-            # Check minimum version requirement (1.7+)
-            import re
-            version_match = re.search(r'bandit\s+(\d+\.\d+\.\d+)', version_output)
-            if version_match:
-                version_str = version_match.group(1)
-                version_parts = [int(x) for x in version_str.split('.')]
-                
-                # Check if version is 1.7.0 or higher
-                if version_parts[0] < 1 or (version_parts[0] == 1 and version_parts[1] < 7):
-                    raise RuntimeError(f"Bandit version {version_str} is below required 1.7.0")
-                
-                self.logger.info(f"Bandit version {version_str} meets requirements")
-            else:
-                self.logger.warning("Could not parse bandit version, proceeding with scan")
-                
-        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-            raise RuntimeError(f"Bandit installation validation failed: {e}")
+        except Exception as e:
+            self.audit_logger.error(
+                f"Failed to initialize Bandit manager: {str(e)}",
+                error_type=type(e).__name__
+            )
+            raise BanditInitializationError(f"Bandit initialization failed: {str(e)}")
     
-    def scan_project(
-        self,
-        target_paths: Optional[List[Union[str, Path]]] = None,
-        baseline_path: Optional[Union[str, Path]] = None,
-        output_format: str = "json",
-        include_nosec: bool = False
-    ) -> BanditScanResult:
+    def analyze_codebase(self, target_path: Union[str, Path]) -> Dict[str, Any]:
         """
-        Execute comprehensive security scan of project using bandit.
+        Execute comprehensive security analysis of Python codebase.
         
         Args:
-            target_paths: Specific paths to scan (defaults to project root)
-            baseline_path: Path to baseline file for comparison
-            output_format: Output format for bandit results
-            include_nosec: Whether to include findings marked with # nosec
+            target_path: Path to Python codebase for analysis
             
         Returns:
-            BanditScanResult: Comprehensive scan results with findings and metrics
-            
-        Raises:
-            SecurityScanError: When scan execution fails
-            SecurityAnalysisError: When scan results cannot be processed
+            Comprehensive security analysis results with findings and metrics
         """
-        scan_start_time = time.time()
-        scan_id = f"bandit_scan_{int(scan_start_time)}_{secrets.token_hex(4)}"
+        analysis_start_time = time.time()
+        target_path = Path(target_path)
         
-        self.logger.info(f"Starting bandit security scan: {scan_id}")
+        self.audit_logger.info(
+            "Starting comprehensive Bandit security analysis",
+            target_path=str(target_path),
+            recursive=self.config.RECURSIVE_ANALYSIS,
+            include_tests=self.config.INCLUDE_TEST_FILES
+        )
         
-        # Log security event
-        if self.security_monitor:
-            self.security_monitor.log_security_event(
-                "security_scan_started",
-                {
-                    "scan_id": scan_id,
-                    "scanner": "bandit",
-                    "target_paths": [str(p) for p in (target_paths or [self.project_root])]
+        try:
+            # Validate target path
+            if not target_path.exists():
+                raise FileNotFoundError(f"Target path does not exist: {target_path}")
+            
+            # Discover Python files for analysis
+            python_files = self._discover_python_files(target_path)
+            
+            if not python_files:
+                self.audit_logger.warning("No Python files found for analysis")
+                return self._generate_empty_analysis_result()
+            
+            # Execute Bandit analysis
+            analysis_results = self._execute_bandit_analysis(python_files)
+            
+            # Process security findings
+            security_findings = self._process_security_findings(analysis_results)
+            
+            # Evaluate security compliance
+            compliance_status = self._evaluate_security_compliance(security_findings)
+            
+            # Generate performance metrics
+            analysis_duration = time.time() - analysis_start_time
+            performance_metrics = self._generate_performance_metrics(
+                analysis_duration, 
+                len(python_files)
+            )
+            
+            # Compile comprehensive results
+            comprehensive_results = {
+                'analysis_metadata': {
+                    'analysis_id': f"bandit_analysis_{int(time.time())}",
+                    'timestamp': datetime.utcnow().isoformat(),
+                    'target_path': str(target_path),
+                    'files_analyzed': len(python_files),
+                    'analysis_duration': analysis_duration,
+                    'bandit_version': self._get_bandit_version()
+                },
+                'security_findings': security_findings,
+                'compliance_status': compliance_status,
+                'performance_metrics': performance_metrics,
+                'security_gate_status': self.security_gate_status,
+                'analysis_summary': self._generate_analysis_summary(security_findings),
+                'remediation_guidance': self._generate_remediation_guidance(security_findings)
+            }
+            
+            # Store analysis results
+            self.analysis_results = comprehensive_results
+            
+            # Log analysis completion
+            self.audit_logger.info(
+                "Bandit security analysis completed successfully",
+                analysis_id=comprehensive_results['analysis_metadata']['analysis_id'],
+                total_findings=len(security_findings),
+                critical_findings=self.security_gate_status['critical_findings'],
+                high_findings=self.security_gate_status['high_findings'],
+                gate_passed=self.security_gate_status['gate_passed']
+            )
+            
+            return comprehensive_results
+            
+        except Exception as e:
+            self.audit_logger.error(
+                f"Bandit security analysis failed: {str(e)}",
+                target_path=str(target_path),
+                error_type=type(e).__name__,
+                analysis_duration=time.time() - analysis_start_time
+            )
+            raise BanditAnalysisError(f"Security analysis failed: {str(e)}")
+    
+    def _discover_python_files(self, target_path: Path) -> List[Path]:
+        """
+        Discover Python files for security analysis with comprehensive file filtering.
+        
+        Args:
+            target_path: Root path for file discovery
+            
+        Returns:
+            List of Python files for analysis
+        """
+        python_files = []
+        
+        try:
+            if target_path.is_file() and target_path.suffix == '.py':
+                python_files.append(target_path)
+            elif target_path.is_dir():
+                # Recursive file discovery
+                pattern = '**/*.py' if self.config.RECURSIVE_ANALYSIS else '*.py'
+                discovered_files = target_path.glob(pattern)
+                
+                for file_path in discovered_files:
+                    # Skip certain directories and files
+                    if self._should_include_file(file_path):
+                        python_files.append(file_path)
+            
+            self.audit_logger.info(
+                f"Discovered {len(python_files)} Python files for analysis",
+                target_path=str(target_path),
+                recursive=self.config.RECURSIVE_ANALYSIS
+            )
+            
+            return python_files
+            
+        except Exception as e:
+            self.audit_logger.error(
+                f"File discovery failed: {str(e)}",
+                target_path=str(target_path)
+            )
+            raise
+    
+    def _should_include_file(self, file_path: Path) -> bool:
+        """
+        Determine if file should be included in security analysis.
+        
+        Args:
+            file_path: Path to Python file
+            
+        Returns:
+            True if file should be analyzed
+        """
+        # Exclude patterns
+        exclude_patterns = [
+            '__pycache__',
+            '.pytest_cache',
+            '.git',
+            'node_modules',
+            'venv',
+            '.venv',
+            'env',
+            '.env'
+        ]
+        
+        # Check if file is in excluded directories
+        for part in file_path.parts:
+            if part in exclude_patterns:
+                return False
+        
+        # Include test files based on configuration
+        if not self.config.INCLUDE_TEST_FILES:
+            if 'test_' in file_path.name or file_path.name.endswith('_test.py'):
+                return False
+        
+        # Check if file is readable
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                f.read(100)  # Test readability
+            return True
+        except (UnicodeDecodeError, PermissionError):
+            return False
+    
+    def _execute_bandit_analysis(self, python_files: List[Path]) -> Dict[str, Any]:
+        """
+        Execute Bandit security analysis on discovered Python files.
+        
+        Args:
+            python_files: List of Python files to analyze
+            
+        Returns:
+            Raw Bandit analysis results
+        """
+        try:
+            # Convert paths to strings for Bandit
+            file_paths = [str(path) for path in python_files]
+            
+            # Execute Bandit analysis
+            self.bandit_manager.discover_files(file_paths)
+            self.bandit_manager.run_tests()
+            
+            # Extract raw results
+            raw_results = {
+                'results': self.bandit_manager.get_issue_list(),
+                'metrics': self.bandit_manager.metrics,
+                'files_analyzed': len(file_paths),
+                'analysis_time': time.time()
+            }
+            
+            return raw_results
+            
+        except Exception as e:
+            self.audit_logger.error(
+                f"Bandit analysis execution failed: {str(e)}",
+                files_count=len(python_files)
+            )
+            raise
+    
+    def _process_security_findings(self, raw_results: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Process raw Bandit results into structured security findings.
+        
+        Args:
+            raw_results: Raw Bandit analysis results
+            
+        Returns:
+            Structured security findings with comprehensive metadata
+        """
+        security_findings = []
+        
+        try:
+            for issue in raw_results.get('results', []):
+                # Extract issue details
+                finding = {
+                    'finding_id': f"bandit_{issue.issue_id}_{int(time.time())}",
+                    'rule_id': issue.test,
+                    'severity': issue.severity,
+                    'confidence': issue.confidence,
+                    'category': self._categorize_security_issue(issue.test),
+                    'title': issue.issue_text,
+                    'description': issue.issue_detail,
+                    'file_path': issue.fname,
+                    'line_number': issue.lineno,
+                    'line_range': getattr(issue, 'line_range', [issue.lineno]),
+                    'code_context': getattr(issue, 'code', ''),
+                    'cwe_id': self._get_cwe_mapping(issue.test),
+                    'owasp_category': self._get_owasp_mapping(issue.test),
+                    'remediation_guidance': self._get_remediation_guidance(issue.test),
+                    'compliance_impact': self._assess_compliance_impact(issue.test, issue.severity),
+                    'timestamp': datetime.utcnow().isoformat()
                 }
-            )
-        
-        try:
-            # Prepare scan parameters
-            scan_targets = target_paths or [self.project_root]
-            scan_paths = [Path(p).resolve() for p in scan_targets]
+                
+                security_findings.append(finding)
+                
+                # Update security gate status
+                self._update_security_gate_status(finding)
             
-            # Validate target paths
-            for path in scan_paths:
-                if not path.exists():
-                    raise FileNotFoundError(f"Scan target not found: {path}")
-            
-            # Execute bandit scan
-            scan_output = self._execute_bandit_scan(
-                scan_paths=scan_paths,
-                baseline_path=baseline_path,
-                output_format=output_format,
-                include_nosec=include_nosec
+            # Sort findings by severity and confidence
+            security_findings.sort(
+                key=lambda x: (
+                    self._severity_weight(x['severity']),
+                    self._confidence_weight(x['confidence'])
+                ),
+                reverse=True
             )
             
-            # Process scan results
-            findings = self._process_scan_results(scan_output, scan_id)
-            
-            # Calculate scan metrics
-            scan_duration = time.time() - scan_start_time
-            scan_metrics = self._calculate_scan_metrics(scan_paths)
-            
-            # Create comprehensive scan result
-            scan_result = BanditScanResult(
-                scan_id=scan_id,
-                scan_timestamp=datetime.now(timezone.utc).isoformat(),
-                scan_duration=scan_duration,
-                analyzer_version=self._get_bandit_version(),
-                target_paths=[str(p) for p in scan_paths],
-                excluded_paths=self.excluded_paths,
-                rules_used=self.included_rules,
-                confidence_levels=self.confidence_levels,
-                findings=findings,
-                total_files_scanned=scan_metrics['files_scanned'],
-                total_lines_scanned=scan_metrics['lines_scanned']
-            )
-            
-            # Record scan in history
-            self.scan_history.append(scan_result)
-            
-            # Log scan completion
-            self.logger.info(
-                f"Bandit scan completed: {scan_id} - "
-                f"Found {len(findings)} findings in {scan_duration:.2f}s"
-            )
-            
-            # Log security event
-            if self.security_monitor:
-                self.security_monitor.log_security_event(
-                    "security_scan_completed",
-                    {
-                        "scan_id": scan_id,
-                        "findings_count": len(findings),
-                        "critical_count": scan_result.critical_count,
-                        "high_count": scan_result.high_count,
-                        "scan_duration": scan_duration,
-                        "deployment_ready": scan_result.is_deployment_ready()
-                    }
-                )
-            
-            # Record metrics
-            if self.metrics_collector:
-                self.metrics_collector.record_security_response_time(
-                    "bandit_scan", scan_duration * 1000
-                )
-                for finding in findings:
-                    self.metrics_collector.record_attack_detection(
-                        f"static_analysis_{finding.category.value}",
-                        True,  # bandit detects by definition
-                        0  # Static analysis has no detection time
-                    )
-            
-            return scan_result
+            return security_findings
             
         except Exception as e:
-            scan_duration = time.time() - scan_start_time
-            self.logger.error(f"Bandit scan failed: {scan_id} - {str(e)}")
-            
-            # Log security event
-            if self.security_monitor:
-                self.security_monitor.log_security_event(
-                    "security_scan_failed",
-                    {
-                        "scan_id": scan_id,
-                        "error": str(e),
-                        "scan_duration": scan_duration
-                    }
-                )
-            
-            raise SecurityScanError(f"Bandit security scan failed: {str(e)}") from e
+            self.audit_logger.error(
+                f"Security findings processing failed: {str(e)}"
+            )
+            raise
     
-    def _execute_bandit_scan(
-        self,
-        scan_paths: List[Path],
-        baseline_path: Optional[Path] = None,
-        output_format: str = "json",
-        include_nosec: bool = False
-    ) -> str:
+    def _categorize_security_issue(self, rule_id: str) -> str:
         """
-        Execute bandit scan with comprehensive configuration.
+        Categorize security issue based on rule ID and security profile.
         
         Args:
-            scan_paths: Paths to scan for security issues
-            baseline_path: Optional baseline file for comparison
-            output_format: Output format for results
-            include_nosec: Whether to include nosec findings
+            rule_id: Bandit rule identifier
             
         Returns:
-            Raw bandit output as string
-            
-        Raises:
-            SecurityScanError: When bandit execution fails
+            Security category classification
         """
-        # Prepare bandit command
-        bandit_cmd = ["bandit"]
+        for category, rules in self.profile.CRITICAL_SECURITY_CATEGORIES.items():
+            if rule_id in rules:
+                return category
         
-        # Add format specification
-        bandit_cmd.extend(["-f", output_format])
-        
-        # Add verbosity
-        bandit_cmd.append("-v")
-        
-        # Add confidence levels
-        bandit_cmd.extend(["-i", ",".join(self.confidence_levels)])
-        
-        # Add severity levels
-        bandit_cmd.extend(["-ll"])  # Include low level findings
-        
-        # Add baseline if provided
-        if baseline_path and baseline_path.exists():
-            bandit_cmd.extend(["-b", str(baseline_path)])
-        
-        # Add excluded paths
-        for exclude_pattern in self.bandit_config["exclude_dirs"]:
-            bandit_cmd.extend(["-x", exclude_pattern])
-        
-        # Add specific tests if configured
-        if self.bandit_config["tests"]:
-            tests_str = ",".join(self.bandit_config["tests"])
-            bandit_cmd.extend(["-t", tests_str])
-        
-        # Add skip tests if configured
-        if self.bandit_config["skips"]:
-            skips_str = ",".join(self.bandit_config["skips"])
-            bandit_cmd.extend(["-s", skips_str])
-        
-        # Handle nosec comments
-        if not include_nosec:
-            # Default: respect # nosec comments
-            pass
+        # Default categorization based on rule prefix
+        if rule_id.startswith('B1'):
+            return 'code_quality'
+        elif rule_id.startswith('B2'):
+            return 'flask_security'
+        elif rule_id.startswith('B3'):
+            return 'cryptographic_security'
+        elif rule_id.startswith('B4'):
+            return 'network_security'
+        elif rule_id.startswith('B5'):
+            return 'ssl_tls_security'
+        elif rule_id.startswith('B6'):
+            return 'injection_security'
+        elif rule_id.startswith('B7'):
+            return 'template_security'
         else:
-            # Force scan even with # nosec comments
-            bandit_cmd.append("--ignore-nosec")
-        
-        # Add target paths
-        for path in scan_paths:
-            if path.is_file():
-                bandit_cmd.append(str(path))
-            else:
-                bandit_cmd.extend(["-r", str(path)])
-        
-        self.logger.debug(f"Executing bandit command: {' '.join(bandit_cmd)}")
-        
-        try:
-            # Execute bandit with timeout protection
-            result = subprocess.run(
-                bandit_cmd,
-                capture_output=True,
-                text=True,
-                timeout=300,  # 5 minute timeout
-                cwd=self.project_root
-            )
-            
-            # Bandit returns exit code 1 when findings are present
-            # Exit code 0 = no findings, 1 = findings found, >1 = error
-            if result.returncode > 1:
-                error_msg = f"Bandit execution error (exit code {result.returncode}): {result.stderr}"
-                raise SecurityScanError(error_msg)
-            
-            if not result.stdout:
-                # No output typically means no findings
-                return '{"results": [], "metrics": {}}'
-            
-            return result.stdout
-            
-        except subprocess.TimeoutExpired:
-            raise SecurityScanError("Bandit scan timed out after 5 minutes")
-        except FileNotFoundError:
-            raise SecurityScanError("Bandit executable not found in PATH")
-        except Exception as e:
-            raise SecurityScanError(f"Bandit execution failed: {str(e)}") from e
+            return 'general_security'
     
-    def _process_scan_results(self, scan_output: str, scan_id: str) -> List[SecurityFinding]:
+    def _get_cwe_mapping(self, rule_id: str) -> Optional[str]:
         """
-        Process bandit scan output into structured security findings.
+        Map Bandit rule to Common Weakness Enumeration (CWE) identifier.
         
         Args:
-            scan_output: Raw bandit JSON output
-            scan_id: Unique scan identifier
+            rule_id: Bandit rule identifier
             
         Returns:
-            List of processed security findings
-            
-        Raises:
-            SecurityAnalysisError: When results cannot be parsed
+            CWE identifier if available
         """
-        try:
-            # Parse JSON output
-            scan_data = json.loads(scan_output)
-            
-            findings = []
-            results = scan_data.get("results", [])
-            
-            for result in results:
-                try:
-                    # Extract finding data
-                    finding = self._create_security_finding(result, scan_id)
-                    findings.append(finding)
-                    
-                except Exception as e:
-                    self.logger.warning(f"Failed to process finding: {e}")
-                    continue
-            
-            self.logger.info(f"Processed {len(findings)} security findings from scan")
-            return findings
-            
-        except json.JSONDecodeError as e:
-            raise SecurityAnalysisError(f"Failed to parse bandit output as JSON: {e}")
-        except Exception as e:
-            raise SecurityAnalysisError(f"Failed to process scan results: {e}")
+        cwe_mappings = {
+            'B101': 'CWE-703',  # Improper Check or Handling of Exceptional Conditions
+            'B102': 'CWE-94',   # Improper Control of Generation of Code
+            'B105': 'CWE-798',  # Use of Hard-coded Credentials
+            'B106': 'CWE-798',  # Use of Hard-coded Credentials
+            'B107': 'CWE-798',  # Use of Hard-coded Credentials
+            'B201': 'CWE-489',  # Active Debug Code
+            'B301': 'CWE-502',  # Deserialization of Untrusted Data
+            'B302': 'CWE-502',  # Deserialization of Untrusted Data
+            'B303': 'CWE-327',  # Use of a Broken or Risky Cryptographic Algorithm
+            'B304': 'CWE-327',  # Use of a Broken or Risky Cryptographic Algorithm
+            'B305': 'CWE-327',  # Use of a Broken or Risky Cryptographic Algorithm
+            'B307': 'CWE-94',   # Improper Control of Generation of Code
+            'B313': 'CWE-91',   # XML Injection
+            'B314': 'CWE-611',  # Improper Restriction of XML External Entity Reference
+            'B315': 'CWE-611',  # Improper Restriction of XML External Entity Reference
+            'B324': 'CWE-327',  # Use of a Broken or Risky Cryptographic Algorithm
+            'B505': 'CWE-326',  # Inadequate Encryption Strength
+            'B506': 'CWE-502',  # Deserialization of Untrusted Data
+            'B601': 'CWE-78',   # Improper Neutralization of Special Elements used in an OS Command
+            'B602': 'CWE-78',   # Improper Neutralization of Special Elements used in an OS Command
+            'B608': 'CWE-89',   # Improper Neutralization of Special Elements used in an SQL Command
+            'B609': 'CWE-78',   # Improper Neutralization of Special Elements used in an OS Command
+            'B701': 'CWE-79',   # Improper Neutralization of Input During Web Page Generation
+            'B702': 'CWE-79',   # Improper Neutralization of Input During Web Page Generation
+        }
+        
+        return cwe_mappings.get(rule_id)
     
-    def _create_security_finding(self, result_data: Dict[str, Any], scan_id: str) -> SecurityFinding:
+    def _get_owasp_mapping(self, rule_id: str) -> Optional[str]:
         """
-        Create SecurityFinding object from bandit result data.
+        Map Bandit rule to OWASP Top 10 category.
         
         Args:
-            result_data: Individual bandit finding data
-            scan_id: Associated scan identifier
+            rule_id: Bandit rule identifier
             
         Returns:
-            Structured SecurityFinding object
+            OWASP Top 10 category if applicable
         """
-        # Extract basic information
-        test_name = result_data.get("test_name", "unknown")
-        test_id = result_data.get("test_id", "B000")
-        
-        # Map bandit severity to our severity enum
-        bandit_severity = result_data.get("issue_severity", "MEDIUM").upper()
-        severity_mapping = {
-            "LOW": SecuritySeverity.LOW,
-            "MEDIUM": SecuritySeverity.MEDIUM,
-            "HIGH": SecuritySeverity.HIGH,
-            "CRITICAL": SecuritySeverity.CRITICAL
+        owasp_mappings = {
+            'B608': 'A03:2021 – Injection',
+            'B609': 'A03:2021 – Injection',
+            'B610': 'A03:2021 – Injection',
+            'B611': 'A03:2021 – Injection',
+            'B105': 'A07:2021 – Identification and Authentication Failures',
+            'B106': 'A07:2021 – Identification and Authentication Failures',
+            'B107': 'A07:2021 – Identification and Authentication Failures',
+            'B303': 'A02:2021 – Cryptographic Failures',
+            'B304': 'A02:2021 – Cryptographic Failures',
+            'B305': 'A02:2021 – Cryptographic Failures',
+            'B324': 'A02:2021 – Cryptographic Failures',
+            'B505': 'A02:2021 – Cryptographic Failures',
+            'B313': 'A03:2021 – Injection',
+            'B314': 'A05:2021 – Security Misconfiguration',
+            'B315': 'A05:2021 – Security Misconfiguration',
+            'B104': 'A05:2021 – Security Misconfiguration',
+            'B201': 'A05:2021 – Security Misconfiguration',
+            'B701': 'A03:2021 – Injection',
+            'B702': 'A03:2021 – Injection',
+            'B301': 'A08:2021 – Software and Data Integrity Failures',
+            'B302': 'A08:2021 – Software and Data Integrity Failures',
+            'B506': 'A08:2021 – Software and Data Integrity Failures'
         }
-        severity = severity_mapping.get(bandit_severity, SecuritySeverity.MEDIUM)
         
-        # Extract confidence level
-        confidence = result_data.get("issue_confidence", "MEDIUM").upper()
+        return owasp_mappings.get(rule_id)
+    
+    def _get_remediation_guidance(self, rule_id: str) -> str:
+        """
+        Provide remediation guidance for specific security issues.
         
-        # Extract location information
-        filename = result_data.get("filename", "unknown")
-        line_number = result_data.get("line_number", 0)
-        column_number = result_data.get("col_offset", 0)
+        Args:
+            rule_id: Bandit rule identifier
+            
+        Returns:
+            Detailed remediation guidance
+        """
+        remediation_guidance = {
+            'B105': 'Remove hardcoded passwords and use environment variables or secure credential management systems.',
+            'B106': 'Remove hardcoded passwords from function arguments and use secure credential management.',
+            'B107': 'Remove hardcoded password defaults and implement secure credential handling.',
+            'B201': 'Disable Flask debug mode in production by setting app.debug = False.',
+            'B301': 'Avoid using pickle for untrusted data. Use JSON or other safe serialization formats.',
+            'B302': 'Avoid using marshal for untrusted data. Use safer serialization alternatives.',
+            'B303': 'Replace MD5 with SHA-256 or stronger cryptographic hash functions.',
+            'B304': 'Use strong encryption algorithms instead of DES, RC4, or other weak ciphers.',
+            'B305': 'Use secure cipher modes like GCM or CBC with proper IV generation.',
+            'B307': 'Avoid using eval() with untrusted input. Use safer alternatives like ast.literal_eval().',
+            'B313': 'Validate and sanitize XML input to prevent XML injection attacks.',
+            'B314': 'Disable XML external entity processing or use defusedxml library.',
+            'B324': 'Use SHA-256 or stronger hash algorithms instead of MD5 or SHA1.',
+            'B505': 'Use cryptographically strong keys (minimum 2048 bits for RSA, 256 bits for AES).',
+            'B506': 'Use safe_load() instead of load() when parsing YAML files.',
+            'B601': 'Validate and sanitize shell command inputs or use subprocess with shell=False.',
+            'B602': 'Use subprocess with shell=False and validate all inputs.',
+            'B608': 'Use parameterized queries or ORM methods to prevent SQL injection.',
+            'B609': 'Validate and sanitize all command-line inputs.',
+            'B701': 'Enable Jinja2 autoescape or manually escape all template variables.',
+            'B702': 'Use template engines with automatic escaping or manually escape variables.'
+        }
         
-        # Extract code snippet
-        code_snippet = result_data.get("code", "").strip()
-        
-        # Extract vulnerability details
-        issue_text = result_data.get("issue_text", "")
-        
-        # Map test name to security rule category
-        category = self._map_test_to_category(test_name, test_id)
-        
-        # Calculate risk score
-        risk_score = self._calculate_risk_score(severity, confidence)
-        
-        # Generate remediation guidance
-        remediation_guidance = self._generate_remediation_guidance(category, test_name)
-        
-        # Create security finding
-        finding = SecurityFinding(
-            finding_id="",  # Will be generated in __post_init__
-            rule_id=test_id,
-            test_name=test_name,
-            category=category,
-            severity=severity,
-            confidence=confidence,
-            risk_score=risk_score,
-            file_path=filename,
-            line_number=line_number,
-            column_number=column_number,
-            code_snippet=code_snippet,
-            issue_text=issue_text,
-            issue_description=issue_text,
-            remediation_guidance=remediation_guidance,
-            scan_timestamp=datetime.now(timezone.utc).isoformat(),
-            analyzer_version=self._get_bandit_version(),
-            reporting_tags=[scan_id, "bandit", "static_analysis"]
+        return remediation_guidance.get(
+            rule_id, 
+            'Review the code for security best practices and follow OWASP guidelines.'
         )
-        
-        return finding
     
-    def _map_test_to_category(self, test_name: str, test_id: str) -> SecurityRuleCategory:
-        """Map bandit test name/ID to security rule category."""
-        # Mapping based on test names and IDs
-        category_mapping = {
-            # Hardcoded passwords and secrets
-            "hardcoded_password_string": SecurityRuleCategory.HARDCODED_PASSWORD,
-            "hardcoded_password_funcarg": SecurityRuleCategory.HARDCODED_PASSWORD,
-            "hardcoded_password_default": SecurityRuleCategory.HARDCODED_PASSWORD,
-            "hardcoded_bind_all_interfaces": SecurityRuleCategory.HARDCODED_PASSWORD,
+    def _assess_compliance_impact(self, rule_id: str, severity: str) -> Dict[str, Any]:
+        """
+        Assess compliance impact of security finding.
+        
+        Args:
+            rule_id: Bandit rule identifier
+            severity: Finding severity level
             
-            # SQL injection
-            "hardcoded_sql_expressions": SecurityRuleCategory.SQL_INJECTION,
-            
-            # Shell injection
-            "subprocess_popen_with_shell_equals_true": SecurityRuleCategory.SHELL_INJECTION,
-            "subprocess_without_shell_equals_false": SecurityRuleCategory.SHELL_INJECTION,
-            "start_process_with_a_shell": SecurityRuleCategory.SHELL_INJECTION,
-            "start_process_with_no_shell": SecurityRuleCategory.SHELL_INJECTION,
-            "start_process_with_partial_path": SecurityRuleCategory.SHELL_INJECTION,
-            
-            # Cryptographic issues
-            "weak_cryptographic_key": SecurityRuleCategory.CRYPTO_WEAK,
-            "use_of_insecure_md2_hash": SecurityRuleCategory.CRYPTO_WEAK,
-            "use_of_insecure_md4_hash": SecurityRuleCategory.CRYPTO_WEAK,
-            "use_of_insecure_md5_hash": SecurityRuleCategory.CRYPTO_WEAK,
-            "use_of_weak_cryptographic_key": SecurityRuleCategory.CRYPTO_WEAK,
-            "use_of_insecure_cipher": SecurityRuleCategory.CRYPTO_WEAK,
-            "use_of_insecure_cipher_mode": SecurityRuleCategory.CRYPTO_WEAK,
-            
-            # Random number generation
-            "standard_pseudorandom_generators": SecurityRuleCategory.RANDOM_WEAK,
-            "use_of_insecure_pseudo_random_generator": SecurityRuleCategory.RANDOM_WEAK,
-            
-            # Input validation
-            "try_except_pass": SecurityRuleCategory.INPUT_VALIDATION,
-            "try_except_continue": SecurityRuleCategory.INPUT_VALIDATION,
-            
-            # Insecure transport
-            "request_without_timeout": SecurityRuleCategory.INSECURE_TRANSPORT,
-            "request_with_no_cert_validation": SecurityRuleCategory.HTTP_INSECURE,
-            "use_of_http_instead_of_https": SecurityRuleCategory.INSECURE_TRANSPORT,
-            
-            # Path traversal
-            "path_traversal": SecurityRuleCategory.PATH_TRAVERSAL,
-            
-            # Deserialization
-            "pickle_load": SecurityRuleCategory.DESERIALIZATION,
-            "use_of_insecure_deserializer": SecurityRuleCategory.DESERIALIZATION,
-            
-            # Code execution
-            "exec_used": SecurityRuleCategory.EXEC_INJECTION,
-            "use_of_eval": SecurityRuleCategory.EVAL_INJECTION,
-            
-            # YAML/XML vulnerabilities
-            "yaml_load": SecurityRuleCategory.YAML_LOAD,
-            "xml_bad_tree": SecurityRuleCategory.XML_VULNERABILITY,
-            "xml_bad_etree": SecurityRuleCategory.XML_VULNERABILITY,
-            "xml_bad_expatreader": SecurityRuleCategory.XML_VULNERABILITY,
-            "xml_bad_minidom": SecurityRuleCategory.XML_VULNERABILITY,
-            
-            # LDAP injection
-            "ldap_injection": SecurityRuleCategory.LDAP_INJECTION
+        Returns:
+            Compliance impact assessment
+        """
+        impact_assessment = {
+            'pci_dss_impact': False,
+            'sox_impact': False,
+            'gdpr_impact': False,
+            'soc2_impact': False,
+            'owasp_impact': True,
+            'sans_impact': False,
+            'severity_impact': severity.upper()
         }
         
-        # Try to match by test name first
-        category = category_mapping.get(test_name.lower())
-        if category:
-            return category
+        # High-impact rules for compliance
+        high_compliance_impact_rules = [
+            'B105', 'B106', 'B107',  # Hardcoded credentials - PCI DSS, SOX
+            'B303', 'B304', 'B305', 'B324', 'B505',  # Cryptographic issues - All compliance
+            'B608', 'B609', 'B610', 'B611',  # Injection attacks - All compliance
+            'B201',  # Debug mode - PCI DSS, SOC2
+            'B301', 'B302', 'B506'  # Deserialization - SOC2, GDPR
+        ]
         
-        # Try to match by test ID patterns
-        if test_id.startswith("B1"):
-            # B1xx series - assert and password issues
-            if test_id in ["B105", "B106", "B107", "B108"]:
-                return SecurityRuleCategory.HARDCODED_PASSWORD
-            else:
-                return SecurityRuleCategory.INPUT_VALIDATION
-        elif test_id.startswith("B2"):
-            # B2xx series - application security
-            return SecurityRuleCategory.INPUT_VALIDATION
-        elif test_id.startswith("B3"):
-            # B3xx series - crypto and security
-            return SecurityRuleCategory.CRYPTO_WEAK
-        elif test_id.startswith("B4"):
-            # B4xx series - misc security
-            return SecurityRuleCategory.INPUT_VALIDATION
-        elif test_id.startswith("B5"):
-            # B5xx series - web security
-            return SecurityRuleCategory.INSECURE_TRANSPORT
-        elif test_id.startswith("B6"):
-            # B6xx series - injection
-            return SecurityRuleCategory.SHELL_INJECTION
-        elif test_id.startswith("B7"):
-            # B7xx series - framework specific
-            return SecurityRuleCategory.INPUT_VALIDATION
+        if rule_id in high_compliance_impact_rules:
+            impact_assessment['pci_dss_impact'] = True
+            impact_assessment['sox_impact'] = True
+            impact_assessment['gdpr_impact'] = True
+            impact_assessment['soc2_impact'] = True
+            impact_assessment['sans_impact'] = True
         
-        # Default category
-        return SecurityRuleCategory.INPUT_VALIDATION
+        return impact_assessment
     
-    def _calculate_risk_score(self, severity: SecuritySeverity, confidence: str) -> float:
-        """Calculate numerical risk score for finding prioritization."""
-        severity_scores = {
-            SecuritySeverity.LOW: 1.0,
-            SecuritySeverity.MEDIUM: 4.0,
-            SecuritySeverity.HIGH: 7.0,
-            SecuritySeverity.CRITICAL: 10.0
-        }
+    def _update_security_gate_status(self, finding: Dict[str, Any]) -> None:
+        """
+        Update security gate status based on finding severity.
         
-        confidence_multipliers = {
-            "LOW": 0.3,
-            "MEDIUM": 0.7,
-            "HIGH": 1.0
-        }
+        Args:
+            finding: Security finding with severity information
+        """
+        severity = finding['severity'].upper()
         
-        base_score = severity_scores[severity]
-        confidence_multiplier = confidence_multipliers.get(confidence, 0.5)
+        if severity == 'HIGH':
+            self.security_gate_status['high_findings'] += 1
+            if self.config.HIGH_SEVERITY_BLOCKING:
+                self.security_gate_status['blocking_issues'].append(finding['finding_id'])
+        elif severity == 'MEDIUM':
+            self.security_gate_status['medium_findings'] += 1
+        elif severity == 'LOW':
+            self.security_gate_status['low_findings'] += 1
         
-        return round(base_score * confidence_multiplier, 2)
-    
-    def _generate_remediation_guidance(self, category: SecurityRuleCategory, test_name: str) -> str:
-        """Generate specific remediation guidance for security finding."""
-        remediation_map = {
-            SecurityRuleCategory.HARDCODED_PASSWORD: (
-                "Remove hardcoded passwords and secrets. Use environment variables, "
-                "configuration files, or secure secret management systems like AWS Secrets Manager."
-            ),
-            SecurityRuleCategory.SQL_INJECTION: (
-                "Use parameterized queries or prepared statements instead of string concatenation. "
-                "Validate and sanitize all user input before database operations."
-            ),
-            SecurityRuleCategory.SHELL_INJECTION: (
-                "Avoid shell=True in subprocess calls. Use subprocess with argument lists "
-                "instead of shell commands. Validate and sanitize command arguments."
-            ),
-            SecurityRuleCategory.CRYPTO_WEAK: (
-                "Replace weak cryptographic algorithms with strong alternatives. "
-                "Use AES-256 for encryption, SHA-256 or higher for hashing, and secure key generation."
-            ),
-            SecurityRuleCategory.RANDOM_WEAK: (
-                "Replace standard random generators with cryptographically secure alternatives "
-                "using secrets module for security-sensitive operations."
-            ),
-            SecurityRuleCategory.INPUT_VALIDATION: (
-                "Implement comprehensive input validation and error handling. "
-                "Use try-except blocks with specific exception handling instead of bare except."
-            ),
-            SecurityRuleCategory.INSECURE_TRANSPORT: (
-                "Use HTTPS for all network communications. Set appropriate timeouts "
-                "and enable certificate verification for requests."
-            ),
-            SecurityRuleCategory.PATH_TRAVERSAL: (
-                "Validate file paths and prevent directory traversal attacks. "
-                "Use os.path.normpath() and restrict file access to allowed directories."
-            ),
-            SecurityRuleCategory.DESERIALIZATION: (
-                "Avoid deserializing untrusted data. Use safe serialization formats "
-                "like JSON instead of pickle for external data."
-            ),
-            SecurityRuleCategory.EXEC_INJECTION: (
-                "Remove use of exec() and eval() functions. Implement alternative approaches "
-                "using safe parsing and controlled execution environments."
-            ),
-            SecurityRuleCategory.EVAL_INJECTION: (
-                "Replace eval() with safe alternatives like ast.literal_eval() for data parsing "
-                "or implement custom parsers for specific use cases."
-            ),
-            SecurityRuleCategory.YAML_LOAD: (
-                "Use yaml.safe_load() instead of yaml.load() to prevent code execution "
-                "during YAML parsing. Validate YAML structure before processing."
-            ),
-            SecurityRuleCategory.XML_VULNERABILITY: (
-                "Use secure XML parsers with disabled external entity processing. "
-                "Configure XML parsers to prevent XXE attacks and validate XML input."
-            ),
-            SecurityRuleCategory.LDAP_INJECTION: (
-                "Sanitize LDAP queries and use parameterized LDAP operations. "
-                "Validate and escape special characters in LDAP search filters."
-            ),
-            SecurityRuleCategory.HTTP_INSECURE: (
-                "Enable SSL certificate verification for HTTP requests. "
-                "Use trusted certificate authorities and validate server certificates."
+        # Check zero-tolerance policy compliance
+        if self.config.ZERO_TOLERANCE_CRITICAL and severity == 'HIGH':
+            self.security_gate_status['gate_passed'] = False
+        elif self.config.ZERO_TOLERANCE_HIGH and severity == 'HIGH':
+            self.security_gate_status['gate_passed'] = False
+        else:
+            # Update gate status based on thresholds
+            critical_compliance = (
+                self.security_gate_status['critical_findings'] <= self.config.MAX_CRITICAL_FINDINGS
             )
+            high_compliance = (
+                self.security_gate_status['high_findings'] <= self.config.MAX_HIGH_FINDINGS
+            )
+            self.security_gate_status['gate_passed'] = critical_compliance and high_compliance
+    
+    def _severity_weight(self, severity: str) -> int:
+        """Get numeric weight for severity sorting."""
+        weights = {'HIGH': 3, 'MEDIUM': 2, 'LOW': 1}
+        return weights.get(severity.upper(), 0)
+    
+    def _confidence_weight(self, confidence: str) -> int:
+        """Get numeric weight for confidence sorting."""
+        weights = {'HIGH': 3, 'MEDIUM': 2, 'LOW': 1}
+        return weights.get(confidence.upper(), 0)
+    
+    def _evaluate_security_compliance(self, security_findings: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Evaluate security compliance status based on findings.
+        
+        Args:
+            security_findings: List of security findings
+            
+        Returns:
+            Comprehensive compliance status assessment
+        """
+        compliance_status = {
+            'overall_compliance': True,
+            'zero_tolerance_compliance': True,
+            'owasp_compliance': True,
+            'sans_compliance': True,
+            'pci_dss_compliance': True,
+            'sox_compliance': True,
+            'gdpr_compliance': True,
+            'soc2_compliance': True,
+            'compliance_violations': [],
+            'compliance_summary': {}
         }
         
-        return remediation_map.get(
-            category,
-            "Review security finding details and implement appropriate security controls "
-            "based on the specific vulnerability type and context."
-        )
-    
-    def _calculate_scan_metrics(self, scan_paths: List[Path]) -> Dict[str, int]:
-        """Calculate scan coverage metrics."""
-        files_scanned = 0
-        lines_scanned = 0
+        # Evaluate findings against compliance requirements
+        for finding in security_findings:
+            severity = finding['severity'].upper()
+            compliance_impact = finding['compliance_impact']
+            
+            # Check zero-tolerance policy violations
+            if severity == 'HIGH' and self.config.ZERO_TOLERANCE_HIGH:
+                compliance_status['zero_tolerance_compliance'] = False
+                compliance_status['compliance_violations'].append({
+                    'type': 'zero_tolerance_violation',
+                    'finding_id': finding['finding_id'],
+                    'severity': severity,
+                    'rule_id': finding['rule_id']
+                })
+            
+            # Check specific compliance violations
+            if compliance_impact['pci_dss_impact'] and severity in ['HIGH', 'CRITICAL']:
+                compliance_status['pci_dss_compliance'] = False
+            
+            if compliance_impact['sox_impact'] and severity in ['HIGH', 'CRITICAL']:
+                compliance_status['sox_compliance'] = False
+            
+            if compliance_impact['gdpr_impact'] and severity in ['HIGH', 'CRITICAL']:
+                compliance_status['gdpr_compliance'] = False
+            
+            if compliance_impact['soc2_impact'] and severity in ['HIGH', 'CRITICAL']:
+                compliance_status['soc2_compliance'] = False
         
-        for path in scan_paths:
-            if path.is_file() and path.suffix == '.py':
-                files_scanned += 1
-                try:
-                    with open(path, 'r', encoding='utf-8') as f:
-                        lines_scanned += sum(1 for _ in f)
-                except Exception:
-                    pass  # Skip files that can't be read
-            elif path.is_dir():
-                for py_file in path.rglob('*.py'):
-                    # Skip excluded directories
-                    if any(exclude in str(py_file) for exclude in self.excluded_paths):
-                        continue
-                    
-                    files_scanned += 1
-                    try:
-                        with open(py_file, 'r', encoding='utf-8') as f:
-                            lines_scanned += sum(1 for _ in f)
-                    except Exception:
-                        pass  # Skip files that can't be read
+        # Update overall compliance status
+        compliance_status['overall_compliance'] = all([
+            compliance_status['zero_tolerance_compliance'],
+            compliance_status['pci_dss_compliance'],
+            compliance_status['sox_compliance'],
+            compliance_status['gdpr_compliance'],
+            compliance_status['soc2_compliance']
+        ])
+        
+        # Generate compliance summary
+        compliance_status['compliance_summary'] = {
+            'total_findings': len(security_findings),
+            'high_severity_findings': len([f for f in security_findings if f['severity'].upper() == 'HIGH']),
+            'medium_severity_findings': len([f for f in security_findings if f['severity'].upper() == 'MEDIUM']),
+            'low_severity_findings': len([f for f in security_findings if f['severity'].upper() == 'LOW']),
+            'compliance_violations': len(compliance_status['compliance_violations']),
+            'deployment_blocked': not compliance_status['overall_compliance']
+        }
+        
+        return compliance_status
+    
+    def _generate_performance_metrics(self, analysis_duration: float, files_count: int) -> Dict[str, Any]:
+        """
+        Generate performance metrics for security analysis.
+        
+        Args:
+            analysis_duration: Total analysis time in seconds
+            files_count: Number of files analyzed
+            
+        Returns:
+            Comprehensive performance metrics
+        """
+        return {
+            'analysis_duration_seconds': round(analysis_duration, 2),
+            'files_analyzed': files_count,
+            'analysis_rate_files_per_second': round(files_count / analysis_duration, 2) if analysis_duration > 0 else 0,
+            'performance_status': 'optimal' if analysis_duration < 60 else 'acceptable' if analysis_duration < 300 else 'slow',
+            'memory_efficient': True,  # Could be enhanced with actual memory monitoring
+            'parallel_execution': self.config.PARALLEL_ANALYSIS_ENABLED,
+            'analysis_optimization_recommendations': self._generate_optimization_recommendations(analysis_duration, files_count)
+        }
+    
+    def _generate_optimization_recommendations(self, duration: float, files_count: int) -> List[str]:
+        """Generate performance optimization recommendations."""
+        recommendations = []
+        
+        if duration > 300:  # 5 minutes
+            recommendations.append("Consider enabling parallel analysis for large codebases")
+        
+        if files_count > 1000:
+            recommendations.append("Consider excluding non-critical files from analysis")
+        
+        if duration / files_count > 1:  # More than 1 second per file
+            recommendations.append("Consider optimizing Bandit rule set for better performance")
+        
+        return recommendations
+    
+    def _generate_analysis_summary(self, security_findings: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Generate comprehensive analysis summary.
+        
+        Args:
+            security_findings: List of security findings
+            
+        Returns:
+            Analysis summary with key metrics and recommendations
+        """
+        return {
+            'total_findings': len(security_findings),
+            'findings_by_severity': {
+                'high': len([f for f in security_findings if f['severity'].upper() == 'HIGH']),
+                'medium': len([f for f in security_findings if f['severity'].upper() == 'MEDIUM']),
+                'low': len([f for f in security_findings if f['severity'].upper() == 'LOW'])
+            },
+            'findings_by_category': self._categorize_findings_summary(security_findings),
+            'top_security_issues': self._identify_top_security_issues(security_findings),
+            'remediation_priority': self._prioritize_remediation(security_findings),
+            'security_score': self._calculate_security_score(security_findings),
+            'recommendations': self._generate_security_recommendations(security_findings)
+        }
+    
+    def _categorize_findings_summary(self, findings: List[Dict[str, Any]]) -> Dict[str, int]:
+        """Categorize findings by security category."""
+        categories = {}
+        for finding in findings:
+            category = finding['category']
+            categories[category] = categories.get(category, 0) + 1
+        return categories
+    
+    def _identify_top_security_issues(self, findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Identify top security issues requiring immediate attention."""
+        high_severity_findings = [f for f in findings if f['severity'].upper() == 'HIGH']
+        return sorted(high_severity_findings, key=lambda x: self._confidence_weight(x['confidence']), reverse=True)[:5]
+    
+    def _prioritize_remediation(self, findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Prioritize remediation based on severity, compliance impact, and OWASP category."""
+        def priority_score(finding):
+            severity_score = self._severity_weight(finding['severity'])
+            confidence_score = self._confidence_weight(finding['confidence'])
+            compliance_score = 2 if any(finding['compliance_impact'].values()) else 1
+            return severity_score * confidence_score * compliance_score
+        
+        return sorted(findings, key=priority_score, reverse=True)[:10]
+    
+    def _calculate_security_score(self, findings: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Calculate overall security score based on findings."""
+        total_score = 100
+        
+        for finding in findings:
+            severity = finding['severity'].upper()
+            if severity == 'HIGH':
+                total_score -= 10
+            elif severity == 'MEDIUM':
+                total_score -= 5
+            elif severity == 'LOW':
+                total_score -= 1
+        
+        security_score = max(0, total_score)
         
         return {
-            'files_scanned': files_scanned,
-            'lines_scanned': lines_scanned
+            'score': security_score,
+            'grade': self._get_security_grade(security_score),
+            'status': 'excellent' if security_score >= 90 else 'good' if security_score >= 70 else 'needs_improvement' if security_score >= 50 else 'critical'
+        }
+    
+    def _get_security_grade(self, score: int) -> str:
+        """Get letter grade for security score."""
+        if score >= 90:
+            return 'A'
+        elif score >= 80:
+            return 'B'
+        elif score >= 70:
+            return 'C'
+        elif score >= 60:
+            return 'D'
+        else:
+            return 'F'
+    
+    def _generate_security_recommendations(self, findings: List[Dict[str, Any]]) -> List[str]:
+        """Generate actionable security recommendations."""
+        recommendations = []
+        
+        high_findings = [f for f in findings if f['severity'].upper() == 'HIGH']
+        if high_findings:
+            recommendations.append(f"Address {len(high_findings)} high-severity security findings immediately")
+        
+        crypto_findings = [f for f in findings if 'cryptographic' in f['category']]
+        if crypto_findings:
+            recommendations.append("Review and strengthen cryptographic implementations")
+        
+        injection_findings = [f for f in findings if 'injection' in f['category']]
+        if injection_findings:
+            recommendations.append("Implement input validation and sanitization for injection prevention")
+        
+        if not recommendations:
+            recommendations.append("Security analysis passed. Continue following security best practices.")
+        
+        return recommendations
+    
+    def _generate_remediation_guidance(self, findings: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Generate comprehensive remediation guidance for security findings.
+        
+        Args:
+            findings: List of security findings
+            
+        Returns:
+            Detailed remediation guidance with priorities and timelines
+        """
+        return {
+            'immediate_actions': [
+                f['remediation_guidance'] for f in findings 
+                if f['severity'].upper() == 'HIGH'
+            ],
+            'short_term_actions': [
+                f['remediation_guidance'] for f in findings 
+                if f['severity'].upper() == 'MEDIUM'
+            ],
+            'long_term_improvements': [
+                f['remediation_guidance'] for f in findings 
+                if f['severity'].upper() == 'LOW'
+            ],
+            'compliance_requirements': [
+                f['remediation_guidance'] for f in findings 
+                if any(f['compliance_impact'].values())
+            ],
+            'owasp_guidance': [
+                f"Address {f['owasp_category']}: {f['remediation_guidance']}" 
+                for f in findings if f.get('owasp_category')
+            ],
+            'security_best_practices': [
+                "Implement comprehensive input validation",
+                "Use parameterized queries for database operations",
+                "Enable security headers in web applications",
+                "Implement proper authentication and authorization",
+                "Use secure cryptographic algorithms and key management",
+                "Regular security testing and code reviews"
+            ]
+        }
+    
+    def _generate_empty_analysis_result(self) -> Dict[str, Any]:
+        """Generate empty analysis result when no files are found."""
+        return {
+            'analysis_metadata': {
+                'analysis_id': f"bandit_analysis_{int(time.time())}",
+                'timestamp': datetime.utcnow().isoformat(),
+                'files_analyzed': 0,
+                'analysis_duration': 0.0
+            },
+            'security_findings': [],
+            'compliance_status': {
+                'overall_compliance': True,
+                'zero_tolerance_compliance': True,
+                'compliance_summary': {
+                    'total_findings': 0,
+                    'deployment_blocked': False
+                }
+            },
+            'security_gate_status': {
+                'gate_passed': True,
+                'blocking_issues': []
+            },
+            'analysis_summary': {
+                'total_findings': 0,
+                'security_score': {'score': 100, 'grade': 'A', 'status': 'excellent'}
+            }
         }
     
     def _get_bandit_version(self) -> str:
-        """Get bandit version string."""
+        """Get Bandit version information."""
         try:
-            result = subprocess.run(
-                ["bandit", "--version"],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            if result.returncode == 0:
-                return result.stdout.strip()
-            else:
-                return "unknown"
-        except Exception:
+            import bandit
+            return bandit.__version__
+        except (ImportError, AttributeError):
             return "unknown"
     
-    def create_baseline(self, output_path: Union[str, Path]) -> bool:
+    def generate_security_reports(self, output_dir: Union[str, Path] = None) -> Dict[str, str]:
         """
-        Create security baseline file for future comparisons.
+        Generate comprehensive security reports in multiple formats.
         
         Args:
-            output_path: Path where baseline file should be saved
+            output_dir: Directory for report output
             
         Returns:
-            Success status of baseline creation
+            Dictionary mapping report types to file paths
         """
-        try:
-            baseline_path = Path(output_path)
-            
-            # Execute scan to create baseline
-            scan_result = self.scan_project()
-            
-            # Create baseline data
-            baseline_data = {
-                "creation_date": datetime.now(timezone.utc).isoformat(),
-                "bandit_version": self._get_bandit_version(),
-                "project_root": str(self.project_root),
-                "findings": [finding.to_dict() for finding in scan_result.findings],
-                "metrics": {
-                    "total_files": scan_result.total_files_scanned,
-                    "total_lines": scan_result.total_lines_scanned,
-                    "finding_counts": {
-                        "critical": scan_result.critical_count,
-                        "high": scan_result.high_count,
-                        "medium": scan_result.medium_count,
-                        "low": scan_result.low_count
-                    }
-                }
-            }
-            
-            # Save baseline to file
-            with open(baseline_path, 'w', encoding='utf-8') as f:
-                json.dump(baseline_data, f, indent=2, sort_keys=True)
-            
-            # Update baseline findings tracking
-            self.baseline_findings = {f.finding_id for f in scan_result.findings}
-            
-            self.logger.info(f"Security baseline created: {baseline_path}")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Failed to create security baseline: {e}")
-            return False
-    
-    def compare_with_baseline(
-        self,
-        baseline_path: Union[str, Path],
-        current_scan: Optional[BanditScanResult] = None
-    ) -> Dict[str, Any]:
-        """
-        Compare current scan results with security baseline.
+        if not self.analysis_results:
+            raise BanditAnalysisError("No analysis results available. Run analyze_codebase() first.")
         
-        Args:
-            baseline_path: Path to baseline file
-            current_scan: Current scan results (will scan if not provided)
-            
-        Returns:
-            Comprehensive comparison results
-        """
+        output_dir = Path(output_dir) if output_dir else Path.cwd() / 'security_reports'
+        output_dir.mkdir(exist_ok=True)
+        
+        report_files = {}
+        timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+        
         try:
-            baseline_file = Path(baseline_path)
-            if not baseline_file.exists():
-                raise FileNotFoundError(f"Baseline file not found: {baseline_file}")
+            # Generate JSON report
+            if self.config.GENERATE_JSON_REPORT:
+                json_file = output_dir / f'bandit_security_report_{timestamp}.json'
+                with open(json_file, 'w', encoding='utf-8') as f:
+                    json.dump(self.analysis_results, f, indent=2, default=str)
+                report_files['json'] = str(json_file)
             
-            # Load baseline data
-            with open(baseline_file, 'r', encoding='utf-8') as f:
-                baseline_data = json.load(f)
+            # Generate HTML report
+            if self.config.GENERATE_HTML_REPORT:
+                html_file = output_dir / f'bandit_security_report_{timestamp}.html'
+                html_content = self._generate_html_report()
+                with open(html_file, 'w', encoding='utf-8') as f:
+                    f.write(html_content)
+                report_files['html'] = str(html_file)
             
-            # Get current scan results
-            if current_scan is None:
-                current_scan = self.scan_project()
+            # Generate text report
+            if self.config.GENERATE_TXT_REPORT:
+                txt_file = output_dir / f'bandit_security_report_{timestamp}.txt'
+                txt_content = self._generate_text_report()
+                with open(txt_file, 'w', encoding='utf-8') as f:
+                    f.write(txt_content)
+                report_files['txt'] = str(txt_file)
             
-            # Extract baseline findings
-            baseline_findings = {
-                finding_data['finding_id']: finding_data
-                for finding_data in baseline_data.get('findings', [])
-            }
-            
-            # Extract current findings
-            current_findings = {
-                finding.finding_id: finding.to_dict()
-                for finding in current_scan.findings
-            }
-            
-            # Perform comparison analysis
-            comparison_result = {
-                "baseline_info": {
-                    "creation_date": baseline_data.get('creation_date'),
-                    "bandit_version": baseline_data.get('bandit_version'),
-                    "total_findings": len(baseline_findings)
-                },
-                "current_scan_info": {
-                    "scan_date": current_scan.scan_timestamp,
-                    "bandit_version": current_scan.analyzer_version,
-                    "total_findings": len(current_findings)
-                },
-                "comparison_analysis": {
-                    "new_findings": [],
-                    "resolved_findings": [],
-                    "unchanged_findings": [],
-                    "modified_findings": []
-                },
-                "trend_analysis": {
-                    "security_improvement": False,
-                    "net_change": 0,
-                    "severity_changes": {}
-                }
-            }
-            
-            # Identify finding changes
-            baseline_ids = set(baseline_findings.keys())
-            current_ids = set(current_findings.keys())
-            
-            # New findings (in current but not in baseline)
-            new_finding_ids = current_ids - baseline_ids
-            comparison_result["comparison_analysis"]["new_findings"] = [
-                current_findings[fid] for fid in new_finding_ids
-            ]
-            
-            # Resolved findings (in baseline but not in current)
-            resolved_finding_ids = baseline_ids - current_ids
-            comparison_result["comparison_analysis"]["resolved_findings"] = [
-                baseline_findings[fid] for fid in resolved_finding_ids
-            ]
-            
-            # Unchanged findings (in both with same severity)
-            unchanged_ids = baseline_ids & current_ids
-            unchanged_findings = []
-            modified_findings = []
-            
-            for fid in unchanged_ids:
-                baseline_finding = baseline_findings[fid]
-                current_finding = current_findings[fid]
-                
-                if baseline_finding['severity'] == current_finding['severity']:
-                    unchanged_findings.append(current_finding)
-                else:
-                    modified_findings.append({
-                        'finding_id': fid,
-                        'baseline_severity': baseline_finding['severity'],
-                        'current_severity': current_finding['severity'],
-                        'finding_details': current_finding
-                    })
-            
-            comparison_result["comparison_analysis"]["unchanged_findings"] = unchanged_findings
-            comparison_result["comparison_analysis"]["modified_findings"] = modified_findings
-            
-            # Calculate trend analysis
-            net_change = len(new_finding_ids) - len(resolved_finding_ids)
-            comparison_result["trend_analysis"]["net_change"] = net_change
-            comparison_result["trend_analysis"]["security_improvement"] = net_change <= 0
-            
-            # Calculate severity changes
-            baseline_metrics = baseline_data.get('metrics', {}).get('finding_counts', {})
-            current_metrics = {
-                'critical': current_scan.critical_count,
-                'high': current_scan.high_count,
-                'medium': current_scan.medium_count,
-                'low': current_scan.low_count
-            }
-            
-            severity_changes = {}
-            for severity, current_count in current_metrics.items():
-                baseline_count = baseline_metrics.get(severity, 0)
-                severity_changes[severity] = {
-                    'baseline': baseline_count,
-                    'current': current_count,
-                    'change': current_count - baseline_count
-                }
-            
-            comparison_result["trend_analysis"]["severity_changes"] = severity_changes
-            
-            self.logger.info(
-                f"Baseline comparison completed: {len(new_finding_ids)} new, "
-                f"{len(resolved_finding_ids)} resolved, {len(unchanged_ids)} unchanged"
+            self.audit_logger.info(
+                "Security reports generated successfully",
+                report_files=list(report_files.keys()),
+                output_directory=str(output_dir)
             )
             
-            return comparison_result
+            return report_files
             
         except Exception as e:
-            self.logger.error(f"Baseline comparison failed: {e}")
-            raise SecurityAnalysisError(f"Failed to compare with baseline: {e}")
+            self.audit_logger.error(
+                f"Report generation failed: {str(e)}",
+                output_directory=str(output_dir)
+            )
+            raise
     
-    def generate_security_report(
-        self,
-        scan_result: BanditScanResult,
-        output_path: Union[str, Path],
-        report_format: str = "json",
-        include_remediation: bool = True
-    ) -> bool:
-        """
-        Generate comprehensive security report from scan results.
-        
-        Args:
-            scan_result: Scan results to generate report from
-            output_path: Path where report should be saved
-            report_format: Report format (json, html, markdown)
-            include_remediation: Whether to include remediation guidance
-            
-        Returns:
-            Success status of report generation
-        """
-        try:
-            report_path = Path(output_path)
-            report_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            if report_format.lower() == "json":
-                report_data = self._generate_json_report(scan_result, include_remediation)
-                with open(report_path, 'w', encoding='utf-8') as f:
-                    json.dump(report_data, f, indent=2, sort_keys=True)
-                    
-            elif report_format.lower() == "html":
-                report_html = self._generate_html_report(scan_result, include_remediation)
-                with open(report_path, 'w', encoding='utf-8') as f:
-                    f.write(report_html)
-                    
-            elif report_format.lower() == "markdown":
-                report_md = self._generate_markdown_report(scan_result, include_remediation)
-                with open(report_path, 'w', encoding='utf-8') as f:
-                    f.write(report_md)
-                    
-            else:
-                raise ValueError(f"Unsupported report format: {report_format}")
-            
-            self.logger.info(f"Security report generated: {report_path}")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Failed to generate security report: {e}")
-            return False
-    
-    def _generate_json_report(self, scan_result: BanditScanResult, include_remediation: bool) -> Dict[str, Any]:
-        """Generate comprehensive JSON security report."""
-        report_data = {
-            "report_metadata": {
-                "generation_time": datetime.now(timezone.utc).isoformat(),
-                "report_version": "1.0",
-                "scanner": "bandit",
-                "analyzer_version": scan_result.analyzer_version
-            },
-            "scan_summary": {
-                "scan_id": scan_result.scan_id,
-                "scan_timestamp": scan_result.scan_timestamp,
-                "scan_duration": scan_result.scan_duration,
-                "security_score": scan_result.get_security_score(),
-                "deployment_ready": scan_result.is_deployment_ready(),
-                "compliance_status": scan_result.compliance_status
-            },
-            "coverage_metrics": {
-                "files_scanned": scan_result.total_files_scanned,
-                "lines_scanned": scan_result.total_lines_scanned,
-                "target_paths": scan_result.target_paths,
-                "excluded_paths": scan_result.excluded_paths
-            },
-            "security_findings": {
-                "total_findings": len(scan_result.findings),
-                "severity_breakdown": {
-                    "critical": scan_result.critical_count,
-                    "high": scan_result.high_count,
-                    "medium": scan_result.medium_count,
-                    "low": scan_result.low_count
-                },
-                "blocking_findings": len(scan_result.blocking_findings),
-                "priority_findings": len(scan_result.priority_findings)
-            },
-            "compliance_assessment": {
-                "compliance_violations": scan_result.compliance_violations,
-                "estimated_remediation_time": scan_result.estimated_remediation_time,
-                "affected_frameworks": list(set(
-                    impact for finding in scan_result.findings
-                    for impact in finding.compliance_impact
-                ))
-            },
-            "detailed_findings": [
-                finding.to_dict() for finding in scan_result.findings
-            ]
-        }
-        
-        if include_remediation:
-            report_data["remediation_guidance"] = {
-                "priority_actions": [
-                    {
-                        "finding_id": f.finding_id,
-                        "severity": f.severity.value,
-                        "category": f.category.value,
-                        "file_path": f.file_path,
-                        "line_number": f.line_number,
-                        "remediation": f.remediation_guidance,
-                        "estimated_time": f.estimated_fix_time or "2-4 hours"
-                    }
-                    for f in scan_result.priority_findings
-                ],
-                "remediation_summary": {
-                    "immediate_actions": len([
-                        f for f in scan_result.findings
-                        if f.severity == SecuritySeverity.CRITICAL
-                    ]),
-                    "short_term_actions": len([
-                        f for f in scan_result.findings
-                        if f.severity == SecuritySeverity.HIGH
-                    ]),
-                    "medium_term_actions": len([
-                        f for f in scan_result.findings
-                        if f.severity == SecuritySeverity.MEDIUM
-                    ])
-                }
-            }
-        
-        return report_data
-    
-    def _generate_html_report(self, scan_result: BanditScanResult, include_remediation: bool) -> str:
+    def _generate_html_report(self) -> str:
         """Generate HTML security report."""
-        # Basic HTML report template
-        html_template = f"""
+        metadata = self.analysis_results['analysis_metadata']
+        findings = self.analysis_results['security_findings']
+        compliance = self.analysis_results['compliance_status']
+        summary = self.analysis_results['analysis_summary']
+        
+        html_content = f"""
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Bandit Security Analysis Report</title>
     <style>
         body {{ font-family: Arial, sans-serif; margin: 20px; }}
-        .header {{ background-color: #f8f9fa; padding: 20px; border-radius: 5px; }}
-        .summary {{ background-color: #e9ecef; padding: 15px; margin: 20px 0; border-radius: 5px; }}
-        .critical {{ color: #dc3545; font-weight: bold; }}
-        .high {{ color: #fd7e14; font-weight: bold; }}
-        .medium {{ color: #ffc107; font-weight: bold; }}
-        .low {{ color: #28a745; font-weight: bold; }}
-        .finding {{ margin: 10px 0; padding: 10px; border-left: 4px solid #dee2e6; }}
-        .finding.critical {{ border-left-color: #dc3545; }}
-        .finding.high {{ border-left-color: #fd7e14; }}
-        .finding.medium {{ border-left-color: #ffc107; }}
-        .finding.low {{ border-left-color: #28a745; }}
+        .header {{ background-color: #f0f0f0; padding: 20px; border-radius: 5px; }}
+        .summary {{ background-color: #e8f5e8; padding: 15px; margin: 20px 0; border-radius: 5px; }}
+        .finding {{ border: 1px solid #ddd; margin: 10px 0; padding: 15px; border-radius: 5px; }}
+        .high {{ border-left: 5px solid #ff0000; }}
+        .medium {{ border-left: 5px solid #ff8800; }}
+        .low {{ border-left: 5px solid #ffff00; }}
+        .compliance {{ background-color: #f0f8ff; padding: 15px; margin: 20px 0; border-radius: 5px; }}
     </style>
 </head>
 <body>
     <div class="header">
         <h1>Bandit Security Analysis Report</h1>
-        <p><strong>Scan ID:</strong> {scan_result.scan_id}</p>
-        <p><strong>Scan Date:</strong> {scan_result.scan_timestamp}</p>
-        <p><strong>Security Score:</strong> {scan_result.get_security_score()}/100</p>
-        <p><strong>Deployment Ready:</strong> {"✅ Yes" if scan_result.is_deployment_ready() else "❌ No"}</p>
+        <p><strong>Analysis ID:</strong> {metadata['analysis_id']}</p>
+        <p><strong>Timestamp:</strong> {metadata['timestamp']}</p>
+        <p><strong>Files Analyzed:</strong> {metadata['files_analyzed']}</p>
+        <p><strong>Analysis Duration:</strong> {metadata['analysis_duration']:.2f} seconds</p>
     </div>
     
     <div class="summary">
-        <h2>Security Summary</h2>
-        <p><span class="critical">Critical: {scan_result.critical_count}</span> | 
-           <span class="high">High: {scan_result.high_count}</span> | 
-           <span class="medium">Medium: {scan_result.medium_count}</span> | 
-           <span class="low">Low: {scan_result.low_count}</span></p>
-        <p><strong>Total Findings:</strong> {len(scan_result.findings)}</p>
-        <p><strong>Files Scanned:</strong> {scan_result.total_files_scanned}</p>
-        <p><strong>Blocking Findings:</strong> {len(scan_result.blocking_findings)}</p>
+        <h2>Analysis Summary</h2>
+        <p><strong>Total Findings:</strong> {summary['total_findings']}</p>
+        <p><strong>Security Score:</strong> {summary['security_score']['score']}/100 ({summary['security_score']['grade']})</p>
+        <p><strong>High Severity:</strong> {summary['findings_by_severity']['high']}</p>
+        <p><strong>Medium Severity:</strong> {summary['findings_by_severity']['medium']}</p>
+        <p><strong>Low Severity:</strong> {summary['findings_by_severity']['low']}</p>
     </div>
-"""
+    
+    <div class="compliance">
+        <h2>Compliance Status</h2>
+        <p><strong>Overall Compliance:</strong> {'✅ PASS' if compliance['overall_compliance'] else '❌ FAIL'}</p>
+        <p><strong>Zero Tolerance Policy:</strong> {'✅ COMPLIANT' if compliance['zero_tolerance_compliance'] else '❌ VIOLATED'}</p>
+        <p><strong>Deployment Status:</strong> {'✅ APPROVED' if not compliance['compliance_summary']['deployment_blocked'] else '❌ BLOCKED'}</p>
+    </div>
+    
+    <h2>Security Findings</h2>
+    """
         
-        # Add findings details
-        if scan_result.findings:
-            html_template += "<h2>Security Findings</h2>"
-            for finding in scan_result.findings:
-                severity_class = finding.severity.value.lower()
-                html_template += f"""
+        for finding in findings:
+            severity_class = finding['severity'].lower()
+            html_content += f"""
     <div class="finding {severity_class}">
-        <h3>{finding.test_name} ({finding.severity.value})</h3>
-        <p><strong>File:</strong> {finding.file_path}:{finding.line_number}</p>
-        <p><strong>Issue:</strong> {finding.issue_text}</p>
-        <p><strong>Rule ID:</strong> {finding.rule_id}</p>
-        <p><strong>Confidence:</strong> {finding.confidence}</p>
-"""
-                if include_remediation and finding.remediation_guidance:
-                    html_template += f"<p><strong>Remediation:</strong> {finding.remediation_guidance}</p>"
-                
-                html_template += "</div>"
+        <h3>{finding['title']} (Rule: {finding['rule_id']})</h3>
+        <p><strong>Severity:</strong> {finding['severity']}</p>
+        <p><strong>File:</strong> {finding['file_path']}:{finding['line_number']}</p>
+        <p><strong>Description:</strong> {finding['description']}</p>
+        <p><strong>Remediation:</strong> {finding['remediation_guidance']}</p>
+        {f"<p><strong>OWASP Category:</strong> {finding['owasp_category']}</p>" if finding.get('owasp_category') else ""}
+    </div>
+    """
         
-        html_template += """
+        html_content += """
 </body>
 </html>
-"""
-        return html_template
-    
-    def _generate_markdown_report(self, scan_result: BanditScanResult, include_remediation: bool) -> str:
-        """Generate Markdown security report."""
-        report_md = f"""# Bandit Security Analysis Report
-
-## Scan Summary
-
-- **Scan ID:** {scan_result.scan_id}
-- **Scan Date:** {scan_result.scan_timestamp}
-- **Scanner Version:** {scan_result.analyzer_version}
-- **Security Score:** {scan_result.get_security_score()}/100
-- **Deployment Ready:** {"✅ Yes" if scan_result.is_deployment_ready() else "❌ No"}
-
-## Security Findings Overview
-
-| Severity | Count |
-|----------|-------|
-| Critical | {scan_result.critical_count} |
-| High     | {scan_result.high_count} |
-| Medium   | {scan_result.medium_count} |
-| Low      | {scan_result.low_count} |
-| **Total** | **{len(scan_result.findings)}** |
-
-## Scan Coverage
-
-- **Files Scanned:** {scan_result.total_files_scanned}
-- **Lines Scanned:** {scan_result.total_lines_scanned}
-- **Blocking Findings:** {len(scan_result.blocking_findings)}
-- **Priority Findings:** {len(scan_result.priority_findings)}
-
-"""
-        
-        # Add detailed findings
-        if scan_result.findings:
-            report_md += "## Detailed Findings\n\n"
-            
-            for i, finding in enumerate(scan_result.findings, 1):
-                severity_emoji = {
-                    SecuritySeverity.CRITICAL: "🔴",
-                    SecuritySeverity.HIGH: "🟠", 
-                    SecuritySeverity.MEDIUM: "🟡",
-                    SecuritySeverity.LOW: "🟢"
-                }
-                
-                report_md += f"""### {i}. {finding.test_name} {severity_emoji[finding.severity]}
-
-- **Severity:** {finding.severity.value}
-- **Confidence:** {finding.confidence}
-- **File:** `{finding.file_path}:{finding.line_number}`
-- **Rule ID:** {finding.rule_id}
-- **Issue:** {finding.issue_text}
-
-"""
-                if include_remediation and finding.remediation_guidance:
-                    report_md += f"**Remediation:** {finding.remediation_guidance}\n\n"
-                
-                report_md += "---\n\n"
-        
-        return report_md
-    
-    def is_deployment_ready(self, scan_result: Optional[BanditScanResult] = None) -> Tuple[bool, List[str]]:
         """
-        Determine if codebase is ready for deployment based on security scan.
         
-        Args:
-            scan_result: Scan results to evaluate (will scan if not provided)
-            
-        Returns:
-            Tuple of (deployment_ready, blocking_reasons)
-        """
-        if scan_result is None:
-            scan_result = self.scan_project()
+        return html_content
+    
+    def _generate_text_report(self) -> str:
+        """Generate text security report."""
+        metadata = self.analysis_results['analysis_metadata']
+        findings = self.analysis_results['security_findings']
+        compliance = self.analysis_results['compliance_status']
+        summary = self.analysis_results['analysis_summary']
         
-        blocking_reasons = []
-        
-        # Check for critical findings
-        if scan_result.critical_count > 0:
-            blocking_reasons.append(
-                f"{scan_result.critical_count} critical security vulnerabilities found"
-            )
-        
-        # Check for high severity findings
-        if scan_result.high_count > 0:
-            blocking_reasons.append(
-                f"{scan_result.high_count} high severity security vulnerabilities found"
-            )
-        
-        # Check compliance violations
-        if scan_result.compliance_violations:
-            blocking_reasons.append(
-                f"Compliance violations: {', '.join(scan_result.compliance_violations)}"
-            )
-        
-        # Check for specific blocking rule violations
-        blocking_rules = [
-            SecurityRuleCategory.HARDCODED_PASSWORD,
-            SecurityRuleCategory.SQL_INJECTION,
-            SecurityRuleCategory.SHELL_INJECTION,
-            SecurityRuleCategory.EXEC_INJECTION,
-            SecurityRuleCategory.EVAL_INJECTION,
-            SecurityRuleCategory.CRYPTO_WEAK
+        report_lines = [
+            "=" * 80,
+            "BANDIT SECURITY ANALYSIS REPORT",
+            "=" * 80,
+            f"Analysis ID: {metadata['analysis_id']}",
+            f"Timestamp: {metadata['timestamp']}",
+            f"Files Analyzed: {metadata['files_analyzed']}",
+            f"Analysis Duration: {metadata['analysis_duration']:.2f} seconds",
+            "",
+            "ANALYSIS SUMMARY",
+            "-" * 40,
+            f"Total Findings: {summary['total_findings']}",
+            f"Security Score: {summary['security_score']['score']}/100 ({summary['security_score']['grade']})",
+            f"High Severity: {summary['findings_by_severity']['high']}",
+            f"Medium Severity: {summary['findings_by_severity']['medium']}",
+            f"Low Severity: {summary['findings_by_severity']['low']}",
+            "",
+            "COMPLIANCE STATUS",
+            "-" * 40,
+            f"Overall Compliance: {'PASS' if compliance['overall_compliance'] else 'FAIL'}",
+            f"Zero Tolerance Policy: {'COMPLIANT' if compliance['zero_tolerance_compliance'] else 'VIOLATED'}",
+            f"Deployment Status: {'APPROVED' if not compliance['compliance_summary']['deployment_blocked'] else 'BLOCKED'}",
+            "",
+            "SECURITY FINDINGS",
+            "-" * 40
         ]
         
-        for finding in scan_result.findings:
-            if (finding.category in blocking_rules and 
-                finding.severity in [SecuritySeverity.CRITICAL, SecuritySeverity.HIGH] and
-                not finding.false_positive):
-                blocking_reasons.append(
-                    f"Blocking security rule violation: {finding.category.value} in {finding.file_path}"
-                )
+        for i, finding in enumerate(findings, 1):
+            report_lines.extend([
+                f"{i}. {finding['title']} ({finding['rule_id']})",
+                f"   Severity: {finding['severity']}",
+                f"   File: {finding['file_path']}:{finding['line_number']}",
+                f"   Description: {finding['description']}",
+                f"   Remediation: {finding['remediation_guidance']}",
+                ""
+            ])
         
-        deployment_ready = len(blocking_reasons) == 0
-        
-        # Log deployment readiness assessment
-        if self.security_monitor:
-            self.security_monitor.log_security_event(
-                "deployment_readiness_assessment",
-                {
-                    "scan_id": scan_result.scan_id,
-                    "deployment_ready": deployment_ready,
-                    "blocking_reasons": blocking_reasons,
-                    "security_score": scan_result.get_security_score()
-                }
-            )
-        
-        return deployment_ready, blocking_reasons
+        return "\n".join(report_lines)
 
 
-# Custom exception classes
-class SecurityScanError(Exception):
-    """Exception raised when security scan execution fails."""
+# =============================================================================
+# Security Analysis Exceptions
+# =============================================================================
+
+class BanditAnalysisError(Exception):
+    """Base exception for Bandit security analysis errors."""
     pass
 
 
-class SecurityAnalysisError(Exception):
-    """Exception raised when security analysis processing fails."""
+class BanditInitializationError(BanditAnalysisError):
+    """Exception raised when Bandit manager initialization fails."""
     pass
 
 
-# Utility functions for CI/CD integration
-def run_security_gate(
-    project_root: Union[str, Path],
-    fail_on_high: bool = True,
-    fail_on_medium: bool = False,
-    output_report: Optional[Union[str, Path]] = None
-) -> bool:
+class SecurityGateViolationError(BanditAnalysisError):
+    """Exception raised when security gate policy is violated."""
+    pass
+
+
+# =============================================================================
+# Bandit Security Analysis Test Suite
+# =============================================================================
+
+class TestBanditSecurityAnalysis:
     """
-    Execute security gate for CI/CD pipeline integration.
+    Comprehensive test suite for Bandit security analysis automation implementing
+    enterprise-grade security scanning validation per Section 6.6.3 requirements.
+    """
+    
+    @pytest.fixture(scope="class")
+    def bandit_analyzer(self):
+        """Fixture providing configured Bandit security analyzer."""
+        config = BanditAnalysisConfig()
+        profile = BanditSecurityProfile()
+        return BanditSecurityAnalyzer(config, profile)
+    
+    @pytest.fixture(scope="function")
+    def temp_python_files(self, tmp_path):
+        """Fixture providing temporary Python files for testing."""
+        # Create test files with various security issues
+        secure_file = tmp_path / "secure_code.py"
+        secure_file.write_text("""
+import hashlib
+import os
+
+def secure_hash(data):
+    return hashlib.sha256(data.encode()).hexdigest()
+
+def get_config():
+    return os.environ.get('DATABASE_URL', 'sqlite:///default.db')
+        """)
+        
+        insecure_file = tmp_path / "insecure_code.py"
+        insecure_file.write_text("""
+import hashlib
+import subprocess
+
+# B105: Hardcoded password
+PASSWORD = "hardcoded_password"
+
+# B303: MD5 usage
+def weak_hash(data):
+    return hashlib.md5(data.encode()).hexdigest()
+
+# B602: Subprocess with shell=True
+def execute_command(cmd):
+    return subprocess.call(cmd, shell=True)
+
+# B608: SQL injection risk
+def get_user(user_id):
+    query = f"SELECT * FROM users WHERE id = {user_id}"
+    return query
+        """)
+        
+        return tmp_path
+    
+    def test_bandit_analyzer_initialization(self, bandit_analyzer):
+        """Test Bandit analyzer initialization with proper configuration."""
+        assert bandit_analyzer is not None
+        assert bandit_analyzer.config.BANDIT_VERSION_REQUIRED == "1.7.0"
+        assert bandit_analyzer.config.ZERO_TOLERANCE_CRITICAL is True
+        assert bandit_analyzer.config.CI_CD_INTEGRATION_ENABLED is True
+        assert bandit_analyzer.bandit_manager is not None
+    
+    def test_security_analysis_execution(self, bandit_analyzer, temp_python_files):
+        """Test comprehensive security analysis execution."""
+        results = bandit_analyzer.analyze_codebase(temp_python_files)
+        
+        # Validate analysis results structure
+        assert 'analysis_metadata' in results
+        assert 'security_findings' in results
+        assert 'compliance_status' in results
+        assert 'security_gate_status' in results
+        
+        # Validate metadata
+        metadata = results['analysis_metadata']
+        assert metadata['files_analyzed'] > 0
+        assert metadata['analysis_duration'] > 0
+        assert 'analysis_id' in metadata
+        assert 'timestamp' in metadata
+    
+    def test_security_findings_detection(self, bandit_analyzer, temp_python_files):
+        """Test detection of security vulnerabilities in code."""
+        results = bandit_analyzer.analyze_codebase(temp_python_files)
+        findings = results['security_findings']
+        
+        # Should detect multiple security issues in insecure_code.py
+        assert len(findings) > 0
+        
+        # Validate finding structure
+        for finding in findings:
+            assert 'finding_id' in finding
+            assert 'rule_id' in finding
+            assert 'severity' in finding
+            assert 'file_path' in finding
+            assert 'line_number' in finding
+            assert 'remediation_guidance' in finding
+            assert 'compliance_impact' in finding
+        
+        # Check for specific security issues
+        rule_ids = [f['rule_id'] for f in findings]
+        assert 'B105' in rule_ids  # Hardcoded password
+        assert 'B303' in rule_ids  # MD5 usage
+        assert 'B602' in rule_ids  # Subprocess shell=True
+    
+    def test_zero_tolerance_policy_enforcement(self, bandit_analyzer, temp_python_files):
+        """Test zero-tolerance policy enforcement per Section 6.6.3."""
+        results = bandit_analyzer.analyze_codebase(temp_python_files)
+        
+        compliance_status = results['compliance_status']
+        security_gate = results['security_gate_status']
+        
+        # Check zero-tolerance compliance
+        if security_gate['high_findings'] > 0:
+            assert not compliance_status['zero_tolerance_compliance']
+            assert not security_gate['gate_passed']
+            assert len(security_gate['blocking_issues']) > 0
+    
+    def test_compliance_validation(self, bandit_analyzer, temp_python_files):
+        """Test comprehensive compliance validation against multiple standards."""
+        results = bandit_analyzer.analyze_codebase(temp_python_files)
+        compliance = results['compliance_status']
+        
+        # Validate compliance structure
+        assert 'overall_compliance' in compliance
+        assert 'zero_tolerance_compliance' in compliance
+        assert 'owasp_compliance' in compliance
+        assert 'pci_dss_compliance' in compliance
+        assert 'sox_compliance' in compliance
+        assert 'compliance_summary' in compliance
+        
+        # Check compliance summary
+        summary = compliance['compliance_summary']
+        assert 'total_findings' in summary
+        assert 'deployment_blocked' in summary
+        assert 'compliance_violations' in summary
+    
+    def test_security_gate_enforcement(self, bandit_analyzer, temp_python_files):
+        """Test security gate enforcement and deployment blocking."""
+        results = bandit_analyzer.analyze_codebase(temp_python_files)
+        security_gate = results['security_gate_status']
+        
+        # Validate security gate structure
+        assert 'critical_findings' in security_gate
+        assert 'high_findings' in security_gate
+        assert 'medium_findings' in security_gate
+        assert 'low_findings' in security_gate
+        assert 'gate_passed' in security_gate
+        assert 'blocking_issues' in security_gate
+        
+        # Check gate logic
+        if security_gate['high_findings'] > 0:
+            if bandit_analyzer.config.HIGH_SEVERITY_BLOCKING:
+                assert not security_gate['gate_passed']
+    
+    def test_owasp_compliance_mapping(self, bandit_analyzer, temp_python_files):
+        """Test OWASP Top 10 compliance mapping per Section 6.4.5."""
+        results = bandit_analyzer.analyze_codebase(temp_python_files)
+        findings = results['security_findings']
+        
+        # Check OWASP mapping for findings
+        owasp_mapped_findings = [f for f in findings if f.get('owasp_category')]
+        if owasp_mapped_findings:
+            for finding in owasp_mapped_findings:
+                assert 'A0' in finding['owasp_category']  # OWASP 2021 format
+    
+    def test_remediation_guidance_generation(self, bandit_analyzer, temp_python_files):
+        """Test comprehensive remediation guidance generation."""
+        results = bandit_analyzer.analyze_codebase(temp_python_files)
+        
+        # Check remediation guidance in findings
+        findings = results['security_findings']
+        for finding in findings:
+            assert finding['remediation_guidance']
+            assert len(finding['remediation_guidance']) > 20  # Meaningful guidance
+        
+        # Check comprehensive remediation guidance
+        remediation = results['remediation_guidance']
+        assert 'immediate_actions' in remediation
+        assert 'short_term_actions' in remediation
+        assert 'security_best_practices' in remediation
+    
+    def test_performance_metrics_collection(self, bandit_analyzer, temp_python_files):
+        """Test performance metrics collection and analysis."""
+        results = bandit_analyzer.analyze_codebase(temp_python_files)
+        metrics = results['performance_metrics']
+        
+        # Validate performance metrics
+        assert 'analysis_duration_seconds' in metrics
+        assert 'files_analyzed' in metrics
+        assert 'analysis_rate_files_per_second' in metrics
+        assert 'performance_status' in metrics
+        
+        # Check performance thresholds
+        assert metrics['analysis_duration_seconds'] > 0
+        assert metrics['files_analyzed'] > 0
+        assert metrics['performance_status'] in ['optimal', 'acceptable', 'slow']
+    
+    def test_security_score_calculation(self, bandit_analyzer, temp_python_files):
+        """Test security score calculation and grading."""
+        results = bandit_analyzer.analyze_codebase(temp_python_files)
+        summary = results['analysis_summary']
+        
+        # Validate security score
+        assert 'security_score' in summary
+        score_info = summary['security_score']
+        
+        assert 'score' in score_info
+        assert 'grade' in score_info
+        assert 'status' in score_info
+        
+        assert 0 <= score_info['score'] <= 100
+        assert score_info['grade'] in ['A', 'B', 'C', 'D', 'F']
+        assert score_info['status'] in ['excellent', 'good', 'needs_improvement', 'critical']
+    
+    def test_security_report_generation(self, bandit_analyzer, temp_python_files, tmp_path):
+        """Test automated security report generation per Section 6.6.2."""
+        # First run analysis
+        bandit_analyzer.analyze_codebase(temp_python_files)
+        
+        # Generate reports
+        report_files = bandit_analyzer.generate_security_reports(tmp_path)
+        
+        # Validate report generation
+        assert 'json' in report_files
+        assert Path(report_files['json']).exists()
+        
+        # Validate JSON report content
+        with open(report_files['json'], 'r') as f:
+            json_data = json.load(f)
+            assert 'analysis_metadata' in json_data
+            assert 'security_findings' in json_data
+            assert 'compliance_status' in json_data
+    
+    def test_ci_cd_integration_compatibility(self, bandit_analyzer, temp_python_files):
+        """Test CI/CD pipeline integration compatibility per Section 6.6.2."""
+        results = bandit_analyzer.analyze_codebase(temp_python_files)
+        
+        # Check CI/CD integration elements
+        assert results['security_gate_status']['gate_passed'] is not None
+        assert 'compliance_status' in results
+        assert results['compliance_status']['compliance_summary']['deployment_blocked'] is not None
+        
+        # Validate exit code logic for CI/CD
+        deployment_blocked = results['compliance_status']['compliance_summary']['deployment_blocked']
+        gate_passed = results['security_gate_status']['gate_passed']
+        
+        # CI/CD should block deployment if gate doesn't pass
+        if not gate_passed:
+            assert deployment_blocked
+    
+    def test_comprehensive_python_module_coverage(self, bandit_analyzer, tmp_path):
+        """Test comprehensive Python module security analysis coverage per Section 6.4.5."""
+        # Create complex Python module structure
+        module_dir = tmp_path / "test_module"
+        module_dir.mkdir()
+        
+        # Create __init__.py
+        (module_dir / "__init__.py").write_text("# Module init")
+        
+        # Create submodules
+        (module_dir / "auth.py").write_text("""
+import hashlib
+PASSWORD = "secret123"  # B105
+def authenticate(user, pwd):
+    return hashlib.md5(pwd.encode()).hexdigest()  # B303
+        """)
+        
+        (module_dir / "database.py").write_text("""
+def query_user(user_id):
+    query = f"SELECT * FROM users WHERE id = {user_id}"  # B608
+    return query
+        """)
+        
+        # Create subdirectory
+        subdir = module_dir / "utils"
+        subdir.mkdir()
+        (subdir / "__init__.py").write_text("")
+        (subdir / "crypto.py").write_text("""
+import ssl
+context = ssl.create_default_context()
+context.check_hostname = False  # B501
+        """)
+        
+        # Analyze complete module
+        results = bandit_analyzer.analyze_codebase(module_dir)
+        
+        # Should detect issues across all files
+        findings = results['security_findings']
+        assert len(findings) >= 3  # At least B105, B303, B608
+        
+        # Check file coverage
+        analyzed_files = {f['file_path'] for f in findings}
+        assert any('auth.py' in path for path in analyzed_files)
+        assert any('database.py' in path for path in analyzed_files)
+    
+    def test_security_analysis_audit_logging(self, bandit_analyzer, temp_python_files, security_audit_logger):
+        """Test comprehensive security analysis audit logging."""
+        # Mock audit logger to capture events
+        with patch.object(bandit_analyzer, 'audit_logger') as mock_logger:
+            results = bandit_analyzer.analyze_codebase(temp_python_files)
+            
+            # Verify audit logging calls
+            mock_logger.info.assert_called()
+            
+            # Check for key audit events
+            call_args = [call.args[0] for call in mock_logger.info.call_args_list]
+            assert any('Starting comprehensive Bandit security analysis' in msg for msg in call_args)
+            assert any('Bandit security analysis completed successfully' in msg for msg in call_args)
+    
+    def test_security_analysis_performance_monitoring(self, bandit_analyzer, temp_python_files, security_performance_monitor):
+        """Test security analysis performance monitoring integration."""
+        with security_performance_monitor.measure_security_operation('bandit_analysis'):
+            results = bandit_analyzer.analyze_codebase(temp_python_files)
+        
+        # Verify performance metrics
+        performance_summary = security_performance_monitor.get_security_performance_summary()
+        assert performance_summary['total_operations'] > 0
+        assert 'bandit_analysis' in [m['operation'] for m in security_performance_monitor.security_metrics]
+    
+    @pytest.mark.parametrize("severity_level", ["HIGH", "MEDIUM", "LOW"])
+    def test_severity_level_handling(self, bandit_analyzer, severity_level):
+        """Test handling of different security finding severity levels."""
+        # Create finding with specific severity
+        test_finding = {
+            'finding_id': 'test_finding',
+            'severity': severity_level,
+            'compliance_impact': {
+                'pci_dss_impact': severity_level == 'HIGH',
+                'sox_impact': severity_level == 'HIGH'
+            }
+        }
+        
+        # Test severity weight calculation
+        weight = bandit_analyzer._severity_weight(severity_level)
+        expected_weights = {'HIGH': 3, 'MEDIUM': 2, 'LOW': 1}
+        assert weight == expected_weights[severity_level]
+    
+    def test_empty_codebase_analysis(self, bandit_analyzer, tmp_path):
+        """Test analysis of empty codebase without Python files."""
+        empty_dir = tmp_path / "empty"
+        empty_dir.mkdir()
+        
+        results = bandit_analyzer.analyze_codebase(empty_dir)
+        
+        # Should return clean results for empty codebase
+        assert results['analysis_metadata']['files_analyzed'] == 0
+        assert len(results['security_findings']) == 0
+        assert results['compliance_status']['overall_compliance'] is True
+        assert results['security_gate_status']['gate_passed'] is True
+    
+    def test_error_handling_robustness(self, bandit_analyzer):
+        """Test error handling for various failure scenarios."""
+        # Test non-existent path
+        with pytest.raises(FileNotFoundError):
+            bandit_analyzer.analyze_codebase("/nonexistent/path")
+        
+        # Test report generation without analysis
+        analyzer = BanditSecurityAnalyzer()
+        with pytest.raises(BanditAnalysisError):
+            analyzer.generate_security_reports()
+
+
+# =============================================================================
+# CI/CD Integration Functions
+# =============================================================================
+
+def run_bandit_security_gate(target_path: Union[str, Path], 
+                            config: BanditAnalysisConfig = None,
+                            fail_on_violations: bool = True) -> int:
+    """
+    Run Bandit security analysis as CI/CD security gate per Section 6.6.2.
+    
+    This function provides a CI/CD-friendly interface for automated security
+    scanning with proper exit codes and comprehensive reporting.
     
     Args:
-        project_root: Project root directory to scan
-        fail_on_high: Whether to fail on high severity findings
-        fail_on_medium: Whether to fail on medium severity findings
-        output_report: Optional path to save detailed report
+        target_path: Path to Python codebase for analysis
+        config: Bandit analysis configuration
+        fail_on_violations: Whether to return non-zero exit code on violations
         
     Returns:
-        Success status (True = pass, False = fail)
+        Exit code for CI/CD pipeline (0 = success, 1 = security violations)
     """
+    exit_code = 0
+    config = config or BanditAnalysisConfig()
+    
     try:
         # Initialize analyzer
-        analyzer = BanditSecurityAnalyzer(project_root)
+        analyzer = BanditSecurityAnalyzer(config)
         
-        # Execute scan
-        scan_result = analyzer.scan_project()
+        # Execute security analysis
+        results = analyzer.analyze_codebase(target_path)
         
-        # Assess deployment readiness
-        deployment_ready, blocking_reasons = analyzer.is_deployment_ready(scan_result)
+        # Generate reports
+        report_files = analyzer.generate_security_reports()
         
-        # Apply additional failure criteria
-        if fail_on_high and scan_result.high_count > 0:
-            deployment_ready = False
-            blocking_reasons.append(f"High severity findings not allowed: {scan_result.high_count} found")
+        # Check security gate status
+        security_gate = results['security_gate_status']
+        compliance_status = results['compliance_status']
         
-        if fail_on_medium and scan_result.medium_count > 0:
-            deployment_ready = False
-            blocking_reasons.append(f"Medium severity findings not allowed: {scan_result.medium_count} found")
+        print(f"🔒 Bandit Security Analysis Results")
+        print(f"{'='*50}")
+        print(f"Files Analyzed: {results['analysis_metadata']['files_analyzed']}")
+        print(f"Total Findings: {results['analysis_summary']['total_findings']}")
+        print(f"High Severity: {security_gate['high_findings']}")
+        print(f"Medium Severity: {security_gate['medium_findings']}")
+        print(f"Low Severity: {security_gate['low_findings']}")
+        print(f"Security Score: {results['analysis_summary']['security_score']['score']}/100")
+        print(f"{'='*50}")
         
-        # Generate report if requested
-        if output_report:
-            analyzer.generate_security_report(scan_result, output_report, "json", True)
+        # Check for security gate violations
+        if not security_gate['gate_passed']:
+            print("❌ SECURITY GATE FAILED")
+            print(f"Blocking Issues: {len(security_gate['blocking_issues'])}")
+            
+            if config.ZERO_TOLERANCE_CRITICAL or config.ZERO_TOLERANCE_HIGH:
+                print("🚨 ZERO TOLERANCE POLICY VIOLATED")
+            
+            if fail_on_violations:
+                exit_code = 1
+        else:
+            print("✅ SECURITY GATE PASSED")
         
-        # Log results
-        logger.info(f"Security gate assessment: {'PASS' if deployment_ready else 'FAIL'}")
-        if blocking_reasons:
-            logger.warning(f"Blocking reasons: {'; '.join(blocking_reasons)}")
+        # Check overall compliance
+        if not compliance_status['overall_compliance']:
+            print("❌ COMPLIANCE VIOLATIONS DETECTED")
+            print(f"Violations: {len(compliance_status['compliance_violations'])}")
+            
+            if fail_on_violations:
+                exit_code = 1
+        else:
+            print("✅ COMPLIANCE REQUIREMENTS MET")
         
-        return deployment_ready
+        # Print report locations
+        print(f"\n📊 Security Reports Generated:")
+        for report_type, file_path in report_files.items():
+            print(f"  {report_type.upper()}: {file_path}")
+        
+        return exit_code
         
     except Exception as e:
-        logger.error(f"Security gate execution failed: {e}")
+        print(f"❌ Security analysis failed: {str(e)}")
+        return 1 if fail_on_violations else 0
+
+
+def validate_bandit_installation() -> bool:
+    """
+    Validate Bandit installation and version requirements per Section 6.6.3.
+    
+    Returns:
+        True if Bandit is properly installed and meets version requirements
+    """
+    try:
+        import bandit
+        from packaging import version
+        
+        required_version = BanditAnalysisConfig.BANDIT_VERSION_REQUIRED
+        installed_version = bandit.__version__
+        
+        if version.parse(installed_version) >= version.parse(required_version):
+            print(f"✅ Bandit {installed_version} meets requirements (>= {required_version})")
+            return True
+        else:
+            print(f"❌ Bandit {installed_version} below required version {required_version}")
+            return False
+            
+    except ImportError:
+        print("❌ Bandit not installed. Install with: pip install bandit>=1.7.0")
+        return False
+    except Exception as e:
+        print(f"❌ Bandit validation failed: {str(e)}")
         return False
 
 
-def main():
-    """
-    Main entry point for command-line execution.
-    
-    Provides command-line interface for bandit security analysis with
-    comprehensive reporting and CI/CD integration capabilities.
-    """
+# =============================================================================
+# CLI Interface for Security Analysis
+# =============================================================================
+
+if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(
-        description="Bandit Security Analysis Automation",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python bandit_analysis.py /path/to/project
-  python bandit_analysis.py /path/to/project --report security_report.json
-  python bandit_analysis.py /path/to/project --fail-on-high --fail-on-medium
-  python bandit_analysis.py /path/to/project --baseline baseline.json --compare
-        """
+        description="Bandit Security Analysis Automation for Flask Applications"
     )
-    
     parser.add_argument(
-        "project_root",
-        help="Root directory of project to scan"
+        "target", 
+        help="Path to Python codebase for security analysis"
     )
-    
     parser.add_argument(
-        "--config",
-        help="Path to bandit configuration file"
+        "--output-dir", 
+        help="Directory for security report output"
     )
-    
     parser.add_argument(
-        "--report",
-        help="Path to save security report"
-    )
-    
-    parser.add_argument(
-        "--format",
-        choices=["json", "html", "markdown"],
-        default="json",
-        help="Report format (default: json)"
-    )
-    
-    parser.add_argument(
-        "--baseline",
-        help="Path to baseline file for comparison"
-    )
-    
-    parser.add_argument(
-        "--create-baseline",
+        "--no-fail", 
         action="store_true",
-        help="Create new baseline file"
+        help="Don't fail on security violations (for reporting only)"
     )
-    
     parser.add_argument(
-        "--compare",
+        "--validate-install", 
         action="store_true",
-        help="Compare results with baseline"
-    )
-    
-    parser.add_argument(
-        "--fail-on-high",
-        action="store_true",
-        help="Fail if high severity findings are found"
-    )
-    
-    parser.add_argument(
-        "--fail-on-medium",
-        action="store_true",
-        help="Fail if medium severity findings are found"
-    )
-    
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Enable verbose logging"
+        help="Validate Bandit installation and exit"
     )
     
     args = parser.parse_args()
     
-    # Configure logging
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
+    if args.validate_install:
+        sys.exit(0 if validate_bandit_installation() else 1)
     
-    try:
-        # Initialize analyzer
-        analyzer = BanditSecurityAnalyzer(
-            project_root=args.project_root,
-            config_path=args.config
-        )
-        
-        if args.create_baseline:
-            # Create baseline
-            if not args.baseline:
-                print("Error: --baseline path required when creating baseline")
-                sys.exit(1)
-            
-            success = analyzer.create_baseline(args.baseline)
-            if success:
-                print(f"Baseline created: {args.baseline}")
-                sys.exit(0)
-            else:
-                print("Failed to create baseline")
-                sys.exit(1)
-        
-        # Execute scan
-        scan_result = analyzer.scan_project()
-        
-        # Compare with baseline if requested
-        if args.compare and args.baseline:
-            comparison = analyzer.compare_with_baseline(args.baseline, scan_result)
-            print(f"Baseline comparison: {comparison['trend_analysis']['net_change']} net change")
-        
-        # Generate report if requested
-        if args.report:
-            success = analyzer.generate_security_report(
-                scan_result, args.report, args.format, True
-            )
-            if success:
-                print(f"Security report saved: {args.report}")
-        
-        # Assess deployment readiness
-        deployment_ready, blocking_reasons = analyzer.is_deployment_ready(scan_result)
-        
-        # Apply command-line failure criteria
-        if args.fail_on_high and scan_result.high_count > 0:
-            deployment_ready = False
-            blocking_reasons.append(f"High severity findings: {scan_result.high_count}")
-        
-        if args.fail_on_medium and scan_result.medium_count > 0:
-            deployment_ready = False
-            blocking_reasons.append(f"Medium severity findings: {scan_result.medium_count}")
-        
-        # Display results
-        print(f"Security Scan Results:")
-        print(f"  Critical: {scan_result.critical_count}")
-        print(f"  High: {scan_result.high_count}")
-        print(f"  Medium: {scan_result.medium_count}")
-        print(f"  Low: {scan_result.low_count}")
-        print(f"  Security Score: {scan_result.get_security_score()}/100")
-        print(f"  Deployment Ready: {'Yes' if deployment_ready else 'No'}")
-        
-        if blocking_reasons:
-            print(f"Blocking Issues:")
-            for reason in blocking_reasons:
-                print(f"  - {reason}")
-        
-        # Exit with appropriate code
-        sys.exit(0 if deployment_ready else 1)
-        
-    except Exception as e:
-        print(f"Security analysis failed: {e}")
-        sys.exit(1)
+    exit_code = run_bandit_security_gate(
+        args.target,
+        fail_on_violations=not args.no_fail
+    )
+    
+    sys.exit(exit_code)
 
 
-if __name__ == "__main__":
-    main()
+# Export all public interfaces
+__all__ = [
+    'BanditAnalysisConfig',
+    'BanditSecurityProfile', 
+    'BanditSecurityAnalyzer',
+    'BanditAnalysisError',
+    'BanditInitializationError',
+    'SecurityGateViolationError',
+    'TestBanditSecurityAnalysis',
+    'run_bandit_security_gate',
+    'validate_bandit_installation'
+]
