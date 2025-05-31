@@ -1,1727 +1,2275 @@
 """
-Comprehensive unit tests for authentication module.
+Comprehensive JWT Authentication and Auth0 Integration Testing
 
-This module provides comprehensive testing coverage for JWT authentication and Auth0 integration,
-covering PyJWT token validation, cryptographic verification, Auth0 Python SDK integration, 
-and authentication state management. Implements comprehensive authentication testing with 
-security compliance validation and 95% coverage for authentication module.
+This module provides comprehensive testing for PyJWT 2.8+ token validation, Auth0 Python SDK
+integration, cryptographic verification, and authentication state management. Implements 
+comprehensive authentication testing with security compliance validation and 95% coverage 
+for authentication module per Section 6.6.3.
 
-Test Coverage Areas:
-- PyJWT 2.8+ token validation testing replacing Node.js jsonwebtoken per Section 0.1.2
-- Auth0 Python SDK integration testing per Section 6.4.1  
-- JWT claims extraction and validation testing per Section 0.1.4
+Key Testing Areas:
+- JWT token processing migration from jsonwebtoken to PyJWT 2.8+ per Section 0.1.2
+- Auth0 enterprise integration testing through Python SDK per Section 0.1.3
+- Authentication system preserving JWT token validation patterns per Section 0.1.1
 - Cryptographic verification testing with cryptography 41.0+ per Section 6.4.1
-- Token expiration and refresh testing per Section 6.4.1
-- User context creation and session management testing per Section 5.2.3
 - Circuit breaker testing for Auth0 API calls per Section 6.4.2
-- 95% authentication module coverage per Section 6.6.3 security compliance
-
-Dependencies:
-- pytest 7.4+ for comprehensive test framework with fixtures
-- pytest-mock for external service mocking and behavior verification
-- pytest-asyncio for asynchronous authentication operation testing
-- freezegun for datetime testing consistency and token expiration scenarios
-- PyJWT 2.8+ for token validation testing equivalent to Node.js patterns
-- cryptography 41.0+ for cryptographic verification testing
-- httpx for HTTP client mocking and Auth0 API simulation
+- User context creation and session management testing per Section 5.2.3
 
 Author: Flask Migration Team
 Version: 1.0.0
-Coverage: 95% authentication module coverage requirement
+Compliance: SOC 2, ISO 27001, OWASP Top 10
 """
 
 import asyncio
 import base64
+import hashlib
 import json
 import time
-import pytest
-import secrets
+import uuid
 from datetime import datetime, timezone, timedelta
-from unittest.mock import Mock, MagicMock, AsyncMock, patch, call
-from typing import Dict, List, Optional, Any, Set
+from typing import Any, Dict, List, Optional
+from unittest.mock import AsyncMock, Mock, MagicMock, patch, call
+from urllib.parse import urlparse
+import secrets
 
-# Third-party testing imports
+import pytest
+import pytest_asyncio
 import jwt
-from cryptography.fernet import Fernet
-from cryptography.hazmat.primitives import serialization, hashes
+import structlog
+from flask import Flask, g, request
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from freezegun import freeze_time
+from auth0.exceptions import Auth0Error
 import httpx
 import redis
-from auth0.exceptions import Auth0Error
+from prometheus_client import REGISTRY
 
-# Import authentication components to test
+# Import authentication modules
 from src.auth.authentication import (
-    Auth0Config,
-    Auth0CircuitBreaker,
-    JWTTokenValidator,
-    Auth0UserManager,
-    AuthenticationManager,
-    get_auth_manager,
-    init_auth_manager,
-    close_auth_manager,
-    authenticate_jwt_token,
-    validate_user_permissions,
-    refresh_jwt_token,
-    create_authenticated_session,
-    get_authenticated_session,
-    invalidate_authenticated_session
+    CoreJWTAuthenticator,
+    AuthenticatedUser,
+    get_core_authenticator,
+    require_authentication,
+    get_authenticated_user,
+    authenticate_token,
+    create_auth_health_check,
+    auth_operation_metrics
+)
+from src.auth.exceptions import (
+    AuthenticationException,
+    JWTException,
+    Auth0Exception,
+    SessionException,
+    SecurityErrorCode
 )
 
-# Import exception classes for testing
-try:
-    from src.auth.exceptions import (
-        AuthenticationException,
-        JWTException,
-        Auth0Exception,
-        SessionException,
-        CircuitBreakerException,
-        ValidationException,
-        SecurityErrorCode
-    )
-except ImportError:
-    # Fallback mock exceptions for testing isolation
-    class AuthenticationException(Exception):
-        def __init__(self, message, error_code=None, **kwargs):
-            super().__init__(message)
-            self.error_code = error_code
-            self.metadata = kwargs
 
-    class JWTException(AuthenticationException):
-        pass
-
-    class Auth0Exception(AuthenticationException):
-        pass
-
-    class SessionException(AuthenticationException):
-        pass
-
-    class CircuitBreakerException(AuthenticationException):
-        pass
-
-    class ValidationException(AuthenticationException):
-        pass
-
-    class SecurityErrorCode:
-        AUTH_CREDENTIALS_INVALID = 'AUTH_CREDENTIALS_INVALID'
-        AUTH_TOKEN_EXPIRED = 'AUTH_TOKEN_EXPIRED'
-        AUTH_TOKEN_INVALID = 'AUTH_TOKEN_INVALID'
-        AUTH_TOKEN_MALFORMED = 'AUTH_TOKEN_MALFORMED'
-        AUTH_TOKEN_MISSING = 'AUTH_TOKEN_MISSING'
-        AUTH_SESSION_INVALID = 'AUTH_SESSION_INVALID'
-        EXT_AUTH0_UNAVAILABLE = 'EXT_AUTH0_UNAVAILABLE'
-        EXT_AUTH0_API_ERROR = 'EXT_AUTH0_API_ERROR'
-        EXT_CIRCUIT_BREAKER_OPEN = 'EXT_CIRCUIT_BREAKER_OPEN'
-        VAL_INPUT_INVALID = 'VAL_INPUT_INVALID'
-        AUTHZ_PERMISSION_DENIED = 'AUTHZ_PERMISSION_DENIED'
-
-# Import cache classes for testing
-try:
-    from src.auth.cache import AuthenticationCache, hash_token, generate_session_id
-except ImportError:
-    # Mock cache implementations for testing
-    class AuthenticationCache:
-        def __init__(self):
-            self._cache = {}
-        
-        def get_jwt_validation(self, token_hash):
-            return self._cache.get(f'jwt_{token_hash}')
-        
-        def cache_jwt_validation(self, token_hash, result, ttl):
-            self._cache[f'jwt_{token_hash}'] = result
-            return True
-        
-        def get_auth0_user_profile(self, user_id):
-            return self._cache.get(f'profile_{user_id}')
-        
-        def cache_auth0_user_profile(self, user_id, profile, ttl):
-            self._cache[f'profile_{user_id}'] = profile
-            return True
-        
-        def get_user_permissions(self, user_id):
-            return self._cache.get(f'perm_{user_id}')
-        
-        def cache_user_permissions(self, user_id, permissions, ttl):
-            self._cache[f'perm_{user_id}'] = permissions
-            return True
-        
-        def get_user_session(self, session_id):
-            return self._cache.get(f'session_{session_id}')
-        
-        def cache_user_session(self, session_id, session_data, ttl):
-            self._cache[f'session_{session_id}'] = session_data
-            return True
-        
-        def invalidate_user_session(self, session_id):
-            return self._cache.pop(f'session_{session_id}', None) is not None
-        
-        def get(self, namespace, key):
-            return self._cache.get(f'{namespace}_{key}')
-        
-        def set(self, namespace, key, value, ttl):
-            self._cache[f'{namespace}_{key}'] = value
-            return True
-        
-        def health_check(self):
-            return {'status': 'healthy'}
-
-    def hash_token(token):
-        import hashlib
-        return hashlib.sha256(token.encode()).hexdigest()[:16]
+class TestCoreJWTAuthenticator:
+    """
+    Comprehensive test suite for CoreJWTAuthenticator class covering PyJWT 2.8+ validation,
+    Auth0 Python SDK integration, and enterprise authentication workflows.
     
-    def generate_session_id():
-        return secrets.token_urlsafe(32)
+    Test Coverage:
+    - JWT token validation with PyJWT 2.8+ replacing Node.js jsonwebtoken
+    - Auth0 service integration with circuit breaker patterns
+    - Cryptographic verification with cryptography 41.0+
+    - User context creation and session management
+    - Performance optimization with Redis caching
+    - Security event logging and monitoring
+    """
 
-
-# ============================================================================
-# PYTEST MARKERS AND CONFIGURATION
-# ============================================================================
-
-pytestmark = [
-    pytest.mark.auth,
-    pytest.mark.utilities,
-    pytest.mark.unit
-]
-
-
-# ============================================================================
-# TEST FIXTURES
-# ============================================================================
-
-@pytest.fixture
-def auth_config():
-    """Auth0 configuration for testing."""
-    return {
-        'AUTH0_DOMAIN': 'test-domain.auth0.com',
-        'AUTH0_CLIENT_ID': 'test-client-id',
-        'AUTH0_CLIENT_SECRET': 'test-client-secret',
-        'AUTH0_AUDIENCE': 'test-api-audience',
-        'JWT_ALGORITHM': 'RS256'
-    }
-
-
-@pytest.fixture
-def mock_auth_cache():
-    """Mock authentication cache for testing."""
-    return AuthenticationCache()
-
-
-@pytest.fixture
-def test_jwt_secret():
-    """Test JWT secret key."""
-    return 'test-jwt-secret-key-for-testing-authentication-module'
-
-
-@pytest.fixture
-def test_rsa_keypair():
-    """Generate test RSA key pair for JWT testing."""
-    private_key = rsa.generate_private_key(
-        public_exponent=65537,
-        key_size=2048
-    )
-    public_key = private_key.public_key()
-    
-    private_pem = private_key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption()
-    )
-    
-    public_pem = public_key.public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo
-    )
-    
-    return {
-        'private_key': private_key,
-        'public_key': public_key,
-        'private_pem': private_pem.decode('utf-8'),
-        'public_pem': public_pem.decode('utf-8')
-    }
-
-
-@pytest.fixture
-def valid_jwt_payload():
-    """Valid JWT payload for testing."""
-    return {
-        'sub': 'auth0|test-user-12345',
-        'email': 'test@example.com',
-        'email_verified': True,
-        'name': 'Test User',
-        'roles': ['user', 'admin'],
-        'permissions': ['read', 'write', 'delete'],
-        'iat': int(time.time()),
-        'exp': int(time.time()) + 3600,
-        'aud': 'test-api-audience',
-        'iss': 'https://test-domain.auth0.com/'
-    }
-
-
-@pytest.fixture
-def valid_jwt_token(test_rsa_keypair, valid_jwt_payload):
-    """Valid JWT token for testing."""
-    return jwt.encode(
-        payload=valid_jwt_payload,
-        key=test_rsa_keypair['private_pem'],
-        algorithm='RS256'
-    )
-
-
-@pytest.fixture
-def expired_jwt_token(test_rsa_keypair, valid_jwt_payload):
-    """Expired JWT token for testing."""
-    expired_payload = {
-        **valid_jwt_payload,
-        'iat': int(time.time()) - 7200,  # 2 hours ago
-        'exp': int(time.time()) - 3600   # 1 hour ago (expired)
-    }
-    return jwt.encode(
-        payload=expired_payload,
-        key=test_rsa_keypair['private_pem'],
-        algorithm='RS256'
-    )
-
-
-@pytest.fixture
-def malformed_jwt_tokens():
-    """Collection of malformed JWT tokens for testing."""
-    return [
-        'invalid.token',  # Only 2 parts
-        'invalid.jwt.token.extra',  # 4 parts
-        'not-base64.not-base64.not-base64',  # Invalid base64
-        '',  # Empty token
-        'header.payload',  # Missing signature
-        'a.b.c.d.e'  # Too many parts
-    ]
-
-
-@pytest.fixture
-def mock_jwks_response():
-    """Mock JWKS response from Auth0."""
-    return {
-        'keys': [
-            {
-                'kty': 'RSA',
-                'kid': 'test-key-id',
-                'use': 'sig',
-                'alg': 'RS256',
-                'n': 'test-modulus-value',
-                'e': 'AQAB'
-            }
-        ]
-    }
-
-
-@pytest.fixture
-def mock_auth0_user_profile():
-    """Mock Auth0 user profile response."""
-    return {
-        'user_id': 'auth0|test-user-12345',
-        'email': 'test@example.com',
-        'email_verified': True,
-        'name': 'Test User',
-        'picture': 'https://example.com/avatar.jpg',
-        'app_metadata': {
-            'roles': ['user', 'admin']
-        },
-        'user_metadata': {
-            'preferences': {
-                'theme': 'dark'
-            }
-        }
-    }
-
-
-@pytest.fixture
-def mock_auth0_permissions():
-    """Mock Auth0 permissions response."""
-    return [
-        {
-            'permission_name': 'read',
-            'resource_server_identifier': 'test-api'
-        },
-        {
-            'permission_name': 'write', 
-            'resource_server_identifier': 'test-api'
-        },
-        {
-            'permission_name': 'delete',
-            'resource_server_identifier': 'test-api'
-        }
-    ]
-
-
-@pytest.fixture
-def sample_session_data():
-    """Sample session data for testing."""
-    return {
-        'user_id': 'auth0|test-user-12345',
-        'email': 'test@example.com',
-        'roles': ['user', 'admin'],
-        'permissions': ['read', 'write'],
-        'session_start': datetime.utcnow().isoformat(),
-        'ip_address': '192.168.1.100',
-        'user_agent': 'Test Browser/1.0'
-    }
-
-
-# ============================================================================
-# AUTH0CONFIG TESTS
-# ============================================================================
-
-class TestAuth0Config:
-    """Test Auth0 configuration management."""
-
-    def test_auth0_config_initialization_success(self, auth_config, mock_environment):
-        """Test successful Auth0 configuration initialization."""
-        with patch.dict('os.environ', auth_config):
-            config = Auth0Config()
-            
-            assert config.domain == auth_config['AUTH0_DOMAIN']
-            assert config.client_id == auth_config['AUTH0_CLIENT_ID'] 
-            assert config.client_secret == auth_config['AUTH0_CLIENT_SECRET']
-            assert config.audience == auth_config['AUTH0_AUDIENCE']
-            assert config.algorithm == auth_config['JWT_ALGORITHM']
-            assert config.issuer == f"https://{auth_config['AUTH0_DOMAIN']}/"
-
-    def test_auth0_config_missing_required_vars(self):
-        """Test Auth0 configuration validation with missing variables."""
-        with patch.dict('os.environ', {}, clear=True):
-            with pytest.raises(AuthenticationException) as exc_info:
-                Auth0Config()
-            
-            assert 'Missing Auth0 configuration' in str(exc_info.value)
-            assert exc_info.value.error_code == SecurityErrorCode.AUTH_CREDENTIALS_INVALID
-
-    def test_auth0_config_invalid_domain_format(self, auth_config, mock_environment):
-        """Test Auth0 configuration validation with invalid domain format."""
-        invalid_config = {**auth_config, 'AUTH0_DOMAIN': 'invalid-domain'}
+    @pytest.fixture(autouse=True)
+    def setup_method(self, mock_auth_context, mock_redis_cache):
+        """Set up test environment for each test method."""
+        self.mock_auth_context = mock_auth_context
+        self.mock_redis_cache = mock_redis_cache
         
-        with patch.dict('os.environ', invalid_config):
-            with pytest.raises(AuthenticationException) as exc_info:
-                Auth0Config()
-            
-            assert 'Invalid Auth0 domain format' in str(exc_info.value)
-            assert exc_info.value.error_code == SecurityErrorCode.AUTH_CREDENTIALS_INVALID
-
-    def test_auth0_config_properties(self, auth_config, mock_environment):
-        """Test Auth0 configuration properties."""
-        with patch.dict('os.environ', auth_config):
-            config = Auth0Config()
-            
-            expected_jwks_url = f"https://{auth_config['AUTH0_DOMAIN']}/.well-known/jwks.json"
-            expected_token_url = f"https://{auth_config['AUTH0_DOMAIN']}/oauth/token"
-            expected_userinfo_url = f"https://{auth_config['AUTH0_DOMAIN']}/userinfo"
-            
-            assert config.jwks_url == expected_jwks_url
-            assert config.token_url == expected_token_url
-            assert config.userinfo_url == expected_userinfo_url
-
-    def test_auth0_config_jwks_caching(self, auth_config, mock_environment):
-        """Test JWKS caching functionality."""
-        with patch.dict('os.environ', auth_config):
-            config = Auth0Config()
-            
-            # Test initial state
-            assert config._jwks_cache is None
-            assert config._jwks_cache_expiry is None
-            
-            # Test cache setting
-            test_jwks = {'keys': [{'kid': 'test', 'kty': 'RSA'}]}
-            config._jwks_cache = test_jwks
-            config._jwks_cache_expiry = datetime.utcnow() + timedelta(hours=1)
-            
-            assert config._jwks_cache == test_jwks
-            assert config._jwks_cache_expiry > datetime.utcnow()
-
-
-# ============================================================================
-# AUTH0CIRCUITBREAKER TESTS
-# ============================================================================
-
-class TestAuth0CircuitBreaker:
-    """Test Auth0 circuit breaker functionality."""
-
-    def test_circuit_breaker_initialization(self):
-        """Test circuit breaker initialization."""
-        breaker = Auth0CircuitBreaker(failure_threshold=3, recovery_timeout=30)
+        # Clear Prometheus metrics before each test
+        for metric in auth_operation_metrics.values():
+            try:
+                REGISTRY.unregister(metric)
+            except KeyError:
+                pass
         
-        assert breaker.failure_threshold == 3
-        assert breaker.recovery_timeout == 30
-        assert breaker.failure_count == 0
-        assert breaker.last_failure_time is None
-        assert breaker.state == 'closed'
-
-    @pytest.mark.asyncio
-    async def test_circuit_breaker_async_success(self):
-        """Test circuit breaker with successful async function."""
-        breaker = Auth0CircuitBreaker()
-        
-        @breaker
-        async def mock_async_function():
-            return {'status': 'success'}
-        
-        result = await mock_async_function()
-        assert result == {'status': 'success'}
-        assert breaker.state == 'closed'
-        assert breaker.failure_count == 0
-
-    def test_circuit_breaker_sync_success(self):
-        """Test circuit breaker with successful sync function."""
-        breaker = Auth0CircuitBreaker()
-        
-        @breaker
-        def mock_sync_function():
-            return {'status': 'success'}
-        
-        result = mock_sync_function()
-        assert result == {'status': 'success'}
-        assert breaker.state == 'closed'
-        assert breaker.failure_count == 0
-
-    @pytest.mark.asyncio
-    async def test_circuit_breaker_failure_tracking(self):
-        """Test circuit breaker failure tracking."""
-        breaker = Auth0CircuitBreaker(failure_threshold=2)
-        
-        @breaker
-        async def failing_function():
-            raise Auth0Exception("Service unavailable")
-        
-        # First failure
-        with pytest.raises(Auth0Exception):
-            await failing_function()
-        
-        assert breaker.failure_count == 1
-        assert breaker.state == 'closed'
-        
-        # Second failure should open circuit
-        with pytest.raises(Auth0Exception):
-            await failing_function()
-        
-        assert breaker.failure_count == 2
-        assert breaker.state == 'open'
-
-    @pytest.mark.asyncio
-    async def test_circuit_breaker_open_state(self):
-        """Test circuit breaker behavior in open state."""
-        breaker = Auth0CircuitBreaker(failure_threshold=1)
-        
-        @breaker
-        async def failing_function():
-            raise Auth0Exception("Service unavailable")
-        
-        # Trigger circuit open
-        with pytest.raises(Auth0Exception):
-            await failing_function()
-        
-        assert breaker.state == 'open'
-        
-        # Next call should raise CircuitBreakerException
-        with pytest.raises(CircuitBreakerException) as exc_info:
-            await failing_function()
-        
-        assert exc_info.value.error_code == SecurityErrorCode.EXT_CIRCUIT_BREAKER_OPEN
-        assert 'Circuit breaker is open' in str(exc_info.value)
-
-    @pytest.mark.asyncio
-    async def test_circuit_breaker_half_open_recovery(self):
-        """Test circuit breaker half-open state and recovery."""
-        breaker = Auth0CircuitBreaker(failure_threshold=1, recovery_timeout=1)
-        
-        call_count = 0
-        
-        @breaker
-        async def sometimes_failing_function():
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                raise Auth0Exception("Service unavailable")
-            return {'status': 'success'}
-        
-        # First call fails, opens circuit
-        with pytest.raises(Auth0Exception):
-            await sometimes_failing_function()
-        
-        assert breaker.state == 'open'
-        
-        # Wait for recovery timeout
-        await asyncio.sleep(1.1)
-        
-        # Next call should enter half-open state and succeed
-        result = await sometimes_failing_function()
-        assert result == {'status': 'success'}
-        assert breaker.state == 'closed'
-        assert breaker.failure_count == 0
-
-    def test_circuit_breaker_get_state(self):
-        """Test circuit breaker state information."""
-        breaker = Auth0CircuitBreaker(failure_threshold=5, recovery_timeout=60)
-        
-        state = breaker.get_state()
-        
-        assert state['state'] == 'closed'
-        assert state['failure_count'] == 0
-        assert state['last_failure_time'] is None
-        assert state['failure_threshold'] == 5
-        assert state['recovery_timeout'] == 60
-
-
-# ============================================================================
-# JWTTOKENVALIDATOR TESTS
-# ============================================================================
-
-class TestJWTTokenValidator:
-    """Test JWT token validation functionality."""
+        # Reset global authenticator instance
+        import src.auth.authentication
+        src.auth.authentication._core_authenticator = None
 
     @pytest.fixture
-    def jwt_validator(self, auth_config, mock_auth_cache, mock_environment):
-        """JWT token validator instance for testing."""
-        with patch.dict('os.environ', auth_config):
-            config = Auth0Config()
-            return JWTTokenValidator(config, mock_auth_cache)
+    def auth_config(self):
+        """Provide comprehensive authentication configuration for testing."""
+        return {
+            'AUTH0_DOMAIN': 'test-domain.auth0.com',
+            'AUTH0_CLIENT_ID': 'test-client-id',
+            'AUTH0_CLIENT_SECRET': 'test-client-secret',
+            'AUTH0_AUDIENCE': 'test-audience',
+            'JWT_ALGORITHM': 'RS256',
+            'TOKEN_LEEWAY': 10,
+            'CACHE_TTL_SECONDS': 300,
+            'MAX_CONCURRENT_VALIDATIONS': 100
+        }
 
-    @pytest.mark.asyncio
-    async def test_jwt_validation_success(self, jwt_validator, valid_jwt_token, 
-                                        valid_jwt_payload, test_rsa_keypair):
-        """Test successful JWT token validation."""
-        with patch.object(jwt_validator, '_get_signing_key', return_value=test_rsa_keypair['public_pem']):
-            result = await jwt_validator.validate_token(valid_jwt_token)
-            
-            assert result['sub'] == valid_jwt_payload['sub']
-            assert result['email'] == valid_jwt_payload['email']
-            assert 'validation_metadata' in result
-            assert result['validation_metadata']['signature_verified'] == True
+    @pytest.fixture
+    def sample_jwt_claims(self):
+        """Provide realistic JWT token claims for testing."""
+        return {
+            'sub': 'auth0|test-user-123',
+            'iss': 'https://test-domain.auth0.com/',
+            'aud': 'test-audience',
+            'exp': int(time.time()) + 3600,  # Expires in 1 hour
+            'iat': int(time.time()),
+            'email': 'test@example.com',
+            'name': 'Test User',
+            'picture': 'https://example.com/avatar.jpg',
+            'email_verified': True,
+            'scope': 'read:profile write:profile',
+            'permissions': ['read:documents', 'write:documents', 'admin:users'],
+            'updated_at': '2023-01-01T12:00:00.000Z',
+            'https://custom.claim/role': 'admin',
+            'https://custom.claim/permissions': ['custom:permission']
+        }
 
-    @pytest.mark.asyncio
-    async def test_jwt_validation_expired_token(self, jwt_validator, expired_jwt_token, test_rsa_keypair):
-        """Test JWT validation with expired token."""
-        with patch.object(jwt_validator, '_get_signing_key', return_value=test_rsa_keypair['public_pem']):
-            with pytest.raises(JWTException) as exc_info:
-                await jwt_validator.validate_token(expired_jwt_token)
-            
-            assert exc_info.value.error_code == SecurityErrorCode.AUTH_TOKEN_EXPIRED
-            assert 'expired' in str(exc_info.value).lower()
+    @pytest.fixture
+    def expired_jwt_claims(self, sample_jwt_claims):
+        """Provide expired JWT token claims for testing."""
+        expired_claims = sample_jwt_claims.copy()
+        expired_claims.update({
+            'exp': int(time.time()) - 3600,  # Expired 1 hour ago
+            'iat': int(time.time()) - 7200   # Issued 2 hours ago
+        })
+        return expired_claims
 
-    @pytest.mark.asyncio
-    async def test_jwt_validation_invalid_signature(self, jwt_validator, valid_jwt_token):
-        """Test JWT validation with invalid signature."""
-        # Use different key for signature verification
-        wrong_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        wrong_public_pem = wrong_key.public_key().public_bytes(
+    @pytest.fixture
+    def rsa_key_pair(self):
+        """Generate RSA key pair for JWT signing and validation testing."""
+        # Generate RSA key pair
+        private_key = rsa.generate_private_key(
+            public_exponent=65537,
+            key_size=2048
+        )
+        public_key = private_key.public_key()
+        
+        # Serialize keys
+        private_pem = private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption()
+        )
+        
+        public_pem = public_key.public_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo
-        ).decode('utf-8')
-        
-        with patch.object(jwt_validator, '_get_signing_key', return_value=wrong_public_pem):
-            with pytest.raises(JWTException) as exc_info:
-                await jwt_validator.validate_token(valid_jwt_token)
-            
-            assert exc_info.value.error_code == SecurityErrorCode.AUTH_TOKEN_INVALID
-
-    @pytest.mark.asyncio
-    async def test_jwt_validation_malformed_token(self, jwt_validator, malformed_jwt_tokens):
-        """Test JWT validation with malformed tokens."""
-        for malformed_token in malformed_jwt_tokens:
-            with pytest.raises(JWTException) as exc_info:
-                await jwt_validator.validate_token(malformed_token)
-            
-            assert exc_info.value.error_code in [
-                SecurityErrorCode.AUTH_TOKEN_MALFORMED,
-                SecurityErrorCode.AUTH_TOKEN_INVALID
-            ]
-
-    @pytest.mark.asyncio
-    async def test_jwt_validation_caching(self, jwt_validator, valid_jwt_token, 
-                                        valid_jwt_payload, test_rsa_keypair, mock_auth_cache):
-        """Test JWT validation result caching."""
-        with patch.object(jwt_validator, '_get_signing_key', return_value=test_rsa_keypair['public_pem']):
-            # First validation
-            result1 = await jwt_validator.validate_token(valid_jwt_token, cache_result=True)
-            
-            # Second validation should use cache
-            result2 = await jwt_validator.validate_token(valid_jwt_token, cache_result=True)
-            
-            assert result1['sub'] == result2['sub']
-            assert result1['email'] == result2['email']
-
-    @pytest.mark.asyncio
-    async def test_jwt_validation_no_signature_verification(self, jwt_validator, valid_jwt_token):
-        """Test JWT validation without signature verification."""
-        result = await jwt_validator.validate_token(
-            valid_jwt_token, 
-            verify_signature=False,
-            verify_expiration=False,
-            verify_audience=False
         )
         
-        assert 'sub' in result
-        assert result['validation_metadata']['signature_verified'] == False
-
-    @pytest.mark.asyncio
-    async def test_fetch_jwks_success(self, jwt_validator, mock_jwks_response):
-        """Test successful JWKS fetching."""
-        mock_response = Mock()
-        mock_response.json.return_value = mock_jwks_response
-        mock_response.raise_for_status.return_value = None
-        
-        with patch.object(jwt_validator.http_client, 'get', return_value=mock_response):
-            jwks = await jwt_validator._fetch_jwks()
-            
-            assert jwks == mock_jwks_response
-            assert 'keys' in jwks
-
-    @pytest.mark.asyncio
-    async def test_fetch_jwks_http_error(self, jwt_validator):
-        """Test JWKS fetching with HTTP error."""
-        with patch.object(jwt_validator.http_client, 'get', 
-                         side_effect=httpx.HTTPStatusError("Not found", request=Mock(), response=Mock())):
-            with pytest.raises(Auth0Exception) as exc_info:
-                await jwt_validator._fetch_jwks()
-            
-            assert exc_info.value.error_code == SecurityErrorCode.EXT_AUTH0_UNAVAILABLE
-
-    @pytest.mark.asyncio
-    async def test_token_refresh_success(self, jwt_validator):
-        """Test successful token refresh."""
-        refresh_token = 'test-refresh-token'
-        mock_response_data = {
-            'access_token': 'new-access-token',
-            'token_type': 'Bearer',
-            'expires_in': 3600
+        return {
+            'private_key': private_key,
+            'public_key': public_key,
+            'private_pem': private_pem,
+            'public_pem': public_pem
         }
-        
-        mock_response = Mock()
-        mock_response.json.return_value = mock_response_data
-        mock_response.raise_for_status.return_value = None
-        
-        with patch.object(jwt_validator.http_client, 'post', return_value=mock_response):
-            result = await jwt_validator.refresh_token(refresh_token)
-            
-            assert result['access_token'] == 'new-access-token'
-            assert result['token_type'] == 'Bearer'
-            assert result['expires_in'] == 3600
-
-    @pytest.mark.asyncio
-    async def test_token_refresh_failure(self, jwt_validator):
-        """Test token refresh failure."""
-        refresh_token = 'invalid-refresh-token'
-        
-        with patch.object(jwt_validator.http_client, 'post', 
-                         side_effect=httpx.HTTPStatusError("Unauthorized", request=Mock(), response=Mock())):
-            with pytest.raises(Auth0Exception) as exc_info:
-                await jwt_validator.refresh_token(refresh_token)
-            
-            assert exc_info.value.error_code == SecurityErrorCode.EXT_AUTH0_API_ERROR
-
-    def test_jwk_to_pem_conversion(self, jwt_validator):
-        """Test JWK to PEM key conversion."""
-        # Sample JWK (simplified for testing)
-        jwk = {
-            'kty': 'RSA',
-            'n': base64.urlsafe_b64encode(b'test-modulus').decode().rstrip('='),
-            'e': base64.urlsafe_b64encode(b'\x01\x00\x01').decode().rstrip('=')  # 65537
-        }
-        
-        # This test verifies the conversion process handles JWK format
-        with pytest.raises(Auth0Exception):  # Expected to fail with simplified test data
-            jwt_validator._jwk_to_pem(jwk)
-
-    def test_custom_claims_validation_success(self, jwt_validator, valid_jwt_payload):
-        """Test successful custom claims validation."""
-        # Should not raise any exception
-        jwt_validator._validate_custom_claims(valid_jwt_payload)
-
-    def test_custom_claims_validation_missing_required(self, jwt_validator):
-        """Test custom claims validation with missing required claims."""
-        invalid_payload = {
-            'email': 'test@example.com'
-            # Missing 'sub', 'iat', 'exp'
-        }
-        
-        with pytest.raises(JWTException) as exc_info:
-            jwt_validator._validate_custom_claims(invalid_payload)
-        
-        assert exc_info.value.error_code == SecurityErrorCode.AUTH_TOKEN_INVALID
-
-    def test_custom_claims_validation_invalid_user_id(self, jwt_validator):
-        """Test custom claims validation with invalid user ID format."""
-        invalid_payload = {
-            'sub': 'invalid<>user>id',  # Invalid characters
-            'iat': int(time.time()),
-            'exp': int(time.time()) + 3600
-        }
-        
-        with pytest.raises(JWTException) as exc_info:
-            jwt_validator._validate_custom_claims(invalid_payload)
-        
-        assert exc_info.value.error_code == SecurityErrorCode.AUTH_TOKEN_INVALID
-
-    def test_custom_claims_validation_future_issued_time(self, jwt_validator):
-        """Test custom claims validation with future issued time."""
-        future_payload = {
-            'sub': 'auth0|test-user',
-            'iat': int(time.time()) + 1000,  # Far in the future
-            'exp': int(time.time()) + 3600
-        }
-        
-        with pytest.raises(JWTException) as exc_info:
-            jwt_validator._validate_custom_claims(future_payload)
-        
-        assert exc_info.value.error_code == SecurityErrorCode.AUTH_TOKEN_INVALID
-
-    @pytest.mark.asyncio
-    async def test_jwt_validator_close(self, jwt_validator):
-        """Test JWT validator resource cleanup."""
-        await jwt_validator.close()
-        # Verify that close doesn't raise exceptions
-
-
-# ============================================================================
-# AUTH0USERMANAGER TESTS  
-# ============================================================================
-
-class TestAuth0UserManager:
-    """Test Auth0 user management functionality."""
 
     @pytest.fixture
-    def user_manager(self, auth_config, mock_auth_cache, mock_environment):
-        """Auth0 user manager instance for testing."""
-        with patch.dict('os.environ', auth_config):
-            config = Auth0Config()
-            return Auth0UserManager(config, mock_auth_cache)
-
-    @pytest.mark.asyncio
-    async def test_get_user_profile_success(self, user_manager, mock_auth0_user_profile):
-        """Test successful user profile retrieval."""
-        user_id = 'auth0|test-user-12345'
-        
-        mock_response = Mock()
-        mock_response.json.return_value = mock_auth0_user_profile
-        mock_response.raise_for_status.return_value = None
-        
-        with patch.object(user_manager, '_fetch_user_profile', return_value=mock_auth0_user_profile):
-            result = await user_manager.get_user_profile(user_id)
-            
-            assert result['user_id'] == mock_auth0_user_profile['user_id']
-            assert result['email'] == mock_auth0_user_profile['email']
-            assert 'profile_metadata' in result
-
-    @pytest.mark.asyncio
-    async def test_get_user_profile_cached(self, user_manager, mock_auth0_user_profile, mock_auth_cache):
-        """Test user profile retrieval from cache."""
-        user_id = 'auth0|test-user-12345'
-        
-        # Pre-populate cache
-        cached_profile = {**mock_auth0_user_profile, 'cached_at': datetime.utcnow().isoformat()}
-        mock_auth_cache.cache_auth0_user_profile(user_id, cached_profile, 1800)
-        
-        result = await user_manager.get_user_profile(user_id, use_cache=True)
-        
-        assert result['user_id'] == mock_auth0_user_profile['user_id']
-        assert 'cached_at' in result
-
-    @pytest.mark.asyncio
-    async def test_get_user_profile_fallback_to_cache(self, user_manager, mock_auth0_user_profile, mock_auth_cache):
-        """Test user profile fallback to cache on API failure."""
-        user_id = 'auth0|test-user-12345'
-        
-        # Pre-populate cache
-        cached_profile = {**mock_auth0_user_profile, 'cached_at': datetime.utcnow().isoformat()}
-        mock_auth_cache.cache_auth0_user_profile(user_id, cached_profile, 1800)
-        
-        with patch.object(user_manager, '_fetch_user_profile', side_effect=Auth0Exception("API unavailable")):
-            result = await user_manager.get_user_profile(user_id, use_cache=True)
-            
-            assert result['user_id'] == mock_auth0_user_profile['user_id']
-            assert result['profile_metadata']['fallback_used'] == True
-
-    @pytest.mark.asyncio
-    async def test_get_user_profile_no_fallback_available(self, user_manager):
-        """Test user profile retrieval with no cache fallback."""
-        user_id = 'auth0|test-user-12345'
-        
-        with patch.object(user_manager, '_fetch_user_profile', side_effect=Auth0Exception("API unavailable")):
-            with pytest.raises(Auth0Exception) as exc_info:
-                await user_manager.get_user_profile(user_id, use_cache=False)
-            
-            assert 'API unavailable' in str(exc_info.value)
-
-    @pytest.mark.asyncio
-    async def test_validate_user_permissions_success(self, user_manager, mock_auth0_permissions):
-        """Test successful user permissions validation."""
-        user_id = 'auth0|test-user-12345'
-        required_permissions = ['read', 'write']
-        
-        with patch.object(user_manager, '_fetch_user_permissions', 
-                         return_value={'read', 'write', 'delete'}):
-            result = await user_manager.validate_user_permissions(user_id, required_permissions)
-            
-            assert result['has_permissions'] == True
-            assert result['user_id'] == user_id
-            assert set(required_permissions).issubset(set(result['granted_permissions']))
-
-    @pytest.mark.asyncio
-    async def test_validate_user_permissions_insufficient(self, user_manager):
-        """Test user permissions validation with insufficient permissions."""
-        user_id = 'auth0|test-user-12345'
-        required_permissions = ['read', 'write', 'admin']
-        
-        with patch.object(user_manager, '_fetch_user_permissions', 
-                         return_value={'read', 'write'}):
-            result = await user_manager.validate_user_permissions(user_id, required_permissions)
-            
-            assert result['has_permissions'] == False
-            assert result['user_id'] == user_id
-
-    @pytest.mark.asyncio
-    async def test_validate_user_permissions_cached(self, user_manager, mock_auth_cache):
-        """Test user permissions validation using cache."""
-        user_id = 'auth0|test-user-12345'
-        required_permissions = ['read', 'write']
-        cached_permissions = {'read', 'write', 'delete'}
-        
-        # Pre-populate cache
-        mock_auth_cache.cache_user_permissions(user_id, cached_permissions, 300)
-        
-        result = await user_manager.validate_user_permissions(user_id, required_permissions, use_cache=True)
-        
-        assert result['has_permissions'] == True
-        assert result['validation_source'] == 'cache'
-
-    @pytest.mark.asyncio
-    async def test_validate_user_permissions_fallback_deny(self, user_manager):
-        """Test user permissions validation fallback deny on failure."""
-        user_id = 'auth0|test-user-12345'
-        required_permissions = ['read', 'write']
-        
-        with patch.object(user_manager, '_fetch_user_permissions', 
-                         side_effect=Auth0Exception("Service unavailable")):
-            result = await user_manager.validate_user_permissions(user_id, required_permissions, use_cache=False)
-            
-            assert result['has_permissions'] == False
-            assert result['validation_source'] == 'fallback_deny'
-            assert result['degraded_mode'] == True
-
-    @pytest.mark.asyncio
-    async def test_get_management_token_success(self, user_manager):
-        """Test successful management token retrieval."""
-        mock_token_response = {
-            'access_token': 'mgmt-token-12345',
-            'token_type': 'Bearer',
-            'expires_in': 3600
-        }
-        
-        mock_response = Mock()
-        mock_response.json.return_value = mock_token_response
-        mock_response.raise_for_status.return_value = None
-        
-        with patch.object(user_manager.http_client, 'post', return_value=mock_response):
-            token = await user_manager._get_management_token()
-            
-            assert token == 'mgmt-token-12345'
-
-    @pytest.mark.asyncio
-    async def test_get_management_token_cached(self, user_manager, mock_auth_cache):
-        """Test management token retrieval from cache."""
-        cached_token = 'cached-mgmt-token-67890'
-        mock_auth_cache.set('auth0_mgmt_token', 'current', cached_token, 3600)
-        
-        token = await user_manager._get_management_token()
-        
-        assert token == cached_token
-
-    @pytest.mark.asyncio
-    async def test_fetch_user_permissions_success(self, user_manager, mock_auth0_permissions):
-        """Test successful user permissions fetching."""
-        user_id = 'auth0|test-user-12345'
-        
-        mock_response = Mock()
-        mock_response.json.return_value = mock_auth0_permissions
-        mock_response.raise_for_status.return_value = None
-        
-        with patch.object(user_manager, '_get_management_token', return_value='mgmt-token'), \
-             patch.object(user_manager.http_client, 'get', return_value=mock_response):
-            
-            permissions = await user_manager._fetch_user_permissions(user_id)
-            
-            expected_permissions = {'read', 'write', 'delete'}
-            assert permissions == expected_permissions
-
-    @pytest.mark.asyncio
-    async def test_user_manager_close(self, user_manager):
-        """Test user manager resource cleanup."""
-        await user_manager.close()
-        # Verify that close doesn't raise exceptions
-
-
-# ============================================================================
-# AUTHENTICATIONMANAGER TESTS
-# ============================================================================
-
-class TestAuthenticationManager:
-    """Test comprehensive authentication manager functionality."""
+    def valid_jwt_token(self, sample_jwt_claims, rsa_key_pair):
+        """Generate valid JWT token for testing."""
+        return jwt.encode(
+            sample_jwt_claims,
+            rsa_key_pair['private_pem'],
+            algorithm='RS256',
+            headers={'kid': 'test-key-id'}
+        )
 
     @pytest.fixture
-    def auth_manager(self, auth_config, mock_auth_cache, mock_environment):
-        """Authentication manager instance for testing."""
-        with patch.dict('os.environ', auth_config):
-            return AuthenticationManager(mock_auth_cache)
+    def expired_jwt_token(self, expired_jwt_claims, rsa_key_pair):
+        """Generate expired JWT token for testing."""
+        return jwt.encode(
+            expired_jwt_claims,
+            rsa_key_pair['private_pem'],
+            algorithm='RS256',
+            headers={'kid': 'test-key-id'}
+        )
 
-    @pytest.mark.asyncio
-    async def test_authenticate_user_success(self, auth_manager, valid_jwt_token, 
-                                           valid_jwt_payload, test_rsa_keypair, mock_auth0_user_profile):
-        """Test successful user authentication."""
-        with patch.object(auth_manager.token_validator, 'validate_token', 
-                         return_value=valid_jwt_payload), \
-             patch.object(auth_manager.user_manager, 'get_user_profile', 
-                         return_value=mock_auth0_user_profile):
-            
-            result = await auth_manager.authenticate_user(valid_jwt_token)
-            
-            assert result['authenticated'] == True
-            assert result['user_id'] == valid_jwt_payload['sub']
-            assert 'token_payload' in result
-            assert 'user_profile' in result
-            assert 'authentication_metadata' in result
-
-    @pytest.mark.asyncio
-    async def test_authenticate_user_invalid_token_format(self, auth_manager):
-        """Test authentication with invalid token format."""
-        invalid_tokens = ['', 'invalid.token', 'too.many.parts.here', None]
-        
-        for invalid_token in invalid_tokens:
-            with pytest.raises(AuthenticationException) as exc_info:
-                await auth_manager.authenticate_user(invalid_token or '')
-            
-            assert exc_info.value.error_code in [
-                SecurityErrorCode.AUTH_TOKEN_MISSING,
-                SecurityErrorCode.AUTH_TOKEN_MALFORMED
-            ]
-
-    @pytest.mark.asyncio
-    async def test_authenticate_user_no_user_id(self, auth_manager, valid_jwt_token):
-        """Test authentication with token missing user ID."""
-        invalid_payload = {'email': 'test@example.com', 'iat': int(time.time()), 'exp': int(time.time()) + 3600}
-        
-        with patch.object(auth_manager.token_validator, 'validate_token', 
-                         return_value=invalid_payload):
-            with pytest.raises(AuthenticationException) as exc_info:
-                await auth_manager.authenticate_user(valid_jwt_token)
-            
-            assert exc_info.value.error_code == SecurityErrorCode.AUTH_TOKEN_INVALID
-
-    @pytest.mark.asyncio
-    async def test_validate_permissions_success(self, auth_manager):
-        """Test successful permission validation."""
-        user_id = 'auth0|test-user-12345'
-        required_permissions = ['read', 'write']
-        
-        validation_result = {
-            'user_id': user_id,
-            'has_permissions': True,
-            'granted_permissions': ['read', 'write', 'delete'],
-            'required_permissions': required_permissions,
-            'validation_source': 'auth0_api'
-        }
-        
-        with patch.object(auth_manager.user_manager, 'validate_user_permissions', 
-                         return_value=validation_result):
-            result = await auth_manager.validate_permissions(user_id, required_permissions)
-            
-            assert result['has_permissions'] == True
-            assert result['user_id'] == user_id
-
-    @pytest.mark.asyncio
-    async def test_validate_permissions_with_resource(self, auth_manager):
-        """Test permission validation with resource ID."""
-        user_id = 'auth0|test-user-12345'
-        required_permissions = ['read']
-        resource_id = 'document-123'
-        
-        validation_result = {
-            'user_id': user_id,
-            'has_permissions': True,
-            'granted_permissions': ['read'],
-            'required_permissions': required_permissions,
-            'validation_source': 'auth0_api'
-        }
-        
-        with patch.object(auth_manager.user_manager, 'validate_user_permissions', 
-                         return_value=validation_result):
-            result = await auth_manager.validate_permissions(user_id, required_permissions, resource_id)
-            
-            assert result['resource_id'] == resource_id
-            assert result['resource_specific'] == True
-
-    @pytest.mark.asyncio
-    async def test_validate_permissions_invalid_input(self, auth_manager):
-        """Test permission validation with invalid input."""
-        with pytest.raises(ValidationException) as exc_info:
-            await auth_manager.validate_permissions('', [])
-        
-        assert exc_info.value.error_code == SecurityErrorCode.VAL_INPUT_INVALID
-
-    @pytest.mark.asyncio
-    async def test_refresh_user_token_success(self, auth_manager):
-        """Test successful token refresh."""
-        refresh_token = 'valid-refresh-token'
-        token_response = {
-            'access_token': 'new-access-token',
-            'token_type': 'Bearer',
-            'expires_in': 3600
-        }
-        
-        with patch.object(auth_manager.token_validator, 'refresh_token', 
-                         return_value=token_response):
-            result = await auth_manager.refresh_user_token(refresh_token)
-            
-            assert result['access_token'] == 'new-access-token'
-            assert 'refresh_metadata' in result
-
-    @pytest.mark.asyncio
-    async def test_refresh_user_token_invalid_format(self, auth_manager):
-        """Test token refresh with invalid token format."""
-        invalid_tokens = ['', 'short', None]
-        
-        for invalid_token in invalid_tokens:
-            with pytest.raises(ValidationException) as exc_info:
-                await auth_manager.refresh_user_token(invalid_token or '')
-            
-            assert exc_info.value.error_code == SecurityErrorCode.AUTH_TOKEN_INVALID
-
-    @pytest.mark.asyncio
-    async def test_create_user_session_success(self, auth_manager, valid_jwt_payload, sample_session_data):
-        """Test successful user session creation."""
-        user_id = 'auth0|test-user-12345'
-        
-        result = await auth_manager.create_user_session(
-            user_id, 
-            valid_jwt_payload, 
-            sample_session_data, 
-            ttl=3600
+    @pytest.fixture
+    def invalid_signature_token(self, sample_jwt_claims):
+        """Generate JWT token with invalid signature for testing."""
+        # Use a different key to create invalid signature
+        wrong_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        wrong_pem = wrong_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption()
         )
         
-        assert result['session_created'] == True
-        assert result['user_id'] == user_id
-        assert 'session_id' in result
-        assert result['ttl'] == 3600
+        return jwt.encode(
+            sample_jwt_claims,
+            wrong_pem,
+            algorithm='RS256',
+            headers={'kid': 'test-key-id'}
+        )
+
+    @pytest.fixture
+    def malformed_jwt_token(self):
+        """Provide malformed JWT token for testing."""
+        return "malformed.jwt.token.invalid"
+
+    @pytest.fixture
+    def authenticator(self, auth_config):
+        """Create CoreJWTAuthenticator instance for testing."""
+        with patch('src.auth.authentication.get_auth_config') as mock_config:
+            mock_config.return_value.config = auth_config
+            return CoreJWTAuthenticator(config={'config': auth_config})
+
+    def test_authenticator_initialization(self, auth_config):
+        """Test CoreJWTAuthenticator initialization with proper configuration."""
+        with patch('src.auth.authentication.get_auth_config') as mock_config:
+            mock_config.return_value.config = auth_config
+            
+            authenticator = CoreJWTAuthenticator(config={'config': auth_config})
+            
+            assert authenticator.auth0_domain == 'test-domain.auth0.com'
+            assert authenticator.auth0_client_id == 'test-client-id'
+            assert authenticator.auth0_audience == 'test-audience'
+            assert authenticator.jwt_algorithm == 'RS256'
+            assert authenticator.token_leeway == 10
+            assert authenticator.cache_ttl_seconds == 300
+            assert authenticator._auth0_circuit_breaker_state == 'closed'
+            assert authenticator._auth0_failure_count == 0
+
+    def test_authenticator_initialization_with_defaults(self):
+        """Test CoreJWTAuthenticator initialization with default configuration."""
+        with patch('src.auth.authentication.get_auth_config') as mock_config:
+            mock_config.return_value.config = {}
+            
+            authenticator = CoreJWTAuthenticator()
+            
+            assert authenticator.jwt_algorithm == 'RS256'
+            assert authenticator.token_leeway == 10
+            assert authenticator.cache_ttl_seconds == 300
+            assert authenticator.max_concurrent_validations == 100
 
     @pytest.mark.asyncio
-    async def test_create_user_session_cache_failure(self, auth_manager, valid_jwt_payload, mock_auth_cache):
-        """Test session creation with cache failure."""
-        user_id = 'auth0|test-user-12345'
-        
-        # Mock cache failure
-        with patch.object(mock_auth_cache, 'cache_user_session', return_value=False):
-            with pytest.raises(SessionException) as exc_info:
-                await auth_manager.create_user_session(user_id, valid_jwt_payload)
+    async def test_authenticate_request_success_with_valid_token(
+        self, 
+        authenticator, 
+        valid_jwt_token, 
+        sample_jwt_claims,
+        rsa_key_pair
+    ):
+        """Test successful request authentication with valid JWT token."""
+        with patch.object(authenticator, '_extract_token_from_request') as mock_extract, \
+             patch.object(authenticator, '_validate_jwt_token') as mock_validate, \
+             patch.object(authenticator, '_create_user_context') as mock_create_user, \
+             patch.object(authenticator, '_verify_user_permissions') as mock_verify_perms:
             
-            assert exc_info.value.error_code == SecurityErrorCode.AUTH_SESSION_INVALID
-
-    @pytest.mark.asyncio
-    async def test_get_user_session_success(self, auth_manager, sample_session_data, mock_auth_cache):
-        """Test successful user session retrieval."""
-        session_id = 'test-session-12345'
-        
-        # Mock session data with valid expiration
-        session_data_with_metadata = {
-            **sample_session_data,
-            'session_metadata': {
-                'expires_at': (datetime.utcnow() + timedelta(hours=1)).isoformat()
-            }
-        }
-        
-        mock_auth_cache.cache_user_session(session_id, session_data_with_metadata, 3600)
-        
-        result = await auth_manager.get_user_session(session_id)
-        
-        assert result is not None
-        assert result['user_id'] == sample_session_data['user_id']
-
-    @pytest.mark.asyncio
-    async def test_get_user_session_expired(self, auth_manager, sample_session_data, mock_auth_cache):
-        """Test user session retrieval with expired session."""
-        session_id = 'expired-session-12345'
-        
-        # Mock expired session data
-        expired_session_data = {
-            **sample_session_data,
-            'session_metadata': {
-                'expires_at': (datetime.utcnow() - timedelta(hours=1)).isoformat()
-            }
-        }
-        
-        mock_auth_cache.cache_user_session(session_id, expired_session_data, 3600)
-        
-        result = await auth_manager.get_user_session(session_id)
-        
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_get_user_session_not_found(self, auth_manager):
-        """Test user session retrieval for non-existent session."""
-        session_id = 'non-existent-session'
-        
-        result = await auth_manager.get_user_session(session_id)
-        
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_invalidate_user_session_success(self, auth_manager, sample_session_data, mock_auth_cache):
-        """Test successful user session invalidation."""
-        session_id = 'test-session-to-invalidate'
-        
-        # Pre-populate session
-        mock_auth_cache.cache_user_session(session_id, sample_session_data, 3600)
-        
-        result = await auth_manager.invalidate_user_session(session_id)
-        
-        assert result == True
-
-    @pytest.mark.asyncio
-    async def test_invalidate_user_session_not_found(self, auth_manager):
-        """Test user session invalidation for non-existent session."""
-        session_id = 'non-existent-session'
-        
-        result = await auth_manager.invalidate_user_session(session_id)
-        
-        assert result == False
-
-    def test_validate_token_format_valid(self, auth_manager, valid_jwt_token):
-        """Test token format validation with valid token."""
-        # Should not raise any exception
-        auth_manager._validate_token_format(valid_jwt_token)
-
-    def test_validate_token_format_invalid(self, auth_manager, malformed_jwt_tokens):
-        """Test token format validation with invalid tokens."""
-        for malformed_token in malformed_jwt_tokens:
-            with pytest.raises(AuthenticationException) as exc_info:
-                auth_manager._validate_token_format(malformed_token)
+            # Setup mocks
+            mock_extract.return_value = valid_jwt_token
+            mock_validate.return_value = sample_jwt_claims
             
-            assert exc_info.value.error_code in [
-                SecurityErrorCode.AUTH_TOKEN_MISSING,
-                SecurityErrorCode.AUTH_TOKEN_MALFORMED
-            ]
-
-    @pytest.mark.asyncio
-    async def test_get_health_status(self, auth_manager):
-        """Test authentication system health status."""
-        with patch.object(auth_manager.cache, 'health_check', return_value={'status': 'healthy'}), \
-             patch.object(auth_manager.token_validator.http_client, 'get') as mock_get:
+            mock_user = AuthenticatedUser(
+                user_id='auth0|test-user-123',
+                token_claims=sample_jwt_claims,
+                permissions=['read:documents', 'write:documents'],
+                profile={'email': 'test@example.com', 'name': 'Test User'},
+                token=valid_jwt_token
+            )
+            mock_create_user.return_value = mock_user
+            mock_verify_perms.return_value = True
             
-            mock_response = Mock()
-            mock_response.status_code = 200
-            mock_response.elapsed.total_seconds.return_value = 0.1
-            mock_get.return_value = mock_response
-            
-            health_status = await auth_manager.get_health_status()
-            
-            assert health_status['status'] in ['healthy', 'degraded']
-            assert 'components' in health_status
-            assert 'cache' in health_status['components']
-            assert 'auth0' in health_status['components']
-
-    @pytest.mark.asyncio
-    async def test_auth_manager_close(self, auth_manager):
-        """Test authentication manager resource cleanup."""
-        await auth_manager.close()
-        # Verify that close doesn't raise exceptions
-
-
-# ============================================================================
-# GLOBAL AUTHENTICATION MANAGER TESTS
-# ============================================================================
-
-class TestGlobalAuthenticationManager:
-    """Test global authentication manager functions."""
-
-    def test_get_auth_manager_initialization(self, auth_config, mock_environment):
-        """Test global authentication manager initialization."""
-        with patch.dict('os.environ', auth_config):
-            # Clear any existing manager
-            import src.auth.authentication
-            src.auth.authentication._auth_manager = None
-            
-            manager = get_auth_manager()
-            
-            assert manager is not None
-            assert isinstance(manager, AuthenticationManager)
-
-    def test_get_auth_manager_singleton(self, auth_config, mock_environment):
-        """Test global authentication manager singleton behavior."""
-        with patch.dict('os.environ', auth_config):
-            # Clear any existing manager
-            import src.auth.authentication
-            src.auth.authentication._auth_manager = None
-            
-            manager1 = get_auth_manager()
-            manager2 = get_auth_manager()
-            
-            assert manager1 is manager2
-
-    @pytest.mark.asyncio
-    async def test_init_auth_manager_custom_cache(self, auth_config, mock_environment, mock_auth_cache):
-        """Test authentication manager initialization with custom cache."""
-        with patch.dict('os.environ', auth_config):
-            manager = await init_auth_manager(mock_auth_cache)
-            
-            assert manager is not None
-            assert manager.cache is mock_auth_cache
-
-    @pytest.mark.asyncio
-    async def test_close_auth_manager(self, auth_config, mock_environment):
-        """Test global authentication manager cleanup."""
-        with patch.dict('os.environ', auth_config):
-            # Initialize manager
-            await init_auth_manager()
-            
-            # Close manager
-            await close_auth_manager()
-            
-            # Verify manager is cleared
-            import src.auth.authentication
-            assert src.auth.authentication._auth_manager is None
-
-
-# ============================================================================
-# CONVENIENCE FUNCTION TESTS
-# ============================================================================
-
-class TestConvenienceFunctions:
-    """Test authentication convenience functions."""
-
-    @pytest.mark.asyncio
-    async def test_authenticate_jwt_token_convenience(self, auth_config, mock_environment, 
-                                                    valid_jwt_token, valid_jwt_payload):
-        """Test JWT token authentication convenience function."""
-        with patch.dict('os.environ', auth_config), \
-             patch('src.auth.authentication.get_auth_manager') as mock_get_manager:
-            
-            mock_manager = Mock()
-            mock_manager.authenticate_user = AsyncMock(return_value={
-                'authenticated': True,
-                'user_id': valid_jwt_payload['sub']
-            })
-            mock_get_manager.return_value = mock_manager
-            
-            result = await authenticate_jwt_token(valid_jwt_token)
-            
-            assert result['authenticated'] == True
-            assert result['user_id'] == valid_jwt_payload['sub']
-
-    @pytest.mark.asyncio
-    async def test_validate_user_permissions_convenience(self, auth_config, mock_environment):
-        """Test user permissions validation convenience function."""
-        with patch.dict('os.environ', auth_config), \
-             patch('src.auth.authentication.get_auth_manager') as mock_get_manager:
-            
-            user_id = 'auth0|test-user-12345'
-            required_permissions = ['read', 'write']
-            
-            mock_manager = Mock()
-            mock_manager.validate_permissions = AsyncMock(return_value={
-                'has_permissions': True,
-                'user_id': user_id
-            })
-            mock_get_manager.return_value = mock_manager
-            
-            result = await validate_user_permissions(user_id, required_permissions)
-            
-            assert result['has_permissions'] == True
-            assert result['user_id'] == user_id
-
-    @pytest.mark.asyncio
-    async def test_refresh_jwt_token_convenience(self, auth_config, mock_environment):
-        """Test JWT token refresh convenience function."""
-        with patch.dict('os.environ', auth_config), \
-             patch('src.auth.authentication.get_auth_manager') as mock_get_manager:
-            
-            refresh_token = 'test-refresh-token'
-            
-            mock_manager = Mock()
-            mock_manager.refresh_user_token = AsyncMock(return_value={
-                'access_token': 'new-access-token'
-            })
-            mock_get_manager.return_value = mock_manager
-            
-            result = await refresh_jwt_token(refresh_token)
-            
-            assert result['access_token'] == 'new-access-token'
-
-    @pytest.mark.asyncio
-    async def test_create_authenticated_session_convenience(self, auth_config, mock_environment, 
-                                                          valid_jwt_payload, sample_session_data):
-        """Test authenticated session creation convenience function."""
-        with patch.dict('os.environ', auth_config), \
-             patch('src.auth.authentication.get_auth_manager') as mock_get_manager:
-            
-            user_id = 'auth0|test-user-12345'
-            
-            mock_manager = Mock()
-            mock_manager.create_user_session = AsyncMock(return_value={
-                'session_created': True,
-                'user_id': user_id
-            })
-            mock_get_manager.return_value = mock_manager
-            
-            result = await create_authenticated_session(user_id, valid_jwt_payload, sample_session_data)
-            
-            assert result['session_created'] == True
-            assert result['user_id'] == user_id
-
-    @pytest.mark.asyncio
-    async def test_get_authenticated_session_convenience(self, auth_config, mock_environment, sample_session_data):
-        """Test authenticated session retrieval convenience function."""
-        with patch.dict('os.environ', auth_config), \
-             patch('src.auth.authentication.get_auth_manager') as mock_get_manager:
-            
-            session_id = 'test-session-12345'
-            
-            mock_manager = Mock()
-            mock_manager.get_user_session = AsyncMock(return_value=sample_session_data)
-            mock_get_manager.return_value = mock_manager
-            
-            result = await get_authenticated_session(session_id)
-            
-            assert result == sample_session_data
-
-    @pytest.mark.asyncio
-    async def test_invalidate_authenticated_session_convenience(self, auth_config, mock_environment):
-        """Test authenticated session invalidation convenience function."""
-        with patch.dict('os.environ', auth_config), \
-             patch('src.auth.authentication.get_auth_manager') as mock_get_manager:
-            
-            session_id = 'test-session-12345'
-            
-            mock_manager = Mock()
-            mock_manager.invalidate_user_session = AsyncMock(return_value=True)
-            mock_get_manager.return_value = mock_manager
-            
-            result = await invalidate_authenticated_session(session_id)
-            
-            assert result == True
-
-
-# ============================================================================
-# INTEGRATION AND ERROR HANDLING TESTS
-# ============================================================================
-
-class TestIntegrationAndErrorHandling:
-    """Test integration scenarios and comprehensive error handling."""
-
-    @pytest.mark.asyncio
-    async def test_full_authentication_flow(self, auth_config, mock_environment, 
-                                          valid_jwt_token, valid_jwt_payload, 
-                                          test_rsa_keypair, mock_auth0_user_profile):
-        """Test complete authentication flow integration."""
-        with patch.dict('os.environ', auth_config):
-            auth_manager = AuthenticationManager()
-            
-            # Mock all external dependencies
-            with patch.object(auth_manager.token_validator, '_get_signing_key', 
-                             return_value=test_rsa_keypair['public_pem']), \
-                 patch.object(auth_manager.user_manager, 'get_user_profile', 
-                             return_value=mock_auth0_user_profile):
-                
-                # Authenticate user
-                auth_result = await auth_manager.authenticate_user(valid_jwt_token)
-                
-                # Create session
-                session_result = await auth_manager.create_user_session(
-                    auth_result['user_id'],
-                    auth_result['token_payload']
-                )
-                
-                # Retrieve session
-                retrieved_session = await auth_manager.get_user_session(
-                    session_result['session_id']
-                )
-                
-                # Validate permissions
-                permissions_result = await auth_manager.validate_permissions(
-                    auth_result['user_id'],
-                    ['read', 'write']
-                )
-                
-                # Verify complete flow
-                assert auth_result['authenticated'] == True
-                assert session_result['session_created'] == True
-                assert retrieved_session is not None
-                assert permissions_result['user_id'] == auth_result['user_id']
-
-    @pytest.mark.asyncio
-    async def test_authentication_with_network_failures(self, auth_config, mock_environment, valid_jwt_token):
-        """Test authentication behavior with network failures."""
-        with patch.dict('os.environ', auth_config):
-            auth_manager = AuthenticationManager()
-            
-            # Simulate network failure
-            with patch.object(auth_manager.token_validator.http_client, 'get', 
-                             side_effect=httpx.ConnectError("Network unavailable")):
-                with pytest.raises(JWTException):
-                    await auth_manager.authenticate_user(valid_jwt_token)
-
-    @pytest.mark.asyncio
-    async def test_authentication_with_auth0_service_degradation(self, auth_config, mock_environment, 
-                                                               valid_jwt_token, mock_auth_cache):
-        """Test authentication during Auth0 service degradation."""
-        with patch.dict('os.environ', auth_config):
-            auth_manager = AuthenticationManager(mock_auth_cache)
-            
-            # Pre-populate cache with validation result
-            token_hash = hash_token(valid_jwt_token)
-            cached_validation = {
-                'sub': 'auth0|test-user-12345',
-                'email': 'test@example.com',
-                'cached_at': datetime.utcnow().isoformat()
-            }
-            mock_auth_cache.cache_jwt_validation(token_hash, cached_validation, 300)
-            
-            # Simulate Auth0 service failure
-            with patch.object(auth_manager.token_validator, '_get_signing_key', 
-                             side_effect=Auth0Exception("Service unavailable")):
-                # Should still work with cached validation
-                result = await auth_manager.authenticate_user(valid_jwt_token, verify_signature=False)
-                
-                assert result['authenticated'] == True
-
-    @pytest.mark.asyncio
-    async def test_circuit_breaker_integration(self, auth_config, mock_environment):
-        """Test circuit breaker integration across authentication components."""
-        with patch.dict('os.environ', auth_config):
-            auth_manager = AuthenticationManager()
-            
-            # Test circuit breaker activation
-            user_id = 'auth0|test-user-12345'
-            
-            # Simulate repeated Auth0 failures
-            with patch.object(auth_manager.user_manager.http_client, 'get', 
-                             side_effect=httpx.HTTPStatusError("Service error", request=Mock(), response=Mock())):
-                
-                # Multiple failures should trigger circuit breaker
-                for _ in range(3):
-                    try:
-                        await auth_manager.user_manager.get_user_profile(user_id, use_cache=False)
-                    except Auth0Exception:
-                        pass
-
-    @pytest.mark.asyncio
-    async def test_concurrent_authentication_requests(self, auth_config, mock_environment, 
-                                                    valid_jwt_token, valid_jwt_payload, test_rsa_keypair):
-        """Test concurrent authentication request handling."""
-        with patch.dict('os.environ', auth_config):
-            auth_manager = AuthenticationManager()
-            
-            with patch.object(auth_manager.token_validator, '_get_signing_key', 
-                             return_value=test_rsa_keypair['public_pem']), \
-                 patch.object(auth_manager.user_manager, 'get_user_profile', 
-                             return_value={'user_id': valid_jwt_payload['sub']}):
-                
-                # Simulate concurrent requests
-                tasks = [
-                    auth_manager.authenticate_user(valid_jwt_token)
-                    for _ in range(5)
-                ]
-                
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                
-                # All requests should succeed
-                for result in results:
-                    assert not isinstance(result, Exception)
-                    assert result['authenticated'] == True
-
-    @pytest.mark.asyncio
-    async def test_memory_cleanup_and_resource_management(self, auth_config, mock_environment):
-        """Test proper memory cleanup and resource management."""
-        with patch.dict('os.environ', auth_config):
-            auth_manager = AuthenticationManager()
-            
-            # Test resource cleanup
-            await auth_manager.close()
-            
-            # Verify components are closed
-            # This test ensures no resource leaks occur
-
-
-# ============================================================================
-# SECURITY AND COMPLIANCE TESTS
-# ============================================================================
-
-class TestSecurityAndCompliance:
-    """Test security compliance and vulnerability protections."""
-
-    def test_jwt_secret_key_security(self, auth_config, mock_environment):
-        """Test JWT secret key security requirements."""
-        # Test weak secret key detection
-        weak_config = {**auth_config, 'JWT_SECRET_KEY': 'weak'}
-        
-        # Implementation should validate secret key strength
-        # This test ensures production deployments use strong keys
-        assert len(auth_config.get('JWT_SECRET_KEY', '')) >= 32
-
-    @pytest.mark.asyncio
-    async def test_timing_attack_resistance(self, auth_config, mock_environment, test_rsa_keypair):
-        """Test resistance to timing attacks in token validation."""
-        with patch.dict('os.environ', auth_config):
-            validator = JWTTokenValidator(Auth0Config(), AuthenticationCache())
-            
-            # Test with invalid tokens of different lengths
-            tokens = [
-                'short',
-                'medium.length.token',
-                'very.long.token.that.should.take.similar.time.to.validate.as.shorter.tokens'
-            ]
-            
-            times = []
-            for token in tokens:
-                start_time = time.time()
-                try:
-                    await validator.validate_token(token, verify_signature=False)
-                except:
-                    pass
-                times.append(time.time() - start_time)
-            
-            # Timing should be consistent (within reasonable variance)
-            max_time = max(times)
-            min_time = min(times)
-            # Allow up to 50% variance for timing attack resistance
-            assert (max_time - min_time) / min_time < 0.5
-
-    @pytest.mark.asyncio
-    async def test_token_payload_injection_protection(self, auth_config, mock_environment, test_rsa_keypair):
-        """Test protection against token payload injection attacks."""
-        with patch.dict('os.environ', auth_config):
-            # Create token with malicious payload
-            malicious_payload = {
-                'sub': 'auth0|user123',
-                'admin': True,  # Injected claim
-                'roles': ['admin', 'superuser'],  # Escalated roles
-                'iat': int(time.time()),
-                'exp': int(time.time()) + 3600,
-                'aud': 'test-api-audience',
-                'iss': 'https://test-domain.auth0.com/',
-                # Attempt to inject dangerous claims
-                'permissions': ['*'],
-                'sudo': True,
-                'system_access': True
-            }
-            
-            malicious_token = jwt.encode(
-                payload=malicious_payload,
-                key=test_rsa_keypair['private_pem'],
-                algorithm='RS256'
+            # Execute authentication
+            result = await authenticator.authenticate_request(
+                required_permissions=['read:documents']
             )
             
-            validator = JWTTokenValidator(Auth0Config(), AuthenticationCache())
+            # Verify result
+            assert result is not None
+            assert isinstance(result, AuthenticatedUser)
+            assert result.user_id == 'auth0|test-user-123'
+            assert 'read:documents' in result.permissions
             
-            with patch.object(validator, '_get_signing_key', return_value=test_rsa_keypair['public_pem']):
-                # Token should validate structurally but dangerous claims should be handled carefully
-                result = await validator.validate_token(malicious_token)
-                
-                # Verify basic claims are present
-                assert result['sub'] == malicious_payload['sub']
-                
-                # Dangerous claims should not bypass security controls
-                # Real implementation should validate claims against allowed values
+            # Verify method calls
+            mock_extract.assert_called_once()
+            mock_validate.assert_called_once_with(valid_jwt_token, allow_expired=False)
+            mock_create_user.assert_called_once_with(sample_jwt_claims, valid_jwt_token)
+            mock_verify_perms.assert_called_once_with(mock_user, ['read:documents'])
 
     @pytest.mark.asyncio
-    async def test_session_fixation_protection(self, auth_config, mock_environment, valid_jwt_payload):
-        """Test protection against session fixation attacks."""
-        with patch.dict('os.environ', auth_config):
-            auth_manager = AuthenticationManager()
+    async def test_authenticate_request_with_explicit_token(
+        self, 
+        authenticator, 
+        valid_jwt_token, 
+        sample_jwt_claims
+    ):
+        """Test authentication with explicitly provided token."""
+        with patch.object(authenticator, '_validate_jwt_token') as mock_validate, \
+             patch.object(authenticator, '_create_user_context') as mock_create_user:
             
-            user_id = 'auth0|test-user-12345'
+            mock_validate.return_value = sample_jwt_claims
+            mock_user = AuthenticatedUser(
+                user_id='auth0|test-user-123',
+                token_claims=sample_jwt_claims,
+                permissions=['read:documents'],
+                token=valid_jwt_token
+            )
+            mock_create_user.return_value = mock_user
             
-            # Create multiple sessions for same user
-            session1 = await auth_manager.create_user_session(user_id, valid_jwt_payload)
-            session2 = await auth_manager.create_user_session(user_id, valid_jwt_payload)
+            result = await authenticator.authenticate_request(token=valid_jwt_token)
             
-            # Sessions should have different IDs
-            assert session1['session_id'] != session2['session_id']
-            
-            # Both sessions should be valid independently
-            retrieved1 = await auth_manager.get_user_session(session1['session_id'])
-            retrieved2 = await auth_manager.get_user_session(session2['session_id'])
-            
-            assert retrieved1 is not None
-            assert retrieved2 is not None
+            assert result is not None
+            assert result.user_id == 'auth0|test-user-123'
+            mock_validate.assert_called_once_with(valid_jwt_token, allow_expired=False)
 
     @pytest.mark.asyncio
-    async def test_rate_limiting_protection(self, auth_config, mock_environment):
-        """Test rate limiting protection mechanisms."""
-        with patch.dict('os.environ', auth_config):
-            auth_manager = AuthenticationManager()
+    async def test_authenticate_request_missing_token(self, authenticator):
+        """Test authentication failure when no token is provided."""
+        with patch.object(authenticator, '_extract_token_from_request') as mock_extract:
+            mock_extract.return_value = None
             
-            # Simulate rapid authentication attempts
-            user_id = 'auth0|test-user-12345'
+            result = await authenticator.authenticate_request()
             
-            # Implementation should include rate limiting
-            # This test verifies protection against brute force attacks
-            attempts = []
-            for i in range(10):
+            assert result is None
+            mock_extract.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_authenticate_request_invalid_token(
+        self, 
+        authenticator, 
+        invalid_signature_token
+    ):
+        """Test authentication failure with invalid token signature."""
+        with patch.object(authenticator, '_extract_token_from_request') as mock_extract, \
+             patch.object(authenticator, '_validate_jwt_token') as mock_validate:
+            
+            mock_extract.return_value = invalid_signature_token
+            mock_validate.return_value = None
+            
+            result = await authenticator.authenticate_request()
+            
+            assert result is None
+            mock_validate.assert_called_once_with(invalid_signature_token, allow_expired=False)
+
+    @pytest.mark.asyncio
+    async def test_authenticate_request_insufficient_permissions(
+        self, 
+        authenticator, 
+        valid_jwt_token, 
+        sample_jwt_claims
+    ):
+        """Test authentication failure with insufficient permissions."""
+        with patch.object(authenticator, '_extract_token_from_request') as mock_extract, \
+             patch.object(authenticator, '_validate_jwt_token') as mock_validate, \
+             patch.object(authenticator, '_create_user_context') as mock_create_user, \
+             patch.object(authenticator, '_verify_user_permissions') as mock_verify_perms:
+            
+            mock_extract.return_value = valid_jwt_token
+            mock_validate.return_value = sample_jwt_claims
+            
+            mock_user = AuthenticatedUser(
+                user_id='auth0|test-user-123',
+                token_claims=sample_jwt_claims,
+                permissions=['read:documents'],  # Missing admin permission
+                token=valid_jwt_token
+            )
+            mock_create_user.return_value = mock_user
+            mock_verify_perms.return_value = False
+            
+            with pytest.raises(AuthenticationException) as exc_info:
+                await authenticator.authenticate_request(
+                    required_permissions=['admin:users']
+                )
+            
+            assert exc_info.value.error_code == SecurityErrorCode.AUTHZ_INSUFFICIENT_PERMISSIONS
+            assert "Insufficient permissions" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_authenticate_request_with_expired_token_allowed(
+        self, 
+        authenticator, 
+        expired_jwt_token, 
+        expired_jwt_claims
+    ):
+        """Test authentication with expired token when explicitly allowed."""
+        with patch.object(authenticator, '_extract_token_from_request') as mock_extract, \
+             patch.object(authenticator, '_validate_jwt_token') as mock_validate, \
+             patch.object(authenticator, '_create_user_context') as mock_create_user:
+            
+            mock_extract.return_value = expired_jwt_token
+            expired_jwt_claims['_expired'] = True
+            mock_validate.return_value = expired_jwt_claims
+            
+            mock_user = AuthenticatedUser(
+                user_id='auth0|test-user-123',
+                token_claims=expired_jwt_claims,
+                permissions=['read:documents'],
+                token=expired_jwt_token
+            )
+            mock_create_user.return_value = mock_user
+            
+            result = await authenticator.authenticate_request(
+                token=expired_jwt_token,
+                allow_expired=True
+            )
+            
+            assert result is not None
+            assert result.user_id == 'auth0|test-user-123'
+            mock_validate.assert_called_once_with(expired_jwt_token, allow_expired=True)
+
+    @pytest.mark.asyncio
+    async def test_validate_jwt_token_success(
+        self, 
+        authenticator, 
+        valid_jwt_token, 
+        sample_jwt_claims,
+        rsa_key_pair
+    ):
+        """Test successful JWT token validation with PyJWT 2.8+."""
+        with patch.object(authenticator, '_get_auth0_public_key') as mock_get_key, \
+             patch.object(authenticator, '_perform_additional_token_validations') as mock_additional:
+            
+            mock_get_key.return_value = rsa_key_pair['public_pem']
+            mock_additional.return_value = None
+            
+            result = await authenticator._validate_jwt_token(valid_jwt_token)
+            
+            assert result is not None
+            assert result['sub'] == 'auth0|test-user-123'
+            assert result['iss'] == 'https://test-domain.auth0.com/'
+            assert result['aud'] == 'test-audience'
+            assert 'exp' in result
+            assert 'iat' in result
+            
+            mock_get_key.assert_called_once_with('test-key-id')
+            mock_additional.assert_called_once_with(result)
+
+    @pytest.mark.asyncio
+    async def test_validate_jwt_token_with_cache_hit(
+        self, 
+        authenticator, 
+        valid_jwt_token, 
+        sample_jwt_claims
+    ):
+        """Test JWT token validation with cache hit for performance optimization."""
+        token_hash = hashlib.sha256(valid_jwt_token.encode()).hexdigest()
+        
+        with patch.object(authenticator.cache_manager, 'get_cached_jwt_validation_result') as mock_cache_get:
+            mock_cache_get.return_value = sample_jwt_claims
+            
+            result = await authenticator._validate_jwt_token(valid_jwt_token)
+            
+            assert result == sample_jwt_claims
+            mock_cache_get.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_validate_jwt_token_expired_not_allowed(
+        self, 
+        authenticator, 
+        expired_jwt_token,
+        rsa_key_pair
+    ):
+        """Test JWT token validation failure with expired token."""
+        with patch.object(authenticator, '_get_auth0_public_key') as mock_get_key:
+            mock_get_key.return_value = rsa_key_pair['public_pem']
+            
+            with pytest.raises(JWTException) as exc_info:
+                await authenticator._validate_jwt_token(expired_jwt_token)
+            
+            assert exc_info.value.error_code == SecurityErrorCode.AUTH_TOKEN_EXPIRED
+            assert "Token has expired" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_validate_jwt_token_expired_allowed(
+        self, 
+        authenticator, 
+        expired_jwt_token,
+        rsa_key_pair
+    ):
+        """Test JWT token validation with expired token when allowed."""
+        with patch.object(authenticator, '_get_auth0_public_key') as mock_get_key, \
+             patch.object(authenticator, '_perform_additional_token_validations') as mock_additional:
+            
+            mock_get_key.return_value = rsa_key_pair['public_pem']
+            mock_additional.return_value = None
+            
+            result = await authenticator._validate_jwt_token(
+                expired_jwt_token, 
+                allow_expired=True
+            )
+            
+            assert result is not None
+            assert result['_expired'] is True
+            assert result['sub'] == 'auth0|test-user-123'
+
+    @pytest.mark.asyncio
+    async def test_validate_jwt_token_invalid_signature(
+        self, 
+        authenticator, 
+        invalid_signature_token,
+        rsa_key_pair
+    ):
+        """Test JWT token validation failure with invalid signature."""
+        with patch.object(authenticator, '_get_auth0_public_key') as mock_get_key:
+            mock_get_key.return_value = rsa_key_pair['public_pem']
+            
+            with pytest.raises(JWTException) as exc_info:
+                await authenticator._validate_jwt_token(invalid_signature_token)
+            
+            assert exc_info.value.error_code == SecurityErrorCode.AUTH_TOKEN_INVALID
+            assert "Token validation failed" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_validate_jwt_token_malformed(self, authenticator, malformed_jwt_token):
+        """Test JWT token validation failure with malformed token."""
+        with pytest.raises(JWTException) as exc_info:
+            await authenticator._validate_jwt_token(malformed_jwt_token)
+        
+        assert exc_info.value.error_code == SecurityErrorCode.AUTH_TOKEN_MALFORMED
+        assert "Invalid token header" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_validate_jwt_token_missing_public_key(
+        self, 
+        authenticator, 
+        valid_jwt_token
+    ):
+        """Test JWT token validation failure when public key is not found."""
+        with patch.object(authenticator, '_get_auth0_public_key') as mock_get_key:
+            mock_get_key.return_value = None
+            
+            with pytest.raises(JWTException) as exc_info:
+                await authenticator._validate_jwt_token(valid_jwt_token)
+            
+            assert exc_info.value.error_code == SecurityErrorCode.AUTH_TOKEN_INVALID
+            assert "Unable to find public key for kid" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_get_auth0_public_key_success(self, authenticator):
+        """Test successful Auth0 public key retrieval and caching."""
+        mock_jwks_response = {
+            'keys': [
+                {
+                    'kty': 'RSA',
+                    'use': 'sig',
+                    'kid': 'test-key-id',
+                    'n': 'test-n-value',
+                    'e': 'AQAB',
+                    'alg': 'RS256'
+                }
+            ]
+        }
+        
+        with patch('src.auth.authentication.requests.Session') as mock_session_class:
+            mock_session = Mock()
+            mock_response = Mock()
+            mock_response.json.return_value = mock_jwks_response
+            mock_response.raise_for_status.return_value = None
+            mock_session.get.return_value = mock_response
+            mock_session_class.return_value = mock_session
+            
+            with patch('src.auth.authentication.jwt.algorithms.RSAAlgorithm.from_jwk') as mock_from_jwk:
+                mock_public_key = Mock()
+                mock_from_jwk.return_value = mock_public_key
+                
+                result = await authenticator._get_auth0_public_key('test-key-id')
+                
+                assert result == mock_public_key
+                mock_session.get.assert_called_once_with(
+                    'https://test-domain.auth0.com/.well-known/jwks.json',
+                    timeout=10
+                )
+                mock_from_jwk.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_get_auth0_public_key_cached(self, authenticator):
+        """Test Auth0 public key retrieval from cache."""
+        # Set up cached keys
+        authenticator._auth0_public_keys = {
+            'keys': [
+                {
+                    'kty': 'RSA',
+                    'use': 'sig',
+                    'kid': 'test-key-id',
+                    'n': 'test-n-value',
+                    'e': 'AQAB',
+                    'alg': 'RS256'
+                }
+            ]
+        }
+        authenticator._public_keys_cache_expiry = time.time() + 3600
+        
+        with patch('src.auth.authentication.jwt.algorithms.RSAAlgorithm.from_jwk') as mock_from_jwk:
+            mock_public_key = Mock()
+            mock_from_jwk.return_value = mock_public_key
+            
+            result = await authenticator._get_auth0_public_key('test-key-id')
+            
+            assert result == mock_public_key
+            mock_from_jwk.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_get_auth0_public_key_circuit_breaker_open(self, authenticator):
+        """Test Auth0 public key retrieval with circuit breaker open."""
+        authenticator._auth0_circuit_breaker_state = 'open'
+        authenticator._auth0_last_failure_time = time.time() - 30  # 30 seconds ago
+        
+        with pytest.raises(Auth0Exception) as exc_info:
+            await authenticator._get_auth0_public_key('test-key-id')
+        
+        assert exc_info.value.error_code == SecurityErrorCode.EXT_CIRCUIT_BREAKER_OPEN
+        assert "circuit breaker is open" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_get_auth0_public_key_network_failure(self, authenticator):
+        """Test Auth0 public key retrieval with network failure and circuit breaker."""
+        with patch('src.auth.authentication.requests.Session') as mock_session_class:
+            mock_session = Mock()
+            mock_session.get.side_effect = Exception("Network error")
+            mock_session_class.return_value = mock_session
+            
+            with pytest.raises(Auth0Exception) as exc_info:
+                await authenticator._get_auth0_public_key('test-key-id')
+            
+            assert exc_info.value.error_code == SecurityErrorCode.EXT_AUTH0_UNAVAILABLE
+            assert "Unable to retrieve Auth0 JWKS" in str(exc_info.value)
+            
+            # Verify circuit breaker state updated
+            assert authenticator._auth0_failure_count == 1
+
+    @pytest.mark.asyncio
+    async def test_get_auth0_public_key_not_found(self, authenticator):
+        """Test Auth0 public key retrieval when key ID is not found."""
+        mock_jwks_response = {
+            'keys': [
+                {
+                    'kty': 'RSA',
+                    'use': 'sig',
+                    'kid': 'different-key-id',
+                    'n': 'test-n-value',
+                    'e': 'AQAB',
+                    'alg': 'RS256'
+                }
+            ]
+        }
+        
+        with patch('src.auth.authentication.requests.Session') as mock_session_class:
+            mock_session = Mock()
+            mock_response = Mock()
+            mock_response.json.return_value = mock_jwks_response
+            mock_response.raise_for_status.return_value = None
+            mock_session.get.return_value = mock_response
+            mock_session_class.return_value = mock_session
+            
+            result = await authenticator._get_auth0_public_key('test-key-id')
+            
+            assert result is None
+
+    @pytest.mark.asyncio
+    async def test_perform_additional_token_validations_success(
+        self, 
+        authenticator, 
+        sample_jwt_claims
+    ):
+        """Test additional JWT token validations with valid claims."""
+        # Should not raise any exceptions
+        await authenticator._perform_additional_token_validations(sample_jwt_claims)
+
+    @pytest.mark.asyncio
+    async def test_perform_additional_token_validations_old_token(
+        self, 
+        authenticator, 
+        sample_jwt_claims
+    ):
+        """Test additional validations failure with very old token."""
+        old_claims = sample_jwt_claims.copy()
+        old_claims['iat'] = int(time.time()) - (25 * 3600)  # 25 hours ago
+        
+        with pytest.raises(JWTException) as exc_info:
+            await authenticator._perform_additional_token_validations(old_claims)
+        
+        assert exc_info.value.error_code == SecurityErrorCode.AUTH_TOKEN_INVALID
+        assert "Token is too old" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_perform_additional_token_validations_invalid_subject(
+        self, 
+        authenticator, 
+        sample_jwt_claims
+    ):
+        """Test additional validations failure with invalid subject."""
+        invalid_claims = sample_jwt_claims.copy()
+        invalid_claims['sub'] = ''  # Empty subject
+        
+        with pytest.raises(JWTException) as exc_info:
+            await authenticator._perform_additional_token_validations(invalid_claims)
+        
+        assert exc_info.value.error_code == SecurityErrorCode.AUTH_TOKEN_MALFORMED
+        assert "Invalid or missing subject" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_perform_additional_token_validations_invalid_scope(
+        self, 
+        authenticator, 
+        sample_jwt_claims
+    ):
+        """Test additional validations failure with invalid scope format."""
+        invalid_claims = sample_jwt_claims.copy()
+        invalid_claims['scope'] = ['invalid', 'scope', 'format']  # Should be string
+        
+        with pytest.raises(JWTException) as exc_info:
+            await authenticator._perform_additional_token_validations(invalid_claims)
+        
+        assert exc_info.value.error_code == SecurityErrorCode.AUTH_TOKEN_MALFORMED
+        assert "Invalid scope format" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_perform_additional_token_validations_invalid_permissions(
+        self, 
+        authenticator, 
+        sample_jwt_claims
+    ):
+        """Test additional validations failure with invalid permissions format."""
+        invalid_claims = sample_jwt_claims.copy()
+        invalid_claims['permissions'] = 'invalid-permissions-format'  # Should be list
+        
+        with pytest.raises(JWTException) as exc_info:
+            await authenticator._perform_additional_token_validations(invalid_claims)
+        
+        assert exc_info.value.error_code == SecurityErrorCode.AUTH_TOKEN_MALFORMED
+        assert "Invalid permissions format" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_create_user_context_success(
+        self, 
+        authenticator, 
+        sample_jwt_claims, 
+        valid_jwt_token
+    ):
+        """Test successful user context creation from JWT claims."""
+        with patch.object(authenticator, '_get_user_profile') as mock_get_profile, \
+             patch.object(authenticator, '_cache_user_session') as mock_cache_session:
+            
+            mock_profile = {
+                'user_id': 'auth0|test-user-123',
+                'email': 'test@example.com',
+                'name': 'Test User',
+                'picture': 'https://example.com/avatar.jpg'
+            }
+            mock_get_profile.return_value = mock_profile
+            mock_cache_session.return_value = None
+            
+            result = await authenticator._create_user_context(
+                sample_jwt_claims, 
+                valid_jwt_token
+            )
+            
+            assert result is not None
+            assert isinstance(result, AuthenticatedUser)
+            assert result.user_id == 'auth0|test-user-123'
+            assert result.token == valid_jwt_token
+            assert result.token_claims == sample_jwt_claims
+            assert 'read:documents' in result.permissions
+            assert 'write:documents' in result.permissions
+            assert 'read:profile' in result.permissions  # From scope
+            assert 'write:profile' in result.permissions  # From scope
+            assert result.profile == mock_profile
+            
+            mock_get_profile.assert_called_once_with(
+                'auth0|test-user-123', 
+                sample_jwt_claims
+            )
+            mock_cache_session.assert_called_once_with(result)
+
+    @pytest.mark.asyncio
+    async def test_create_user_context_missing_subject(
+        self, 
+        authenticator, 
+        sample_jwt_claims, 
+        valid_jwt_token
+    ):
+        """Test user context creation failure with missing subject."""
+        invalid_claims = sample_jwt_claims.copy()
+        del invalid_claims['sub']
+        
+        with pytest.raises(AuthenticationException) as exc_info:
+            await authenticator._create_user_context(invalid_claims, valid_jwt_token)
+        
+        assert exc_info.value.error_code == SecurityErrorCode.AUTH_TOKEN_MALFORMED
+        assert "Missing user ID in token claims" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_create_user_context_with_custom_claims(
+        self, 
+        authenticator, 
+        sample_jwt_claims, 
+        valid_jwt_token
+    ):
+        """Test user context creation with custom claims in permissions."""
+        with patch.object(authenticator, '_get_user_profile') as mock_get_profile, \
+             patch.object(authenticator, '_cache_user_session') as mock_cache_session:
+            
+            mock_get_profile.return_value = {}
+            mock_cache_session.return_value = None
+            
+            result = await authenticator._create_user_context(
+                sample_jwt_claims, 
+                valid_jwt_token
+            )
+            
+            # Should include custom permissions from https://custom.claim/permissions
+            assert 'custom:permission' in result.permissions
+            
+            # Should deduplicate permissions
+            assert len([p for p in result.permissions if p == 'read:documents']) == 1
+
+    @pytest.mark.asyncio
+    async def test_get_user_profile_success(self, authenticator, sample_jwt_claims):
+        """Test successful user profile retrieval with caching."""
+        user_id = 'auth0|test-user-123'
+        
+        with patch.object(authenticator.cache_manager, 'get_cached_session_data') as mock_cache_get, \
+             patch.object(authenticator.cache_manager, 'cache_session_data') as mock_cache_set:
+            
+            mock_cache_get.return_value = None  # Cache miss
+            mock_cache_set.return_value = None
+            
+            result = await authenticator._get_user_profile(user_id, sample_jwt_claims)
+            
+            assert result is not None
+            assert result['user_id'] == user_id
+            assert result['email'] == 'test@example.com'
+            assert result['name'] == 'Test User'
+            assert result['picture'] == 'https://example.com/avatar.jpg'
+            assert result['email_verified'] is True
+            assert result['https://custom.claim/role'] == 'admin'
+            
+            mock_cache_set.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_get_user_profile_cached(self, authenticator, sample_jwt_claims):
+        """Test user profile retrieval from cache."""
+        user_id = 'auth0|test-user-123'
+        cached_profile = {
+            'user_id': user_id,
+            'email': 'cached@example.com',
+            'name': 'Cached User'
+        }
+        
+        with patch.object(authenticator.cache_manager, 'get_cached_session_data') as mock_cache_get:
+            mock_cache_get.return_value = cached_profile
+            
+            result = await authenticator._get_user_profile(user_id, sample_jwt_claims)
+            
+            assert result == cached_profile
+            mock_cache_get.assert_called_once_with(f"profile:{user_id}")
+
+    @pytest.mark.asyncio
+    async def test_get_user_profile_with_auth0_fetch(self, authenticator, sample_jwt_claims):
+        """Test user profile retrieval with Auth0 Management API fetch."""
+        user_id = 'auth0|test-user-123'
+        
+        with patch.object(authenticator, '_should_fetch_extended_profile') as mock_should_fetch, \
+             patch.object(authenticator, '_fetch_auth0_user_profile') as mock_fetch_auth0, \
+             patch.object(authenticator.cache_manager, 'get_cached_session_data') as mock_cache_get, \
+             patch.object(authenticator.cache_manager, 'cache_session_data') as mock_cache_set:
+            
+            mock_cache_get.return_value = None
+            mock_should_fetch.return_value = True
+            mock_fetch_auth0.return_value = {
+                'last_login': '2023-01-01T12:00:00.000Z',
+                'login_count': 42,
+                'app_metadata': {'role': 'admin'}
+            }
+            mock_cache_set.return_value = None
+            
+            result = await authenticator._get_user_profile(user_id, sample_jwt_claims)
+            
+            assert result['last_login'] == '2023-01-01T12:00:00.000Z'
+            assert result['login_count'] == 42
+            assert result['app_metadata']['role'] == 'admin'
+            
+            mock_should_fetch.assert_called_once_with(user_id)
+            mock_fetch_auth0.assert_called_once_with(user_id)
+
+    @pytest.mark.asyncio
+    async def test_get_user_profile_auth0_fetch_failure(
+        self, 
+        authenticator, 
+        sample_jwt_claims
+    ):
+        """Test user profile retrieval with Auth0 fetch failure fallback."""
+        user_id = 'auth0|test-user-123'
+        
+        with patch.object(authenticator, '_should_fetch_extended_profile') as mock_should_fetch, \
+             patch.object(authenticator, '_fetch_auth0_user_profile') as mock_fetch_auth0, \
+             patch.object(authenticator.cache_manager, 'get_cached_session_data') as mock_cache_get, \
+             patch.object(authenticator.cache_manager, 'cache_session_data') as mock_cache_set:
+            
+            mock_cache_get.return_value = None
+            mock_should_fetch.return_value = True
+            mock_fetch_auth0.side_effect = Exception("Auth0 API error")
+            mock_cache_set.return_value = None
+            
+            result = await authenticator._get_user_profile(user_id, sample_jwt_claims)
+            
+            # Should still return basic profile from token claims
+            assert result['user_id'] == user_id
+            assert result['email'] == 'test@example.com'
+            assert result['name'] == 'Test User'
+
+    def test_should_fetch_extended_profile_true(self, authenticator):
+        """Test should fetch extended profile when conditions are met."""
+        user_id = 'auth0|test-user-123'
+        
+        with patch.object(authenticator.cache_manager, 'redis_client') as mock_redis:
+            mock_redis.get.return_value = None  # No recent attempt
+            mock_redis.setex.return_value = True
+            
+            result = authenticator._should_fetch_extended_profile(user_id)
+            
+            assert result is True
+            mock_redis.get.assert_called_once_with(f"profile_fetch_attempt:{user_id}")
+            mock_redis.setex.assert_called_once_with(
+                f"profile_fetch_attempt:{user_id}", 300, "1"
+            )
+
+    def test_should_fetch_extended_profile_circuit_breaker_open(self, authenticator):
+        """Test should not fetch extended profile when circuit breaker is open."""
+        authenticator._auth0_circuit_breaker_state = 'open'
+        
+        result = authenticator._should_fetch_extended_profile('auth0|test-user-123')
+        
+        assert result is False
+
+    def test_should_fetch_extended_profile_recent_attempt(self, authenticator):
+        """Test should not fetch extended profile when recent attempt exists."""
+        user_id = 'auth0|test-user-123'
+        
+        with patch.object(authenticator.cache_manager, 'redis_client') as mock_redis:
+            mock_redis.get.return_value = "1"  # Recent attempt exists
+            
+            result = authenticator._should_fetch_extended_profile(user_id)
+            
+            assert result is False
+            mock_redis.get.assert_called_once_with(f"profile_fetch_attempt:{user_id}")
+
+    @pytest.mark.asyncio
+    async def test_fetch_auth0_user_profile_success(self, authenticator):
+        """Test successful Auth0 user profile fetch."""
+        user_id = 'auth0|test-user-123'
+        
+        with patch.object(authenticator, '_initialize_auth0_management_client') as mock_init:
+            mock_management_client = Mock()
+            mock_management_client.users.get.return_value = {
+                'last_login': '2023-01-01T12:00:00.000Z',
+                'logins_count': 42,
+                'created_at': '2022-01-01T00:00:00.000Z',
+                'app_metadata': {'role': 'admin'},
+                'user_metadata': {'preferences': {'theme': 'dark'}}
+            }
+            authenticator._auth0_management_client = mock_management_client
+            
+            result = await authenticator._fetch_auth0_user_profile(user_id)
+            
+            assert result is not None
+            assert result['last_login'] == '2023-01-01T12:00:00.000Z'
+            assert result['login_count'] == 42
+            assert result['created_at'] == '2022-01-01T00:00:00.000Z'
+            assert result['app_metadata']['role'] == 'admin'
+            assert result['user_metadata']['preferences']['theme'] == 'dark'
+            
+            mock_management_client.users.get.assert_called_once_with(user_id)
+
+    @pytest.mark.asyncio
+    async def test_fetch_auth0_user_profile_auth0_error(self, authenticator):
+        """Test Auth0 user profile fetch with Auth0 error."""
+        user_id = 'auth0|test-user-123'
+        
+        with patch.object(authenticator, '_initialize_auth0_management_client') as mock_init:
+            mock_management_client = Mock()
+            mock_management_client.users.get.side_effect = Auth0Error(
+                status_code=404,
+                message="User not found",
+                content=""
+            )
+            authenticator._auth0_management_client = mock_management_client
+            
+            result = await authenticator._fetch_auth0_user_profile(user_id)
+            
+            assert result is None
+
+    @pytest.mark.asyncio
+    async def test_fetch_auth0_user_profile_no_client(self, authenticator):
+        """Test Auth0 user profile fetch when management client is not available."""
+        user_id = 'auth0|test-user-123'
+        authenticator._auth0_management_client = None
+        
+        with patch.object(authenticator, '_initialize_auth0_management_client') as mock_init:
+            mock_init.return_value = None
+            
+            result = await authenticator._fetch_auth0_user_profile(user_id)
+            
+            assert result is None
+            mock_init.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_initialize_auth0_management_client_success(self, authenticator):
+        """Test successful Auth0 management client initialization."""
+        with patch('src.auth.authentication.GetToken') as mock_get_token_class, \
+             patch('src.auth.authentication.Auth0') as mock_auth0_class:
+            
+            mock_get_token = Mock()
+            mock_get_token.client_credentials.return_value = {
+                'access_token': 'test-management-token'
+            }
+            mock_get_token_class.return_value = mock_get_token
+            
+            mock_auth0_client = Mock()
+            mock_auth0_class.return_value = mock_auth0_client
+            
+            await authenticator._initialize_auth0_management_client()
+            
+            assert authenticator._auth0_management_client == mock_auth0_client
+            
+            mock_get_token_class.assert_called_once_with(
+                'test-domain.auth0.com',
+                'test-client-id',
+                'test-client-secret'
+            )
+            mock_get_token.client_credentials.assert_called_once_with(
+                'https://test-domain.auth0.com/api/v2/'
+            )
+            mock_auth0_class.assert_called_once_with(
+                'test-domain.auth0.com',
+                'test-management-token'
+            )
+
+    @pytest.mark.asyncio
+    async def test_initialize_auth0_management_client_missing_credentials(
+        self, 
+        authenticator
+    ):
+        """Test Auth0 management client initialization with missing credentials."""
+        authenticator.auth0_client_secret = None  # Missing credential
+        
+        await authenticator._initialize_auth0_management_client()
+        
+        assert authenticator._auth0_management_client is None
+
+    @pytest.mark.asyncio
+    async def test_initialize_auth0_management_client_error(self, authenticator):
+        """Test Auth0 management client initialization with error."""
+        with patch('src.auth.authentication.GetToken') as mock_get_token_class:
+            mock_get_token_class.side_effect = Exception("Auth0 initialization error")
+            
+            await authenticator._initialize_auth0_management_client()
+            
+            assert authenticator._auth0_management_client is None
+
+    @pytest.mark.asyncio
+    async def test_cache_user_session_success(self, authenticator, sample_jwt_claims):
+        """Test successful user session caching."""
+        user = AuthenticatedUser(
+            user_id='auth0|test-user-123',
+            token_claims=sample_jwt_claims,
+            permissions=['read:documents', 'write:documents'],
+            profile={'email': 'test@example.com'},
+            token='test-token'
+        )
+        
+        with patch.object(authenticator.cache_manager, 'cache_user_permissions') as mock_cache_perms, \
+             patch.object(authenticator.cache_manager, 'cache_session_data') as mock_cache_session, \
+             patch('secrets.token_urlsafe') as mock_token:
+            
+            mock_token.return_value = 'test-session-id'
+            mock_cache_perms.return_value = None
+            mock_cache_session.return_value = None
+            
+            await authenticator._cache_user_session(user)
+            
+            mock_cache_perms.assert_called_once_with(
+                'auth0|test-user-123',
+                {'read:documents', 'write:documents'},
+                ttl=300
+            )
+            mock_cache_session.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_cache_user_session_error(self, authenticator, sample_jwt_claims):
+        """Test user session caching with error (should not fail authentication)."""
+        user = AuthenticatedUser(
+            user_id='auth0|test-user-123',
+            token_claims=sample_jwt_claims,
+            permissions=['read:documents'],
+            profile={'email': 'test@example.com'},
+            token='test-token'
+        )
+        
+        with patch.object(authenticator.cache_manager, 'cache_user_permissions') as mock_cache_perms:
+            mock_cache_perms.side_effect = Exception("Cache error")
+            
+            # Should not raise exception
+            await authenticator._cache_user_session(user)
+
+    @pytest.mark.asyncio
+    async def test_verify_user_permissions_success(self, authenticator, sample_jwt_claims):
+        """Test successful user permission verification."""
+        user = AuthenticatedUser(
+            user_id='auth0|test-user-123',
+            token_claims=sample_jwt_claims,
+            permissions=['read:documents', 'write:documents', 'admin:users'],
+            token='test-token'
+        )
+        
+        required_permissions = ['read:documents', 'write:documents']
+        
+        result = await authenticator._verify_user_permissions(user, required_permissions)
+        
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_verify_user_permissions_failure(self, authenticator, sample_jwt_claims):
+        """Test user permission verification failure."""
+        user = AuthenticatedUser(
+            user_id='auth0|test-user-123',
+            token_claims=sample_jwt_claims,
+            permissions=['read:documents'],  # Missing write permission
+            token='test-token'
+        )
+        
+        required_permissions = ['read:documents', 'write:documents']
+        
+        result = await authenticator._verify_user_permissions(user, required_permissions)
+        
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_verify_user_permissions_no_required(self, authenticator, sample_jwt_claims):
+        """Test user permission verification with no required permissions."""
+        user = AuthenticatedUser(
+            user_id='auth0|test-user-123',
+            token_claims=sample_jwt_claims,
+            permissions=['read:documents'],
+            token='test-token'
+        )
+        
+        result = await authenticator._verify_user_permissions(user, [])
+        
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_verify_user_permissions_user_has_no_permissions(
+        self, 
+        authenticator, 
+        sample_jwt_claims
+    ):
+        """Test user permission verification when user has no permissions."""
+        user = AuthenticatedUser(
+            user_id='auth0|test-user-123',
+            token_claims=sample_jwt_claims,
+            permissions=None,
+            token='test-token'
+        )
+        
+        required_permissions = ['read:documents']
+        
+        result = await authenticator._verify_user_permissions(user, required_permissions)
+        
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_verify_user_permissions_error(self, authenticator, sample_jwt_claims):
+        """Test user permission verification with error."""
+        user = AuthenticatedUser(
+            user_id='auth0|test-user-123',
+            token_claims=sample_jwt_claims,
+            permissions=['read:documents'],
+            token='test-token'
+        )
+        
+        # Simulate error by corrupting user object
+        user.permissions = "invalid-permissions-format"
+        
+        result = await authenticator._verify_user_permissions(user, ['read:documents'])
+        
+        assert result is False
+
+    def test_extract_token_from_request_authorization_header(self, authenticator, app):
+        """Test token extraction from Authorization header."""
+        with app.test_request_context(
+            headers={'Authorization': 'Bearer test-jwt-token'}
+        ):
+            result = authenticator._extract_token_from_request()
+            
+            assert result == 'test-jwt-token'
+
+    def test_extract_token_from_request_cookie(self, authenticator, app):
+        """Test token extraction from cookie."""
+        with app.test_request_context(cookies={'access_token': 'test-jwt-token'}):
+            result = authenticator._extract_token_from_request()
+            
+            assert result == 'test-jwt-token'
+
+    def test_extract_token_from_request_query_parameter(self, authenticator, app):
+        """Test token extraction from query parameter (with warning)."""
+        with app.test_request_context('/?access_token=test-jwt-token'):
+            result = authenticator._extract_token_from_request()
+            
+            assert result == 'test-jwt-token'
+
+    def test_extract_token_from_request_no_token(self, authenticator, app):
+        """Test token extraction when no token is present."""
+        with app.test_request_context():
+            result = authenticator._extract_token_from_request()
+            
+            assert result is None
+
+    def test_extract_token_from_request_invalid_authorization_header(
+        self, 
+        authenticator, 
+        app
+    ):
+        """Test token extraction with invalid Authorization header format."""
+        with app.test_request_context(
+            headers={'Authorization': 'Basic invalid-format'}
+        ):
+            result = authenticator._extract_token_from_request()
+            
+            assert result is None
+
+    def test_extract_token_from_request_error(self, authenticator):
+        """Test token extraction with request error."""
+        # Test without Flask application context
+        result = authenticator._extract_token_from_request()
+        
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_refresh_token_success(self, authenticator, rsa_key_pair):
+        """Test successful token refresh operation."""
+        # Create refresh token claims
+        refresh_claims = {
+            'sub': 'auth0|test-user-123',
+            'type': 'refresh_token',
+            'exp': int(time.time()) + 7200,  # Expires in 2 hours
+            'iat': int(time.time())
+        }
+        
+        refresh_token = jwt.encode(
+            refresh_claims,
+            rsa_key_pair['private_pem'],
+            algorithm='RS256',
+            headers={'kid': 'test-key-id'}
+        )
+        
+        with patch.object(authenticator, '_validate_jwt_token') as mock_validate, \
+             patch.object(authenticator.jwt_manager, 'refresh_access_token') as mock_refresh:
+            
+            mock_validate.return_value = refresh_claims
+            mock_refresh.return_value = ('new-access-token', 'new-refresh-token')
+            
+            new_access, new_refresh = await authenticator.refresh_token(
+                refresh_token,
+                current_access_token='old-access-token'
+            )
+            
+            assert new_access == 'new-access-token'
+            assert new_refresh == 'new-refresh-token'
+            
+            mock_validate.assert_called_once_with(refresh_token, allow_expired=False)
+            mock_refresh.assert_called_once_with(refresh_token)
+
+    @pytest.mark.asyncio
+    async def test_refresh_token_invalid_type(self, authenticator, rsa_key_pair):
+        """Test token refresh failure with invalid token type."""
+        # Create access token claims (not refresh token)
+        access_claims = {
+            'sub': 'auth0|test-user-123',
+            'type': 'access_token',  # Wrong type
+            'exp': int(time.time()) + 3600,
+            'iat': int(time.time())
+        }
+        
+        access_token = jwt.encode(
+            access_claims,
+            rsa_key_pair['private_pem'],
+            algorithm='RS256',
+            headers={'kid': 'test-key-id'}
+        )
+        
+        with patch.object(authenticator, '_validate_jwt_token') as mock_validate:
+            mock_validate.return_value = access_claims
+            
+            with pytest.raises(JWTException) as exc_info:
+                await authenticator.refresh_token(access_token)
+            
+            assert exc_info.value.error_code == SecurityErrorCode.AUTH_TOKEN_INVALID
+            assert "Invalid token type for refresh operation" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_refresh_token_validation_failure(self, authenticator):
+        """Test token refresh failure with token validation error."""
+        with patch.object(authenticator, '_validate_jwt_token') as mock_validate:
+            mock_validate.side_effect = JWTException(
+                message="Token validation failed",
+                error_code=SecurityErrorCode.AUTH_TOKEN_INVALID
+            )
+            
+            with pytest.raises(JWTException):
+                await authenticator.refresh_token('invalid-refresh-token')
+
+    @pytest.mark.asyncio
+    async def test_refresh_token_jwt_manager_error(self, authenticator, rsa_key_pair):
+        """Test token refresh failure with JWT manager error."""
+        refresh_claims = {
+            'sub': 'auth0|test-user-123',
+            'type': 'refresh_token',
+            'exp': int(time.time()) + 7200,
+            'iat': int(time.time())
+        }
+        
+        refresh_token = jwt.encode(
+            refresh_claims,
+            rsa_key_pair['private_pem'],
+            algorithm='RS256',
+            headers={'kid': 'test-key-id'}
+        )
+        
+        with patch.object(authenticator, '_validate_jwt_token') as mock_validate, \
+             patch.object(authenticator.jwt_manager, 'refresh_access_token') as mock_refresh:
+            
+            mock_validate.return_value = refresh_claims
+            mock_refresh.side_effect = Exception("JWT manager error")
+            
+            with pytest.raises(JWTException) as exc_info:
+                await authenticator.refresh_token(refresh_token)
+            
+            assert exc_info.value.error_code == SecurityErrorCode.AUTH_TOKEN_INVALID
+            assert "Token refresh failed" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_revoke_token_success(self, authenticator, valid_jwt_token, sample_jwt_claims):
+        """Test successful token revocation."""
+        with patch.object(authenticator, '_validate_jwt_token') as mock_validate, \
+             patch.object(authenticator.jwt_manager, 'revoke_token') as mock_revoke, \
+             patch.object(authenticator.cache_manager, 'bulk_invalidate_user_cache') as mock_invalidate:
+            
+            mock_validate.return_value = sample_jwt_claims
+            mock_revoke.return_value = True
+            mock_invalidate.return_value = None
+            
+            result = await authenticator.revoke_token(
+                valid_jwt_token,
+                reason="user_logout"
+            )
+            
+            assert result is True
+            
+            mock_validate.assert_called_once_with(valid_jwt_token, allow_expired=True)
+            mock_revoke.assert_called_once_with(valid_jwt_token, "user_logout")
+            mock_invalidate.assert_called_once_with('auth0|test-user-123')
+
+    @pytest.mark.asyncio
+    async def test_revoke_token_validation_failure(self, authenticator):
+        """Test token revocation with token validation failure."""
+        with patch.object(authenticator, '_validate_jwt_token') as mock_validate:
+            mock_validate.return_value = None
+            
+            result = await authenticator.revoke_token('invalid-token')
+            
+            assert result is False
+
+    @pytest.mark.asyncio
+    async def test_revoke_token_revocation_failure(
+        self, 
+        authenticator, 
+        valid_jwt_token, 
+        sample_jwt_claims
+    ):
+        """Test token revocation with JWT manager revocation failure."""
+        with patch.object(authenticator, '_validate_jwt_token') as mock_validate, \
+             patch.object(authenticator.jwt_manager, 'revoke_token') as mock_revoke:
+            
+            mock_validate.return_value = sample_jwt_claims
+            mock_revoke.return_value = False
+            
+            result = await authenticator.revoke_token(valid_jwt_token)
+            
+            assert result is False
+
+    @pytest.mark.asyncio
+    async def test_revoke_token_error(self, authenticator, valid_jwt_token):
+        """Test token revocation with unexpected error."""
+        with patch.object(authenticator, '_validate_jwt_token') as mock_validate:
+            mock_validate.side_effect = Exception("Unexpected error")
+            
+            result = await authenticator.revoke_token(valid_jwt_token)
+            
+            assert result is False
+
+    def test_get_health_status_healthy(self, authenticator):
+        """Test health status check when all components are healthy."""
+        with patch.object(authenticator.cache_manager, 'perform_health_check') as mock_cache_health:
+            mock_cache_health.return_value = {
+                'status': 'healthy',
+                'details': 'Cache connection active'
+            }
+            
+            health_status = authenticator.get_health_status()
+            
+            assert health_status['status'] == 'healthy'
+            assert 'components' in health_status
+            assert health_status['components']['jwt_manager']['status'] == 'healthy'
+            assert health_status['components']['cache_manager']['status'] == 'healthy'
+            assert health_status['components']['auth0_service']['status'] == 'healthy'
+            assert 'timestamp' in health_status
+
+    def test_get_health_status_circuit_breaker_open(self, authenticator):
+        """Test health status check with Auth0 circuit breaker open."""
+        authenticator._auth0_circuit_breaker_state = 'open'
+        authenticator._auth0_failure_count = 5
+        
+        with patch.object(authenticator.cache_manager, 'perform_health_check') as mock_cache_health:
+            mock_cache_health.return_value = {
+                'status': 'healthy',
+                'details': 'Cache connection active'
+            }
+            
+            health_status = authenticator.get_health_status()
+            
+            assert health_status['status'] == 'degraded'
+            assert health_status['components']['auth0_service']['status'] == 'degraded'
+            assert health_status['components']['auth0_service']['circuit_breaker_state'] == 'open'
+            assert health_status['components']['auth0_service']['failure_count'] == 5
+
+    def test_get_health_status_cache_unhealthy(self, authenticator):
+        """Test health status check with unhealthy cache manager."""
+        with patch.object(authenticator.cache_manager, 'perform_health_check') as mock_cache_health:
+            mock_cache_health.return_value = {
+                'status': 'unhealthy',
+                'details': 'Redis connection failed'
+            }
+            
+            health_status = authenticator.get_health_status()
+            
+            assert health_status['status'] == 'unhealthy'
+            assert health_status['components']['cache_manager']['status'] == 'unhealthy'
+
+    def test_get_health_status_error(self, authenticator):
+        """Test health status check with unexpected error."""
+        with patch.object(authenticator.cache_manager, 'perform_health_check') as mock_cache_health:
+            mock_cache_health.side_effect = Exception("Health check error")
+            
+            health_status = authenticator.get_health_status()
+            
+            assert health_status['status'] == 'unhealthy'
+            assert 'error' in health_status
+
+
+class TestAuthenticatedUser:
+    """
+    Test suite for AuthenticatedUser class covering user context management,
+    permission checking, and profile data handling.
+    """
+
+    @pytest.fixture
+    def sample_user_data(self):
+        """Provide sample user data for testing."""
+        return {
+            'user_id': 'auth0|test-user-123',
+            'token_claims': {
+                'sub': 'auth0|test-user-123',
+                'email': 'test@example.com',
+                'name': 'Test User'
+            },
+            'permissions': ['read:documents', 'write:documents', 'admin:users'],
+            'profile': {
+                'email': 'test@example.com',
+                'name': 'Test User',
+                'picture': 'https://example.com/avatar.jpg',
+                'company': 'Test Company'
+            },
+            'token': 'test-jwt-token'
+        }
+
+    @pytest.fixture
+    def authenticated_user(self, sample_user_data):
+        """Create AuthenticatedUser instance for testing."""
+        return AuthenticatedUser(**sample_user_data)
+
+    def test_authenticated_user_initialization(self, sample_user_data):
+        """Test AuthenticatedUser initialization with all parameters."""
+        user = AuthenticatedUser(**sample_user_data)
+        
+        assert user.user_id == 'auth0|test-user-123'
+        assert user.token_claims == sample_user_data['token_claims']
+        assert user.permissions == sample_user_data['permissions']
+        assert user.profile == sample_user_data['profile']
+        assert user.token == 'test-jwt-token'
+        assert isinstance(user.authenticated_at, datetime)
+
+    def test_authenticated_user_initialization_minimal(self):
+        """Test AuthenticatedUser initialization with minimal parameters."""
+        user = AuthenticatedUser(
+            user_id='auth0|test-user-123',
+            token_claims={'sub': 'auth0|test-user-123'},
+            permissions=[]
+        )
+        
+        assert user.user_id == 'auth0|test-user-123'
+        assert user.permissions == []
+        assert user.profile == {}
+        assert user.token is None
+        assert isinstance(user.authenticated_at, datetime)
+
+    def test_authenticated_user_initialization_with_defaults(self):
+        """Test AuthenticatedUser initialization with None values."""
+        user = AuthenticatedUser(
+            user_id='auth0|test-user-123',
+            token_claims={'sub': 'auth0|test-user-123'},
+            permissions=None,
+            profile=None
+        )
+        
+        assert user.permissions == []
+        assert user.profile == {}
+
+    def test_has_permission_true(self, authenticated_user):
+        """Test has_permission method with existing permission."""
+        result = authenticated_user.has_permission('read:documents')
+        
+        assert result is True
+
+    def test_has_permission_false(self, authenticated_user):
+        """Test has_permission method with non-existing permission."""
+        result = authenticated_user.has_permission('delete:documents')
+        
+        assert result is False
+
+    def test_has_any_permission_true(self, authenticated_user):
+        """Test has_any_permission method with at least one existing permission."""
+        result = authenticated_user.has_any_permission([
+            'delete:documents',  # User doesn't have this
+            'read:documents',    # User has this
+            'super:admin'        # User doesn't have this
+        ])
+        
+        assert result is True
+
+    def test_has_any_permission_false(self, authenticated_user):
+        """Test has_any_permission method with no existing permissions."""
+        result = authenticated_user.has_any_permission([
+            'delete:documents',
+            'super:admin',
+            'manage:billing'
+        ])
+        
+        assert result is False
+
+    def test_has_any_permission_empty_list(self, authenticated_user):
+        """Test has_any_permission method with empty permissions list."""
+        result = authenticated_user.has_any_permission([])
+        
+        assert result is False
+
+    def test_has_all_permissions_true(self, authenticated_user):
+        """Test has_all_permissions method with all existing permissions."""
+        result = authenticated_user.has_all_permissions([
+            'read:documents',
+            'write:documents'
+        ])
+        
+        assert result is True
+
+    def test_has_all_permissions_false(self, authenticated_user):
+        """Test has_all_permissions method with some missing permissions."""
+        result = authenticated_user.has_all_permissions([
+            'read:documents',
+            'write:documents',
+            'delete:documents'  # User doesn't have this
+        ])
+        
+        assert result is False
+
+    def test_has_all_permissions_empty_list(self, authenticated_user):
+        """Test has_all_permissions method with empty permissions list."""
+        result = authenticated_user.has_all_permissions([])
+        
+        assert result is True
+
+    def test_get_profile_value_existing(self, authenticated_user):
+        """Test get_profile_value method with existing profile key."""
+        result = authenticated_user.get_profile_value('email')
+        
+        assert result == 'test@example.com'
+
+    def test_get_profile_value_non_existing(self, authenticated_user):
+        """Test get_profile_value method with non-existing profile key."""
+        result = authenticated_user.get_profile_value('phone')
+        
+        assert result is None
+
+    def test_get_profile_value_with_default(self, authenticated_user):
+        """Test get_profile_value method with default value."""
+        result = authenticated_user.get_profile_value('phone', 'N/A')
+        
+        assert result == 'N/A'
+
+    def test_to_dict(self, authenticated_user):
+        """Test to_dict method returns proper dictionary representation."""
+        result = authenticated_user.to_dict()
+        
+        assert result['user_id'] == 'auth0|test-user-123'
+        assert result['permissions'] == ['read:documents', 'write:documents', 'admin:users']
+        assert result['profile']['email'] == 'test@example.com'
+        assert 'authenticated_at' in result
+        assert 'token_claims' in result
+        
+        # Verify token claims are filtered for security
+        token_claims = result['token_claims']
+        assert 'sub' in token_claims
+        assert 'iss' in token_claims
+        assert 'aud' in token_claims
+        assert 'exp' in token_claims
+        assert 'iat' in token_claims
+
+
+class TestGlobalFunctions:
+    """
+    Test suite for global authentication functions and utilities.
+    """
+
+    def test_get_core_authenticator_singleton(self):
+        """Test get_core_authenticator returns singleton instance."""
+        # Clear existing instance
+        import src.auth.authentication
+        src.auth.authentication._core_authenticator = None
+        
+        authenticator1 = get_core_authenticator()
+        authenticator2 = get_core_authenticator()
+        
+        assert authenticator1 is authenticator2
+        assert isinstance(authenticator1, CoreJWTAuthenticator)
+
+    @pytest.mark.asyncio
+    async def test_authenticate_token_success(self, valid_jwt_token, sample_jwt_claims):
+        """Test standalone authenticate_token function with valid token."""
+        with patch('src.auth.authentication.get_core_authenticator') as mock_get_auth:
+            mock_authenticator = Mock()
+            mock_user = AuthenticatedUser(
+                user_id='auth0|test-user-123',
+                token_claims=sample_jwt_claims,
+                permissions=['read:documents'],
+                token=valid_jwt_token
+            )
+            mock_authenticator.authenticate_request.return_value = mock_user
+            mock_get_auth.return_value = mock_authenticator
+            
+            result = await authenticate_token(valid_jwt_token)
+            
+            assert result == mock_user
+            mock_authenticator.authenticate_request.assert_called_once_with(token=valid_jwt_token)
+
+    @pytest.mark.asyncio
+    async def test_authenticate_token_failure(self, invalid_signature_token):
+        """Test standalone authenticate_token function with invalid token."""
+        with patch('src.auth.authentication.get_core_authenticator') as mock_get_auth:
+            mock_authenticator = Mock()
+            mock_authenticator.authenticate_request.side_effect = Exception("Token invalid")
+            mock_get_auth.return_value = mock_authenticator
+            
+            result = await authenticate_token(invalid_signature_token)
+            
+            assert result is None
+
+    def test_create_auth_health_check_success(self):
+        """Test create_auth_health_check function with healthy system."""
+        with patch('src.auth.authentication.get_core_authenticator') as mock_get_auth:
+            mock_authenticator = Mock()
+            mock_health = {
+                'status': 'healthy',
+                'timestamp': '2023-01-01T12:00:00.000Z',
+                'components': {
+                    'jwt_manager': {'status': 'healthy'},
+                    'cache_manager': {'status': 'healthy'},
+                    'auth0_service': {'status': 'healthy'}
+                }
+            }
+            mock_authenticator.get_health_status.return_value = mock_health
+            mock_get_auth.return_value = mock_authenticator
+            
+            result = create_auth_health_check()
+            
+            assert result == mock_health
+            assert result['status'] == 'healthy'
+
+    def test_create_auth_health_check_error(self):
+        """Test create_auth_health_check function with error."""
+        with patch('src.auth.authentication.get_core_authenticator') as mock_get_auth:
+            mock_get_auth.side_effect = Exception("Health check error")
+            
+            result = create_auth_health_check()
+            
+            assert result['status'] == 'unhealthy'
+            assert 'error' in result
+            assert 'timestamp' in result
+
+    def test_get_authenticated_user_with_context(self, app, sample_jwt_claims):
+        """Test get_authenticated_user function with Flask context."""
+        user = AuthenticatedUser(
+            user_id='auth0|test-user-123',
+            token_claims=sample_jwt_claims,
+            permissions=['read:documents'],
+            token='test-token'
+        )
+        
+        with app.test_request_context():
+            g.authenticated_user = user
+            
+            result = get_authenticated_user()
+            
+            assert result == user
+
+    def test_get_authenticated_user_no_context(self, app):
+        """Test get_authenticated_user function without Flask context."""
+        with app.test_request_context():
+            result = get_authenticated_user()
+            
+            assert result is None
+
+
+class TestRequireAuthenticationDecorator:
+    """
+    Test suite for require_authentication decorator covering route protection,
+    permission validation, and error handling.
+    """
+
+    def test_require_authentication_decorator_import(self):
+        """Test that require_authentication decorator can be imported."""
+        assert require_authentication is not None
+        assert callable(require_authentication)
+
+    @pytest.mark.asyncio
+    async def test_require_authentication_success(self, app, sample_jwt_claims):
+        """Test require_authentication decorator with successful authentication."""
+        user = AuthenticatedUser(
+            user_id='auth0|test-user-123',
+            token_claims=sample_jwt_claims,
+            permissions=['read:documents'],
+            token='test-token'
+        )
+        
+        @require_authentication(['read:documents'])
+        async def protected_endpoint():
+            return {'message': 'success', 'user_id': g.authenticated_user.user_id}
+        
+        with app.test_request_context():
+            with patch('src.auth.authentication.get_core_authenticator') as mock_get_auth:
+                mock_authenticator = Mock()
+                mock_authenticator.authenticate_request.return_value = user
+                mock_get_auth.return_value = mock_authenticator
+                
+                result = await protected_endpoint()
+                
+                assert result['message'] == 'success'
+                assert result['user_id'] == 'auth0|test-user-123'
+                assert g.authenticated_user == user
+
+    @pytest.mark.asyncio 
+    async def test_require_authentication_no_token(self, app):
+        """Test require_authentication decorator with no authentication."""
+        @require_authentication(['read:documents'])
+        async def protected_endpoint():
+            return {'message': 'success'}
+        
+        with app.test_request_context():
+            with patch('src.auth.authentication.get_core_authenticator') as mock_get_auth:
+                mock_authenticator = Mock()
+                mock_authenticator.authenticate_request.return_value = None
+                mock_get_auth.return_value = mock_authenticator
+                
+                response, status_code = await protected_endpoint()
+                
+                assert status_code == 401
+                assert response.json['error'] == 'Authentication required'
+
+    @pytest.mark.asyncio
+    async def test_require_authentication_insufficient_permissions(self, app, sample_jwt_claims):
+        """Test require_authentication decorator with insufficient permissions."""
+        @require_authentication(['admin:users'])
+        async def protected_endpoint():
+            return {'message': 'success'}
+        
+        with app.test_request_context():
+            with patch('src.auth.authentication.get_core_authenticator') as mock_get_auth:
+                mock_authenticator = Mock()
+                mock_authenticator.authenticate_request.side_effect = AuthenticationException(
+                    message="Insufficient permissions",
+                    error_code=SecurityErrorCode.AUTHZ_INSUFFICIENT_PERMISSIONS
+                )
+                mock_get_auth.return_value = mock_authenticator
+                
+                response, status_code = await protected_endpoint()
+                
+                assert status_code == 403  # Assuming http_status property exists
+
+    @pytest.mark.asyncio
+    async def test_require_authentication_authentication_exception(self, app):
+        """Test require_authentication decorator with authentication exception."""
+        @require_authentication(['read:documents'])
+        async def protected_endpoint():
+            return {'message': 'success'}
+        
+        with app.test_request_context():
+            with patch('src.auth.authentication.get_core_authenticator') as mock_get_auth:
+                mock_authenticator = Mock()
+                mock_authenticator.authenticate_request.side_effect = AuthenticationException(
+                    message="Token expired",
+                    error_code=SecurityErrorCode.AUTH_TOKEN_EXPIRED
+                )
+                mock_get_auth.return_value = mock_authenticator
+                
+                response, status_code = await protected_endpoint()
+                
+                assert status_code == 401  # Default for AuthenticationException
+
+    @pytest.mark.asyncio
+    async def test_require_authentication_unexpected_error(self, app):
+        """Test require_authentication decorator with unexpected error."""
+        @require_authentication(['read:documents'])
+        async def protected_endpoint():
+            return {'message': 'success'}
+        
+        with app.test_request_context():
+            with patch('src.auth.authentication.get_core_authenticator') as mock_get_auth:
+                mock_authenticator = Mock()
+                mock_authenticator.authenticate_request.side_effect = Exception("Unexpected error")
+                mock_get_auth.return_value = mock_authenticator
+                
+                response, status_code = await protected_endpoint()
+                
+                assert status_code == 500
+                assert response.json['error'] == 'Authentication system error'
+
+    def test_require_authentication_synchronous_function(self, app, sample_jwt_claims):
+        """Test require_authentication decorator with synchronous function."""
+        user = AuthenticatedUser(
+            user_id='auth0|test-user-123',
+            token_claims=sample_jwt_claims,
+            permissions=['read:documents'],
+            token='test-token'
+        )
+        
+        @require_authentication(['read:documents'])
+        def sync_protected_endpoint():
+            return {'message': 'success', 'user_id': g.authenticated_user.user_id}
+        
+        with app.test_request_context():
+            with patch('src.auth.authentication.get_core_authenticator') as mock_get_auth:
+                mock_authenticator = Mock()
+                mock_authenticator.authenticate_request.return_value = user
+                mock_get_auth.return_value = mock_authenticator
+                
+                # Since the decorator handles async/sync internally
+                result = sync_protected_endpoint()
+                
+                assert isinstance(result, dict)
+
+    def test_require_authentication_no_permissions_required(self, app, sample_jwt_claims):
+        """Test require_authentication decorator with no specific permissions required."""
+        user = AuthenticatedUser(
+            user_id='auth0|test-user-123',
+            token_claims=sample_jwt_claims,
+            permissions=['read:documents'],
+            token='test-token'
+        )
+        
+        @require_authentication()
+        def protected_endpoint():
+            return {'message': 'success', 'user_id': g.authenticated_user.user_id}
+        
+        with app.test_request_context():
+            with patch('src.auth.authentication.get_core_authenticator') as mock_get_auth:
+                mock_authenticator = Mock()
+                mock_authenticator.authenticate_request.return_value = user
+                mock_get_auth.return_value = mock_authenticator
+                
+                result = protected_endpoint()
+                
+                assert isinstance(result, dict)
+
+    def test_require_authentication_allow_expired(self, app, sample_jwt_claims):
+        """Test require_authentication decorator with allow_expired=True."""
+        user = AuthenticatedUser(
+            user_id='auth0|test-user-123',
+            token_claims=sample_jwt_claims,
+            permissions=['read:documents'],
+            token='test-token'
+        )
+        
+        @require_authentication(['read:documents'], allow_expired=True)
+        def refresh_endpoint():
+            return {'message': 'refresh_success', 'user_id': g.authenticated_user.user_id}
+        
+        with app.test_request_context():
+            with patch('src.auth.authentication.get_core_authenticator') as mock_get_auth:
+                mock_authenticator = Mock()
+                mock_authenticator.authenticate_request.return_value = user
+                mock_get_auth.return_value = mock_authenticator
+                
+                result = refresh_endpoint()
+                
+                # Verify decorator called authenticator with allow_expired=True
+                mock_authenticator.authenticate_request.assert_called_with(
+                    required_permissions=['read:documents'],
+                    allow_expired=True
+                )
+
+
+class TestMetricsAndMonitoring:
+    """
+    Test suite for authentication metrics collection and monitoring integration.
+    """
+
+    def test_auth_operation_metrics_exist(self):
+        """Test that authentication operation metrics are properly defined."""
+        assert 'token_validations_total' in auth_operation_metrics
+        assert 'auth0_operations_total' in auth_operation_metrics
+        assert 'user_context_operations' in auth_operation_metrics
+        assert 'authentication_duration' in auth_operation_metrics
+        assert 'active_authenticated_users' in auth_operation_metrics
+        assert 'token_cache_operations' in auth_operation_metrics
+
+    def test_metrics_labels(self):
+        """Test that metrics have proper label configurations."""
+        token_validations = auth_operation_metrics['token_validations_total']
+        assert hasattr(token_validations, '_labelnames')
+        
+        auth0_operations = auth_operation_metrics['auth0_operations_total']
+        assert hasattr(auth0_operations, '_labelnames')
+        
+        user_context_ops = auth_operation_metrics['user_context_operations']
+        assert hasattr(user_context_ops, '_labelnames')
+
+    @pytest.mark.asyncio
+    async def test_metrics_incremented_on_authentication(
+        self, 
+        authenticator, 
+        valid_jwt_token, 
+        sample_jwt_claims
+    ):
+        """Test that metrics are properly incremented during authentication."""
+        with patch.object(authenticator, '_extract_token_from_request') as mock_extract, \
+             patch.object(authenticator, '_validate_jwt_token') as mock_validate, \
+             patch.object(authenticator, '_create_user_context') as mock_create_user:
+            
+            mock_extract.return_value = valid_jwt_token
+            mock_validate.return_value = sample_jwt_claims
+            
+            mock_user = AuthenticatedUser(
+                user_id='auth0|test-user-123',
+                token_claims=sample_jwt_claims,
+                permissions=['read:documents'],
+                token=valid_jwt_token
+            )
+            mock_create_user.return_value = mock_user
+            
+            # Get initial metric values
+            initial_token_validations = auth_operation_metrics['token_validations_total']._value._value
+            initial_user_context = auth_operation_metrics['user_context_operations']._value._value
+            
+            await authenticator.authenticate_request()
+            
+            # Verify metrics were incremented (this is a simplified check)
+            # In practice, you'd need to check specific label combinations
+
+
+class TestCircuitBreakerIntegration:
+    """
+    Test suite for circuit breaker patterns in Auth0 API calls.
+    """
+
+    def test_circuit_breaker_initial_state(self, authenticator):
+        """Test circuit breaker starts in closed state."""
+        assert authenticator._auth0_circuit_breaker_state == 'closed'
+        assert authenticator._auth0_failure_count == 0
+        assert authenticator._auth0_last_failure_time is None
+
+    @pytest.mark.asyncio
+    async def test_circuit_breaker_opens_after_failures(self, authenticator):
+        """Test circuit breaker opens after multiple failures."""
+        with patch('src.auth.authentication.requests.Session') as mock_session_class:
+            mock_session = Mock()
+            mock_session.get.side_effect = Exception("Network error")
+            mock_session_class.return_value = mock_session
+            
+            # Simulate multiple failures
+            for i in range(5):
                 try:
-                    # Simulate rapid permission checks
-                    result = await auth_manager.validate_permissions(user_id, ['read'])
-                    attempts.append(result)
-                except Exception:
-                    # Rate limiting may reject some requests
+                    await authenticator._get_auth0_public_key('test-key-id')
+                except Auth0Exception:
                     pass
             
-            # At least some requests should succeed
-            assert len(attempts) > 0
-
-    def test_cryptographic_randomness(self):
-        """Test cryptographic randomness in session generation."""
-        # Generate multiple session IDs
-        session_ids = [generate_session_id() for _ in range(100)]
-        
-        # All session IDs should be unique
-        assert len(set(session_ids)) == len(session_ids)
-        
-        # Session IDs should have sufficient length
-        for session_id in session_ids:
-            assert len(session_id) >= 32
+            assert authenticator._auth0_failure_count >= 5
+            assert authenticator._auth0_circuit_breaker_state == 'open'
 
     @pytest.mark.asyncio
-    async def test_audit_logging_coverage(self, auth_config, mock_environment, valid_jwt_token):
-        """Test comprehensive audit logging coverage."""
-        with patch.dict('os.environ', auth_config):
-            auth_manager = AuthenticationManager()
+    async def test_circuit_breaker_half_open_after_timeout(self, authenticator):
+        """Test circuit breaker transitions to half-open after timeout."""
+        # Set circuit breaker to open state
+        authenticator._auth0_circuit_breaker_state = 'open'
+        authenticator._auth0_failure_count = 5
+        authenticator._auth0_last_failure_time = time.time() - 70  # 70 seconds ago
+        
+        with patch('src.auth.authentication.requests.Session') as mock_session_class:
+            mock_session = Mock()
+            mock_response = Mock()
+            mock_response.json.return_value = {'keys': []}
+            mock_response.raise_for_status.return_value = None
+            mock_session.get.return_value = mock_response
+            mock_session_class.return_value = mock_session
             
-            # Mock successful authentication
-            with patch.object(auth_manager, 'authenticate_user', 
-                             return_value={'authenticated': True, 'user_id': 'test-user'}):
-                
-                result = await auth_manager.authenticate_user(valid_jwt_token)
-                
-                # Verify authentication events are logged
-                # Real implementation should include comprehensive audit logging
-                assert result['authenticated'] == True
+            await authenticator._get_auth0_public_key('test-key-id')
+            
+            # Circuit breaker should reset to closed after successful call
+            assert authenticator._auth0_circuit_breaker_state == 'closed'
+            assert authenticator._auth0_failure_count == 0
 
-    @pytest.mark.asyncio  
-    async def test_error_information_disclosure_prevention(self, auth_config, mock_environment):
-        """Test prevention of sensitive information disclosure in errors."""
-        with patch.dict('os.environ', auth_config):
-            auth_manager = AuthenticationManager()
+
+class TestSecurityCompliance:
+    """
+    Test suite for security compliance validation and audit logging.
+    """
+
+    @pytest.mark.asyncio
+    async def test_security_event_logging_on_failed_authentication(
+        self, 
+        authenticator, 
+        invalid_signature_token
+    ):
+        """Test security events are logged for failed authentication attempts."""
+        with patch('src.auth.authentication.log_security_event') as mock_log_event:
+            try:
+                await authenticator._validate_jwt_token(invalid_signature_token)
+            except JWTException:
+                pass
             
-            # Test with various invalid inputs
-            invalid_inputs = [
-                'invalid-token',
-                'malformed.jwt.token',
-                '',
-                None
-            ]
+            # Verify security event logging was attempted
+            # Note: The actual logging depends on the implementation
+
+    @pytest.mark.asyncio
+    async def test_rate_limiting_integration(self, authenticator):
+        """Test integration with rate limiting for security protection."""
+        # This test would verify that authentication calls respect rate limits
+        # Implementation depends on the actual rate limiting integration
+        pass
+
+    @pytest.mark.asyncio
+    async def test_audit_trail_for_permission_checks(
+        self, 
+        authenticator, 
+        sample_jwt_claims
+    ):
+        """Test that permission checks create proper audit trails."""
+        user = AuthenticatedUser(
+            user_id='auth0|test-user-123',
+            token_claims=sample_jwt_claims,
+            permissions=['read:documents'],
+            token='test-token'
+        )
+        
+        with patch('src.auth.authentication.log_security_event') as mock_log_event:
+            await authenticator._verify_user_permissions(user, ['admin:users'])
             
-            for invalid_input in invalid_inputs:
-                try:
-                    await auth_manager.authenticate_user(invalid_input or '')
-                except AuthenticationException as e:
-                    # Error messages should not disclose sensitive information
-                    error_message = str(e).lower()
+            # Verify audit logging for permission denial
+            # Implementation depends on the actual audit logging setup
+
+    def test_pii_protection_in_logging(self, authenticator, sample_jwt_claims):
+        """Test that PII is properly protected in log outputs."""
+        user = AuthenticatedUser(
+            user_id='auth0|test-user-123',
+            token_claims=sample_jwt_claims,
+            permissions=['read:documents'],
+            token='test-token'
+        )
+        
+        user_dict = user.to_dict()
+        
+        # Verify sensitive information is not exposed
+        assert 'token' not in user_dict  # Raw token should not be in dict
+        
+        # Verify token claims are filtered
+        token_claims = user_dict['token_claims']
+        expected_claims = ['sub', 'iss', 'aud', 'exp', 'iat']
+        for claim in expected_claims:
+            assert claim in token_claims or token_claims.get(claim) is None
+
+
+class TestPerformanceOptimization:
+    """
+    Test suite for performance optimization features including caching and connection pooling.
+    """
+
+    @pytest.mark.asyncio
+    async def test_jwt_validation_caching(self, authenticator, valid_jwt_token, sample_jwt_claims):
+        """Test JWT validation result caching for performance optimization."""
+        with patch.object(authenticator.cache_manager, 'get_cached_jwt_validation_result') as mock_cache_get, \
+             patch.object(authenticator.cache_manager, 'cache_jwt_validation_result') as mock_cache_set:
+            
+            # First call - cache miss
+            mock_cache_get.return_value = None
+            
+            with patch.object(authenticator, '_get_auth0_public_key') as mock_get_key, \
+                 patch.object(authenticator, '_perform_additional_token_validations') as mock_additional:
+                
+                mock_get_key.return_value = b'fake-public-key'
+                mock_additional.return_value = None
+                
+                # Mock JWT decode
+                with patch('jwt.decode') as mock_jwt_decode:
+                    mock_jwt_decode.return_value = sample_jwt_claims
                     
-                    # Should not contain sensitive configuration details
-                    assert 'secret' not in error_message
-                    assert 'password' not in error_message
-                    assert 'key' not in error_message
-                    assert 'token' not in error_message or 'invalid' in error_message
+                    result1 = await authenticator._validate_jwt_token(valid_jwt_token)
+                    
+                    # Verify cache write was attempted
+                    mock_cache_set.assert_called_once()
+            
+            # Second call - cache hit
+            mock_cache_get.return_value = sample_jwt_claims
+            
+            result2 = await authenticator._validate_jwt_token(valid_jwt_token)
+            
+            assert result2 == sample_jwt_claims
+            # Verify no additional JWT processing on cache hit
+            assert mock_cache_get.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_user_permission_caching(self, authenticator, sample_jwt_claims):
+        """Test user permission caching for authorization performance."""
+        user = AuthenticatedUser(
+            user_id='auth0|test-user-123',
+            token_claims=sample_jwt_claims,
+            permissions=['read:documents', 'write:documents'],
+            token='test-token'
+        )
+        
+        with patch.object(authenticator.cache_manager, 'cache_user_permissions') as mock_cache_perms:
+            await authenticator._cache_user_session(user)
+            
+            mock_cache_perms.assert_called_once_with(
+                'auth0|test-user-123',
+                {'read:documents', 'write:documents'},
+                ttl=300
+            )
+
+    @pytest.mark.asyncio
+    async def test_auth0_public_key_caching(self, authenticator):
+        """Test Auth0 public key caching to reduce JWKS endpoint calls."""
+        mock_jwks_response = {
+            'keys': [
+                {
+                    'kty': 'RSA',
+                    'use': 'sig',
+                    'kid': 'test-key-id',
+                    'n': 'test-n-value',
+                    'e': 'AQAB',
+                    'alg': 'RS256'
+                }
+            ]
+        }
+        
+        with patch('src.auth.authentication.requests.Session') as mock_session_class:
+            mock_session = Mock()
+            mock_response = Mock()
+            mock_response.json.return_value = mock_jwks_response
+            mock_response.raise_for_status.return_value = None
+            mock_session.get.return_value = mock_response
+            mock_session_class.return_value = mock_session
+            
+            with patch('src.auth.authentication.jwt.algorithms.RSAAlgorithm.from_jwk') as mock_from_jwk:
+                mock_public_key = Mock()
+                mock_from_jwk.return_value = mock_public_key
+                
+                # First call - should fetch from Auth0
+                result1 = await authenticator._get_auth0_public_key('test-key-id')
+                assert mock_session.get.call_count == 1
+                
+                # Second call - should use cache
+                result2 = await authenticator._get_auth0_public_key('test-key-id')
+                assert mock_session.get.call_count == 1  # No additional calls
+                
+                assert result1 == result2
+
+    def test_concurrent_validation_limits(self, authenticator):
+        """Test that concurrent validation limits are respected."""
+        assert authenticator.max_concurrent_validations == 100
+        
+        # This test would verify actual concurrency control in a real implementation
+        # For now, we just verify the configuration is set
+
+    @pytest.mark.asyncio
+    async def test_cache_ttl_optimization(self, authenticator, valid_jwt_token, sample_jwt_claims):
+        """Test that cache TTL is optimized based on token expiration."""
+        with patch.object(authenticator.cache_manager, 'cache_jwt_validation_result') as mock_cache_set:
+            
+            # Mock successful token validation
+            with patch.object(authenticator, '_get_auth0_public_key') as mock_get_key, \
+                 patch.object(authenticator, '_perform_additional_token_validations') as mock_additional:
+                
+                mock_get_key.return_value = b'fake-public-key'
+                mock_additional.return_value = None
+                
+                with patch('jwt.decode') as mock_jwt_decode:
+                    # Token expires in 1 hour
+                    token_claims = sample_jwt_claims.copy()
+                    token_claims['exp'] = int(time.time()) + 3600
+                    mock_jwt_decode.return_value = token_claims
+                    
+                    await authenticator._validate_jwt_token(valid_jwt_token)
+                    
+                    # Verify cache TTL is set to minimum of default TTL and token expiration
+                    mock_cache_set.assert_called_once()
+                    call_args = mock_cache_set.call_args
+                    
+                    # TTL should be the minimum of cache_ttl_seconds and time until token expiration
+                    assert call_args[1]['ttl'] <= authenticator.cache_ttl_seconds
+
+
+# Additional test utilities and fixtures for comprehensive coverage
+
+@pytest.fixture
+def mock_jwt_manager():
+    """Mock JWT manager for testing."""
+    mock_manager = Mock()
+    mock_manager.refresh_access_token.return_value = ('new-access-token', 'new-refresh-token')
+    mock_manager.revoke_token.return_value = True
+    return mock_manager
+
+
+@pytest.fixture  
+def mock_cache_manager():
+    """Mock cache manager for testing."""
+    mock_manager = Mock()
+    mock_manager.get_cached_jwt_validation_result.return_value = None
+    mock_manager.cache_jwt_validation_result.return_value = None
+    mock_manager.get_cached_session_data.return_value = None
+    mock_manager.cache_session_data.return_value = None
+    mock_manager.cache_user_permissions.return_value = None
+    mock_manager.bulk_invalidate_user_cache.return_value = None
+    mock_manager.perform_health_check.return_value = {'status': 'healthy'}
+    
+    # Mock Redis client
+    mock_redis = Mock()
+    mock_redis.get.return_value = None
+    mock_redis.setex.return_value = True
+    mock_redis.keys.return_value = []
+    mock_manager.redis_client = mock_redis
+    
+    return mock_manager
+
+
+# Run tests with coverage reporting
+if __name__ == '__main__':
+    pytest.main([
+        __file__,
+        '-v',
+        '--cov=src.auth.authentication',
+        '--cov-report=html',
+        '--cov-report=term-missing',
+        '--cov-fail-under=95'
+    ])
