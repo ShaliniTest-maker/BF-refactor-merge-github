@@ -1,1085 +1,1211 @@
 """
 Locust Load Testing Configuration for Flask Migration Performance Validation
 
-This comprehensive load testing configuration implements realistic user behavior simulation,
-progressive scaling patterns, and baseline performance validation for the Flask migration
-project. Ensures compliance with the ≤10% variance requirement per Section 0.1.1 through
-comprehensive user workflow simulation and performance monitoring.
+This module provides comprehensive Locust-based load testing configuration implementing progressive
+scaling, realistic user behavior simulation, and multi-region load distribution for the 
+BF-refactor-merge Flask migration project, ensuring compliance with the ≤10% variance requirement
+from the original Node.js implementation.
 
 Key Features:
 - Progressive scaling from 10 to 1000 concurrent users per Section 4.6.3
 - 30-minute sustained load testing minimum per Section 4.6.3
 - Multi-region load simulation per Section 4.6.3 geographic distribution
-- Realistic API workflow simulation per Section 4.6.3 user behavior simulation
+- Realistic API workflow simulation per Section 4.6.3 user behavior patterns
 - Concurrent request handling validation per Section 0.2.3 load testing
-- Comprehensive performance monitoring and baseline comparison per Section 0.3.2
-- CI/CD pipeline integration per Section 6.6.2 automated performance gates
+- Performance baseline comparison per Section 0.3.2 monitoring requirements
+- Enterprise-grade load testing with comprehensive metrics collection
 
 Architecture Integration:
-- Section 4.6.3: Load testing specifications with progressive user scaling and endurance testing
-- Section 6.6.1: Locust ≥2.x performance testing framework with user behavior simulation
-- Section 0.1.1: Performance optimization ensuring ≤10% variance from Node.js baseline
-- Section 0.3.2: Continuous performance monitoring with baseline comparison requirements
-- Section 6.6.2: CI/CD integration with automated performance validation and regression detection
+- Section 4.6.3: Load testing specifications with progressive scaling and performance metrics
+- Section 6.6.1: Testing strategy with locust (≥2.x) framework integration
+- Section 0.3.2: Performance monitoring with ≤10% variance requirement validation
+- Section 6.5: Monitoring and observability integration with enterprise APM systems
+- Section 0.2.3: Technical implementation flows with load testing validation
+
+Performance Requirements:
+- 95th percentile response time ≤500ms per Section 4.6.3
+- Minimum 100 requests/second sustained throughput per Section 4.6.3
+- CPU ≤70%, Memory ≤80% during peak load per Section 4.6.3
+- Error rate ≤0.1% under normal load per Section 4.6.3
+- ≤10% variance from Node.js baseline per Section 0.1.1
 
 Author: Flask Migration Team
 Version: 1.0.0
-Dependencies: locust ≥2.x, requests ≥2.31+, structlog ≥23.1+, prometheus-client ≥0.17+
+Dependencies: locust ≥2.x, requests ≥2.31+, performance_config.py, baseline_data.py
 """
 
-import os
-import sys
-import time
 import json
-import random
-import statistics
-from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any, Tuple, Union, Callable
-from pathlib import Path
 import logging
+import random
+import time
+import os
+import statistics
+import csv
+from datetime import datetime, timezone, timedelta
+from typing import Dict, Any, List, Optional, Tuple, Union, Callable
+from pathlib import Path
 from dataclasses import dataclass, field
+from enum import Enum
+import uuid
+import hashlib
 
 # Locust framework imports
-from locust import HttpUser, task, between, events, runners
+from locust import HttpUser, task, between, events, TaskSet
+from locust.runners import MasterRunner, WorkerRunner
 from locust.env import Environment
-from locust.stats import stats_printer, stats_history
-from locust.log import setup_logging
-from locust.exception import RescheduleTask, StopUser
 
-# Performance testing configuration imports
-from performance_config import (
-    PerformanceConfigFactory,
-    LoadTestConfiguration,
-    BaselineMetrics,
-    PerformanceThreshold,
-    LoadTestPhase,
-    PerformanceTestType,
-    BasePerformanceConfig
-)
-from baseline_data import (
-    BaselineDataManager,
-    validate_flask_performance_against_baseline,
-    default_baseline_manager,
-    PERFORMANCE_VARIANCE_THRESHOLD
-)
-
-# Optional imports for enhanced functionality
+# Performance monitoring and metrics
+import psutil
 try:
-    import structlog
-    STRUCTLOG_AVAILABLE = True
-except ImportError:
-    STRUCTLOG_AVAILABLE = False
-
-try:
-    from prometheus_client import CollectorRegistry, Counter, Histogram, Gauge, start_http_server
+    from prometheus_client import Counter, Histogram, Gauge, CollectorRegistry
     PROMETHEUS_AVAILABLE = True
 except ImportError:
     PROMETHEUS_AVAILABLE = False
 
-# Performance test configuration
-PERFORMANCE_ENV = os.getenv('PERFORMANCE_ENV', 'development')
-LOAD_TEST_CONFIG = PerformanceConfigFactory.get_load_test_config(PERFORMANCE_ENV)
-BASELINE_METRICS = PerformanceConfigFactory.get_baseline_metrics(PERFORMANCE_ENV)
-PERFORMANCE_CONFIG = PerformanceConfigFactory.get_config(PERFORMANCE_ENV)
+# Project-specific performance imports
+from tests.performance.performance_config import (
+    PerformanceTestConfig,
+    LoadTestScenario,
+    LoadTestConfiguration,
+    PerformanceConfigFactory,
+    get_load_test_config,
+    validate_performance_results
+)
+from tests.performance.baseline_data import (
+    get_nodejs_baseline,
+    compare_with_baseline,
+    get_baseline_manager,
+    NodeJSPerformanceBaseline
+)
 
-# Test execution parameters per Section 4.6.3
-MIN_USERS = LOAD_TEST_CONFIG.min_users  # 10 concurrent users minimum
-MAX_USERS = LOAD_TEST_CONFIG.max_users  # 1000 concurrent users maximum
-TEST_DURATION = LOAD_TEST_CONFIG.test_duration  # 30-minute sustained load
-USER_SPAWN_RATE = LOAD_TEST_CONFIG.user_spawn_rate  # Users spawned per second
-TARGET_RPS = LOAD_TEST_CONFIG.target_request_rate  # 100 requests/second minimum
+# Configure module logger
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Geographic distribution simulation per Section 4.6.3
-GEOGRAPHIC_REGIONS = LOAD_TEST_CONFIG.geographic_regions
-SCENARIO_WEIGHTS = LOAD_TEST_CONFIG.scenario_weights
 
-# Performance validation thresholds per Section 0.1.1
-VARIANCE_THRESHOLD = PERFORMANCE_CONFIG.PERFORMANCE_VARIANCE_THRESHOLD  # ≤10% variance
-RESPONSE_TIME_THRESHOLD = PERFORMANCE_CONFIG.RESPONSE_TIME_P95_THRESHOLD  # 500ms P95
-ERROR_RATE_THRESHOLD = PERFORMANCE_CONFIG.ERROR_RATE_THRESHOLD  # 0.1% error rate
+class UserBehaviorType(Enum):
+    """User behavior pattern enumeration for realistic load simulation."""
+    
+    LIGHT_BROWSING = "light_browsing"
+    NORMAL_USAGE = "normal_usage"
+    HEAVY_USAGE = "heavy_usage"
+    API_INTEGRATION = "api_integration"
+    BATCH_OPERATIONS = "batch_operations"
+    MIXED_WORKLOAD = "mixed_workload"
+
+
+class LoadTestPhase(Enum):
+    """Load test execution phase enumeration for progressive scaling."""
+    
+    RAMP_UP = "ramp_up"
+    STEADY_STATE = "steady_state"
+    STRESS_TESTING = "stress_testing"
+    PEAK_LOAD = "peak_load"
+    ENDURANCE = "endurance"
+    RAMP_DOWN = "ramp_down"
 
 
 @dataclass
-class UserSession:
-    """User session state management for realistic workflow simulation."""
+class PerformanceMetrics:
+    """Real-time performance metrics collection during load testing."""
     
-    user_id: str
-    session_token: Optional[str] = None
-    auth_timestamp: Optional[datetime] = None
-    request_count: int = 0
-    error_count: int = 0
-    last_request_time: Optional[datetime] = None
-    geographic_region: str = "us-east-1"
-    user_type: str = "standard"  # standard, premium, admin
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    response_time_p50: float = 0.0
+    response_time_p95: float = 0.0
+    response_time_p99: float = 0.0
+    requests_per_second: float = 0.0
+    error_rate: float = 0.0
+    concurrent_users: int = 0
+    cpu_utilization: float = 0.0
+    memory_utilization: float = 0.0
+    current_phase: LoadTestPhase = LoadTestPhase.RAMP_UP
     
-    def is_authenticated(self) -> bool:
-        """Check if user session is authenticated and valid."""
-        if not self.session_token or not self.auth_timestamp:
-            return False
-        
-        # Session expires after 1 hour
-        session_age = datetime.now(timezone.utc) - self.auth_timestamp
-        return session_age.total_seconds() < 3600
-    
-    def record_request(self, success: bool = True) -> None:
-        """Record request execution for session tracking."""
-        self.request_count += 1
-        if not success:
-            self.error_count += 1
-        self.last_request_time = datetime.now(timezone.utc)
-    
-    def get_error_rate(self) -> float:
-        """Calculate session error rate percentage."""
-        if self.request_count == 0:
-            return 0.0
-        return (self.error_count / self.request_count) * 100.0
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert metrics to dictionary for reporting."""
+        return {
+            'timestamp': self.timestamp.isoformat(),
+            'response_time_p50': self.response_time_p50,
+            'response_time_p95': self.response_time_p95,
+            'response_time_p99': self.response_time_p99,
+            'requests_per_second': self.requests_per_second,
+            'error_rate': self.error_rate,
+            'concurrent_users': self.concurrent_users,
+            'cpu_utilization': self.cpu_utilization,
+            'memory_utilization': self.memory_utilization,
+            'current_phase': self.current_phase.value
+        }
 
 
-class PerformanceMetricsCollector:
+class PerformanceMonitor:
     """
-    Comprehensive performance metrics collection and validation system.
+    Real-time performance monitoring and metrics collection during load testing.
     
-    Implements real-time performance monitoring, baseline comparison, and
-    variance validation per Section 0.3.2 performance monitoring requirements.
+    Integrates with Locust event system to collect comprehensive performance data
+    and compare against Node.js baseline metrics for variance calculation.
     """
     
     def __init__(self):
-        self.response_times: List[float] = []
-        self.request_counts: Dict[str, int] = {}
-        self.error_counts: Dict[str, int] = {}
-        self.throughput_samples: List[float] = []
-        self.concurrent_users_samples: List[int] = []
-        self.variance_violations: List[Dict[str, Any]] = []
+        """Initialize performance monitor with metrics collection."""
+        self.metrics_history: List[PerformanceMetrics] = []
+        self.current_phase = LoadTestPhase.RAMP_UP
+        self.baseline = get_nodejs_baseline()
+        self.start_time = datetime.now(timezone.utc)
         
-        # Prometheus metrics setup if available
+        # Prometheus metrics initialization
         if PROMETHEUS_AVAILABLE:
             self.registry = CollectorRegistry()
-            self.response_time_histogram = Histogram(
-                'locust_response_time_seconds',
-                'Response time histogram',
-                ['method', 'endpoint'],
-                registry=self.registry
-            )
-            self.request_counter = Counter(
-                'locust_requests_total',
-                'Total request count',
-                ['method', 'endpoint', 'status'],
-                registry=self.registry
-            )
-            self.throughput_gauge = Gauge(
-                'locust_throughput_rps',
-                'Current throughput in requests per second',
-                registry=self.registry
-            )
-            self.concurrent_users_gauge = Gauge(
-                'locust_concurrent_users',
-                'Current concurrent user count',
-                registry=self.registry
-            )
+            self._init_prometheus_metrics()
+        
+        # Performance thresholds from configuration
+        config = PerformanceTestConfig()
+        self.thresholds = config.PERFORMANCE_THRESHOLDS
+        
+        # Metrics collection
+        self.response_times: List[float] = []
+        self.request_counts: List[int] = []
+        self.error_counts: List[int] = []
+        
+        logger.info("Performance monitor initialized with Node.js baseline comparison")
     
-    def record_request(self, method: str, endpoint: str, response_time: float, 
-                      status_code: int, success: bool) -> None:
-        """Record individual request metrics for performance analysis."""
-        self.response_times.append(response_time)
+    def _init_prometheus_metrics(self) -> None:
+        """Initialize Prometheus metrics for advanced monitoring."""
+        if not PROMETHEUS_AVAILABLE:
+            return
         
-        endpoint_key = f"{method} {endpoint}"
-        self.request_counts[endpoint_key] = self.request_counts.get(endpoint_key, 0) + 1
-        
-        if not success or status_code >= 400:
-            self.error_counts[endpoint_key] = self.error_counts.get(endpoint_key, 0) + 1
-        
-        # Update Prometheus metrics if available
-        if PROMETHEUS_AVAILABLE:
-            self.response_time_histogram.labels(method=method, endpoint=endpoint).observe(response_time / 1000.0)
-            status = "success" if success else "error"
-            self.request_counter.labels(method=method, endpoint=endpoint, status=status).inc()
-    
-    def record_throughput_sample(self, rps: float) -> None:
-        """Record throughput sample for trend analysis."""
-        self.throughput_samples.append(rps)
-        if PROMETHEUS_AVAILABLE:
-            self.throughput_gauge.set(rps)
-    
-    def record_concurrent_users(self, user_count: int) -> None:
-        """Record concurrent user count for capacity analysis."""
-        self.concurrent_users_samples.append(user_count)
-        if PROMETHEUS_AVAILABLE:
-            self.concurrent_users_gauge.set(user_count)
-    
-    def get_performance_summary(self) -> Dict[str, Any]:
-        """
-        Generate comprehensive performance summary with baseline comparison.
-        
-        Returns:
-            Dictionary containing performance metrics and variance analysis
-        """
-        if not self.response_times:
-            return {"error": "No performance data collected"}
-        
-        # Calculate response time statistics
-        response_stats = {
-            "mean_response_time_ms": statistics.mean(self.response_times),
-            "median_response_time_ms": statistics.median(self.response_times),
-            "p95_response_time_ms": self._calculate_percentile(self.response_times, 95),
-            "p99_response_time_ms": self._calculate_percentile(self.response_times, 99),
-            "min_response_time_ms": min(self.response_times),
-            "max_response_time_ms": max(self.response_times),
-            "std_deviation_ms": statistics.stdev(self.response_times) if len(self.response_times) > 1 else 0.0
-        }
-        
-        # Calculate throughput statistics
-        throughput_stats = {
-            "avg_throughput_rps": statistics.mean(self.throughput_samples) if self.throughput_samples else 0.0,
-            "peak_throughput_rps": max(self.throughput_samples) if self.throughput_samples else 0.0,
-            "min_throughput_rps": min(self.throughput_samples) if self.throughput_samples else 0.0
-        }
-        
-        # Calculate error rate statistics
-        total_requests = sum(self.request_counts.values())
-        total_errors = sum(self.error_counts.values())
-        error_rate = (total_errors / total_requests) * 100.0 if total_requests > 0 else 0.0
-        
-        # Validate against baseline performance
-        baseline_validation = self._validate_against_baseline(response_stats, throughput_stats, error_rate)
-        
-        return {
-            "response_time_metrics": response_stats,
-            "throughput_metrics": throughput_stats,
-            "error_metrics": {
-                "total_requests": total_requests,
-                "total_errors": total_errors,
-                "error_rate_percent": error_rate
-            },
-            "baseline_validation": baseline_validation,
-            "performance_compliance": {
-                "within_variance_threshold": baseline_validation.get("overall_compliance", False),
-                "response_time_compliant": response_stats["p95_response_time_ms"] <= RESPONSE_TIME_THRESHOLD,
-                "error_rate_compliant": error_rate <= ERROR_RATE_THRESHOLD,
-                "throughput_compliant": throughput_stats["avg_throughput_rps"] >= TARGET_RPS
-            }
-        }
-    
-    def _calculate_percentile(self, data: List[float], percentile: int) -> float:
-        """Calculate specified percentile from data list."""
-        if not data:
-            return 0.0
-        sorted_data = sorted(data)
-        index = int((percentile / 100.0) * len(sorted_data))
-        index = min(index, len(sorted_data) - 1)
-        return sorted_data[index]
-    
-    def _validate_against_baseline(self, response_stats: Dict[str, float], 
-                                 throughput_stats: Dict[str, float], 
-                                 error_rate: float) -> Dict[str, Any]:
-        """Validate current performance against Node.js baseline metrics."""
-        flask_metrics = {
-            "response_time_ms": response_stats["mean_response_time_ms"],
-            "requests_per_second": throughput_stats["avg_throughput_rps"],
-            "error_rate_percent": error_rate
-        }
-        
-        return validate_flask_performance_against_baseline(flask_metrics)
-
-
-# Global performance metrics collector
-performance_collector = PerformanceMetricsCollector()
-
-
-class BaseFlaskUser(HttpUser):
-    """
-    Base Flask user class providing common functionality for load testing.
-    
-    Implements realistic user behavior patterns, session management, and
-    performance monitoring per Section 6.6.1 user behavior simulation.
-    """
-    
-    abstract = True
-    wait_time = between(1, 3)  # Wait 1-3 seconds between requests
-    
-    def __init__(self, environment):
-        super().__init__(environment)
-        self.session_data = UserSession(
-            user_id=f"user_{random.randint(10000, 99999)}",
-            geographic_region=random.choice(GEOGRAPHIC_REGIONS)
+        self.response_time_histogram = Histogram(
+            'locust_response_time_seconds',
+            'Response time distribution',
+            ['method', 'endpoint'],
+            registry=self.registry
         )
         
-        # Configure session headers for realistic requests
-        self.client.headers.update({
-            "User-Agent": self._get_realistic_user_agent(),
-            "Accept": "application/json",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "X-Requested-With": "XMLHttpRequest",
-            "X-Client-Region": self.session_data.geographic_region
-        })
+        self.request_rate_gauge = Gauge(
+            'locust_requests_per_second',
+            'Current requests per second',
+            registry=self.registry
+        )
+        
+        self.error_rate_gauge = Gauge(
+            'locust_error_rate_percent',
+            'Current error rate percentage',
+            registry=self.registry
+        )
+        
+        self.concurrent_users_gauge = Gauge(
+            'locust_concurrent_users',
+            'Current number of concurrent users',
+            registry=self.registry
+        )
+        
+        self.variance_gauge = Gauge(
+            'locust_baseline_variance_percent',
+            'Performance variance from Node.js baseline',
+            ['metric_name'],
+            registry=self.registry
+        )
     
+    def record_request(self, response_time: float, endpoint: str, method: str, success: bool) -> None:
+        """Record individual request metrics for analysis."""
+        self.response_times.append(response_time)
+        
+        if PROMETHEUS_AVAILABLE:
+            self.response_time_histogram.labels(method=method, endpoint=endpoint).observe(response_time / 1000)
+        
+        if not success:
+            self.error_counts.append(1)
+        else:
+            self.error_counts.append(0)
+    
+    def update_metrics(self, user_count: int) -> PerformanceMetrics:
+        """Update and calculate current performance metrics."""
+        current_metrics = PerformanceMetrics()
+        current_metrics.current_phase = self.current_phase
+        current_metrics.concurrent_users = user_count
+        
+        # Calculate response time percentiles
+        if self.response_times:
+            current_metrics.response_time_p50 = statistics.median(self.response_times[-100:])
+            current_metrics.response_time_p95 = statistics.quantiles(self.response_times[-100:], n=20)[18] if len(self.response_times) >= 20 else 0
+            current_metrics.response_time_p99 = statistics.quantiles(self.response_times[-100:], n=100)[98] if len(self.response_times) >= 100 else 0
+        
+        # Calculate request rate
+        current_time = datetime.now(timezone.utc)
+        time_window = max(1, (current_time - self.start_time).total_seconds())
+        current_metrics.requests_per_second = len(self.response_times) / time_window
+        
+        # Calculate error rate
+        if self.error_counts:
+            current_metrics.error_rate = (sum(self.error_counts[-100:]) / len(self.error_counts[-100:])) * 100
+        
+        # Get system resource utilization
+        try:
+            current_metrics.cpu_utilization = psutil.cpu_percent(interval=None)
+            memory = psutil.virtual_memory()
+            current_metrics.memory_utilization = memory.percent
+        except Exception as e:
+            logger.warning(f"Failed to get system metrics: {e}")
+        
+        # Update Prometheus metrics
+        if PROMETHEUS_AVAILABLE:
+            self.request_rate_gauge.set(current_metrics.requests_per_second)
+            self.error_rate_gauge.set(current_metrics.error_rate)
+            self.concurrent_users_gauge.set(current_metrics.concurrent_users)
+            
+            # Calculate and record baseline variance
+            if current_metrics.response_time_p95 > 0:
+                baseline_p95 = self.baseline.api_response_time_p95
+                variance = ((current_metrics.response_time_p95 - baseline_p95) / baseline_p95) * 100
+                self.variance_gauge.labels(metric_name='response_time_p95').set(abs(variance))
+        
+        self.metrics_history.append(current_metrics)
+        return current_metrics
+    
+    def set_phase(self, phase: LoadTestPhase) -> None:
+        """Update current load test phase."""
+        self.current_phase = phase
+        logger.info(f"Load test phase changed to: {phase.value}")
+    
+    def get_baseline_comparison(self) -> Dict[str, Any]:
+        """Get comprehensive baseline comparison analysis."""
+        if not self.metrics_history:
+            return {"error": "No metrics available for comparison"}
+        
+        latest_metrics = self.metrics_history[-1]
+        
+        comparison_data = {
+            "api_response_time_p95": latest_metrics.response_time_p95,
+            "requests_per_second": latest_metrics.requests_per_second,
+            "memory_usage_mb": latest_metrics.memory_utilization,  # Convert percentage to MB estimate
+            "cpu_utilization_average": latest_metrics.cpu_utilization,
+            "error_rate_overall": latest_metrics.error_rate / 100,  # Convert to decimal
+        }
+        
+        return compare_with_baseline(comparison_data)
+    
+    def generate_report(self) -> Dict[str, Any]:
+        """Generate comprehensive performance test report."""
+        if not self.metrics_history:
+            return {"error": "No performance data collected"}
+        
+        # Calculate summary statistics
+        response_times = [m.response_time_p95 for m in self.metrics_history if m.response_time_p95 > 0]
+        request_rates = [m.requests_per_second for m in self.metrics_history if m.requests_per_second > 0]
+        error_rates = [m.error_rate for m in self.metrics_history]
+        
+        summary = {
+            "test_duration_minutes": (datetime.now(timezone.utc) - self.start_time).total_seconds() / 60,
+            "total_metrics_collected": len(self.metrics_history),
+            "response_time_statistics": {
+                "p95_min": min(response_times) if response_times else 0,
+                "p95_max": max(response_times) if response_times else 0,
+                "p95_average": statistics.mean(response_times) if response_times else 0,
+                "p95_median": statistics.median(response_times) if response_times else 0
+            },
+            "throughput_statistics": {
+                "rps_min": min(request_rates) if request_rates else 0,
+                "rps_max": max(request_rates) if request_rates else 0,
+                "rps_average": statistics.mean(request_rates) if request_rates else 0,
+                "rps_sustained": statistics.median(request_rates) if request_rates else 0
+            },
+            "error_rate_statistics": {
+                "error_rate_min": min(error_rates) if error_rates else 0,
+                "error_rate_max": max(error_rates) if error_rates else 0,
+                "error_rate_average": statistics.mean(error_rates) if error_rates else 0
+            },
+            "baseline_comparison": self.get_baseline_comparison(),
+            "performance_summary": {
+                "meets_response_time_threshold": all(rt <= self.thresholds['response_time_p95'] for rt in response_times),
+                "meets_throughput_threshold": all(rr >= self.thresholds['throughput_minimum'] for rr in request_rates),
+                "meets_error_rate_threshold": all(er <= self.thresholds['error_rate_critical'] for er in error_rates),
+                "overall_compliant": True  # Will be calculated based on individual thresholds
+            }
+        }
+        
+        # Calculate overall compliance
+        summary["performance_summary"]["overall_compliant"] = all([
+            summary["performance_summary"]["meets_response_time_threshold"],
+            summary["performance_summary"]["meets_throughput_threshold"],
+            summary["performance_summary"]["meets_error_rate_threshold"]
+        ])
+        
+        return summary
+
+
+# Global performance monitor instance
+performance_monitor = PerformanceMonitor()
+
+
+class BaseUserBehavior(TaskSet):
+    """
+    Base user behavior class providing common authentication and utility methods
+    for all user behavior patterns in the load testing scenarios.
+    """
+    
+    def __init__(self, parent):
+        """Initialize base user behavior with authentication setup."""
+        super().__init__(parent)
+        self.auth_token = None
+        self.user_id = None
+        self.session_data = {}
+        
     def on_start(self):
-        """Initialize user session and perform authentication."""
+        """Initialize user session with authentication."""
         self.authenticate_user()
-    
-    def on_stop(self):
-        """Clean up user session and log performance metrics."""
-        self._log_user_performance_summary()
     
     def authenticate_user(self) -> bool:
         """
-        Perform user authentication with realistic login flow.
+        Authenticate user and obtain JWT token for subsequent requests.
         
         Returns:
             True if authentication successful, False otherwise
         """
-        login_data = {
-            "username": f"{self.session_data.user_id}@example.com",
-            "password": "test_password_123"
+        auth_payload = {
+            "email": f"testuser_{random.randint(1000, 9999)}@example.com",
+            "password": "TestPassword123!"
         }
         
         start_time = time.time()
         
         with self.client.post(
-            "/api/v1/auth/login",
-            json=login_data,
-            catch_response=True,
-            name="Authentication Flow"
+            "/api/auth/login",
+            json=auth_payload,
+            headers={"Content-Type": "application/json"},
+            catch_response=True
         ) as response:
             response_time = (time.time() - start_time) * 1000
-            success = response.status_code == 200
             
-            if success:
+            if response.status_code == 200:
                 try:
-                    auth_data = response.json()
-                    self.session_data.session_token = auth_data.get("access_token")
-                    self.session_data.auth_timestamp = datetime.now(timezone.utc)
+                    response_data = response.json()
+                    self.auth_token = response_data.get("access_token")
+                    self.user_id = response_data.get("user_id")
                     
-                    # Add authorization header for subsequent requests
-                    self.client.headers["Authorization"] = f"Bearer {self.session_data.session_token}"
-                    response.success()
-                except Exception as e:
-                    success = False
-                    response.failure(f"Authentication parsing failed: {str(e)}")
+                    performance_monitor.record_request(
+                        response_time, "/api/auth/login", "POST", True
+                    )
+                    
+                    logger.debug(f"User authentication successful: {self.user_id}")
+                    return True
+                    
+                except json.JSONDecodeError:
+                    response.failure(f"Authentication response parsing failed")
+                    
             else:
                 response.failure(f"Authentication failed with status {response.status_code}")
             
-            # Record authentication performance
-            performance_collector.record_request(
-                "POST", "/api/v1/auth/login", response_time, response.status_code, success
+            performance_monitor.record_request(
+                response_time, "/api/auth/login", "POST", False
             )
-            self.session_data.record_request(success)
-            
-            return success
+            return False
     
-    def refresh_authentication(self) -> bool:
-        """
-        Refresh user authentication token when expired.
-        
-        Returns:
-            True if refresh successful, False otherwise
-        """
-        if not self.session_data.session_token:
-            return self.authenticate_user()
-        
-        start_time = time.time()
-        
-        with self.client.post(
-            "/api/v1/auth/refresh",
-            headers={"Authorization": f"Bearer {self.session_data.session_token}"},
-            catch_response=True,
-            name="Token Refresh"
-        ) as response:
-            response_time = (time.time() - start_time) * 1000
-            success = response.status_code == 200
-            
-            if success:
-                try:
-                    auth_data = response.json()
-                    self.session_data.session_token = auth_data.get("access_token")
-                    self.session_data.auth_timestamp = datetime.now(timezone.utc)
-                    
-                    # Update authorization header
-                    self.client.headers["Authorization"] = f"Bearer {self.session_data.session_token}"
-                    response.success()
-                except Exception as e:
-                    success = False
-                    response.failure(f"Token refresh parsing failed: {str(e)}")
-            else:
-                response.failure(f"Token refresh failed with status {response.status_code}")
-            
-            # Record refresh performance
-            performance_collector.record_request(
-                "POST", "/api/v1/auth/refresh", response_time, response.status_code, success
-            )
-            self.session_data.record_request(success)
-            
-            return success
+    def get_auth_headers(self) -> Dict[str, str]:
+        """Get authentication headers for authenticated requests."""
+        if self.auth_token:
+            return {
+                "Authorization": f"Bearer {self.auth_token}",
+                "Content-Type": "application/json"
+            }
+        return {"Content-Type": "application/json"}
     
-    def make_authenticated_request(self, method: str, endpoint: str, 
-                                 data: Optional[Dict] = None, 
-                                 params: Optional[Dict] = None,
-                                 name: Optional[str] = None) -> Any:
+    def make_authenticated_request(
+        self, 
+        method: str, 
+        endpoint: str, 
+        payload: Optional[Dict] = None,
+        expected_status: int = 200
+    ) -> Optional[Dict]:
         """
-        Make authenticated API request with performance monitoring.
+        Make authenticated HTTP request with performance monitoring.
         
         Args:
             method: HTTP method (GET, POST, PUT, DELETE)
             endpoint: API endpoint path
-            data: Optional request data for POST/PUT requests
-            params: Optional query parameters
-            name: Optional custom name for request tracking
+            payload: Request payload for POST/PUT requests
+            expected_status: Expected HTTP status code
             
         Returns:
-            Response object or None if request failed
+            Response JSON data if successful, None otherwise
         """
-        # Ensure user is authenticated
-        if not self.session_data.is_authenticated():
-            if not self.refresh_authentication():
-                raise StopUser("Authentication failed")
-        
-        request_name = name or f"{method} {endpoint}"
+        headers = self.get_auth_headers()
         start_time = time.time()
         
-        # Prepare request arguments
-        request_args = {
-            "catch_response": True,
-            "name": request_name
-        }
-        
-        if data:
-            request_args["json"] = data
-        if params:
-            request_args["params"] = params
-        
-        # Execute request based on method
-        if method.upper() == "GET":
-            response_context = self.client.get(endpoint, **request_args)
-        elif method.upper() == "POST":
-            response_context = self.client.post(endpoint, **request_args)
-        elif method.upper() == "PUT":
-            response_context = self.client.put(endpoint, **request_args)
-        elif method.upper() == "DELETE":
-            response_context = self.client.delete(endpoint, **request_args)
-        else:
-            raise ValueError(f"Unsupported HTTP method: {method}")
-        
-        with response_context as response:
-            response_time = (time.time() - start_time) * 1000
-            success = 200 <= response.status_code < 400
-            
-            if success:
-                response.success()
-            else:
-                response.failure(f"Request failed with status {response.status_code}")
-            
-            # Record request performance
-            performance_collector.record_request(
-                method.upper(), endpoint, response_time, response.status_code, success
-            )
-            self.session_data.record_request(success)
-            
-            # Check for authentication errors
-            if response.status_code == 401:
-                self.session_data.session_token = None
-                self.session_data.auth_timestamp = None
-                if "Authorization" in self.client.headers:
-                    del self.client.headers["Authorization"]
-            
-            return response if success else None
-    
-    def _get_realistic_user_agent(self) -> str:
-        """Generate realistic User-Agent string for requests."""
-        user_agents = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/119.0",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/119.0"
-        ]
-        return random.choice(user_agents)
-    
-    def _log_user_performance_summary(self) -> None:
-        """Log user session performance summary."""
-        if STRUCTLOG_AVAILABLE:
-            logger = structlog.get_logger()
-            logger.info(
-                "User session completed",
-                user_id=self.session_data.user_id,
-                total_requests=self.session_data.request_count,
-                error_count=self.session_data.error_count,
-                error_rate=self.session_data.get_error_rate(),
-                geographic_region=self.session_data.geographic_region
-            )
-
-
-class APIReadOperationsUser(BaseFlaskUser):
-    """
-    API read operations user simulating data retrieval workflows.
-    
-    Implements 60% of user behavior per scenario weights focusing on
-    data retrieval, search, and read-heavy operations per Section 4.6.3.
-    """
-    
-    weight = int(SCENARIO_WEIGHTS["api_read_operations"] * 100)  # 60% of users
-    
-    @task(10)
-    def get_user_profile(self):
-        """Retrieve user profile information."""
-        self.make_authenticated_request("GET", "/api/v1/users/profile")
-    
-    @task(8)
-    def list_users(self):
-        """List users with pagination."""
-        params = {
-            "page": random.randint(1, 10),
-            "limit": random.choice([10, 25, 50])
-        }
-        self.make_authenticated_request("GET", "/api/v1/users", params=params)
-    
-    @task(6)
-    def get_reports_data(self):
-        """Retrieve reports data with filtering."""
-        params = {
-            "date_from": "2023-01-01",
-            "date_to": "2023-12-31",
-            "format": "json"
-        }
-        self.make_authenticated_request("GET", "/api/v1/data/reports", params=params)
-    
-    @task(5)
-    def search_users(self):
-        """Search users with query parameters."""
-        params = {
-            "q": random.choice(["john", "admin", "test", "user"]),
-            "filters": "active:true"
-        }
-        self.make_authenticated_request("GET", "/api/v1/users/search", params=params)
-    
-    @task(4)
-    def get_analytics_dashboard(self):
-        """Retrieve analytics dashboard data."""
-        self.make_authenticated_request("GET", "/api/v1/analytics/dashboard")
-    
-    @task(3)
-    def get_system_status(self):
-        """Check system health and status."""
-        self.make_authenticated_request("GET", "/api/v1/health/status")
-
-
-class APIWriteOperationsUser(BaseFlaskUser):
-    """
-    API write operations user simulating data modification workflows.
-    
-    Implements 25% of user behavior per scenario weights focusing on
-    data creation, updates, and write-heavy operations per Section 4.6.3.
-    """
-    
-    weight = int(SCENARIO_WEIGHTS["api_write_operations"] * 100)  # 25% of users
-    
-    @task(8)
-    def create_user(self):
-        """Create new user account."""
-        user_data = {
-            "username": f"testuser_{random.randint(1000, 9999)}",
-            "email": f"test_{random.randint(1000, 9999)}@example.com",
-            "full_name": f"Test User {random.randint(1000, 9999)}",
-            "role": random.choice(["user", "moderator"])
-        }
-        self.make_authenticated_request("POST", "/api/v1/users", data=user_data)
-    
-    @task(6)
-    def update_user_profile(self):
-        """Update user profile information."""
-        update_data = {
-            "full_name": f"Updated User {random.randint(1000, 9999)}",
-            "preferences": {
-                "theme": random.choice(["light", "dark"]),
-                "notifications": random.choice([True, False])
-            }
-        }
-        self.make_authenticated_request("PUT", "/api/v1/users/profile", data=update_data)
-    
-    @task(5)
-    def create_report(self):
-        """Create new report entry."""
-        report_data = {
-            "title": f"Test Report {random.randint(1000, 9999)}",
-            "type": random.choice(["daily", "weekly", "monthly"]),
-            "data": {"metrics": {"value": random.randint(100, 1000)}},
-            "tags": ["test", "automated"]
-        }
-        self.make_authenticated_request("POST", "/api/v1/data/reports", data=report_data)
-    
-    @task(4)
-    def update_system_settings(self):
-        """Update system configuration settings."""
-        settings_data = {
-            "maintenance_mode": False,
-            "max_upload_size": 50 * 1024 * 1024,  # 50MB
-            "session_timeout": 3600
-        }
-        self.make_authenticated_request("PUT", "/api/v1/admin/settings", data=settings_data)
-    
-    @task(3)
-    def delete_old_data(self):
-        """Delete old or expired data."""
-        params = {"older_than": "30d"}
-        self.make_authenticated_request("DELETE", "/api/v1/data/cleanup", params=params)
-
-
-class AuthenticationFlowUser(BaseFlaskUser):
-    """
-    Authentication flow user simulating login, logout, and session management.
-    
-    Implements 10% of user behavior per scenario weights focusing on
-    authentication workflows and session management per Section 4.6.3.
-    """
-    
-    weight = int(SCENARIO_WEIGHTS["authentication_flow"] * 100)  # 10% of users
-    
-    @task(10)
-    def perform_login_logout_cycle(self):
-        """Perform complete login/logout cycle."""
-        # Logout if already authenticated
-        if self.session_data.is_authenticated():
-            self.make_authenticated_request("POST", "/api/v1/auth/logout")
-            self.session_data.session_token = None
-            self.session_data.auth_timestamp = None
-            if "Authorization" in self.client.headers:
-                del self.client.headers["Authorization"]
-        
-        # Perform fresh authentication
-        self.authenticate_user()
-        
-        # Verify authentication with profile request
-        self.make_authenticated_request("GET", "/api/v1/users/profile")
-    
-    @task(8)
-    def refresh_token_cycle(self):
-        """Test token refresh functionality."""
-        if self.session_data.is_authenticated():
-            # Force token refresh
-            self.refresh_authentication()
-            
-            # Validate refreshed token with API request
-            self.make_authenticated_request("GET", "/api/v1/auth/validate")
-    
-    @task(5)
-    def check_session_status(self):
-        """Check current session status and validity."""
-        self.make_authenticated_request("GET", "/api/v1/auth/session")
-    
-    @task(3)
-    def update_password(self):
-        """Update user password."""
-        password_data = {
-            "current_password": "test_password_123",
-            "new_password": f"new_password_{random.randint(1000, 9999)}",
-            "confirm_password": f"new_password_{random.randint(1000, 9999)}"
-        }
-        self.make_authenticated_request("PUT", "/api/v1/auth/password", data=password_data)
-
-
-class FileUploadOperationsUser(BaseFlaskUser):
-    """
-    File upload operations user simulating file handling workflows.
-    
-    Implements 5% of user behavior per scenario weights focusing on
-    file upload, download, and storage operations per Section 4.6.3.
-    """
-    
-    weight = int(SCENARIO_WEIGHTS["file_upload_operations"] * 100)  # 5% of users
-    
-    @task(8)
-    def upload_document(self):
-        """Upload document file to the system."""
-        # Simulate file upload with multipart form data
-        files = {
-            "file": ("test_document.txt", "This is a test document content for load testing.", "text/plain")
-        }
-        data = {
-            "description": f"Test upload {random.randint(1000, 9999)}",
-            "category": random.choice(["document", "report", "data"])
-        }
-        
-        start_time = time.time()
-        
-        with self.client.post(
-            "/api/v1/files/upload",
-            files=files,
-            data=data,
-            catch_response=True,
-            name="File Upload"
+        with self.client.request(
+            method,
+            endpoint,
+            json=payload,
+            headers=headers,
+            catch_response=True
         ) as response:
             response_time = (time.time() - start_time) * 1000
-            success = response.status_code == 201
+            success = response.status_code == expected_status
+            
+            performance_monitor.record_request(
+                response_time, endpoint, method, success
+            )
             
             if success:
-                response.success()
+                try:
+                    return response.json() if response.content else {}
+                except json.JSONDecodeError:
+                    response.failure(f"JSON parsing failed for {endpoint}")
+                    return None
             else:
-                response.failure(f"File upload failed with status {response.status_code}")
+                response.failure(
+                    f"{method} {endpoint} failed with status {response.status_code}"
+                )
+                return None
+
+
+class LightBrowsingUser(BaseUserBehavior):
+    """
+    Light browsing user behavior simulating casual API usage with minimal load.
+    
+    Implements realistic user patterns with read-heavy operations, health checks,
+    and occasional data retrieval for performance baseline validation.
+    """
+    
+    wait_time = between(3, 8)  # 3-8 seconds between requests
+    
+    @task(40)
+    def check_health(self):
+        """Perform health check requests to validate system availability."""
+        start_time = time.time()
+        
+        with self.client.get("/health", catch_response=True) as response:
+            response_time = (time.time() - start_time) * 1000
+            success = response.status_code == 200
             
-            # Record file upload performance
-            performance_collector.record_request(
-                "POST", "/api/v1/files/upload", response_time, response.status_code, success
+            performance_monitor.record_request(
+                response_time, "/health", "GET", success
             )
-            self.session_data.record_request(success)
+            
+            if not success:
+                response.failure(f"Health check failed with status {response.status_code}")
     
-    @task(6)
-    def list_uploaded_files(self):
-        """List user's uploaded files."""
-        params = {
+    @task(30)
+    def browse_users(self):
+        """Browse user listings with pagination and filtering."""
+        query_params = {
             "page": random.randint(1, 5),
-            "limit": random.choice([10, 20, 50])
+            "limit": random.choice([10, 20, 50]),
+            "sort": random.choice(["created_at", "updated_at", "email"])
         }
-        self.make_authenticated_request("GET", "/api/v1/files", params=params)
+        
+        query_string = "&".join([f"{k}={v}" for k, v in query_params.items()])
+        endpoint = f"/api/users?{query_string}"
+        
+        self.make_authenticated_request("GET", endpoint)
     
-    @task(4)
-    def download_file(self):
-        """Download file from the system."""
-        # Simulate downloading a file by ID
-        file_id = f"file_{random.randint(1, 1000)}"
-        self.make_authenticated_request("GET", f"/api/v1/files/{file_id}/download")
+    @task(20)
+    def view_user_profile(self):
+        """View individual user profile information."""
+        if self.user_id:
+            endpoint = f"/api/users/{self.user_id}"
+            self.make_authenticated_request("GET", endpoint)
+        else:
+            # View random user profile
+            user_id = random.randint(1, 1000)
+            endpoint = f"/api/users/{user_id}"
+            self.make_authenticated_request("GET", endpoint, expected_status=404)
     
-    @task(3)
-    def delete_uploaded_file(self):
-        """Delete uploaded file."""
-        file_id = f"file_{random.randint(1, 1000)}"
-        self.make_authenticated_request("DELETE", f"/api/v1/files/{file_id}")
+    @task(10)
+    def refresh_auth_token(self):
+        """Refresh authentication token periodically."""
+        if self.auth_token:
+            endpoint = "/api/auth/refresh"
+            response_data = self.make_authenticated_request("POST", endpoint)
+            
+            if response_data and "access_token" in response_data:
+                self.auth_token = response_data["access_token"]
 
 
-# Locust event handlers for performance monitoring and reporting
+class NormalUsageUser(BaseUserBehavior):
+    """
+    Normal usage user behavior simulating typical application usage patterns.
+    
+    Implements balanced read/write operations, user management, and data updates
+    representing average user interaction patterns for realistic load simulation.
+    """
+    
+    wait_time = between(1, 5)  # 1-5 seconds between requests
+    
+    @task(25)
+    def browse_and_search_users(self):
+        """Browse users with search functionality."""
+        search_terms = ["john", "admin", "test", "user", "demo"]
+        search_term = random.choice(search_terms)
+        
+        endpoint = f"/api/users?search={search_term}&limit=20"
+        self.make_authenticated_request("GET", endpoint)
+    
+    @task(20)
+    def view_user_details(self):
+        """View detailed user information including related data."""
+        user_id = random.randint(1, 100)
+        endpoint = f"/api/users/{user_id}"
+        
+        user_data = self.make_authenticated_request("GET", endpoint, expected_status=200)
+        if user_data:
+            # Simulate related data fetching
+            self.wait_time = between(0.5, 2)  # Shorter wait for related requests
+            
+            # Fetch user activities
+            activities_endpoint = f"/api/users/{user_id}/activities"
+            self.make_authenticated_request("GET", activities_endpoint)
+    
+    @task(15)
+    def update_user_profile(self):
+        """Update user profile information."""
+        if self.user_id:
+            profile_updates = {
+                "first_name": f"Updated_{random.randint(1, 1000)}",
+                "last_name": f"User_{random.randint(1, 1000)}",
+                "bio": f"Updated bio at {datetime.now().isoformat()}",
+                "preferences": {
+                    "theme": random.choice(["light", "dark"]),
+                    "notifications": random.choice([True, False])
+                }
+            }
+            
+            endpoint = f"/api/users/{self.user_id}"
+            self.make_authenticated_request("PUT", endpoint, profile_updates)
+    
+    @task(15)
+    def create_user_data(self):
+        """Create new user-related data entries."""
+        data_payload = {
+            "title": f"Test Entry {random.randint(1, 10000)}",
+            "content": f"Generated content at {datetime.now().isoformat()}",
+            "category": random.choice(["personal", "work", "hobby", "education"]),
+            "tags": random.sample(["python", "flask", "testing", "performance", "api"], 2),
+            "metadata": {
+                "source": "load_test",
+                "timestamp": datetime.now().isoformat(),
+                "user_agent": "Locust Load Test"
+            }
+        }
+        
+        endpoint = "/api/data"
+        response_data = self.make_authenticated_request("POST", endpoint, data_payload, 201)
+        
+        if response_data and "id" in response_data:
+            # Store created data ID for potential future operations
+            self.session_data["last_created_id"] = response_data["id"]
+    
+    @task(10)
+    def delete_user_data(self):
+        """Delete previously created user data."""
+        if "last_created_id" in self.session_data:
+            data_id = self.session_data["last_created_id"]
+            endpoint = f"/api/data/{data_id}"
+            self.make_authenticated_request("DELETE", endpoint, expected_status=204)
+            del self.session_data["last_created_id"]
+    
+    @task(10)
+    def upload_file(self):
+        """Simulate file upload operations."""
+        # Generate small test file content
+        file_content = f"Test file content generated at {datetime.now().isoformat()}"
+        file_data = {
+            "filename": f"test_file_{random.randint(1, 10000)}.txt",
+            "content_type": "text/plain",
+            "size": len(file_content.encode())
+        }
+        
+        endpoint = "/api/files/upload"
+        self.make_authenticated_request("POST", endpoint, file_data, 201)
+    
+    @task(5)
+    def export_data(self):
+        """Export user data in various formats."""
+        export_formats = ["json", "csv", "xml"]
+        export_format = random.choice(export_formats)
+        
+        endpoint = f"/api/data/export?format={export_format}"
+        self.make_authenticated_request("GET", endpoint)
 
+
+class HeavyUsageUser(BaseUserBehavior):
+    """
+    Heavy usage user behavior simulating intensive application usage.
+    
+    Implements high-frequency operations, batch processing, and complex workflows
+    for stress testing and peak load validation scenarios.
+    """
+    
+    wait_time = between(0.5, 2)  # Very short wait times for intensive usage
+    
+    @task(20)
+    def batch_user_operations(self):
+        """Perform batch operations on multiple users."""
+        batch_size = random.randint(5, 20)
+        user_ids = [random.randint(1, 1000) for _ in range(batch_size)]
+        
+        batch_payload = {
+            "user_ids": user_ids,
+            "operation": random.choice(["activate", "deactivate", "update_status"]),
+            "parameters": {
+                "status": random.choice(["active", "inactive", "pending"]),
+                "updated_by": self.user_id or "load_test_user",
+                "timestamp": datetime.now().isoformat()
+            }
+        }
+        
+        endpoint = "/api/users/batch"
+        self.make_authenticated_request("POST", endpoint, batch_payload)
+    
+    @task(15)
+    def complex_search_operations(self):
+        """Perform complex search operations with multiple filters."""
+        search_payload = {
+            "filters": {
+                "status": random.choice(["active", "inactive"]),
+                "created_after": (datetime.now() - timedelta(days=30)).isoformat(),
+                "created_before": datetime.now().isoformat(),
+                "roles": random.sample(["admin", "user", "manager", "viewer"], 2)
+            },
+            "sort": [
+                {"field": "created_at", "direction": "desc"},
+                {"field": "email", "direction": "asc"}
+            ],
+            "pagination": {
+                "page": random.randint(1, 10),
+                "limit": random.choice([50, 100, 200])
+            }
+        }
+        
+        endpoint = "/api/users/search"
+        self.make_authenticated_request("POST", endpoint, search_payload)
+    
+    @task(15)
+    def rapid_crud_operations(self):
+        """Perform rapid CRUD operations on data entities."""
+        # Create multiple data entries rapidly
+        for i in range(random.randint(3, 8)):
+            create_payload = {
+                "title": f"Rapid Entry {i}_{random.randint(1, 10000)}",
+                "content": f"Content {i} created in batch",
+                "priority": random.choice(["low", "medium", "high"]),
+                "metadata": {"batch_id": str(uuid.uuid4())}
+            }
+            
+            response_data = self.make_authenticated_request(
+                "POST", "/api/data", create_payload, 201
+            )
+            
+            if response_data and "id" in response_data:
+                data_id = response_data["id"]
+                
+                # Immediately update the created entry
+                update_payload = {
+                    "content": f"Updated content for entry {i}",
+                    "updated_at": datetime.now().isoformat()
+                }
+                
+                self.make_authenticated_request(
+                    "PUT", f"/api/data/{data_id}", update_payload
+                )
+    
+    @task(12)
+    def analytics_queries(self):
+        """Perform resource-intensive analytics queries."""
+        analytics_requests = [
+            "/api/analytics/user-activity",
+            "/api/analytics/performance-metrics",
+            "/api/analytics/system-health",
+            "/api/analytics/usage-statistics"
+        ]
+        
+        endpoint = random.choice(analytics_requests)
+        query_params = {
+            "start_date": (datetime.now() - timedelta(days=7)).isoformat(),
+            "end_date": datetime.now().isoformat(),
+            "granularity": random.choice(["hour", "day"]),
+            "metrics": random.sample(["requests", "users", "errors", "performance"], 2)
+        }
+        
+        query_string = "&".join([f"{k}={v}" for k, v in query_params.items()])
+        full_endpoint = f"{endpoint}?{query_string}"
+        
+        self.make_authenticated_request("GET", full_endpoint)
+    
+    @task(10)
+    def concurrent_file_operations(self):
+        """Perform concurrent file upload and download operations."""
+        # Upload multiple files concurrently
+        file_operations = []
+        for i in range(random.randint(2, 5)):
+            file_payload = {
+                "filename": f"concurrent_file_{i}_{random.randint(1, 10000)}.dat",
+                "content": f"File content {i}" * 100,  # Larger file content
+                "metadata": {
+                    "batch_operation": True,
+                    "sequence": i
+                }
+            }
+            
+            response_data = self.make_authenticated_request(
+                "POST", "/api/files/upload", file_payload, 201
+            )
+            
+            if response_data and "file_id" in response_data:
+                file_operations.append(response_data["file_id"])
+        
+        # Download the uploaded files
+        for file_id in file_operations:
+            endpoint = f"/api/files/{file_id}/download"
+            self.make_authenticated_request("GET", endpoint)
+    
+    @task(8)
+    def stress_database_operations(self):
+        """Perform database-intensive operations for stress testing."""
+        # Complex aggregation query
+        aggregation_payload = {
+            "pipeline": [
+                {"match": {"status": "active"}},
+                {"group": {
+                    "_id": "$category",
+                    "count": {"$sum": 1},
+                    "avg_score": {"$avg": "$score"}
+                }},
+                {"sort": {"count": -1}},
+                {"limit": 20}
+            ],
+            "options": {
+                "allowDiskUse": True,
+                "maxTimeMS": 30000
+            }
+        }
+        
+        endpoint = "/api/data/aggregate"
+        self.make_authenticated_request("POST", endpoint, aggregation_payload)
+
+
+class APIIntegrationUser(BaseUserBehavior):
+    """
+    API integration user behavior simulating automated systems and integrations.
+    
+    Implements machine-to-machine communication patterns, webhook handling,
+    and external service integration testing for comprehensive API validation.
+    """
+    
+    wait_time = between(0.1, 1)  # Very fast requests for API integration
+    
+    @task(30)
+    def webhook_simulation(self):
+        """Simulate incoming webhook requests from external systems."""
+        webhook_data = {
+            "event_type": random.choice(["user.created", "user.updated", "user.deleted"]),
+            "timestamp": datetime.now().isoformat(),
+            "source": "external_system",
+            "data": {
+                "user_id": random.randint(1, 10000),
+                "changes": {
+                    "status": random.choice(["active", "inactive"]),
+                    "last_login": datetime.now().isoformat()
+                }
+            },
+            "signature": hashlib.sha256(str(random.randint(1, 1000000)).encode()).hexdigest()
+        }
+        
+        endpoint = "/api/webhooks/user-events"
+        self.make_authenticated_request("POST", endpoint, webhook_data)
+    
+    @task(25)
+    def api_key_operations(self):
+        """Test API key authentication and operations."""
+        # Generate API key
+        api_key_payload = {
+            "name": f"integration_key_{random.randint(1, 10000)}",
+            "permissions": random.sample(["read", "write", "delete", "admin"], 2),
+            "expires_at": (datetime.now() + timedelta(days=30)).isoformat()
+        }
+        
+        response_data = self.make_authenticated_request(
+            "POST", "/api/api-keys", api_key_payload, 201
+        )
+        
+        if response_data and "api_key" in response_data:
+            api_key = response_data["api_key"]
+            
+            # Test API key usage
+            api_headers = {
+                "X-API-Key": api_key,
+                "Content-Type": "application/json"
+            }
+            
+            start_time = time.time()
+            with self.client.get("/api/users", headers=api_headers, catch_response=True) as response:
+                response_time = (time.time() - start_time) * 1000
+                success = response.status_code == 200
+                
+                performance_monitor.record_request(
+                    response_time, "/api/users", "GET", success
+                )
+    
+    @task(20)
+    def bulk_data_import(self):
+        """Simulate bulk data import operations."""
+        batch_size = random.randint(50, 200)
+        import_data = {
+            "import_type": "user_data",
+            "format": "json",
+            "data": [
+                {
+                    "external_id": f"ext_{i}_{random.randint(1, 10000)}",
+                    "email": f"import_user_{i}@example.com",
+                    "first_name": f"Import{i}",
+                    "last_name": "User",
+                    "metadata": {
+                        "import_batch": datetime.now().isoformat(),
+                        "source": "api_integration_test"
+                    }
+                }
+                for i in range(batch_size)
+            ]
+        }
+        
+        endpoint = "/api/data/import"
+        self.make_authenticated_request("POST", endpoint, import_data)
+    
+    @task(15)
+    def real_time_sync_operations(self):
+        """Simulate real-time data synchronization operations."""
+        sync_payload = {
+            "sync_type": "incremental",
+            "last_sync_timestamp": (datetime.now() - timedelta(minutes=5)).isoformat(),
+            "entities": ["users", "data", "files"],
+            "options": {
+                "include_deleted": True,
+                "max_records": 1000,
+                "compression": "gzip"
+            }
+        }
+        
+        endpoint = "/api/sync/request"
+        response_data = self.make_authenticated_request("POST", endpoint, sync_payload)
+        
+        if response_data and "sync_id" in response_data:
+            sync_id = response_data["sync_id"]
+            
+            # Poll sync status
+            status_endpoint = f"/api/sync/{sync_id}/status"
+            self.make_authenticated_request("GET", status_endpoint)
+    
+    @task(10)
+    def external_service_integration(self):
+        """Test external service integration endpoints."""
+        integration_endpoints = [
+            "/api/integrations/auth0/sync",
+            "/api/integrations/aws/s3/test",
+            "/api/integrations/monitoring/health",
+            "/api/integrations/cache/status"
+        ]
+        
+        endpoint = random.choice(integration_endpoints)
+        
+        if "test" in endpoint or "health" in endpoint or "status" in endpoint:
+            self.make_authenticated_request("GET", endpoint)
+        else:
+            sync_payload = {
+                "full_sync": False,
+                "dry_run": True,
+                "timestamp": datetime.now().isoformat()
+            }
+            self.make_authenticated_request("POST", endpoint, sync_payload)
+
+
+class ProgressiveLoadUser(HttpUser):
+    """
+    Main Locust user class implementing progressive load scaling patterns.
+    
+    Coordinates multiple user behavior types with dynamic weight adjustment
+    based on load test phase and performance metrics for realistic load simulation.
+    """
+    
+    # Dynamic wait time based on load phase
+    wait_time = between(1, 3)
+    
+    def __init__(self, environment):
+        """Initialize progressive load user with behavior selection."""
+        super().__init__(environment)
+        self.behavior_type = self._select_behavior_type()
+        self.phase_start_time = datetime.now(timezone.utc)
+        
+    def _select_behavior_type(self) -> UserBehaviorType:
+        """
+        Select user behavior type based on current load test phase and user distribution.
+        
+        Returns:
+            UserBehaviorType enum value for behavior selection
+        """
+        current_phase = performance_monitor.current_phase
+        
+        # Behavior distribution based on load phase
+        if current_phase in [LoadTestPhase.RAMP_UP, LoadTestPhase.STEADY_STATE]:
+            # Normal distribution during standard phases
+            behavior_weights = {
+                UserBehaviorType.LIGHT_BROWSING: 40,
+                UserBehaviorType.NORMAL_USAGE: 45,
+                UserBehaviorType.HEAVY_USAGE: 10,
+                UserBehaviorType.API_INTEGRATION: 5
+            }
+        elif current_phase == LoadTestPhase.STRESS_TESTING:
+            # More intensive users during stress testing
+            behavior_weights = {
+                UserBehaviorType.LIGHT_BROWSING: 20,
+                UserBehaviorType.NORMAL_USAGE: 35,
+                UserBehaviorType.HEAVY_USAGE: 35,
+                UserBehaviorType.API_INTEGRATION: 10
+            }
+        elif current_phase == LoadTestPhase.PEAK_LOAD:
+            # Maximum intensity during peak load
+            behavior_weights = {
+                UserBehaviorType.LIGHT_BROWSING: 15,
+                UserBehaviorType.NORMAL_USAGE: 25,
+                UserBehaviorType.HEAVY_USAGE: 45,
+                UserBehaviorType.API_INTEGRATION: 15
+            }
+        else:
+            # Default mixed workload
+            behavior_weights = {
+                UserBehaviorType.LIGHT_BROWSING: 30,
+                UserBehaviorType.NORMAL_USAGE: 40,
+                UserBehaviorType.HEAVY_USAGE: 20,
+                UserBehaviorType.API_INTEGRATION: 10
+            }
+        
+        # Weighted random selection
+        behaviors = list(behavior_weights.keys())
+        weights = list(behavior_weights.values())
+        return random.choices(behaviors, weights=weights)[0]
+    
+    def on_start(self):
+        """Initialize user session based on selected behavior type."""
+        logger.debug(f"Starting user with behavior: {self.behavior_type.value}")
+        
+        # Set task set based on behavior type
+        if self.behavior_type == UserBehaviorType.LIGHT_BROWSING:
+            self.tasks = [LightBrowsingUser]
+            self.wait_time = between(3, 8)
+        elif self.behavior_type == UserBehaviorType.NORMAL_USAGE:
+            self.tasks = [NormalUsageUser]
+            self.wait_time = between(1, 5)
+        elif self.behavior_type == UserBehaviorType.HEAVY_USAGE:
+            self.tasks = [HeavyUsageUser]
+            self.wait_time = between(0.5, 2)
+        elif self.behavior_type == UserBehaviorType.API_INTEGRATION:
+            self.tasks = [APIIntegrationUser]
+            self.wait_time = between(0.1, 1)
+        else:
+            # Default to normal usage
+            self.tasks = [NormalUsageUser]
+            self.wait_time = between(1, 5)
+
+
+# Locust event handlers for performance monitoring and phase management
 @events.test_start.add_listener
 def on_test_start(environment, **kwargs):
-    """Initialize performance monitoring when test starts."""
-    print(f"\n🚀 Starting Flask Migration Load Test")
-    print(f"Environment: {PERFORMANCE_ENV}")
-    print(f"Target Users: {MIN_USERS} → {MAX_USERS}")
-    print(f"Test Duration: {TEST_DURATION} seconds ({TEST_DURATION // 60} minutes)")
-    print(f"Spawn Rate: {USER_SPAWN_RATE} users/second")
-    print(f"Geographic Regions: {', '.join(GEOGRAPHIC_REGIONS)}")
-    print(f"Performance Variance Threshold: ≤{VARIANCE_THRESHOLD * 100:.1f}%")
+    """Initialize test environment and performance monitoring."""
+    logger.info("Load test starting - initializing performance monitoring")
     
-    # Start Prometheus metrics server if available
-    if PROMETHEUS_AVAILABLE:
-        try:
-            prometheus_port = int(os.getenv('PROMETHEUS_PORT', 8089))
-            start_http_server(prometheus_port, registry=performance_collector.registry)
-            print(f"📊 Prometheus metrics server started on port {prometheus_port}")
-        except Exception as e:
-            print(f"⚠️ Failed to start Prometheus metrics server: {e}")
+    # Reset performance monitor
+    global performance_monitor
+    performance_monitor = PerformanceMonitor()
+    performance_monitor.set_phase(LoadTestPhase.RAMP_UP)
     
-    # Initialize structured logging if available
-    if STRUCTLOG_AVAILABLE:
-        structlog.configure(
-            processors=[
-                structlog.processors.TimeStamper(fmt="ISO"),
-                structlog.processors.add_log_level,
-                structlog.processors.JSONRenderer()
-            ],
-            wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
-            logger_factory=structlog.PrintLoggerFactory(),
-            cache_logger_on_first_use=True,
-        )
+    # Load test configuration
+    test_config = PerformanceTestConfig.get_environment_config()
+    logger.info(f"Test configuration loaded: {test_config.get('load_test_scenario', 'default')}")
+
+
+@events.spawning_complete.add_listener
+def on_spawning_complete(user_count, **kwargs):
+    """Handle user spawning completion and phase transitions."""
+    logger.info(f"Spawning complete - {user_count} users active")
+    
+    # Update metrics with current user count
+    current_metrics = performance_monitor.update_metrics(user_count)
+    
+    # Determine phase based on user count and test duration
+    test_duration = (datetime.now(timezone.utc) - performance_monitor.start_time).total_seconds()
+    
+    if user_count >= 800:
+        performance_monitor.set_phase(LoadTestPhase.PEAK_LOAD)
+    elif user_count >= 500:
+        performance_monitor.set_phase(LoadTestPhase.STRESS_TESTING)
+    elif test_duration > 1200:  # 20 minutes
+        performance_monitor.set_phase(LoadTestPhase.ENDURANCE)
+    else:
+        performance_monitor.set_phase(LoadTestPhase.STEADY_STATE)
+    
+    # Log current performance metrics
+    logger.info(
+        f"Current metrics - RPS: {current_metrics.requests_per_second:.2f}, "
+        f"P95: {current_metrics.response_time_p95:.2f}ms, "
+        f"Error Rate: {current_metrics.error_rate:.2f}%, "
+        f"Phase: {current_metrics.current_phase.value}"
+    )
+
+
+@events.request.add_listener
+def on_request(request_type, name, response_time, response_length, exception, context, **kwargs):
+    """Handle individual request events for performance monitoring."""
+    success = exception is None
+    performance_monitor.record_request(response_time, name, request_type, success)
+
+
+@events.user_error.add_listener
+def on_user_error(user_instance, exception, tb, **kwargs):
+    """Handle user errors and exceptions during load testing."""
+    logger.error(f"User error in {user_instance.__class__.__name__}: {exception}")
 
 
 @events.test_stop.add_listener
 def on_test_stop(environment, **kwargs):
-    """Generate final performance report when test completes."""
-    print(f"\n🏁 Load Test Completed")
+    """Generate final performance report and cleanup."""
+    logger.info("Load test stopping - generating performance report")
     
-    # Generate comprehensive performance summary
-    performance_summary = performance_collector.get_performance_summary()
+    # Set final phase
+    performance_monitor.set_phase(LoadTestPhase.RAMP_DOWN)
     
-    # Display performance results
-    print(f"\n📈 Performance Summary:")
-    if "response_time_metrics" in performance_summary:
-        rt_metrics = performance_summary["response_time_metrics"]
-        print(f"  Mean Response Time: {rt_metrics['mean_response_time_ms']:.2f}ms")
-        print(f"  95th Percentile: {rt_metrics['p95_response_time_ms']:.2f}ms")
-        print(f"  99th Percentile: {rt_metrics['p99_response_time_ms']:.2f}ms")
+    # Generate comprehensive performance report
+    final_report = performance_monitor.generate_report()
     
-    if "throughput_metrics" in performance_summary:
-        tp_metrics = performance_summary["throughput_metrics"]
-        print(f"  Average Throughput: {tp_metrics['avg_throughput_rps']:.2f} RPS")
-        print(f"  Peak Throughput: {tp_metrics['peak_throughput_rps']:.2f} RPS")
+    # Save report to file
+    report_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_filename = f"performance_report_{report_timestamp}.json"
+    report_path = Path(__file__).parent / "reports" / report_filename
+    report_path.parent.mkdir(exist_ok=True)
     
-    if "error_metrics" in performance_summary:
-        err_metrics = performance_summary["error_metrics"]
-        print(f"  Total Requests: {err_metrics['total_requests']}")
-        print(f"  Error Rate: {err_metrics['error_rate_percent']:.3f}%")
+    with open(report_path, 'w') as f:
+        json.dump(final_report, f, indent=2, default=str)
     
-    # Display baseline validation results
-    if "baseline_validation" in performance_summary:
-        validation = performance_summary["baseline_validation"]
-        print(f"\n🔍 Baseline Validation:")
-        print(f"  Overall Compliance: {'✅ PASS' if validation.get('overall_compliance', False) else '❌ FAIL'}")
-        
-        if "variance_analysis" in validation:
-            for metric, analysis in validation["variance_analysis"].items():
-                variance = analysis.get("variance_percent", 0)
-                status = "✅ PASS" if analysis.get("compliant", False) else "❌ FAIL"
-                print(f"  {metric.replace('_', ' ').title()}: {variance:+.2f}% variance {status}")
+    logger.info(f"Performance report saved to: {report_path}")
     
-    # Display compliance status
-    if "performance_compliance" in performance_summary:
-        compliance = performance_summary["performance_compliance"]
-        print(f"\n✅ Compliance Status:")
-        print(f"  Variance Threshold: {'✅ PASS' if compliance.get('within_variance_threshold', False) else '❌ FAIL'}")
-        print(f"  Response Time: {'✅ PASS' if compliance.get('response_time_compliant', False) else '❌ FAIL'}")
-        print(f"  Error Rate: {'✅ PASS' if compliance.get('error_rate_compliant', False) else '❌ FAIL'}")
-        print(f"  Throughput: {'✅ PASS' if compliance.get('throughput_compliant', False) else '❌ FAIL'}")
+    # Log performance summary
+    if "performance_summary" in final_report:
+        summary = final_report["performance_summary"]
+        logger.info(
+            f"Performance Summary - "
+            f"Response Time Compliance: {summary.get('meets_response_time_threshold', False)}, "
+            f"Throughput Compliance: {summary.get('meets_throughput_threshold', False)}, "
+            f"Error Rate Compliance: {summary.get('meets_error_rate_threshold', False)}, "
+            f"Overall Compliant: {summary.get('overall_compliant', False)}"
+        )
     
-    # Save performance report to file
-    _save_performance_report(performance_summary)
-    
-    # Log final summary with structured logging
-    if STRUCTLOG_AVAILABLE:
-        logger = structlog.get_logger()
-        logger.info("Load test completed", performance_summary=performance_summary)
+    # Validate against baseline
+    baseline_comparison = final_report.get("baseline_comparison", {})
+    if baseline_comparison.get("summary", {}).get("overall_compliant"):
+        logger.info("✅ Performance test PASSED - within baseline variance threshold")
+    else:
+        logger.warning("❌ Performance test FAILED - exceeded baseline variance threshold")
+        if "comparison_results" in baseline_comparison:
+            for metric, result in baseline_comparison["comparison_results"].items():
+                if not result.get("within_threshold", True):
+                    variance = result.get("variance_percent", 0)
+                    logger.warning(f"  - {metric}: {variance:.2f}% variance")
 
 
-@events.user_add.add_listener
-def on_user_add(user_instance, **kwargs):
-    """Track user addition for concurrent user monitoring."""
-    current_users = len(user_instance.environment.runner.user_greenlets)
-    performance_collector.record_concurrent_users(current_users)
-
-
-@events.user_remove.add_listener
-def on_user_remove(user_instance, **kwargs):
-    """Track user removal for concurrent user monitoring."""
-    current_users = len(user_instance.environment.runner.user_greenlets)
-    performance_collector.record_concurrent_users(current_users)
-
-
-@events.request_success.add_listener
-def on_request_success(request_type, name, response_time, response_length, **kwargs):
-    """Track successful requests for throughput calculation."""
-    # Calculate current RPS based on recent successful requests
-    current_time = time.time()
-    if not hasattr(on_request_success, 'request_times'):
-        on_request_success.request_times = []
-    
-    on_request_success.request_times.append(current_time)
-    
-    # Keep only requests from the last 10 seconds for RPS calculation
-    cutoff_time = current_time - 10
-    on_request_success.request_times = [t for t in on_request_success.request_times if t > cutoff_time]
-    
-    # Calculate and record current RPS
-    if len(on_request_success.request_times) > 1:
-        time_window = on_request_success.request_times[-1] - on_request_success.request_times[0]
-        if time_window > 0:
-            current_rps = (len(on_request_success.request_times) - 1) / time_window
-            performance_collector.record_throughput_sample(current_rps)
-
-
-def _save_performance_report(performance_summary: Dict[str, Any]) -> None:
-    """Save comprehensive performance report to file."""
-    try:
-        report_dir = Path("tests/performance/reports")
-        report_dir.mkdir(parents=True, exist_ok=True)
-        
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        report_file = report_dir / f"load_test_report_{timestamp}.json"
-        
-        # Enhanced report with metadata
-        enhanced_report = {
-            "metadata": {
-                "test_type": "locust_load_test",
-                "environment": PERFORMANCE_ENV,
-                "test_duration_seconds": TEST_DURATION,
-                "min_users": MIN_USERS,
-                "max_users": MAX_USERS,
-                "spawn_rate": USER_SPAWN_RATE,
-                "target_rps": TARGET_RPS,
-                "variance_threshold": VARIANCE_THRESHOLD,
-                "geographic_regions": GEOGRAPHIC_REGIONS,
-                "scenario_weights": SCENARIO_WEIGHTS,
-                "generated_at": datetime.now(timezone.utc).isoformat()
-            },
-            "performance_results": performance_summary,
-            "test_configuration": {
-                "load_test_config": LOAD_TEST_CONFIG.__dict__,
-                "baseline_metrics": BASELINE_METRICS.__dict__,
-                "performance_config": {
-                    "variance_threshold": PERFORMANCE_CONFIG.PERFORMANCE_VARIANCE_THRESHOLD,
-                    "response_time_threshold": PERFORMANCE_CONFIG.RESPONSE_TIME_P95_THRESHOLD,
-                    "error_rate_threshold": PERFORMANCE_CONFIG.ERROR_RATE_THRESHOLD
-                }
-            }
-        }
-        
-        with open(report_file, 'w') as f:
-            json.dump(enhanced_report, f, indent=2, default=str)
-        
-        print(f"\n📄 Performance report saved: {report_file}")
-        
-        # Generate markdown summary report
-        _generate_markdown_summary(enhanced_report, report_dir, timestamp)
-        
-    except Exception as e:
-        print(f"⚠️ Failed to save performance report: {e}")
-
-
-def _generate_markdown_summary(report_data: Dict[str, Any], report_dir: Path, timestamp: str) -> None:
-    """Generate markdown summary report for easy reading."""
-    try:
-        summary_file = report_dir / f"load_test_summary_{timestamp}.md"
-        
-        metadata = report_data["metadata"]
-        results = report_data["performance_results"]
-        
-        markdown_content = f"""# Load Test Summary Report
-
-**Generated:** {metadata['generated_at']}  
-**Environment:** {metadata['environment']}  
-**Test Duration:** {metadata['test_duration_seconds']} seconds ({metadata['test_duration_seconds'] // 60} minutes)  
-**User Range:** {metadata['min_users']} → {metadata['max_users']} concurrent users  
-**Spawn Rate:** {metadata['spawn_rate']} users/second  
-
-## Performance Results
-
-### Response Time Metrics
-"""
-        
-        if "response_time_metrics" in results:
-            rt_metrics = results["response_time_metrics"]
-            markdown_content += f"""
-| Metric | Value |
-|--------|--------|
-| Mean Response Time | {rt_metrics['mean_response_time_ms']:.2f}ms |
-| Median Response Time | {rt_metrics['median_response_time_ms']:.2f}ms |
-| 95th Percentile | {rt_metrics['p95_response_time_ms']:.2f}ms |
-| 99th Percentile | {rt_metrics['p99_response_time_ms']:.2f}ms |
-| Min Response Time | {rt_metrics['min_response_time_ms']:.2f}ms |
-| Max Response Time | {rt_metrics['max_response_time_ms']:.2f}ms |
-"""
-        
-        if "throughput_metrics" in results:
-            tp_metrics = results["throughput_metrics"]
-            markdown_content += f"""
-### Throughput Metrics
-
-| Metric | Value |
-|--------|--------|
-| Average Throughput | {tp_metrics['avg_throughput_rps']:.2f} RPS |
-| Peak Throughput | {tp_metrics['peak_throughput_rps']:.2f} RPS |
-| Min Throughput | {tp_metrics['min_throughput_rps']:.2f} RPS |
-"""
-        
-        if "error_metrics" in results:
-            err_metrics = results["error_metrics"]
-            markdown_content += f"""
-### Error Metrics
-
-| Metric | Value |
-|--------|--------|
-| Total Requests | {err_metrics['total_requests']} |
-| Total Errors | {err_metrics['total_errors']} |
-| Error Rate | {err_metrics['error_rate_percent']:.3f}% |
-"""
-        
-        if "baseline_validation" in results:
-            validation = results["baseline_validation"]
-            compliance_status = "✅ PASS" if validation.get("overall_compliance", False) else "❌ FAIL"
-            
-            markdown_content += f"""
-### Baseline Validation
-
-**Overall Compliance:** {compliance_status}
-
-"""
-            
-            if "variance_analysis" in validation:
-                markdown_content += """| Metric | Variance | Status |
-|--------|----------|--------|
-"""
-                for metric, analysis in validation["variance_analysis"].items():
-                    variance = analysis.get("variance_percent", 0)
-                    status = "✅ PASS" if analysis.get("compliant", False) else "❌ FAIL"
-                    metric_name = metric.replace('_', ' ').title()
-                    markdown_content += f"| {metric_name} | {variance:+.2f}% | {status} |\n"
-        
-        if "performance_compliance" in results:
-            compliance = results["performance_compliance"]
-            markdown_content += f"""
-### Compliance Summary
-
-| Requirement | Status |
-|-------------|--------|
-| Variance Threshold (≤{metadata['variance_threshold']*100:.1f}%) | {'✅ PASS' if compliance.get('within_variance_threshold', False) else '❌ FAIL'} |
-| Response Time (≤500ms P95) | {'✅ PASS' if compliance.get('response_time_compliant', False) else '❌ FAIL'} |
-| Error Rate (≤0.1%) | {'✅ PASS' if compliance.get('error_rate_compliant', False) else '❌ FAIL'} |
-| Throughput (≥{metadata['target_rps']} RPS) | {'✅ PASS' if compliance.get('throughput_compliant', False) else '❌ FAIL'} |
-
-## Test Configuration
-
-- **Geographic Regions:** {', '.join(metadata['geographic_regions'])}
-- **Scenario Weights:** {metadata['scenario_weights']}
-- **Variance Threshold:** ≤{metadata['variance_threshold']*100:.1f}%
-"""
-        
-        with open(summary_file, 'w') as f:
-            f.write(markdown_content)
-        
-        print(f"📄 Markdown summary saved: {summary_file}")
-        
-    except Exception as e:
-        print(f"⚠️ Failed to generate markdown summary: {e}")
-
-
-# Custom load shape for progressive scaling per Section 4.6.3
-class ProgressiveLoadShape:
+# Load test configuration based on environment and command line parameters
+def get_locust_configuration() -> Dict[str, Any]:
     """
-    Custom load shape implementing progressive user scaling from 10 to 1000 users.
+    Get Locust configuration based on environment variables and test parameters.
     
-    Provides gradual load increase following the load testing configuration
-    requirements per Section 4.6.3 with proper ramp-up, steady state, and
-    ramp-down phases.
+    Returns:
+        Dictionary containing Locust configuration parameters
+    """
+    # Get environment-specific configuration
+    environment = os.getenv('FLASK_ENV', 'development')
+    test_scenario = os.getenv('LOAD_TEST_SCENARIO', 'normal_load')
+    
+    # Map environment variables to load test scenarios
+    scenario_mapping = {
+        'light_load': LoadTestScenario.LIGHT_LOAD,
+        'normal_load': LoadTestScenario.NORMAL_LOAD,
+        'heavy_load': LoadTestScenario.HEAVY_LOAD,
+        'stress_test': LoadTestScenario.STRESS_TEST,
+        'endurance_test': LoadTestScenario.ENDURANCE_TEST,
+        'baseline_comparison': LoadTestScenario.BASELINE_COMPARISON
+    }
+    
+    scenario = scenario_mapping.get(test_scenario, LoadTestScenario.NORMAL_LOAD)
+    
+    # Get load test configuration
+    load_config = get_load_test_config(scenario, environment)
+    
+    # Build Locust configuration
+    locust_config = {
+        'host': load_config.host,
+        'users': load_config.users,
+        'spawn_rate': load_config.spawn_rate,
+        'run_time': f"{load_config.duration}s",
+        'headless': os.getenv('LOCUST_HEADLESS', 'true').lower() == 'true',
+        'csv': os.getenv('LOCUST_CSV_OUTPUT', 'performance_results'),
+        'html': os.getenv('LOCUST_HTML_OUTPUT', 'performance_report.html'),
+        'logfile': os.getenv('LOCUST_LOGFILE', 'locust.log'),
+        'loglevel': os.getenv('LOCUST_LOGLEVEL', 'INFO')
+    }
+    
+    logger.info(f"Locust configuration: {locust_config}")
+    return locust_config
+
+
+# Multi-region simulation through distributed Locust execution
+class MultiRegionCoordinator:
+    """
+    Coordinates multi-region load testing simulation through distributed Locust workers.
+    
+    Implements geographic distribution patterns, regional user behavior variations,
+    and coordinated load scaling across multiple regions for comprehensive testing.
     """
     
     def __init__(self):
-        self.user_progression = LOAD_TEST_CONFIG.get_user_progression()
-        self.spawn_rate = USER_SPAWN_RATE
+        """Initialize multi-region coordinator with regional configurations."""
+        self.regions = {
+            'us-east-1': {'weight': 0.4, 'latency_base': 20, 'behavior_bias': 'normal'},
+            'us-west-2': {'weight': 0.25, 'latency_base': 40, 'behavior_bias': 'heavy'},
+            'eu-west-1': {'weight': 0.20, 'latency_base': 100, 'behavior_bias': 'light'},
+            'ap-southeast-1': {'weight': 0.15, 'latency_base': 150, 'behavior_bias': 'api'}
+        }
+        
+    def get_region_config(self, region_name: str) -> Dict[str, Any]:
+        """Get configuration for specific region."""
+        return self.regions.get(region_name, self.regions['us-east-1'])
     
-    def tick(self):
-        """Return user count and spawn rate for current time."""
-        run_time = round(time.time() - self.start_time)
+    def simulate_regional_latency(self, region_name: str) -> None:
+        """Simulate regional network latency."""
+        region_config = self.get_region_config(region_name)
+        base_latency = region_config['latency_base']
         
-        for time_point, user_count in self.user_progression:
-            if run_time <= time_point:
-                return user_count, self.spawn_rate
+        # Add random jitter (±20% of base latency)
+        jitter = random.uniform(-0.2, 0.2) * base_latency
+        latency_ms = base_latency + jitter
         
-        # Test completed, ramp down to 0
-        return 0, self.spawn_rate
+        # Convert to seconds and sleep
+        time.sleep(latency_ms / 1000)
 
 
-# Export user classes for Locust discovery
-__all__ = [
-    'APIReadOperationsUser',
-    'APIWriteOperationsUser', 
-    'AuthenticationFlowUser',
-    'FileUploadOperationsUser',
-    'BaseFlaskUser',
-    'PerformanceMetricsCollector'
-]
-
-
+# Main execution configuration for command-line usage
 if __name__ == "__main__":
-    # Configuration summary for direct execution
-    print("Flask Migration Load Testing Configuration")
-    print("=" * 50)
-    print(f"Environment: {PERFORMANCE_ENV}")
-    print(f"Min Users: {MIN_USERS}")
-    print(f"Max Users: {MAX_USERS}")
-    print(f"Test Duration: {TEST_DURATION} seconds")
-    print(f"Spawn Rate: {USER_SPAWN_RATE} users/second")
-    print(f"Target RPS: {TARGET_RPS}")
-    print(f"Variance Threshold: ≤{VARIANCE_THRESHOLD * 100:.1f}%")
-    print(f"Geographic Regions: {', '.join(GEOGRAPHIC_REGIONS)}")
-    print("\nUser Classes:")
-    for cls_name in __all__:
-        if 'User' in cls_name and cls_name != 'BaseFlaskUser':
-            cls = globals()[cls_name]
-            if hasattr(cls, 'weight'):
-                print(f"  - {cls_name}: {cls.weight}% of users")
-    print("\nRun with: locust -f locustfile.py --host=http://localhost:5000")
+    """
+    Main execution block for running Locust load tests directly.
+    
+    Supports command-line execution with environment variable configuration
+    and automatic performance report generation.
+    """
+    
+    # Load configuration
+    config = get_locust_configuration()
+    
+    logger.info("Starting Locust load test with progressive scaling")
+    logger.info(f"Target: {config['host']}")
+    logger.info(f"Users: {config['users']}, Spawn Rate: {config['spawn_rate']}")
+    logger.info(f"Duration: {config['run_time']}")
+    
+    # Set Locust host for user classes
+    ProgressiveLoadUser.host = config['host']
+    
+    logger.info("Load test configuration complete - ready for execution")
+    logger.info("Run with: locust -f locustfile.py --headless -u 1000 -r 50 -t 30m")
+    logger.info("Or with web UI: locust -f locustfile.py --host http://localhost:5000")
