@@ -1,636 +1,602 @@
 """
-Cache-specific exception classes providing comprehensive error handling for Redis connection 
-failures, cache operation timeouts, and cache invalidation errors. Implements integration 
-with Flask error handlers and circuit breaker patterns for enterprise-grade cache error 
+Cache-specific exception classes providing comprehensive error handling for Redis connection
+failures, cache operation timeouts, and cache invalidation errors. Implements integration
+with Flask error handlers and circuit breaker patterns for enterprise-grade cache error
 management.
 
-This module implements the complete cache exception hierarchy as specified in Section 4.2.3
-of the technical specification, providing robust error handling patterns for Redis-based
-caching operations with enterprise-grade resilience mechanisms.
+This module implements the error handling architecture specified in Section 4.2.3 of the
+technical specification, providing resilience mechanisms per Section 6.1.3 and ensuring
+comprehensive error management for cache operations in the Flask application migration.
 """
 
+import logging
+from typing import Optional, Dict, Any, Union
+from datetime import datetime, timedelta
+
+# Redis and HTTP client exceptions for inheritance and handling
+try:
+    import redis.exceptions as redis_exceptions
+    import redis
+except ImportError:
+    # Graceful fallback for testing environments
+    redis_exceptions = None
+    redis = None
+
+try:
+    import httpx
+except ImportError:
+    httpx = None
+
+try:
+    from pybreaker import CircuitBreakerError
+except ImportError:
+    # Define a placeholder for environments without pybreaker
+    class CircuitBreakerError(Exception):
+        """Placeholder for circuit breaker errors when pybreaker is not available."""
+        pass
+
+# Structured logging for enterprise integration
 import structlog
-from typing import Any, Dict, Optional, Union
-from datetime import datetime
 
-
-# Initialize structured logger for cache exception logging
 logger = structlog.get_logger(__name__)
 
 
 class CacheError(Exception):
     """
-    Base cache exception class providing comprehensive error handling foundation
-    for all cache-related operations per Section 4.2.3 error handling hierarchy.
+    Base exception class for all cache-related errors.
     
-    This base class establishes the foundation for cache error management with
-    structured error information, timing data, and enterprise logging integration.
-    All cache-specific exceptions inherit from this base class to ensure consistent
-    error handling patterns throughout the cache layer.
+    Provides foundation for cache error hierarchy with enterprise-grade error tracking,
+    structured logging integration, and Flask error handler compatibility.
+    
+    Attributes:
+        message: Human-readable error description
+        error_code: Standardized error code for monitoring and alerting
+        details: Additional error context for debugging and observability
+        timestamp: Error occurrence timestamp for correlation with logs
+        retry_after: Optional hint for retry delay (in seconds)
     """
     
     def __init__(
-        self, 
-        message: str, 
-        operation: Optional[str] = None,
-        key: Optional[str] = None,
-        error_code: Optional[str] = None,
-        retry_after: Optional[int] = None,
-        metadata: Optional[Dict[str, Any]] = None
-    ) -> None:
-        """
-        Initialize cache error with comprehensive error context.
-        
-        Args:
-            message: Human-readable error description
-            operation: Cache operation that failed (get, set, delete, etc.)
-            key: Redis key involved in the operation
-            error_code: Standardized error code for monitoring and alerting
-            retry_after: Suggested retry delay in seconds
-            metadata: Additional error context for debugging and monitoring
-        """
+        self,
+        message: str,
+        error_code: str = "CACHE_ERROR",
+        details: Optional[Dict[str, Any]] = None,
+        retry_after: Optional[int] = None
+    ):
         super().__init__(message)
         self.message = message
-        self.operation = operation
-        self.key = key
-        self.error_code = error_code or "CACHE_ERROR"
-        self.retry_after = retry_after
-        self.metadata = metadata or {}
+        self.error_code = error_code
+        self.details = details or {}
         self.timestamp = datetime.utcnow()
+        self.retry_after = retry_after
         
-        # Log error for enterprise monitoring and alerting
+        # Log error occurrence for enterprise observability
         logger.error(
-            "Cache operation failed",
-            error_type=self.__class__.__name__,
+            "Cache error occurred",
             error_code=self.error_code,
-            message=self.message,
-            operation=self.operation,
-            cache_key=self.key,
-            retry_after=self.retry_after,
-            metadata=self.metadata,
-            timestamp=self.timestamp.isoformat()
+            message=message,
+            details=self.details,
+            timestamp=self.timestamp.isoformat(),
+            retry_after=retry_after
         )
     
     def to_dict(self) -> Dict[str, Any]:
         """
-        Convert exception to dictionary for JSON serialization and API responses.
+        Convert exception to dictionary for JSON serialization in Flask error responses.
         
         Returns:
-            Dict containing structured error information for Flask error handlers
+            Dictionary containing error information suitable for HTTP responses
         """
         return {
-            "error": self.__class__.__name__,
+            "error": self.error_code,
             "message": self.message,
-            "error_code": self.error_code,
-            "operation": self.operation,
-            "key": self.key,
-            "retry_after": self.retry_after,
+            "details": self.details,
             "timestamp": self.timestamp.isoformat(),
-            "metadata": self.metadata
+            "retry_after": self.retry_after
         }
 
 
-class CacheConnectionError(CacheError):
+class RedisConnectionError(CacheError):
     """
-    Redis connection failure exception with circuit breaker integration
-    per Section 4.2.3 Redis circuit breaker check.
+    Exception raised when Redis connection operations fail.
     
-    This exception is raised when Redis connection cannot be established or
-    is lost during operation. Integrates with circuit breaker patterns to
-    prevent cascade failures and enable intelligent fallback mechanisms.
-    """
+    Handles Redis connectivity issues including network failures, authentication errors,
+    and connection pool exhaustion. Integrates with circuit breaker patterns for
+    enterprise resilience per Section 6.1.3.
     
-    def __init__(
-        self,
-        message: str = "Redis connection failed",
-        host: Optional[str] = None,
-        port: Optional[int] = None,
-        db: Optional[int] = None,
-        connection_pool_size: Optional[int] = None,
-        retry_count: int = 0,
-        **kwargs
-    ) -> None:
-        """
-        Initialize Redis connection error with connection details.
-        
-        Args:
-            message: Error description
-            host: Redis server hostname
-            port: Redis server port
-            db: Redis database number
-            connection_pool_size: Current connection pool size
-            retry_count: Number of connection attempts made
-            **kwargs: Additional arguments passed to parent class
-        """
-        super().__init__(
-            message=message,
-            error_code="CACHE_CONNECTION_ERROR",
-            **kwargs
-        )
-        self.host = host
-        self.port = port
-        self.db = db
-        self.connection_pool_size = connection_pool_size
-        self.retry_count = retry_count
-        
-        # Add connection details to metadata for debugging
-        self.metadata.update({
-            "redis_host": self.host,
-            "redis_port": self.port,
-            "redis_db": self.db,
-            "connection_pool_size": self.connection_pool_size,
-            "retry_count": self.retry_count
-        })
-        
-        logger.error(
-            "Redis connection failure detected",
-            redis_host=self.host,
-            redis_port=self.port,
-            redis_db=self.db,
-            connection_pool_size=self.connection_pool_size,
-            retry_count=self.retry_count
-        )
-
-
-class CacheTimeoutError(CacheError):
-    """
-    Cache operation timeout exception per Section 4.2.3 cache operation timeouts.
-    
-    Raised when cache operations exceed configured timeout thresholds. Supports
-    circuit breaker integration and intelligent retry strategies with exponential
-    backoff patterns.
+    Attributes:
+        redis_error: Original Redis exception for detailed diagnostics
+        connection_info: Redis connection details (sanitized for security)
+        circuit_breaker_state: Current circuit breaker state if applicable
     """
     
     def __init__(
         self,
-        message: str = "Cache operation timed out",
-        timeout_duration: Optional[float] = None,
-        operation_start_time: Optional[datetime] = None,
-        **kwargs
-    ) -> None:
-        """
-        Initialize cache timeout error with timing information.
+        message: str,
+        redis_error: Optional[Exception] = None,
+        connection_info: Optional[Dict[str, Any]] = None,
+        circuit_breaker_state: Optional[str] = None,
+        retry_after: Optional[int] = 30
+    ):
+        # Sanitize connection info to prevent credential exposure
+        safe_connection_info = {}
+        if connection_info:
+            safe_connection_info = {
+                "host": connection_info.get("host", "unknown"),
+                "port": connection_info.get("port", "unknown"),
+                "db": connection_info.get("db", "unknown"),
+                "ssl": connection_info.get("ssl", False),
+                "max_connections": connection_info.get("max_connections"),
+                "retry_on_timeout": connection_info.get("retry_on_timeout")
+            }
         
-        Args:
-            message: Error description
-            timeout_duration: Configured timeout duration in seconds
-            operation_start_time: When the operation began
-            **kwargs: Additional arguments passed to parent class
-        """
+        details = {
+            "redis_error_type": type(redis_error).__name__ if redis_error else None,
+            "redis_error_message": str(redis_error) if redis_error else None,
+            "connection_info": safe_connection_info,
+            "circuit_breaker_state": circuit_breaker_state
+        }
+        
         super().__init__(
             message=message,
-            error_code="CACHE_TIMEOUT_ERROR",
-            retry_after=30,  # Suggest 30-second retry delay for timeouts
-            **kwargs
+            error_code="REDIS_CONNECTION_ERROR",
+            details=details,
+            retry_after=retry_after
         )
+        
+        self.redis_error = redis_error
+        self.connection_info = safe_connection_info
+        self.circuit_breaker_state = circuit_breaker_state
+
+
+class CacheOperationTimeoutError(CacheError):
+    """
+    Exception raised when cache operations exceed configured timeout limits.
+    
+    Handles timeout scenarios for Redis operations including command execution timeouts,
+    connection acquisition timeouts, and circuit breaker timeout scenarios.
+    
+    Attributes:
+        operation: Cache operation that timed out
+        timeout_duration: Configured timeout value in seconds
+        elapsed_time: Actual time elapsed before timeout
+    """
+    
+    def __init__(
+        self,
+        message: str,
+        operation: str,
+        timeout_duration: float,
+        elapsed_time: Optional[float] = None,
+        retry_after: Optional[int] = 10
+    ):
+        details = {
+            "operation": operation,
+            "timeout_duration": timeout_duration,
+            "elapsed_time": elapsed_time,
+            "timeout_ratio": elapsed_time / timeout_duration if elapsed_time else None
+        }
+        
+        super().__init__(
+            message=message,
+            error_code="CACHE_OPERATION_TIMEOUT",
+            details=details,
+            retry_after=retry_after
+        )
+        
+        self.operation = operation
         self.timeout_duration = timeout_duration
-        self.operation_start_time = operation_start_time
-        
-        # Calculate actual operation duration if start time provided
-        actual_duration = None
-        if operation_start_time:
-            actual_duration = (self.timestamp - operation_start_time).total_seconds()
-        
-        self.metadata.update({
-            "timeout_duration": self.timeout_duration,
-            "operation_start_time": operation_start_time.isoformat() if operation_start_time else None,
-            "actual_duration": actual_duration
-        })
-        
-        logger.warning(
-            "Cache operation timeout",
-            timeout_duration=self.timeout_duration,
-            actual_duration=actual_duration,
-            operation=self.operation,
-            cache_key=self.key
-        )
-
-
-class CacheCircuitBreakerError(CacheError):
-    """
-    Circuit breaker exception for cache service protection per Section 4.2.3
-    circuit breaker patterns and Section 6.1.3 resilience mechanisms.
-    
-    Raised when circuit breaker is open to prevent additional failures and
-    protect system stability during Redis service degradation.
-    """
-    
-    def __init__(
-        self,
-        message: str = "Cache circuit breaker is open",
-        circuit_state: str = "OPEN",
-        failure_count: int = 0,
-        last_failure_time: Optional[datetime] = None,
-        next_attempt_time: Optional[datetime] = None,
-        **kwargs
-    ) -> None:
-        """
-        Initialize circuit breaker error with circuit state information.
-        
-        Args:
-            message: Error description
-            circuit_state: Current circuit breaker state (OPEN, HALF_OPEN, CLOSED)
-            failure_count: Number of consecutive failures
-            last_failure_time: Timestamp of last failure
-            next_attempt_time: When next attempt is allowed
-            **kwargs: Additional arguments passed to parent class
-        """
-        # Calculate retry_after based on next attempt time
-        retry_after = None
-        if next_attempt_time:
-            retry_after = max(0, int((next_attempt_time - datetime.utcnow()).total_seconds()))
-        
-        super().__init__(
-            message=message,
-            error_code="CACHE_CIRCUIT_BREAKER_ERROR",
-            retry_after=retry_after,
-            **kwargs
-        )
-        self.circuit_state = circuit_state
-        self.failure_count = failure_count
-        self.last_failure_time = last_failure_time
-        self.next_attempt_time = next_attempt_time
-        
-        self.metadata.update({
-            "circuit_state": self.circuit_state,
-            "failure_count": self.failure_count,
-            "last_failure_time": last_failure_time.isoformat() if last_failure_time else None,
-            "next_attempt_time": next_attempt_time.isoformat() if next_attempt_time else None
-        })
-        
-        logger.warning(
-            "Cache circuit breaker triggered",
-            circuit_state=self.circuit_state,
-            failure_count=self.failure_count,
-            retry_after=self.retry_after
-        )
-
-
-class CacheSerializationError(CacheError):
-    """
-    Cache data serialization/deserialization exception per Section 4.2.3
-    error handling for data transformation failures.
-    
-    Raised when cache data cannot be properly serialized for storage or
-    deserialized during retrieval, indicating data corruption or format issues.
-    """
-    
-    def __init__(
-        self,
-        message: str = "Cache data serialization failed",
-        data_type: Optional[str] = None,
-        serialization_format: str = "json",
-        **kwargs
-    ) -> None:
-        """
-        Initialize serialization error with data format information.
-        
-        Args:
-            message: Error description
-            data_type: Type of data being serialized/deserialized
-            serialization_format: Format used (json, pickle, etc.)
-            **kwargs: Additional arguments passed to parent class
-        """
-        super().__init__(
-            message=message,
-            error_code="CACHE_SERIALIZATION_ERROR",
-            **kwargs
-        )
-        self.data_type = data_type
-        self.serialization_format = serialization_format
-        
-        self.metadata.update({
-            "data_type": self.data_type,
-            "serialization_format": self.serialization_format
-        })
-        
-        logger.error(
-            "Cache data serialization failure",
-            data_type=self.data_type,
-            serialization_format=self.serialization_format,
-            cache_key=self.key
-        )
+        self.elapsed_time = elapsed_time
 
 
 class CacheInvalidationError(CacheError):
     """
-    Cache invalidation failure exception per Section 4.2.3 cache invalidation
-    error handling flows.
+    Exception raised when cache invalidation operations fail.
     
-    Raised when cache invalidation operations fail, potentially leading to
-    stale data being served. Critical for maintaining data consistency across
-    the distributed cache infrastructure.
+    Handles errors during cache key deletion, pattern-based invalidation,
+    and distributed cache invalidation across multiple instances.
+    
+    Attributes:
+        keys: Cache keys that failed to invalidate
+        pattern: Key pattern used for batch invalidation (if applicable)
+        partial_success: List of keys that were successfully invalidated
     """
     
     def __init__(
         self,
-        message: str = "Cache invalidation failed",
-        invalidation_pattern: Optional[str] = None,
-        affected_keys: Optional[list] = None,
-        partial_failure: bool = False,
-        **kwargs
-    ) -> None:
-        """
-        Initialize cache invalidation error with invalidation details.
+        message: str,
+        keys: Optional[Union[str, list]] = None,
+        pattern: Optional[str] = None,
+        partial_success: Optional[list] = None,
+        retry_after: Optional[int] = 5
+    ):
+        # Normalize keys to list format
+        if keys is None:
+            keys = []
+        elif isinstance(keys, str):
+            keys = [keys]
         
-        Args:
-            message: Error description
-            invalidation_pattern: Pattern used for invalidation (key pattern, tag, etc.)
-            affected_keys: List of keys that were supposed to be invalidated
-            partial_failure: Whether some keys were successfully invalidated
-            **kwargs: Additional arguments passed to parent class
-        """
+        details = {
+            "failed_keys": keys,
+            "invalidation_pattern": pattern,
+            "partially_successful_keys": partial_success or [],
+            "total_failed": len(keys),
+            "total_partial_success": len(partial_success) if partial_success else 0
+        }
+        
         super().__init__(
             message=message,
             error_code="CACHE_INVALIDATION_ERROR",
-            **kwargs
+            details=details,
+            retry_after=retry_after
         )
-        self.invalidation_pattern = invalidation_pattern
-        self.affected_keys = affected_keys or []
-        self.partial_failure = partial_failure
         
-        self.metadata.update({
-            "invalidation_pattern": self.invalidation_pattern,
-            "affected_keys_count": len(self.affected_keys),
-            "affected_keys": self.affected_keys[:10],  # Limit to first 10 keys for logging
-            "partial_failure": self.partial_failure
-        })
+        self.keys = keys
+        self.pattern = pattern
+        self.partial_success = partial_success or []
+
+
+class CircuitBreakerOpenError(CacheError):
+    """
+    Exception raised when cache operations fail due to open circuit breaker.
+    
+    Implements circuit breaker pattern integration per Section 6.1.3 resilience
+    mechanisms, providing fallback mechanisms and recovery guidance.
+    
+    Attributes:
+        failure_count: Number of consecutive failures that triggered circuit breaker
+        recovery_timeout: Time until circuit breaker attempts recovery
+        last_failure_time: Timestamp of most recent failure
+    """
+    
+    def __init__(
+        self,
+        message: str,
+        failure_count: int,
+        recovery_timeout: int,
+        last_failure_time: Optional[datetime] = None,
+        retry_after: Optional[int] = None
+    ):
+        # Calculate retry_after based on recovery_timeout if not provided
+        if retry_after is None:
+            retry_after = recovery_timeout
         
-        logger.error(
-            "Cache invalidation operation failed",
-            invalidation_pattern=self.invalidation_pattern,
-            affected_keys_count=len(self.affected_keys),
-            partial_failure=self.partial_failure
+        details = {
+            "failure_count": failure_count,
+            "recovery_timeout": recovery_timeout,
+            "last_failure_time": last_failure_time.isoformat() if last_failure_time else None,
+            "estimated_recovery_time": (
+                (last_failure_time + timedelta(seconds=recovery_timeout)).isoformat()
+                if last_failure_time else None
+            )
+        }
+        
+        super().__init__(
+            message=message,
+            error_code="CIRCUIT_BREAKER_OPEN",
+            details=details,
+            retry_after=retry_after
         )
+        
+        self.failure_count = failure_count
+        self.recovery_timeout = recovery_timeout
+        self.last_failure_time = last_failure_time
 
 
 class CacheKeyError(CacheError):
     """
-    Invalid cache key exception for key validation failures.
+    Exception raised for cache key related errors including invalid formats,
+    missing keys, and key generation failures.
     
-    Raised when cache keys violate Redis key constraints or application-specific
-    key pattern requirements. Helps maintain cache key consistency and prevents
-    Redis errors from invalid key formats.
+    Attributes:
+        key: Cache key that caused the error
+        key_pattern: Key pattern if pattern matching was involved
+        validation_errors: Specific key validation failures
     """
     
     def __init__(
         self,
-        message: str = "Invalid cache key",
-        invalid_key: Optional[str] = None,
-        validation_rule: Optional[str] = None,
-        **kwargs
-    ) -> None:
-        """
-        Initialize cache key error with validation details.
+        message: str,
+        key: Optional[str] = None,
+        key_pattern: Optional[str] = None,
+        validation_errors: Optional[list] = None,
+        retry_after: Optional[int] = None
+    ):
+        details = {
+            "invalid_key": key,
+            "key_pattern": key_pattern,
+            "validation_errors": validation_errors or [],
+            "key_length": len(key) if key else None
+        }
         
-        Args:
-            message: Error description
-            invalid_key: The problematic cache key
-            validation_rule: The validation rule that was violated
-            **kwargs: Additional arguments passed to parent class
-        """
         super().__init__(
             message=message,
             error_code="CACHE_KEY_ERROR",
-            key=invalid_key,
-            **kwargs
+            details=details,
+            retry_after=retry_after
         )
-        self.invalid_key = invalid_key
-        self.validation_rule = validation_rule
         
-        self.metadata.update({
-            "invalid_key": self.invalid_key,
-            "validation_rule": self.validation_rule
-        })
+        self.key = key
+        self.key_pattern = key_pattern
+        self.validation_errors = validation_errors or []
+
+
+class CacheSerializationError(CacheError):
+    """
+    Exception raised when cache value serialization or deserialization fails.
+    
+    Handles errors during JSON encoding/decoding, pickle operations, and
+    custom serialization formats used in cache operations.
+    
+    Attributes:
+        value_type: Type of value that failed serialization
+        serialization_method: Method used for serialization (json, pickle, etc.)
+        original_error: Original serialization exception
+    """
+    
+    def __init__(
+        self,
+        message: str,
+        value_type: Optional[str] = None,
+        serialization_method: str = "json",
+        original_error: Optional[Exception] = None,
+        retry_after: Optional[int] = None
+    ):
+        details = {
+            "value_type": value_type,
+            "serialization_method": serialization_method,
+            "original_error_type": type(original_error).__name__ if original_error else None,
+            "original_error_message": str(original_error) if original_error else None
+        }
         
-        logger.warning(
-            "Invalid cache key detected",
-            invalid_key=self.invalid_key,
-            validation_rule=self.validation_rule
+        super().__init__(
+            message=message,
+            error_code="CACHE_SERIALIZATION_ERROR",
+            details=details,
+            retry_after=retry_after
         )
+        
+        self.value_type = value_type
+        self.serialization_method = serialization_method
+        self.original_error = original_error
 
 
 class CachePoolExhaustedError(CacheError):
     """
-    Connection pool exhaustion exception per Section 6.1.3 resource optimization.
+    Exception raised when Redis connection pool is exhausted.
     
-    Raised when Redis connection pool has no available connections, indicating
-    high load or connection leaks. Critical for monitoring connection pool health
-    and preventing resource exhaustion.
+    Handles scenarios where all available connections in the pool are in use,
+    indicating potential resource contention or configuration issues.
+    
+    Attributes:
+        max_connections: Maximum number of connections in pool
+        active_connections: Current number of active connections
+        pool_timeout: Configured timeout for pool acquisition
     """
     
     def __init__(
         self,
-        message: str = "Redis connection pool exhausted",
-        max_connections: Optional[int] = None,
-        active_connections: Optional[int] = None,
-        pool_timeout: Optional[float] = None,
-        **kwargs
-    ) -> None:
-        """
-        Initialize connection pool exhaustion error with pool statistics.
+        message: str,
+        max_connections: int,
+        active_connections: int,
+        pool_timeout: float,
+        retry_after: Optional[int] = 15
+    ):
+        details = {
+            "max_connections": max_connections,
+            "active_connections": active_connections,
+            "pool_utilization": active_connections / max_connections if max_connections > 0 else 0,
+            "pool_timeout": pool_timeout
+        }
         
-        Args:
-            message: Error description
-            max_connections: Maximum pool size
-            active_connections: Current active connections
-            pool_timeout: Pool acquisition timeout
-            **kwargs: Additional arguments passed to parent class
-        """
         super().__init__(
             message=message,
-            error_code="CACHE_POOL_EXHAUSTED_ERROR",
-            retry_after=60,  # Suggest 60-second retry for pool exhaustion
-            **kwargs
+            error_code="CACHE_POOL_EXHAUSTED",
+            details=details,
+            retry_after=retry_after
         )
+        
         self.max_connections = max_connections
         self.active_connections = active_connections
         self.pool_timeout = pool_timeout
-        
-        self.metadata.update({
-            "max_connections": self.max_connections,
-            "active_connections": self.active_connections,
-            "pool_timeout": self.pool_timeout
-        })
-        
-        logger.critical(
-            "Redis connection pool exhausted",
-            max_connections=self.max_connections,
-            active_connections=self.active_connections,
-            pool_timeout=self.pool_timeout
-        )
 
 
-class CacheMemoryError(CacheError):
-    """
-    Redis memory limitation exception for memory management failures.
-    
-    Raised when Redis server runs out of memory or hits configured memory limits.
-    Critical for monitoring Redis memory usage and preventing service degradation.
-    """
-    
-    def __init__(
-        self,
-        message: str = "Redis memory limit exceeded",
-        used_memory: Optional[int] = None,
-        max_memory: Optional[int] = None,
-        memory_policy: Optional[str] = None,
-        **kwargs
-    ) -> None:
-        """
-        Initialize Redis memory error with memory statistics.
-        
-        Args:
-            message: Error description
-            used_memory: Current memory usage in bytes
-            max_memory: Maximum memory limit in bytes
-            memory_policy: Redis eviction policy (allkeys-lru, etc.)
-            **kwargs: Additional arguments passed to parent class
-        """
-        super().__init__(
-            message=message,
-            error_code="CACHE_MEMORY_ERROR",
-            retry_after=120,  # Suggest 2-minute retry for memory issues
-            **kwargs
-        )
-        self.used_memory = used_memory
-        self.max_memory = max_memory
-        self.memory_policy = memory_policy
-        
-        self.metadata.update({
-            "used_memory": self.used_memory,
-            "max_memory": self.max_memory,
-            "memory_policy": self.memory_policy,
-            "memory_usage_percent": (
-                (self.used_memory / self.max_memory * 100) 
-                if self.used_memory and self.max_memory else None
-            )
-        })
-        
-        logger.critical(
-            "Redis memory limit exceeded",
-            used_memory=self.used_memory,
-            max_memory=self.max_memory,
-            memory_policy=self.memory_policy
-        )
-
-
-# Exception mapping for Flask error handlers per Section 4.2.3
-# Flask @errorhandler decorators integration
+# Exception mapping for Flask error handler registration
 CACHE_EXCEPTION_MAPPING = {
-    CacheConnectionError: {
-        "status_code": 503,  # Service Unavailable
-        "error_type": "service_unavailable",
-        "user_message": "Cache service is temporarily unavailable. Please try again later."
-    },
-    CacheTimeoutError: {
-        "status_code": 504,  # Gateway Timeout
-        "error_type": "timeout",
-        "user_message": "Operation timed out. Please try again."
-    },
-    CacheCircuitBreakerError: {
-        "status_code": 503,  # Service Unavailable
-        "error_type": "service_unavailable",
-        "user_message": "Cache service is temporarily unavailable due to circuit breaker protection."
-    },
-    CacheSerializationError: {
-        "status_code": 500,  # Internal Server Error
-        "error_type": "internal_error",
-        "user_message": "An internal error occurred while processing cache data."
-    },
-    CacheInvalidationError: {
-        "status_code": 500,  # Internal Server Error
-        "error_type": "internal_error",
-        "user_message": "An error occurred while updating cache. Data may be temporarily inconsistent."
-    },
-    CacheKeyError: {
-        "status_code": 400,  # Bad Request
-        "error_type": "bad_request",
-        "user_message": "Invalid cache key format."
-    },
-    CachePoolExhaustedError: {
-        "status_code": 503,  # Service Unavailable
-        "error_type": "service_unavailable",
-        "user_message": "Service is temporarily overloaded. Please try again later."
-    },
-    CacheMemoryError: {
-        "status_code": 503,  # Service Unavailable
-        "error_type": "service_unavailable",
-        "user_message": "Cache service is temporarily unavailable due to memory constraints."
-    },
-    CacheError: {
-        "status_code": 500,  # Internal Server Error
-        "error_type": "internal_error",
-        "user_message": "An unexpected cache error occurred."
-    }
+    CacheError: 500,
+    RedisConnectionError: 503,
+    CacheOperationTimeoutError: 504,
+    CacheInvalidationError: 500,
+    CircuitBreakerOpenError: 503,
+    CacheKeyError: 400,
+    CacheSerializationError: 500,
+    CachePoolExhaustedError: 503
+}
+
+# HTTP status code mappings for different error types
+HTTP_STATUS_CODES = {
+    "CACHE_ERROR": 500,
+    "REDIS_CONNECTION_ERROR": 503,
+    "CACHE_OPERATION_TIMEOUT": 504,
+    "CACHE_INVALIDATION_ERROR": 500,
+    "CIRCUIT_BREAKER_OPEN": 503,
+    "CACHE_KEY_ERROR": 400,
+    "CACHE_SERIALIZATION_ERROR": 500,
+    "CACHE_POOL_EXHAUSTED": 503
 }
 
 
-def get_cache_error_response(exception: CacheError) -> Dict[str, Any]:
+def handle_redis_exception(redis_error: Exception, operation: str = "unknown") -> CacheError:
     """
-    Generate standardized error response for Flask error handlers per Section 4.2.3
-    Flask @errorhandler decorators.
+    Convert Redis exceptions to appropriate cache exceptions.
     
-    This function creates consistent error responses that can be used by Flask
-    error handlers to return standardized JSON error responses to clients while
-    maintaining enterprise security practices by not exposing internal details.
+    Provides centralized exception translation from redis-py exceptions to
+    application-specific cache exceptions for consistent error handling.
     
     Args:
-        exception: Cache exception instance
+        redis_error: Original Redis exception
+        operation: Description of the operation that failed
         
     Returns:
-        Dict containing standardized error response for JSON serialization
+        Appropriate CacheError subclass based on Redis error type
     """
-    # Get error mapping configuration
-    error_config = CACHE_EXCEPTION_MAPPING.get(
-        type(exception),
-        CACHE_EXCEPTION_MAPPING[CacheError]
-    )
+    if not redis_exceptions:
+        # Fallback when redis is not available
+        return CacheError(
+            message=f"Cache operation '{operation}' failed: {str(redis_error)}",
+            details={"operation": operation, "original_error": str(redis_error)}
+        )
     
-    # Build standardized error response
-    error_response = {
-        "error": {
-            "type": error_config["error_type"],
-            "message": error_config["user_message"],
-            "code": exception.error_code,
-            "timestamp": exception.timestamp.isoformat()
-        }
-    }
+    error_message = f"Redis operation '{operation}' failed: {str(redis_error)}"
     
-    # Add retry information if available
-    if exception.retry_after:
-        error_response["error"]["retry_after"] = exception.retry_after
+    # Connection-related errors
+    if isinstance(redis_error, (redis_exceptions.ConnectionError, redis_exceptions.TimeoutError)):
+        return RedisConnectionError(
+            message=error_message,
+            redis_error=redis_error
+        )
     
-    # Add operation context for debugging (non-sensitive information only)
-    if exception.operation:
-        error_response["error"]["operation"] = exception.operation
+    # Authentication and authorization errors
+    elif isinstance(redis_error, redis_exceptions.AuthenticationError):
+        return RedisConnectionError(
+            message=f"Redis authentication failed for operation '{operation}'",
+            redis_error=redis_error
+        )
     
-    # Log error response generation for monitoring
-    logger.info(
-        "Generated cache error response",
-        error_type=error_config["error_type"],
-        status_code=error_config["status_code"],
-        error_code=exception.error_code,
-        operation=exception.operation
-    )
+    # Response-related errors (timeout, protocol issues)
+    elif isinstance(redis_error, redis_exceptions.ResponseError):
+        if "timeout" in str(redis_error).lower():
+            return CacheOperationTimeoutError(
+                message=error_message,
+                operation=operation,
+                timeout_duration=30.0  # Default timeout assumption
+            )
+        else:
+            return CacheError(
+                message=error_message,
+                error_code="REDIS_RESPONSE_ERROR",
+                details={"operation": operation, "redis_error": str(redis_error)}
+            )
     
-    return {
-        "response": error_response,
-        "status_code": error_config["status_code"]
-    }
+    # Data type and encoding errors
+    elif isinstance(redis_error, redis_exceptions.DataError):
+        return CacheSerializationError(
+            message=error_message,
+            serialization_method="redis",
+            original_error=redis_error
+        )
+    
+    # Generic Redis errors
+    else:
+        return CacheError(
+            message=error_message,
+            error_code="REDIS_ERROR",
+            details={"operation": operation, "redis_error_type": type(redis_error).__name__}
+        )
 
 
-# Expose all exception classes for import
+def register_cache_error_handlers(app):
+    """
+    Register Flask error handlers for cache exceptions.
+    
+    Implements Flask @errorhandler decorator integration per Section 4.2.3,
+    providing consistent error response formatting for all cache-related exceptions.
+    
+    Args:
+        app: Flask application instance
+    """
+    from flask import jsonify, request
+    
+    def create_error_response(error: CacheError, status_code: int):
+        """Create standardized JSON error response."""
+        response_data = error.to_dict()
+        
+        # Add request context for debugging
+        response_data["request_id"] = getattr(request, "request_id", None)
+        response_data["path"] = request.path if request else None
+        response_data["method"] = request.method if request else None
+        
+        # Log error with structured logging for enterprise observability
+        logger.error(
+            "Cache error in HTTP request",
+            error_code=error.error_code,
+            status_code=status_code,
+            path=response_data["path"],
+            method=response_data["method"],
+            request_id=response_data["request_id"],
+            error_details=error.details
+        )
+        
+        response = jsonify(response_data)
+        response.status_code = status_code
+        
+        # Add cache-related headers for client guidance
+        if error.retry_after:
+            response.headers["Retry-After"] = str(error.retry_after)
+        
+        # Prevent caching of error responses
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        
+        return response
+    
+    # Register individual error handlers for each exception type
+    @app.errorhandler(CacheError)
+    def handle_cache_error(error):
+        return create_error_response(error, HTTP_STATUS_CODES.get(error.error_code, 500))
+    
+    @app.errorhandler(RedisConnectionError)
+    def handle_redis_connection_error(error):
+        return create_error_response(error, 503)
+    
+    @app.errorhandler(CacheOperationTimeoutError)
+    def handle_cache_timeout_error(error):
+        return create_error_response(error, 504)
+    
+    @app.errorhandler(CacheInvalidationError)
+    def handle_cache_invalidation_error(error):
+        return create_error_response(error, 500)
+    
+    @app.errorhandler(CircuitBreakerOpenError)
+    def handle_circuit_breaker_error(error):
+        return create_error_response(error, 503)
+    
+    @app.errorhandler(CacheKeyError)
+    def handle_cache_key_error(error):
+        return create_error_response(error, 400)
+    
+    @app.errorhandler(CacheSerializationError)
+    def handle_cache_serialization_error(error):
+        return create_error_response(error, 500)
+    
+    @app.errorhandler(CachePoolExhaustedError)
+    def handle_cache_pool_exhausted_error(error):
+        return create_error_response(error, 503)
+    
+    # Handle circuit breaker exceptions from pybreaker library
+    @app.errorhandler(CircuitBreakerError)
+    def handle_pybreaker_error(error):
+        cache_error = CircuitBreakerOpenError(
+            message=f"Circuit breaker is open: {str(error)}",
+            failure_count=0,  # Unknown from pybreaker exception
+            recovery_timeout=60  # Default recovery timeout
+        )
+        return create_error_response(cache_error, 503)
+    
+    logger.info("Cache error handlers registered with Flask application")
+
+
+# Export public API
 __all__ = [
     "CacheError",
-    "CacheConnectionError", 
-    "CacheTimeoutError",
-    "CacheCircuitBreakerError",
-    "CacheSerializationError",
+    "RedisConnectionError", 
+    "CacheOperationTimeoutError",
     "CacheInvalidationError",
+    "CircuitBreakerOpenError",
     "CacheKeyError",
+    "CacheSerializationError", 
     "CachePoolExhaustedError",
-    "CacheMemoryError",
+    "handle_redis_exception",
+    "register_cache_error_handlers",
     "CACHE_EXCEPTION_MAPPING",
-    "get_cache_error_response"
+    "HTTP_STATUS_CODES"
 ]
