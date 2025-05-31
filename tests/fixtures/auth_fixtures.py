@@ -1,1550 +1,1320 @@
 """
 Authentication and Authorization Test Fixtures
 
-This module provides comprehensive test fixtures for Auth0 service mocking, JWT token generation,
-Flask-Login user objects, and authentication state management for security testing scenarios.
+This module provides comprehensive Auth0 service mocking, JWT token generation, Flask-Login user objects,
+and comprehensive authentication state management for security testing scenarios. The fixtures support
+enterprise-grade testing patterns with complete Auth0 Python SDK integration, PyJWT 2.8+ token processing,
+and Flask-Session distributed session management validation.
 
 Key Features:
-- Auth0 enterprise integration testing through Python SDK per Section 0.1.3 authentication/authorization considerations
-- JWT token processing migration from jsonwebtoken to PyJWT 2.8+ per Section 0.1.2
-- Flask-Login integration for user session management per Section 6.4.1
-- 95% authentication module coverage per Section 6.6.3 security compliance
-- Authentication system preserving JWT token validation patterns per Section 0.1.1
-
-Fixtures Provided:
-- Auth0 Python SDK mock fixtures for authentication testing per Section 6.4.1 identity management
+- Auth0 Python SDK mock fixtures for enterprise authentication testing per Section 6.4.1
 - PyJWT 2.8+ token generation and validation fixtures per Section 0.1.2 authentication module
 - Flask-Login user objects for session management testing per Section 6.4.1 Flask-Login integration
 - JWT claims extraction and validation fixtures per Section 6.4.1 token handling
 - Security context fixtures for authorization testing per Section 6.4.2 authorization system
 - Authentication state management fixtures per Section 6.4.1 session management
 - Flask-Session user context fixtures for distributed session testing per Section 3.4.2
+- Comprehensive test data generation using factory_boy per Section 6.6.1 enhanced mocking strategy
+- Testcontainers integration for realistic Redis behavior per Section 6.6.1 production-equivalent test environment
+
+Architecture Integration:
+- Section 6.6.1: Enhanced mocking strategy using comprehensive external service simulation
+- Section 6.6.3: 95% authentication module coverage requirement for security compliance
+- Section 6.4.1: JWT token processing migration from jsonwebtoken to PyJWT 2.8+
+- Section 6.4.1: Flask-Login integration for user session management
+- Section 6.4.2: Authorization system with role-based access control testing
+- Section 6.6.1: pytest 7.4+ with extensive plugin ecosystem support
+- Section 6.6.1: factory_boy integration for dynamic test object generation
+
+Security Testing Standards:
+- Enterprise-grade Auth0 integration testing with circuit breaker pattern validation
+- Comprehensive JWT token lifecycle testing including generation, validation, and expiration
+- Flask-Login user context management across multiple application instances
+- Redis session persistence testing with encryption validation
+- Authorization decorator testing with permission validation
+- Security event logging and audit trail validation
+- Performance testing ensuring ≤10% variance from Node.js baseline per Section 0.1.1
 
 Dependencies:
-- pytest 7.4+ with extensive plugin ecosystem support
-- pytest-mock for comprehensive external service simulation
-- PyJWT 2.8+ for JWT token processing equivalent to Node.js jsonwebtoken
-- auth0-python 4.7+ for Auth0 enterprise integration
-- Flask-Login 0.7.0+ for user authentication state management
-- factory_boy for dynamic test object generation
-- cryptography 41.0+ for secure cryptographic operations
-- redis-py 5.0+ for caching and session management
-- structlog 23.1+ for enterprise audit logging
+- pytest 7.4+: Primary testing framework with comprehensive fixture support
+- pytest-mock: External service mocking and Auth0 SDK simulation
+- factory_boy: Dynamic test object generation with realistic data patterns
+- PyJWT 2.8+: JWT token generation and validation for authentication testing
+- Flask-Login 0.7.0+: User session management and authentication state testing
+- cryptography 41.0+: Secure token generation and encryption validation
+- python-dateutil 2.9+: ISO 8601 date/time parsing and temporal data testing
+- redis-py 5.0+: Redis session management and caching validation
 
 Author: Flask Migration Team
 Version: 1.0.0
-Compliance: SOC 2, ISO 27001, OWASP Top 10
+Coverage Target: 95% authentication module coverage per Section 6.6.3
 """
 
 import asyncio
 import base64
 import hashlib
 import json
-import os
 import secrets
 import time
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Set, Union, Callable, Generator, AsyncGenerator
-from unittest.mock import Mock, MagicMock, patch, AsyncMock
 import uuid
+from contextlib import asynccontextmanager, contextmanager
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Set, Union, Generator, AsyncGenerator
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
+import factory
+import jwt
 import pytest
 import pytest_asyncio
-from flask import Flask, request, session, g
-from flask_login import UserMixin, AnonymousUserMixin
-import jwt
-from cryptography.hazmat.primitives import serialization, hashes
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.primitives.serialization import load_pem_private_key, load_pem_public_key
-import factory
-from factory import Faker, SubFactory, LazyAttribute, LazyFunction
-import redis
-from redis.exceptions import RedisError
-import structlog
+from dateutil import parser as dateutil_parser
+from flask import Flask, g, request, session
+from flask_login import AnonymousUserMixin, UserMixin, login_user, logout_user
+from redis import Redis
+from werkzeug.test import Client
 
-# Import authentication components with fallback handling
+# Import application modules for testing
 try:
     from src.auth.authentication import (
-        AuthenticationManager, Auth0Config, JWTTokenValidator,
-        Auth0UserManager, Auth0CircuitBreaker
+        CoreJWTAuthenticator,
+        AuthenticatedUser,
+        get_core_authenticator,
+        authenticate_token,
+        create_auth_health_check
     )
     from src.auth.authorization import (
-        PermissionValidator, RoleManager, ResourceAuthorizationManager,
-        AuthorizationDecorators, PermissionContext
+        PermissionContext,
+        AuthorizationManager,
+        require_permissions,
+        check_user_permission
+    )
+    from src.auth.auth0_client import (
+        Auth0ClientManager,
+        Auth0CircuitBreaker,
+        Auth0MetricsCollector
     )
     from src.auth.session import (
-        SessionManager, FlaskLoginManager, DistributedSessionManager,
-        SessionSecurityManager
+        SessionUser,
+        SessionManager,
+        EncryptedSessionInterface
     )
-    from src.auth.cache import (
-        AuthenticationCache, PermissionCacheManager, get_auth_cache
+    from src.auth.decorators import (
+        require_authentication,
+        rate_limited_authorization,
+        DecoratorConfig
     )
     from src.auth.exceptions import (
-        AuthenticationException, AuthorizationException, 
-        JWTException, Auth0Exception, SessionException,
-        SecurityErrorCode, SecurityException
+        SecurityException,
+        AuthenticationException,
+        AuthorizationException,
+        JWTException,
+        Auth0Exception,
+        SessionException,
+        SecurityErrorCode
     )
     from src.config.settings import TestingConfig
-except ImportError:
-    # Fallback implementations for test isolation
-    class AuthenticationException(Exception):
-        pass
-    
-    class AuthorizationException(Exception):
-        pass
-    
-    class JWTException(Exception):
-        pass
-    
-    class Auth0Exception(Exception):
-        pass
-    
-    class SessionException(Exception):
-        pass
-    
-    class SecurityException(Exception):
-        pass
-    
-    class SecurityErrorCode:
-        AUTH_TOKEN_INVALID = "AUTH_TOKEN_INVALID"
-        AUTH_TOKEN_EXPIRED = "AUTH_TOKEN_EXPIRED"
-        AUTH_CREDENTIALS_INVALID = "AUTH_CREDENTIALS_INVALID"
-        AUTHZ_PERMISSION_DENIED = "AUTHZ_PERMISSION_DENIED"
-    
-    class TestingConfig:
-        TESTING = True
-        SECRET_KEY = 'test-secret-key'
+except ImportError as e:
+    # Fallback imports for isolated fixture testing
+    pytest.skip(f"Application modules not available: {e}", allow_module_level=True)
 
 
-# Configure structured logging for test fixtures
-logger = structlog.get_logger("tests.fixtures.auth")
+# =============================================================================
+# Factory Classes for Dynamic Test Object Generation
+# =============================================================================
 
-
-class MockAuth0User(UserMixin):
+class JWTClaimsFactory(factory.Factory):
     """
-    Mock Flask-Login user object for authentication testing with Auth0 profile integration.
-    
-    This class provides a comprehensive user object that mimics the behavior of a real
-    Auth0-authenticated user while providing controlled test data for authentication
-    and authorization testing scenarios.
-    
-    Features:
-    - Flask-Login UserMixin integration for session management
-    - Auth0 profile simulation with realistic user attributes
-    - Permission and role management for authorization testing
-    - Session state management for distributed session testing
-    - Security context for audit logging and compliance testing
+    Factory for generating realistic JWT token claims using factory_boy integration
+    per Section 6.6.1 dynamic test object generation requirements.
     """
-    
-    def __init__(
-        self,
-        user_id: str,
-        email: str,
-        auth0_profile: Optional[Dict[str, Any]] = None,
-        permissions: Optional[Set[str]] = None,
-        roles: Optional[Set[str]] = None,
-        is_authenticated: bool = True,
-        is_active: bool = True
-    ):
-        """
-        Initialize mock Auth0 user with comprehensive profile and security context.
-        
-        Args:
-            user_id: Unique user identifier (Auth0 sub claim)
-            email: User email address
-            auth0_profile: Auth0 user profile data
-            permissions: Set of user permissions for authorization testing
-            roles: Set of user roles for RBAC testing
-            is_authenticated: Whether user is authenticated
-            is_active: Whether user account is active
-        """
-        self.id = user_id
-        self.email = email
-        self.auth0_profile = auth0_profile or self._generate_default_profile()
-        self.permissions = permissions or set()
-        self.roles = roles or {'user'}
-        self._is_authenticated = is_authenticated
-        self._is_active = is_active
-        self._is_anonymous = False
-        
-        # Session and security metadata
-        self.session_id = str(uuid.uuid4())
-        self.login_timestamp = datetime.utcnow()
-        self.last_activity = datetime.utcnow()
-        self.ip_address = '127.0.0.1'
-        self.user_agent = 'pytest-test-agent'
-        
-        logger.debug(
-            "Mock Auth0 user created",
-            user_id=user_id,
-            email=email,
-            permissions_count=len(self.permissions),
-            roles_count=len(self.roles)
-        )
-    
-    def _generate_default_profile(self) -> Dict[str, Any]:
-        """Generate default Auth0 profile for testing"""
-        return {
-            'sub': self.id,
-            'email': self.email,
-            'email_verified': True,
-            'name': f"Test User {self.id[:8]}",
-            'nickname': f"test_{self.id[:8]}",
-            'picture': f"https://example.com/avatars/{self.id}.jpg",
-            'updated_at': datetime.utcnow().isoformat(),
-            'created_at': (datetime.utcnow() - timedelta(days=30)).isoformat(),
-            'last_login': datetime.utcnow().isoformat(),
-            'logins_count': 42,
-            'app_metadata': {
-                'roles': list(self.roles),
-                'permissions': list(self.permissions)
-            },
-            'user_metadata': {
-                'preferences': {
-                    'theme': 'dark',
-                    'language': 'en'
-                }
-            }
-        }
-    
-    @property
-    def is_authenticated(self) -> bool:
-        """Return authentication status for Flask-Login"""
-        return self._is_authenticated
-    
-    @property
-    def is_active(self) -> bool:
-        """Return active status for Flask-Login"""
-        return self._is_active
-    
-    @property
-    def is_anonymous(self) -> bool:
-        """Return anonymous status for Flask-Login"""
-        return self._is_anonymous
-    
-    def get_id(self) -> str:
-        """Return user ID for Flask-Login session management"""
-        return self.id
-    
-    def has_permission(self, permission: str) -> bool:
-        """Check if user has specific permission"""
-        return permission in self.permissions
-    
-    def has_role(self, role: str) -> bool:
-        """Check if user has specific role"""
-        return role in self.roles
-    
-    def add_permission(self, permission: str) -> None:
-        """Add permission to user for dynamic testing"""
-        self.permissions.add(permission)
-        logger.debug("Permission added to mock user", user_id=self.id, permission=permission)
-    
-    def remove_permission(self, permission: str) -> None:
-        """Remove permission from user for dynamic testing"""
-        self.permissions.discard(permission)
-        logger.debug("Permission removed from mock user", user_id=self.id, permission=permission)
-    
-    def add_role(self, role: str) -> None:
-        """Add role to user for dynamic testing"""
-        self.roles.add(role)
-        logger.debug("Role added to mock user", user_id=self.id, role=role)
-    
-    def remove_role(self, role: str) -> None:
-        """Remove role from user for dynamic testing"""
-        self.roles.discard(role)
-        logger.debug("Role removed from mock user", user_id=self.id, role=role)
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert user to dictionary for serialization"""
-        return {
-            'id': self.id,
-            'email': self.email,
-            'auth0_profile': self.auth0_profile,
-            'permissions': list(self.permissions),
-            'roles': list(self.roles),
-            'is_authenticated': self.is_authenticated,
-            'is_active': self.is_active,
-            'session_id': self.session_id,
-            'login_timestamp': self.login_timestamp.isoformat(),
-            'last_activity': self.last_activity.isoformat()
-        }
-
-
-class MockAnonymousUser(AnonymousUserMixin):
-    """
-    Mock anonymous user for unauthenticated testing scenarios.
-    
-    Provides anonymous user behavior for testing authentication requirements
-    and authorization denial scenarios.
-    """
-    
-    def __init__(self):
-        self.permissions = set()
-        self.roles = set()
-        self.auth0_profile = {}
-    
-    def has_permission(self, permission: str) -> bool:
-        """Anonymous users have no permissions"""
-        return False
-    
-    def has_role(self, role: str) -> bool:
-        """Anonymous users have no roles"""
-        return False
-
-
-class JWTTokenFactory:
-    """
-    JWT token factory for generating test tokens with PyJWT 2.8+ compatibility.
-    
-    This factory provides comprehensive JWT token generation for testing authentication
-    scenarios, including valid tokens, expired tokens, invalid signatures, and
-    malformed tokens for comprehensive security testing.
-    
-    Features:
-    - PyJWT 2.8+ token generation equivalent to Node.js jsonwebtoken
-    - RSA key pair generation for signature testing
-    - Configurable token claims and expiration
-    - Invalid token generation for negative testing
-    - Auth0-compatible token structure and claims
-    """
-    
-    def __init__(self):
-        """Initialize JWT token factory with RSA key pair"""
-        self.private_key, self.public_key = self._generate_rsa_keypair()
-        self.algorithm = 'RS256'
-        self.issuer = 'https://test-domain.auth0.com/'
-        self.audience = 'test-audience'
-        
-        logger.debug("JWT token factory initialized with RSA keypair")
-    
-    def _generate_rsa_keypair(self) -> tuple[bytes, bytes]:
-        """Generate RSA key pair for JWT signing"""
-        private_key = rsa.generate_private_key(
-            public_exponent=65537,
-            key_size=2048
-        )
-        
-        private_pem = private_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption()
-        )
-        
-        public_key = private_key.public_key()
-        public_pem = public_key.public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
-        )
-        
-        return private_pem, public_pem
-    
-    def create_valid_token(
-        self,
-        user_id: str,
-        email: str,
-        permissions: Optional[List[str]] = None,
-        roles: Optional[List[str]] = None,
-        expires_in: int = 3600,
-        additional_claims: Optional[Dict[str, Any]] = None
-    ) -> str:
-        """
-        Create valid JWT token for authentication testing.
-        
-        Args:
-            user_id: User identifier (sub claim)
-            email: User email address
-            permissions: List of user permissions
-            roles: List of user roles
-            expires_in: Token expiration in seconds
-            additional_claims: Additional JWT claims
-            
-        Returns:
-            Signed JWT token string
-        """
-        now = datetime.utcnow()
-        
-        payload = {
-            'iss': self.issuer,
-            'aud': self.audience,
-            'sub': user_id,
-            'email': email,
-            'email_verified': True,
-            'iat': int(now.timestamp()),
-            'exp': int((now + timedelta(seconds=expires_in)).timestamp()),
-            'azp': 'test-client-id',
-            'scope': 'openid profile email',
-            'permissions': permissions or [],
-            'roles': roles or ['user'],
-            'https://example.com/roles': roles or ['user'],
-            'https://example.com/permissions': permissions or []
-        }
-        
-        if additional_claims:
-            payload.update(additional_claims)
-        
-        token = jwt.encode(
-            payload=payload,
-            key=self.private_key,
-            algorithm=self.algorithm,
-            headers={'kid': 'test-key-id'}
-        )
-        
-        logger.debug(
-            "Valid JWT token created",
-            user_id=user_id,
-            expires_in=expires_in,
-            permissions_count=len(permissions or [])
-        )
-        
-        return token
-    
-    def create_expired_token(
-        self,
-        user_id: str,
-        email: str,
-        expired_seconds_ago: int = 3600
-    ) -> str:
-        """
-        Create expired JWT token for expiration testing.
-        
-        Args:
-            user_id: User identifier
-            email: User email address
-            expired_seconds_ago: How many seconds ago the token expired
-            
-        Returns:
-            Expired JWT token string
-        """
-        now = datetime.utcnow()
-        
-        payload = {
-            'iss': self.issuer,
-            'aud': self.audience,
-            'sub': user_id,
-            'email': email,
-            'iat': int((now - timedelta(seconds=expired_seconds_ago + 7200)).timestamp()),
-            'exp': int((now - timedelta(seconds=expired_seconds_ago)).timestamp())
-        }
-        
-        token = jwt.encode(
-            payload=payload,
-            key=self.private_key,
-            algorithm=self.algorithm
-        )
-        
-        logger.debug(
-            "Expired JWT token created",
-            user_id=user_id,
-            expired_seconds_ago=expired_seconds_ago
-        )
-        
-        return token
-    
-    def create_invalid_signature_token(
-        self,
-        user_id: str,
-        email: str
-    ) -> str:
-        """
-        Create JWT token with invalid signature for signature validation testing.
-        
-        Args:
-            user_id: User identifier
-            email: User email address
-            
-        Returns:
-            JWT token with invalid signature
-        """
-        # Create token with different key
-        wrong_private_key = rsa.generate_private_key(
-            public_exponent=65537,
-            key_size=2048
-        )
-        
-        wrong_private_pem = wrong_private_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption()
-        )
-        
-        now = datetime.utcnow()
-        
-        payload = {
-            'iss': self.issuer,
-            'aud': self.audience,
-            'sub': user_id,
-            'email': email,
-            'iat': int(now.timestamp()),
-            'exp': int((now + timedelta(hours=1)).timestamp())
-        }
-        
-        token = jwt.encode(
-            payload=payload,
-            key=wrong_private_pem,
-            algorithm=self.algorithm
-        )
-        
-        logger.debug("Invalid signature JWT token created", user_id=user_id)
-        
-        return token
-    
-    def create_malformed_token(self) -> str:
-        """
-        Create malformed JWT token for format validation testing.
-        
-        Returns:
-            Malformed JWT token string
-        """
-        # Return token with wrong number of parts
-        malformed_token = "invalid.token"
-        
-        logger.debug("Malformed JWT token created")
-        
-        return malformed_token
-    
-    def get_public_key_pem(self) -> str:
-        """Get public key in PEM format for verification"""
-        return self.public_key.decode('utf-8')
-    
-    def get_jwks(self) -> Dict[str, Any]:
-        """
-        Get JWKS (JSON Web Key Set) for Auth0 mock integration.
-        
-        Returns:
-            JWKS dictionary compatible with Auth0 format
-        """
-        public_key_obj = load_pem_public_key(self.public_key)
-        public_numbers = public_key_obj.public_numbers()
-        
-        # Convert to base64url encoding
-        def int_to_base64url(value: int) -> str:
-            byte_length = (value.bit_length() + 7) // 8
-            value_bytes = value.to_bytes(byte_length, byteorder='big')
-            return base64.urlsafe_b64encode(value_bytes).decode('utf-8').rstrip('=')
-        
-        jwks = {
-            'keys': [
-                {
-                    'kty': 'RSA',
-                    'use': 'sig',
-                    'kid': 'test-key-id',
-                    'n': int_to_base64url(public_numbers.n),
-                    'e': int_to_base64url(public_numbers.e),
-                    'alg': 'RS256',
-                    'x5c': [],
-                    'x5t': '',
-                    'x5t#S256': ''
-                }
-            ]
-        }
-        
-        logger.debug("JWKS generated for Auth0 mock integration")
-        
-        return jwks
-
-
-class Auth0ServiceMock:
-    """
-    Comprehensive Auth0 service mock for authentication testing.
-    
-    This mock provides realistic Auth0 API responses and behavior for testing
-    authentication flows, user management, and permission validation without
-    external dependencies.
-    
-    Features:
-    - Auth0 Management API mock endpoints
-    - User profile and permission management
-    - Token validation and refresh mocking
-    - JWKS endpoint simulation
-    - Circuit breaker testing support
-    - Rate limiting simulation
-    """
-    
-    def __init__(self, jwt_factory: JWTTokenFactory):
-        """
-        Initialize Auth0 service mock with JWT token factory.
-        
-        Args:
-            jwt_factory: JWT token factory for token generation
-        """
-        self.jwt_factory = jwt_factory
-        self.users: Dict[str, Dict[str, Any]] = {}
-        self.user_permissions: Dict[str, Set[str]] = {}
-        self.user_roles: Dict[str, Set[str]] = {}
-        self.circuit_breaker_enabled = False
-        self.rate_limit_enabled = False
-        self.response_delay = 0.0
-        
-        logger.debug("Auth0 service mock initialized")
-    
-    def add_user(
-        self,
-        user_id: str,
-        email: str,
-        profile_data: Optional[Dict[str, Any]] = None,
-        permissions: Optional[Set[str]] = None,
-        roles: Optional[Set[str]] = None
-    ) -> None:
-        """
-        Add user to Auth0 mock for testing.
-        
-        Args:
-            user_id: User identifier
-            email: User email address
-            profile_data: Additional profile data
-            permissions: User permissions
-            roles: User roles
-        """
-        self.users[user_id] = {
-            'user_id': user_id,
-            'email': email,
-            'email_verified': True,
-            'name': f"Test User {user_id[:8]}",
-            'picture': f"https://example.com/avatars/{user_id}.jpg",
-            'created_at': datetime.utcnow().isoformat(),
-            'updated_at': datetime.utcnow().isoformat(),
-            'last_login': datetime.utcnow().isoformat(),
-            'logins_count': 1,
-            **(profile_data or {})
-        }
-        
-        self.user_permissions[user_id] = permissions or set()
-        self.user_roles[user_id] = roles or {'user'}
-        
-        logger.debug(
-            "User added to Auth0 mock",
-            user_id=user_id,
-            email=email,
-            permissions_count=len(self.user_permissions[user_id])
-        )
-    
-    def get_user_profile(self, user_id: str) -> Optional[Dict[str, Any]]:
-        """Get user profile from Auth0 mock"""
-        if self.circuit_breaker_enabled:
-            raise Auth0Exception("Circuit breaker is open")
-        
-        return self.users.get(user_id)
-    
-    def get_user_permissions(self, user_id: str) -> Set[str]:
-        """Get user permissions from Auth0 mock"""
-        if self.circuit_breaker_enabled:
-            raise Auth0Exception("Circuit breaker is open")
-        
-        return self.user_permissions.get(user_id, set())
-    
-    def get_user_roles(self, user_id: str) -> Set[str]:
-        """Get user roles from Auth0 mock"""
-        if self.circuit_breaker_enabled:
-            raise Auth0Exception("Circuit breaker is open")
-        
-        return self.user_roles.get(user_id, set())
-    
-    def validate_token(self, token: str) -> Dict[str, Any]:
-        """Validate JWT token using mock"""
-        try:
-            payload = jwt.decode(
-                jwt=token,
-                key=self.jwt_factory.public_key,
-                algorithms=[self.jwt_factory.algorithm],
-                audience=self.jwt_factory.audience,
-                issuer=self.jwt_factory.issuer
-            )
-            
-            logger.debug("Token validated by Auth0 mock", user_id=payload.get('sub'))
-            
-            return payload
-        except jwt.ExpiredSignatureError:
-            raise Auth0Exception("Token has expired")
-        except jwt.InvalidSignatureError:
-            raise Auth0Exception("Invalid token signature")
-        except jwt.InvalidTokenError as e:
-            raise Auth0Exception(f"Invalid token: {str(e)}")
-    
-    def get_jwks(self) -> Dict[str, Any]:
-        """Get JWKS for token validation"""
-        return self.jwt_factory.get_jwks()
-    
-    def enable_circuit_breaker(self) -> None:
-        """Enable circuit breaker for testing"""
-        self.circuit_breaker_enabled = True
-        logger.debug("Auth0 mock circuit breaker enabled")
-    
-    def disable_circuit_breaker(self) -> None:
-        """Disable circuit breaker for testing"""
-        self.circuit_breaker_enabled = False
-        logger.debug("Auth0 mock circuit breaker disabled")
-    
-    def enable_rate_limiting(self) -> None:
-        """Enable rate limiting simulation"""
-        self.rate_limit_enabled = True
-        logger.debug("Auth0 mock rate limiting enabled")
-    
-    def disable_rate_limiting(self) -> None:
-        """Disable rate limiting simulation"""
-        self.rate_limit_enabled = False
-        logger.debug("Auth0 mock rate limiting disabled")
-
-
-class MockRedisCache:
-    """
-    Mock Redis cache for authentication and session testing.
-    
-    Provides in-memory Redis-compatible cache behavior for testing authentication
-    caching, session management, and permission caching without external Redis
-    dependency.
-    
-    Features:
-    - Redis command compatibility
-    - TTL and expiration simulation
-    - Key pattern matching
-    - Connection error simulation
-    - Memory usage tracking
-    """
-    
-    def __init__(self):
-        """Initialize mock Redis cache"""
-        self.data: Dict[str, Any] = {}
-        self.ttl_data: Dict[str, datetime] = {}
-        self.connection_error = False
-        self.operation_delay = 0.0
-        
-        logger.debug("Mock Redis cache initialized")
-    
-    def get(self, key: str) -> Optional[str]:
-        """Get value from cache with expiration check"""
-        if self.connection_error:
-            raise RedisError("Connection error")
-        
-        self._check_expiration(key)
-        return self.data.get(key)
-    
-    def set(self, key: str, value: str, ex: Optional[int] = None) -> bool:
-        """Set value in cache with optional expiration"""
-        if self.connection_error:
-            raise RedisError("Connection error")
-        
-        self.data[key] = value
-        
-        if ex is not None:
-            self.ttl_data[key] = datetime.utcnow() + timedelta(seconds=ex)
-        
-        logger.debug("Cache key set", key=key, has_expiration=ex is not None)
-        
-        return True
-    
-    def setex(self, key: str, time: int, value: str) -> bool:
-        """Set value with expiration time"""
-        return self.set(key, value, ex=time)
-    
-    def delete(self, *keys: str) -> int:
-        """Delete keys from cache"""
-        if self.connection_error:
-            raise RedisError("Connection error")
-        
-        deleted_count = 0
-        for key in keys:
-            if key in self.data:
-                del self.data[key]
-                deleted_count += 1
-            if key in self.ttl_data:
-                del self.ttl_data[key]
-        
-        logger.debug("Cache keys deleted", keys=keys, deleted_count=deleted_count)
-        
-        return deleted_count
-    
-    def exists(self, key: str) -> bool:
-        """Check if key exists in cache"""
-        if self.connection_error:
-            raise RedisError("Connection error")
-        
-        self._check_expiration(key)
-        return key in self.data
-    
-    def keys(self, pattern: str) -> List[str]:
-        """Get keys matching pattern"""
-        if self.connection_error:
-            raise RedisError("Connection error")
-        
-        # Simple pattern matching (supports * wildcard)
-        import fnmatch
-        matching_keys = []
-        
-        for key in list(self.data.keys()):
-            self._check_expiration(key)
-            if fnmatch.fnmatch(key, pattern):
-                matching_keys.append(key)
-        
-        return matching_keys
-    
-    def ttl(self, key: str) -> int:
-        """Get TTL for key"""
-        if key not in self.data:
-            return -2  # Key doesn't exist
-        
-        if key not in self.ttl_data:
-            return -1  # Key exists but no expiration
-        
-        ttl = (self.ttl_data[key] - datetime.utcnow()).total_seconds()
-        return max(0, int(ttl))
-    
-    def _check_expiration(self, key: str) -> None:
-        """Check and handle key expiration"""
-        if key in self.ttl_data:
-            if datetime.utcnow() > self.ttl_data[key]:
-                # Key expired, remove it
-                self.data.pop(key, None)
-                self.ttl_data.pop(key, None)
-    
-    def flush_db(self) -> None:
-        """Clear all data from cache"""
-        self.data.clear()
-        self.ttl_data.clear()
-        logger.debug("Mock Redis cache flushed")
-    
-    def enable_connection_error(self) -> None:
-        """Enable connection error simulation"""
-        self.connection_error = True
-        logger.debug("Mock Redis connection error enabled")
-    
-    def disable_connection_error(self) -> None:
-        """Disable connection error simulation"""
-        self.connection_error = False
-        logger.debug("Mock Redis connection error disabled")
-    
-    def health_check(self) -> Dict[str, Any]:
-        """Return cache health status"""
-        return {
-            'status': 'healthy' if not self.connection_error else 'unhealthy',
-            'keys_count': len(self.data),
-            'memory_usage': sum(len(str(k)) + len(str(v)) for k, v in self.data.items()),
-            'connection_error': self.connection_error
-        }
-
-
-# Factory classes using factory_boy for dynamic test object generation
-
-class MockUserFactory(factory.Factory):
-    """Factory for generating mock Auth0 users with varied test scenarios"""
-    
-    class Meta:
-        model = MockAuth0User
-    
-    user_id = factory.LazyFunction(lambda: f"auth0|{uuid.uuid4().hex}")
-    email = factory.Faker('email')
-    is_authenticated = True
-    is_active = True
-    
-    @factory.LazyAttribute
-    def auth0_profile(obj):
-        """Generate Auth0 profile with user-specific data"""
-        return {
-            'sub': obj.user_id,
-            'email': obj.email,
-            'email_verified': True,
-            'name': f"Test User {obj.user_id[:8]}",
-            'nickname': f"test_{obj.user_id[:8]}",
-            'picture': f"https://example.com/avatars/{obj.user_id}.jpg",
-            'updated_at': datetime.utcnow().isoformat(),
-            'created_at': (datetime.utcnow() - timedelta(days=30)).isoformat(),
-        }
-    
-    @factory.LazyAttribute
-    def permissions(obj):
-        """Generate varied permission sets for testing"""
-        return {'read:profile', 'update:profile'}
-    
-    @factory.LazyAttribute
-    def roles(obj):
-        """Generate role sets for testing"""
-        return {'user'}
-
-
-class AdminUserFactory(MockUserFactory):
-    """Factory for generating admin users with elevated permissions"""
-    
-    @factory.LazyAttribute
-    def permissions(obj):
-        return {
-            'read:profile', 'update:profile', 'delete:profile',
-            'read:admin', 'write:admin', 'delete:admin',
-            'manage:users', 'manage:roles', 'manage:permissions'
-        }
-    
-    @factory.LazyAttribute
-    def roles(obj):
-        return {'user', 'admin', 'superuser'}
-
-
-class JWTTokenTestFactory(factory.Factory):
-    """Factory for generating JWT tokens with varied test scenarios"""
     
     class Meta:
         model = dict
     
-    user_id = factory.LazyFunction(lambda: f"auth0|{uuid.uuid4().hex}")
+    # Standard JWT claims
+    sub = factory.LazyFunction(lambda: f"auth0|{secrets.token_hex(12)}")
+    iss = factory.LazyAttribute(lambda obj: f"https://{factory.Faker('domain_name').generate()}.auth0.com/")
+    aud = factory.Sequence(lambda n: f"test-audience-{n}")
+    exp = factory.LazyFunction(lambda: int((datetime.now(timezone.utc) + timedelta(hours=1)).timestamp()))
+    iat = factory.LazyFunction(lambda: int(datetime.now(timezone.utc).timestamp()))
+    nbf = factory.LazyFunction(lambda: int(datetime.now(timezone.utc).timestamp()))
+    jti = factory.LazyFunction(lambda: str(uuid.uuid4()))
+    
+    # Auth0-specific claims
+    azp = factory.LazyAttribute(lambda obj: obj.aud)
+    scope = "read:profile write:profile read:documents"
+    
+    # User profile claims
+    name = factory.Faker('name')
     email = factory.Faker('email')
-    permissions = factory.LazyFunction(lambda: ['read:profile', 'update:profile'])
-    roles = factory.LazyFunction(lambda: ['user'])
-    expires_in = 3600
+    email_verified = True
+    picture = factory.LazyAttribute(lambda obj: f"https://avatars.example.com/{obj.sub}.png")
+    updated_at = factory.LazyFunction(lambda: datetime.now(timezone.utc).isoformat())
     
-    @classmethod
-    def _create(cls, model_class, **kwargs):
-        """Create JWT token using token factory"""
-        jwt_factory = JWTTokenFactory()
-        return jwt_factory.create_valid_token(**kwargs)
+    # Custom claims with namespace
+    permissions = factory.LazyFunction(lambda: [
+        "read:profile", "write:profile", "read:documents", "write:documents",
+        "read:admin", "write:admin"
+    ])
+    
+    # Auth0 app metadata
+    app_metadata = factory.LazyFunction(lambda: {
+        "roles": ["user", "admin"],
+        "department": "engineering",
+        "tenant_id": "test-tenant"
+    })
+    
+    # Auth0 user metadata
+    user_metadata = factory.LazyFunction(lambda: {
+        "preferences": {"theme": "dark", "language": "en"},
+        "onboarding_completed": True
+    })
 
 
-# Pytest fixtures for authentication testing
-
-@pytest.fixture
-def jwt_token_factory() -> JWTTokenFactory:
+class Auth0UserProfileFactory(factory.Factory):
     """
-    Provide JWT token factory for test token generation.
-    
-    Returns:
-        Configured JWT token factory instance
+    Factory for generating comprehensive Auth0 user profiles with enterprise metadata
+    per Section 6.4.1 identity management requirements.
     """
-    factory = JWTTokenFactory()
-    logger.debug("JWT token factory fixture created")
-    return factory
-
-
-@pytest.fixture
-def auth0_mock(jwt_token_factory: JWTTokenFactory) -> Auth0ServiceMock:
-    """
-    Provide Auth0 service mock for authentication testing.
     
-    Args:
-        jwt_token_factory: JWT token factory for token generation
-        
-    Returns:
-        Configured Auth0 service mock instance
-    """
-    mock = Auth0ServiceMock(jwt_token_factory)
+    class Meta:
+        model = dict
     
-    # Add default test users
-    mock.add_user(
-        user_id="auth0|test_user_1",
-        email="test@example.com",
-        permissions={'read:profile', 'update:profile'},
-        roles={'user'}
-    )
+    user_id = factory.LazyFunction(lambda: f"auth0|{secrets.token_hex(12)}")
+    username = factory.Faker('user_name')
+    name = factory.Faker('name')
+    given_name = factory.Faker('first_name')
+    family_name = factory.Faker('last_name')
+    middle_name = factory.Faker('first_name')
+    nickname = factory.LazyAttribute(lambda obj: obj.username)
+    preferred_username = factory.LazyAttribute(lambda obj: obj.username)
+    profile = factory.LazyAttribute(lambda obj: f"https://profiles.example.com/{obj.username}")
+    picture = factory.LazyAttribute(lambda obj: f"https://avatars.example.com/{obj.user_id}.png")
+    website = factory.Faker('url')
+    email = factory.Faker('email')
+    email_verified = True
+    gender = factory.Faker('random_element', elements=('male', 'female', 'other', 'prefer_not_to_say'))
+    birthdate = factory.Faker('date_of_birth', minimum_age=18, maximum_age=80)
+    zoneinfo = factory.Faker('timezone')
+    locale = "en-US"
+    phone_number = factory.Faker('phone_number')
+    phone_number_verified = False
+    address = factory.SubFactory('tests.fixtures.auth_fixtures.AddressFactory')
     
-    mock.add_user(
-        user_id="auth0|test_admin_1", 
-        email="admin@example.com",
-        permissions={
-            'read:profile', 'update:profile', 'delete:profile',
-            'read:admin', 'write:admin', 'manage:users'
+    # Auth0 specific fields
+    created_at = factory.LazyFunction(lambda: datetime.now(timezone.utc).isoformat())
+    updated_at = factory.LazyFunction(lambda: datetime.now(timezone.utc).isoformat())
+    last_login = factory.LazyFunction(lambda: (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat())
+    last_ip = factory.Faker('ipv4')
+    logins_count = factory.Faker('random_int', min=1, max=1000)
+    blocked = False
+    
+    # Enterprise metadata
+    app_metadata = factory.LazyFunction(lambda: {
+        "roles": ["user"],
+        "permissions": ["read:profile", "write:profile"],
+        "department": "engineering",
+        "employee_id": secrets.token_hex(8),
+        "hire_date": datetime.now(timezone.utc).isoformat(),
+        "manager_id": f"auth0|{secrets.token_hex(12)}"
+    })
+    
+    user_metadata = factory.LazyFunction(lambda: {
+        "preferences": {
+            "theme": "light",
+            "language": "en",
+            "timezone": "America/New_York",
+            "notifications": True
         },
-        roles={'user', 'admin'}
-    )
-    
-    logger.debug("Auth0 service mock fixture created with test users")
-    return mock
-
-
-@pytest.fixture
-def mock_redis_cache() -> MockRedisCache:
-    """
-    Provide mock Redis cache for caching and session testing.
-    
-    Returns:
-        Mock Redis cache instance
-    """
-    cache = MockRedisCache()
-    logger.debug("Mock Redis cache fixture created")
-    return cache
-
-
-@pytest.fixture
-def mock_auth_user() -> MockAuth0User:
-    """
-    Provide basic authenticated mock user for testing.
-    
-    Returns:
-        Mock Auth0 user instance with standard permissions
-    """
-    user = MockUserFactory()
-    logger.debug("Mock authenticated user fixture created", user_id=user.id)
-    return user
-
-
-@pytest.fixture
-def mock_admin_user() -> MockAuth0User:
-    """
-    Provide admin mock user for elevated permission testing.
-    
-    Returns:
-        Mock Auth0 user instance with admin permissions
-    """
-    user = AdminUserFactory()
-    logger.debug("Mock admin user fixture created", user_id=user.id)
-    return user
-
-
-@pytest.fixture
-def mock_anonymous_user() -> MockAnonymousUser:
-    """
-    Provide anonymous user for unauthenticated testing.
-    
-    Returns:
-        Mock anonymous user instance
-    """
-    user = MockAnonymousUser()
-    logger.debug("Mock anonymous user fixture created")
-    return user
-
-
-@pytest.fixture
-def valid_jwt_token(jwt_token_factory: JWTTokenFactory) -> str:
-    """
-    Provide valid JWT token for authentication testing.
-    
-    Args:
-        jwt_token_factory: JWT token factory
-        
-    Returns:
-        Valid JWT token string
-    """
-    token = jwt_token_factory.create_valid_token(
-        user_id="auth0|test_user_1",
-        email="test@example.com",
-        permissions=['read:profile', 'update:profile'],
-        roles=['user']
-    )
-    logger.debug("Valid JWT token fixture created")
-    return token
-
-
-@pytest.fixture
-def expired_jwt_token(jwt_token_factory: JWTTokenFactory) -> str:
-    """
-    Provide expired JWT token for expiration testing.
-    
-    Args:
-        jwt_token_factory: JWT token factory
-        
-    Returns:
-        Expired JWT token string
-    """
-    token = jwt_token_factory.create_expired_token(
-        user_id="auth0|test_user_1",
-        email="test@example.com",
-        expired_seconds_ago=3600
-    )
-    logger.debug("Expired JWT token fixture created")
-    return token
-
-
-@pytest.fixture
-def invalid_signature_token(jwt_token_factory: JWTTokenFactory) -> str:
-    """
-    Provide JWT token with invalid signature for signature testing.
-    
-    Args:
-        jwt_token_factory: JWT token factory
-        
-    Returns:
-        JWT token with invalid signature
-    """
-    token = jwt_token_factory.create_invalid_signature_token(
-        user_id="auth0|test_user_1",
-        email="test@example.com"
-    )
-    logger.debug("Invalid signature JWT token fixture created")
-    return token
-
-
-@pytest.fixture
-def malformed_jwt_token(jwt_token_factory: JWTTokenFactory) -> str:
-    """
-    Provide malformed JWT token for format validation testing.
-    
-    Args:
-        jwt_token_factory: JWT token factory
-        
-    Returns:
-        Malformed JWT token string
-    """
-    token = jwt_token_factory.create_malformed_token()
-    logger.debug("Malformed JWT token fixture created")
-    return token
-
-
-@pytest.fixture
-def admin_jwt_token(jwt_token_factory: JWTTokenFactory) -> str:
-    """
-    Provide JWT token with admin permissions for authorization testing.
-    
-    Args:
-        jwt_token_factory: JWT token factory
-        
-    Returns:
-        JWT token with admin permissions
-    """
-    token = jwt_token_factory.create_valid_token(
-        user_id="auth0|test_admin_1",
-        email="admin@example.com",
-        permissions=[
-            'read:profile', 'update:profile', 'delete:profile',
-            'read:admin', 'write:admin', 'manage:users'
-        ],
-        roles=['user', 'admin']
-    )
-    logger.debug("Admin JWT token fixture created")
-    return token
-
-
-@pytest.fixture
-def session_data() -> Dict[str, Any]:
-    """
-    Provide session data for session management testing.
-    
-    Returns:
-        Dictionary with session test data
-    """
-    data = {
-        'user_id': 'auth0|test_user_1',
-        'email': 'test@example.com',
-        'login_timestamp': datetime.utcnow().isoformat(),
-        'session_metadata': {
-            'ip_address': '127.0.0.1',
-            'user_agent': 'pytest-test-agent',
-            'session_type': 'test_session'
+        "onboarding": {
+            "completed": True,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "steps_completed": ["profile", "security", "preferences"]
+        },
+        "security": {
+            "mfa_enabled": True,
+            "backup_codes_generated": True,
+            "last_password_change": datetime.now(timezone.utc).isoformat()
         }
+    })
+
+
+class AddressFactory(factory.Factory):
+    """Factory for generating address information per OIDC standards."""
+    
+    class Meta:
+        model = dict
+    
+    street_address = factory.Faker('street_address')
+    locality = factory.Faker('city')
+    region = factory.Faker('state')
+    postal_code = factory.Faker('zipcode')
+    country = factory.Faker('country_code')
+    formatted = factory.LazyAttribute(
+        lambda obj: f"{obj.street_address}\n{obj.locality}, {obj.region} {obj.postal_code}\n{obj.country}"
+    )
+
+
+class SessionDataFactory(factory.Factory):
+    """
+    Factory for generating Flask-Session data for distributed session testing
+    per Section 3.4.2 Flask-Session Redis configuration.
+    """
+    
+    class Meta:
+        model = dict
+    
+    session_id = factory.LazyFunction(lambda: secrets.token_urlsafe(32))
+    user_id = factory.LazyFunction(lambda: f"auth0|{secrets.token_hex(12)}")
+    created_at = factory.LazyFunction(lambda: datetime.now(timezone.utc).isoformat())
+    last_accessed = factory.LazyFunction(lambda: datetime.now(timezone.utc).isoformat())
+    expires_at = factory.LazyFunction(lambda: (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat())
+    ip_address = factory.Faker('ipv4')
+    user_agent = factory.Faker('user_agent')
+    
+    # Session state data
+    authenticated = True
+    permissions = factory.LazyFunction(lambda: ["read:profile", "write:profile", "read:documents"])
+    roles = factory.LazyFunction(lambda: ["user"])
+    
+    # Additional session metadata
+    csrf_token = factory.LazyFunction(lambda: secrets.token_hex(32))
+    flash_messages = factory.LazyFunction(lambda: [])
+    
+    # Authentication context
+    auth_method = "jwt"
+    auth_provider = "auth0"
+    mfa_verified = True
+    
+    # Security context
+    security_level = "standard"
+    risk_score = factory.Faker('random_int', min=0, max=100)
+    device_trusted = True
+
+
+# =============================================================================
+# Core Authentication Fixtures
+# =============================================================================
+
+@pytest.fixture
+def mock_auth0_domain():
+    """Auth0 domain for testing configuration."""
+    return "test-domain.auth0.com"
+
+
+@pytest.fixture
+def mock_auth0_client_id():
+    """Auth0 client ID for testing configuration."""
+    return "test_client_id_123456789"
+
+
+@pytest.fixture
+def mock_auth0_client_secret():
+    """Auth0 client secret for testing configuration."""
+    return "test_client_secret_abcdefghijklmnop"
+
+
+@pytest.fixture
+def mock_auth0_audience():
+    """Auth0 API audience for testing configuration."""
+    return "https://api.test-domain.auth0.com"
+
+
+@pytest.fixture
+def auth0_config(mock_auth0_domain, mock_auth0_client_id, mock_auth0_client_secret, mock_auth0_audience):
+    """
+    Complete Auth0 configuration for testing Auth0 Python SDK integration
+    per Section 6.4.1 identity management.
+    """
+    return {
+        'AUTH0_DOMAIN': mock_auth0_domain,
+        'AUTH0_CLIENT_ID': mock_auth0_client_id,
+        'AUTH0_CLIENT_SECRET': mock_auth0_client_secret,
+        'AUTH0_AUDIENCE': mock_auth0_audience,
+        'AUTH0_ALGORITHM': 'RS256',
+        'AUTH0_ISSUER': f"https://{mock_auth0_domain}/",
     }
-    logger.debug("Session data fixture created")
-    return data
 
 
 @pytest.fixture
-def mock_auth_cache(mock_redis_cache: MockRedisCache) -> MockRedisCache:
+def rsa_key_pair():
     """
-    Provide configured authentication cache for caching testing.
+    RSA key pair for JWT token signing and validation testing using
+    cryptography 41.0+ per Section 6.4.1 cryptographic operations.
+    """
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
     
-    Args:
-        mock_redis_cache: Mock Redis cache instance
-        
-    Returns:
-        Configured authentication cache
-    """
-    # Pre-populate with some test data
-    mock_redis_cache.setex(
-        'jwt_validation:test_token_hash',
-        300,
-        json.dumps({
-            'sub': 'auth0|test_user_1',
-            'email': 'test@example.com',
-            'validated_at': datetime.utcnow().isoformat()
-        })
+    # Generate RSA key pair
+    private_key = rsa.generate_private_key(
+        public_exponent=65537,
+        key_size=2048
     )
     
-    mock_redis_cache.setex(
-        'perm_cache:auth0|test_user_1',
-        300,
-        json.dumps(['read:profile', 'update:profile'])
+    # Serialize private key
+    private_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption()
     )
     
-    logger.debug("Mock authentication cache fixture created with test data")
-    return mock_redis_cache
-
-
-@pytest.fixture
-def auth_test_context():
-    """
-    Provide authentication test context with mocked external services.
+    # Serialize public key
+    public_key = private_key.public_key()
+    public_pem = public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo
+    )
     
-    This fixture sets up comprehensive mocking for authentication testing
-    including Auth0 service calls, Redis caching, and JWT validation.
-    
-    Returns:
-        Test context manager with mocked services
-    """
-    with patch('src.auth.authentication.httpx.AsyncClient') as mock_httpx, \
-         patch('src.auth.cache.redis.Redis') as mock_redis, \
-         patch('src.auth.authentication.Auth0Management') as mock_auth0_mgmt:
-        
-        # Configure mock HTTP client
-        mock_client = AsyncMock()
-        mock_httpx.return_value = mock_client
-        
-        # Configure mock Redis client
-        mock_redis_instance = MockRedisCache()
-        mock_redis.return_value = mock_redis_instance
-        
-        # Configure mock Auth0 management client
-        mock_mgmt = Mock()
-        mock_auth0_mgmt.return_value = mock_mgmt
-        
-        context = {
-            'mock_httpx_client': mock_client,
-            'mock_redis': mock_redis_instance,
-            'mock_auth0_mgmt': mock_mgmt
-        }
-        
-        logger.debug("Authentication test context fixture created")
-        yield context
-
-
-@pytest.fixture
-def circuit_breaker_test_context():
-    """
-    Provide context for circuit breaker testing with controlled failure simulation.
-    
-    Returns:
-        Circuit breaker test context
-    """
-    context = {
-        'failure_count': 0,
-        'circuit_state': 'closed',
-        'failure_threshold': 5,
-        'recovery_timeout': 60
+    return {
+        'private_key': private_key,
+        'public_key': public_key,
+        'private_pem': private_pem,
+        'public_pem': public_pem,
+        'private_key_str': private_pem.decode('utf-8'),
+        'public_key_str': public_pem.decode('utf-8')
     }
-    
-    def simulate_failure():
-        context['failure_count'] += 1
-        if context['failure_count'] >= context['failure_threshold']:
-            context['circuit_state'] = 'open'
-    
-    def simulate_recovery():
-        context['failure_count'] = 0
-        context['circuit_state'] = 'closed'
-    
-    context['simulate_failure'] = simulate_failure
-    context['simulate_recovery'] = simulate_recovery
-    
-    logger.debug("Circuit breaker test context fixture created")
-    return context
-
-
-@pytest.fixture 
-def permission_test_scenarios() -> List[Dict[str, Any]]:
-    """
-    Provide permission test scenarios for authorization testing.
-    
-    Returns:
-        List of permission test scenarios with expected outcomes
-    """
-    scenarios = [
-        {
-            'name': 'user_read_own_profile',
-            'user_permissions': {'read:profile'},
-            'required_permissions': ['read:profile'],
-            'resource_owner': 'auth0|test_user_1',
-            'requesting_user': 'auth0|test_user_1',
-            'expected_result': True
-        },
-        {
-            'name': 'user_write_others_profile', 
-            'user_permissions': {'read:profile'},
-            'required_permissions': ['write:profile'],
-            'resource_owner': 'auth0|other_user',
-            'requesting_user': 'auth0|test_user_1',
-            'expected_result': False
-        },
-        {
-            'name': 'admin_write_any_profile',
-            'user_permissions': {'read:profile', 'write:profile', 'admin:write'},
-            'required_permissions': ['write:profile'],
-            'resource_owner': 'auth0|other_user', 
-            'requesting_user': 'auth0|admin_user',
-            'expected_result': True
-        },
-        {
-            'name': 'anonymous_access_denied',
-            'user_permissions': set(),
-            'required_permissions': ['read:profile'],
-            'resource_owner': None,
-            'requesting_user': None,
-            'expected_result': False
-        }
-    ]
-    
-    logger.debug("Permission test scenarios fixture created", scenarios_count=len(scenarios))
-    return scenarios
 
 
 @pytest.fixture
-def auth_metrics_context() -> Dict[str, Any]:
+def jwt_claims():
     """
-    Provide metrics context for authentication performance testing.
+    Standard JWT claims factory instance for token generation testing
+    per Section 6.4.1 token handling.
+    """
+    return JWTClaimsFactory()
+
+
+@pytest.fixture
+def valid_jwt_token(rsa_key_pair, jwt_claims, auth0_config):
+    """
+    Generate valid JWT token using PyJWT 2.8+ for authentication testing
+    per Section 0.1.2 JWT token processing migration.
+    """
+    claims = jwt_claims.build()
+    claims.update({
+        'iss': auth0_config['AUTH0_ISSUER'],
+        'aud': auth0_config['AUTH0_AUDIENCE']
+    })
     
-    Returns:
-        Metrics tracking context for performance validation
+    # Generate token using RS256 algorithm
+    token = jwt.encode(
+        claims,
+        rsa_key_pair['private_key'],
+        algorithm='RS256',
+        headers={'kid': 'test-key-id'}
+    )
+    
+    return {
+        'token': token,
+        'claims': claims,
+        'header': jwt.get_unverified_header(token)
+    }
+
+
+@pytest.fixture
+def expired_jwt_token(rsa_key_pair, jwt_claims, auth0_config):
     """
-    context = {
-        'auth_requests': 0,
-        'auth_successes': 0,
-        'auth_failures': 0,
-        'cache_hits': 0,
-        'cache_misses': 0,
-        'avg_response_time': 0.0,
-        'response_times': []
+    Generate expired JWT token for expiration testing scenarios
+    per Section 6.4.1 token validation patterns.
+    """
+    claims = jwt_claims.build()
+    claims.update({
+        'iss': auth0_config['AUTH0_ISSUER'],
+        'aud': auth0_config['AUTH0_AUDIENCE'],
+        'exp': int((datetime.now(timezone.utc) - timedelta(hours=1)).timestamp()),
+        'iat': int((datetime.now(timezone.utc) - timedelta(hours=2)).timestamp())
+    })
+    
+    token = jwt.encode(
+        claims,
+        rsa_key_pair['private_key'],
+        algorithm='RS256',
+        headers={'kid': 'test-key-id'}
+    )
+    
+    return {
+        'token': token,
+        'claims': claims,
+        'header': jwt.get_unverified_header(token)
+    }
+
+
+@pytest.fixture
+def malformed_jwt_token():
+    """Malformed JWT token for error handling testing."""
+    return "invalid.jwt.token.format"
+
+
+@pytest.fixture
+def jwt_token_with_invalid_signature(valid_jwt_token, rsa_key_pair):
+    """
+    JWT token with invalid signature for security testing
+    per Section 6.4.1 comprehensive token validation.
+    """
+    # Create a different key for signing
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    
+    wrong_key = rsa.generate_private_key(
+        public_exponent=65537,
+        key_size=2048
+    )
+    
+    # Sign with wrong key
+    token = jwt.encode(
+        valid_jwt_token['claims'],
+        wrong_key,
+        algorithm='RS256',
+        headers={'kid': 'wrong-key-id'}
+    )
+    
+    return {
+        'token': token,
+        'claims': valid_jwt_token['claims'],
+        'header': jwt.get_unverified_header(token)
+    }
+
+
+@pytest.fixture
+def auth0_user_profile():
+    """
+    Complete Auth0 user profile for testing user context creation
+    per Section 6.4.1 user context creation and authentication state management.
+    """
+    return Auth0UserProfileFactory()
+
+
+@pytest.fixture
+def authenticated_user(valid_jwt_token, auth0_user_profile):
+    """
+    AuthenticatedUser instance for testing user context management
+    per Section 6.4.1 authentication system.
+    """
+    profile = auth0_user_profile.build()
+    claims = valid_jwt_token['claims']
+    
+    return AuthenticatedUser(
+        user_id=claims['sub'],
+        token_claims=claims,
+        permissions=claims.get('permissions', []),
+        profile=profile,
+        token=valid_jwt_token['token'],
+        authenticated_at=datetime.now(timezone.utc)
+    )
+
+
+# =============================================================================
+# Auth0 Service Mocking Fixtures
+# =============================================================================
+
+@pytest.fixture
+def mock_auth0_jwks(rsa_key_pair):
+    """
+    Mock Auth0 JWKS (JSON Web Key Set) endpoint response for public key validation
+    per Section 6.4.1 Auth0 enterprise integration.
+    """
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+    
+    public_key = rsa_key_pair['public_key']
+    
+    # Convert to JWK format
+    public_numbers = public_key.public_numbers()
+    
+    # Convert to base64url encoding for JWK
+    def int_to_base64url(value):
+        byte_length = (value.bit_length() + 7) // 8
+        value_bytes = value.to_bytes(byte_length, byteorder='big')
+        return base64.urlsafe_b64encode(value_bytes).decode('ascii').rstrip('=')
+    
+    jwks = {
+        "keys": [
+            {
+                "kty": "RSA",
+                "use": "sig",
+                "key_ops": ["verify"],
+                "kid": "test-key-id",
+                "x5t": "test-thumbprint",
+                "alg": "RS256",
+                "n": int_to_base64url(public_numbers.n),
+                "e": int_to_base64url(public_numbers.e),
+                "x5c": []
+            }
+        ]
     }
     
-    def record_auth_request(success: bool, response_time: float):
-        context['auth_requests'] += 1
-        if success:
-            context['auth_successes'] += 1
-        else:
-            context['auth_failures'] += 1
-        
-        context['response_times'].append(response_time)
-        context['avg_response_time'] = sum(context['response_times']) / len(context['response_times'])
-    
-    def record_cache_operation(hit: bool):
-        if hit:
-            context['cache_hits'] += 1
-        else:
-            context['cache_misses'] += 1
-    
-    context['record_auth_request'] = record_auth_request
-    context['record_cache_operation'] = record_cache_operation
-    
-    logger.debug("Authentication metrics context fixture created")
-    return context
+    return jwks
 
 
-# Async fixtures for comprehensive testing
-
-@pytest_asyncio.fixture
-async def async_auth_manager():
+@pytest.fixture
+def mock_auth0_client(auth0_config, mock_auth0_jwks, auth0_user_profile):
     """
-    Provide async authentication manager for async authentication testing.
-    
-    Returns:
-        Configured authentication manager for async operations
+    Comprehensive Auth0 Python SDK mock for authentication service testing
+    per Section 6.4.1 Auth0 enterprise integration through Python SDK.
     """
-    # Mock implementation for testing
-    class MockAsyncAuthManager:
-        def __init__(self):
-            self.jwt_factory = JWTTokenFactory()
-            self.auth0_mock = Auth0ServiceMock(self.jwt_factory)
+    with patch('src.auth.auth0_client.Auth0') as mock_auth0:
+        # Mock Auth0 management client
+        mock_management_client = MagicMock()
+        mock_auth0.return_value = mock_management_client
         
-        async def authenticate_user(self, token: str) -> Dict[str, Any]:
-            """Mock async user authentication"""
-            try:
-                payload = self.auth0_mock.validate_token(token)
-                return {
-                    'authenticated': True,
-                    'user_id': payload.get('sub'),
-                    'token_payload': payload
-                }
-            except Exception as e:
-                return {
-                    'authenticated': False,
-                    'error': str(e)
-                }
+        # Mock user profile response
+        user_profile = auth0_user_profile.build()
+        mock_management_client.users.get.return_value = user_profile
+        mock_management_client.users.list.return_value = [user_profile]
         
-        async def validate_permissions(self, user_id: str, permissions: List[str]) -> Dict[str, Any]:
-            """Mock async permission validation"""
-            user_permissions = self.auth0_mock.get_user_permissions(user_id)
-            has_permissions = all(perm in user_permissions for perm in permissions)
+        # Mock user permissions
+        mock_management_client.users.get_permissions.return_value = [
+            {'permission_name': 'read:profile', 'description': 'Read user profile'},
+            {'permission_name': 'write:profile', 'description': 'Write user profile'},
+            {'permission_name': 'read:documents', 'description': 'Read documents'},
+        ]
+        
+        # Mock JWKS endpoint
+        with patch('requests.get') as mock_get:
+            mock_response = MagicMock()
+            mock_response.json.return_value = mock_auth0_jwks
+            mock_response.raise_for_status.return_value = None
+            mock_get.return_value = mock_response
             
+            yield {
+                'management_client': mock_management_client,
+                'auth0_class': mock_auth0,
+                'jwks_response': mock_response,
+                'user_profile': user_profile
+            }
+
+
+@pytest.fixture
+def mock_auth0_circuit_breaker():
+    """
+    Mock Auth0 circuit breaker for resilience testing
+    per Section 6.4.2 circuit breaker integration for Auth0 API calls.
+    """
+    with patch('src.auth.auth0_client.Auth0CircuitBreaker') as mock_circuit_breaker:
+        mock_instance = MagicMock()
+        mock_circuit_breaker.return_value = mock_instance
+        
+        # Configure circuit breaker states
+        mock_instance._auth0_circuit_breaker_state = 'closed'
+        mock_instance._auth0_failure_count = 0
+        mock_instance._auth0_last_failure_time = None
+        
+        # Mock validation methods
+        async def mock_validate_permissions(user_id, permissions):
             return {
                 'user_id': user_id,
-                'has_permissions': has_permissions,
-                'granted_permissions': list(user_permissions),
-                'required_permissions': permissions
+                'has_permissions': True,
+                'granted_permissions': permissions,
+                'validation_source': 'auth0_api',
+                'timestamp': datetime.now(timezone.utc).isoformat()
             }
-    
-    manager = MockAsyncAuthManager()
-    logger.debug("Async authentication manager fixture created")
-    return manager
-
-
-@pytest_asyncio.fixture
-async def async_session_manager():
-    """
-    Provide async session manager for session testing.
-    
-    Returns:
-        Configured session manager for async session operations
-    """
-    class MockAsyncSessionManager:
-        def __init__(self):
-            self.sessions: Dict[str, Dict[str, Any]] = {}
         
-        async def create_session(self, user_id: str, session_data: Dict[str, Any]) -> str:
-            """Create new session"""
-            session_id = str(uuid.uuid4())
-            self.sessions[session_id] = {
-                'session_id': session_id,
-                'user_id': user_id,
-                'created_at': datetime.utcnow().isoformat(),
-                **session_data
-            }
-            return session_id
+        mock_instance.validate_user_permissions_with_retry = AsyncMock(
+            side_effect=mock_validate_permissions
+        )
         
-        async def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
-            """Get session data"""
-            return self.sessions.get(session_id)
-        
-        async def invalidate_session(self, session_id: str) -> bool:
-            """Invalidate session"""
-            if session_id in self.sessions:
-                del self.sessions[session_id]
-                return True
-            return False
-    
-    manager = MockAsyncSessionManager()
-    logger.debug("Async session manager fixture created")
-    return manager
-
-
-# Security and audit logging fixtures
-
-@pytest.fixture
-def security_audit_logger():
-    """
-    Provide security audit logger for compliance testing.
-    
-    Returns:
-        Configured security audit logger instance
-    """
-    class MockSecurityAuditLogger:
-        def __init__(self):
-            self.events: List[Dict[str, Any]] = []
-        
-        def log_auth_event(self, event_type: str, user_id: str, success: bool, **kwargs):
-            """Log authentication event"""
-            event = {
-                'timestamp': datetime.utcnow().isoformat(),
-                'event_type': event_type,
-                'user_id': user_id,
-                'success': success,
-                'metadata': kwargs
-            }
-            self.events.append(event)
-            logger.debug("Security event logged", event_type=event_type, success=success)
-        
-        def log_authz_event(self, user_id: str, permissions: List[str], granted: bool, **kwargs):
-            """Log authorization event"""
-            event = {
-                'timestamp': datetime.utcnow().isoformat(),
-                'event_type': 'authorization',
-                'user_id': user_id,
-                'permissions': permissions,
-                'granted': granted,
-                'metadata': kwargs
-            }
-            self.events.append(event)
-            logger.debug("Authorization event logged", user_id=user_id, granted=granted)
-        
-        def get_events(self) -> List[Dict[str, Any]]:
-            """Get all logged events"""
-            return self.events.copy()
-        
-        def clear_events(self) -> None:
-            """Clear all logged events"""
-            self.events.clear()
-    
-    audit_logger = MockSecurityAuditLogger()
-    logger.debug("Security audit logger fixture created")
-    return audit_logger
+        yield mock_instance
 
 
 @pytest.fixture
-def security_compliance_context() -> Dict[str, Any]:
+async def mock_auth0_async_client():
     """
-    Provide security compliance testing context.
-    
-    Returns:
-        Compliance testing context with validation functions
+    Mock Auth0 async HTTP client for testing HTTPX integration
+    per Section 6.4.2 HTTPX async client for external service integration.
     """
-    context = {
-        'audit_events': [],
-        'security_violations': [],
-        'compliance_checks': {
-            'audit_logging': True,
-            'session_security': True,
-            'token_validation': True,
-            'permission_enforcement': True
+    with patch('httpx.AsyncClient') as mock_client:
+        mock_instance = AsyncMock()
+        mock_client.return_value = mock_instance
+        
+        # Mock successful responses
+        mock_response = AsyncMock()
+        mock_response.json.return_value = {
+            'permissions': [
+                {'permission_name': 'read:profile', 'description': 'Read user profile'},
+                {'permission_name': 'write:profile', 'description': 'Write user profile'}
+            ]
         }
-    }
-    
-    def validate_audit_trail(required_events: List[str]) -> bool:
-        """Validate required audit events are present"""
-        logged_event_types = {event.get('event_type') for event in context['audit_events']}
-        return all(event_type in logged_event_types for event_type in required_events)
-    
-    def record_security_violation(violation_type: str, details: Dict[str, Any]):
-        """Record security violation for compliance tracking"""
-        violation = {
-            'timestamp': datetime.utcnow().isoformat(),
-            'violation_type': violation_type,
-            'details': details
-        }
-        context['security_violations'].append(violation)
-        logger.warning("Security violation recorded", violation_type=violation_type)
-    
-    context['validate_audit_trail'] = validate_audit_trail
-    context['record_security_violation'] = record_security_violation
-    
-    logger.debug("Security compliance context fixture created")
-    return context
+        mock_response.raise_for_status.return_value = None
+        mock_instance.get.return_value = mock_response
+        
+        yield mock_instance
 
 
-# Performance testing fixtures
+# =============================================================================
+# Flask-Login Integration Fixtures
+# =============================================================================
 
 @pytest.fixture
-def performance_baseline_context() -> Dict[str, Any]:
+def flask_login_user(auth0_user_profile):
     """
-    Provide performance baseline context for ≤10% variance validation.
-    
-    Returns:
-        Performance testing context with baseline comparison functions
+    Flask-Login user object for session management testing
+    per Section 6.4.1 Flask-Login integration.
     """
-    # Simulated Node.js baseline performance metrics
-    baseline_metrics = {
-        'auth_request_time': 0.15,  # 150ms average
-        'token_validation_time': 0.05,  # 50ms average
-        'permission_check_time': 0.03,  # 30ms average
-        'session_create_time': 0.08,  # 80ms average
-        'cache_operation_time': 0.01   # 10ms average
-    }
+    profile = auth0_user_profile.build()
     
-    context = {
-        'baseline_metrics': baseline_metrics,
-        'current_metrics': {},
-        'variance_threshold': 0.10,  # 10% variance threshold
-        'performance_violations': []
-    }
-    
-    def record_performance_metric(metric_name: str, value: float):
-        """Record performance metric"""
-        context['current_metrics'][metric_name] = value
-        
-        # Check variance against baseline
-        if metric_name in baseline_metrics:
-            baseline_value = baseline_metrics[metric_name]
-            variance = abs(value - baseline_value) / baseline_value
+    class TestUser(UserMixin):
+        def __init__(self, user_profile):
+            self.id = user_profile['user_id']
+            self.auth0_profile = user_profile
+            self.is_authenticated = True
+            self.is_active = True
+            self.is_anonymous = False
             
-            if variance > context['variance_threshold']:
-                violation = {
-                    'metric': metric_name,
-                    'baseline': baseline_value,
-                    'current': value,
-                    'variance': variance,
-                    'threshold': context['variance_threshold'],
-                    'timestamp': datetime.utcnow().isoformat()
-                }
-                context['performance_violations'].append(violation)
-                logger.warning(
-                    "Performance variance violation",
-                    metric=metric_name,
-                    variance=variance,
-                    threshold=context['variance_threshold']
-                )
+        def get_id(self):
+            return str(self.id)
+            
+        def has_permission(self, permission):
+            permissions = self.auth0_profile.get('app_metadata', {}).get('permissions', [])
+            return permission in permissions
+            
+        def get_roles(self):
+            return self.auth0_profile.get('app_metadata', {}).get('roles', [])
     
-    def validate_performance_compliance() -> bool:
-        """Validate all metrics meet performance requirements"""
-        return len(context['performance_violations']) == 0
+    return TestUser(profile)
+
+
+@pytest.fixture
+def anonymous_user():
+    """Anonymous user for testing unauthenticated scenarios."""
+    class TestAnonymousUser(AnonymousUserMixin):
+        def __init__(self):
+            self.is_authenticated = False
+            self.is_active = False
+            self.is_anonymous = True
+            
+        def get_id(self):
+            return None
+            
+        def has_permission(self, permission):
+            return False
+            
+        def get_roles(self):
+            return []
     
-    context['record_performance_metric'] = record_performance_metric
-    context['validate_performance_compliance'] = validate_performance_compliance
+    return TestAnonymousUser()
+
+
+@pytest.fixture
+def session_user(auth0_user_profile):
+    """
+    SessionUser instance for distributed session testing
+    per Section 6.4.1 session management Flask-Session integration.
+    """
+    profile = auth0_user_profile.build()
+    session_data = SessionDataFactory().build()
     
-    logger.debug("Performance baseline context fixture created")
-    return context
+    return SessionUser(
+        user_id=profile['user_id'],
+        auth0_profile=profile,
+        session_id=session_data['session_id'],
+        session_metadata=session_data
+    )
+
+
+@pytest.fixture
+def mock_flask_login_manager(flask_app):
+    """
+    Mock Flask-Login manager for testing login/logout functionality
+    per Section 6.4.1 Flask-Login user context handling.
+    """
+    from flask_login import LoginManager
+    
+    login_manager = LoginManager()
+    login_manager.init_app(flask_app)
+    login_manager.login_view = 'auth.login'
+    login_manager.session_protection = 'strong'
+    
+    # Mock user loader
+    users_db = {}
+    
+    @login_manager.user_loader
+    def load_user(user_id):
+        return users_db.get(user_id)
+    
+    @login_manager.unauthorized_handler
+    def unauthorized():
+        return {'error': 'Authentication required'}, 401
+    
+    return {
+        'login_manager': login_manager,
+        'users_db': users_db,
+        'load_user': load_user
+    }
+
+
+# =============================================================================
+# Flask-Session and Redis Integration Fixtures
+# =============================================================================
+
+@pytest.fixture
+def mock_redis_client():
+    """
+    Mock Redis client for session storage testing
+    per Section 3.4.2 Redis session management.
+    """
+    with patch('redis.Redis') as mock_redis:
+        mock_instance = MagicMock()
+        mock_redis.return_value = mock_instance
+        
+        # Mock Redis operations
+        session_store = {}
+        
+        def mock_setex(key, ttl, value):
+            session_store[key] = {'value': value, 'ttl': ttl, 'created': time.time()}
+            return True
+        
+        def mock_get(key):
+            if key in session_store:
+                entry = session_store[key]
+                # Check TTL expiration
+                if time.time() - entry['created'] < entry['ttl']:
+                    return entry['value']
+                else:
+                    del session_store[key]
+            return None
+        
+        def mock_delete(key):
+            if key in session_store:
+                del session_store[key]
+                return 1
+            return 0
+        
+        def mock_keys(pattern):
+            return [key for key in session_store.keys() if pattern.replace('*', '') in key]
+        
+        mock_instance.setex.side_effect = mock_setex
+        mock_instance.get.side_effect = mock_get
+        mock_instance.delete.side_effect = mock_delete
+        mock_instance.keys.side_effect = mock_keys
+        mock_instance.exists.side_effect = lambda key: key in session_store
+        
+        # Connection pool mock
+        mock_instance.connection_pool.connection_kwargs = {
+            'host': 'localhost',
+            'port': 6379,
+            'db': 0
+        }
+        
+        yield {
+            'redis_client': mock_instance,
+            'session_store': session_store
+        }
+
+
+@pytest.fixture
+def mock_encrypted_session_interface(mock_redis_client):
+    """
+    Mock encrypted session interface for testing AES-256-GCM encryption
+    per Section 6.4.1 session encryption using cryptography 41.0+.
+    """
+    from cryptography.fernet import Fernet
+    
+    # Generate encryption key
+    encryption_key = Fernet.generate_key()
+    fernet = Fernet(encryption_key)
+    
+    class MockEncryptedSessionInterface:
+        def __init__(self, redis_client, encryption_key):
+            self.redis = redis_client
+            self.fernet = Fernet(encryption_key)
+        
+        def save_session(self, session_id, session_data):
+            # Encrypt session data
+            encrypted_data = self.fernet.encrypt(json.dumps(session_data).encode())
+            key = f"session:{session_id}"
+            self.redis.setex(key, 3600, base64.b64encode(encrypted_data).decode())
+            return True
+        
+        def load_session(self, session_id):
+            key = f"session:{session_id}"
+            encrypted_data = self.redis.get(key)
+            if encrypted_data:
+                try:
+                    decrypted_data = self.fernet.decrypt(base64.b64decode(encrypted_data))
+                    return json.loads(decrypted_data.decode())
+                except Exception:
+                    return None
+            return None
+        
+        def delete_session(self, session_id):
+            key = f"session:{session_id}"
+            return self.redis.delete(key)
+    
+    interface = MockEncryptedSessionInterface(mock_redis_client['redis_client'], encryption_key)
+    
+    return {
+        'interface': interface,
+        'encryption_key': encryption_key,
+        'fernet': fernet
+    }
+
+
+@pytest.fixture
+def session_data():
+    """Session data factory for Flask-Session testing."""
+    return SessionDataFactory()
+
+
+@pytest.fixture
+def mock_flask_session(flask_app, mock_redis_client, mock_encrypted_session_interface):
+    """
+    Mock Flask-Session configuration for distributed session testing
+    per Section 6.4.1 Flask-Session Redis distributed caching.
+    """
+    from flask_session import Session
+    
+    # Configure Flask-Session
+    flask_app.config['SESSION_TYPE'] = 'redis'
+    flask_app.config['SESSION_REDIS'] = mock_redis_client['redis_client']
+    flask_app.config['SESSION_PERMANENT'] = False
+    flask_app.config['SESSION_USE_SIGNER'] = True
+    flask_app.config['SESSION_KEY_PREFIX'] = 'session:'
+    flask_app.config['SESSION_COOKIE_SECURE'] = True
+    flask_app.config['SESSION_COOKIE_HTTPONLY'] = True
+    flask_app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+    
+    session_extension = Session(flask_app)
+    
+    return {
+        'session_extension': session_extension,
+        'redis_client': mock_redis_client['redis_client'],
+        'session_store': mock_redis_client['session_store'],
+        'encrypted_interface': mock_encrypted_session_interface['interface']
+    }
+
+
+# =============================================================================
+# Authorization Testing Fixtures
+# =============================================================================
+
+@pytest.fixture
+def permission_context(authenticated_user):
+    """
+    Permission context for authorization testing
+    per Section 6.4.2 authorization system.
+    """
+    return PermissionContext(
+        user_id=authenticated_user.user_id,
+        user_roles=['user', 'admin'],
+        user_permissions=set(authenticated_user.permissions),
+        resource_id='test-resource-123',
+        resource_type='document',
+        resource_owner=authenticated_user.user_id,
+        request_ip='127.0.0.1',
+        request_method='GET',
+        request_endpoint='/api/test',
+        session_id=secrets.token_urlsafe(32),
+        correlation_id=str(uuid.uuid4()),
+        additional_context={'test': True}
+    )
+
+
+@pytest.fixture
+def mock_authorization_manager():
+    """
+    Mock authorization manager for permission testing
+    per Section 6.4.2 role-based access control.
+    """
+    with patch('src.auth.authorization.AuthorizationManager') as mock_manager:
+        mock_instance = MagicMock()
+        mock_manager.return_value = mock_instance
+        
+        # Mock permission checking
+        mock_instance.check_permission.return_value = True
+        mock_instance.check_permissions.return_value = True
+        mock_instance.check_role.return_value = True
+        mock_instance.get_user_permissions.return_value = [
+            'read:profile', 'write:profile', 'read:documents'
+        ]
+        
+        # Mock permission caching
+        mock_instance.cache_user_permissions.return_value = True
+        mock_instance.get_cached_permissions.return_value = set([
+            'read:profile', 'write:profile', 'read:documents'
+        ])
+        
+        yield mock_instance
+
+
+@pytest.fixture
+def mock_permission_cache(mock_redis_client):
+    """
+    Mock permission cache for testing Redis permission caching
+    per Section 6.4.2 Redis permission caching with intelligent TTL management.
+    """
+    class MockPermissionCache:
+        def __init__(self, redis_client):
+            self.redis = redis_client
+            
+        def cache_user_permissions(self, user_id, permissions, ttl=300):
+            cache_key = f"perm_cache:{user_id}"
+            cache_data = {
+                'permissions': list(permissions),
+                'cached_at': datetime.now(timezone.utc).isoformat(),
+                'expires_at': (datetime.now(timezone.utc) + timedelta(seconds=ttl)).isoformat()
+            }
+            return self.redis.setex(cache_key, ttl, json.dumps(cache_data))
+        
+        def get_cached_permissions(self, user_id):
+            cache_key = f"perm_cache:{user_id}"
+            cached_data = self.redis.get(cache_key)
+            if cached_data:
+                try:
+                    data = json.loads(cached_data)
+                    return set(data['permissions'])
+                except (json.JSONDecodeError, KeyError):
+                    return None
+            return None
+        
+        def invalidate_user_cache(self, user_id):
+            cache_key = f"perm_cache:{user_id}"
+            return self.redis.delete(cache_key)
+    
+    return MockPermissionCache(mock_redis_client['redis_client'])
+
+
+# =============================================================================
+# Security Context Fixtures
+# =============================================================================
+
+@pytest.fixture
+def security_context(authenticated_user, permission_context):
+    """
+    Comprehensive security context for authorization testing
+    per Section 6.4.2 security context fixtures for authorization testing.
+    """
+    return {
+        'user': authenticated_user,
+        'permission_context': permission_context,
+        'security_level': 'standard',
+        'risk_score': 25,
+        'auth_method': 'jwt',
+        'auth_provider': 'auth0',
+        'mfa_verified': True,
+        'device_trusted': True,
+        'session_id': permission_context.session_id,
+        'correlation_id': permission_context.correlation_id,
+        'timestamp': datetime.now(timezone.utc).isoformat(),
+        'client_ip': permission_context.request_ip,
+        'user_agent': 'Mozilla/5.0 (Test Browser)',
+        'geo_location': {
+            'country': 'US',
+            'region': 'CA',
+            'city': 'San Francisco'
+        }
+    }
+
+
+@pytest.fixture
+def mock_security_audit_logger():
+    """
+    Mock security audit logger for testing security event logging
+    per Section 6.4.2 comprehensive audit logging for authorization decisions.
+    """
+    with patch('src.auth.audit.SecurityAuditLogger') as mock_logger:
+        mock_instance = MagicMock()
+        mock_logger.return_value = mock_instance
+        
+        # Track logged events
+        logged_events = []
+        
+        def mock_log_event(event_type, **kwargs):
+            event = {
+                'event_type': event_type,
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                **kwargs
+            }
+            logged_events.append(event)
+        
+        mock_instance.log_authorization_event.side_effect = mock_log_event
+        mock_instance.log_authentication_event.side_effect = mock_log_event
+        mock_instance.log_security_violation.side_effect = mock_log_event
+        
+        yield {
+            'logger': mock_instance,
+            'logged_events': logged_events
+        }
+
+
+# =============================================================================
+# Authentication State Management Fixtures
+# =============================================================================
+
+@pytest.fixture
+def authentication_state():
+    """
+    Authentication state for testing state management
+    per Section 6.4.1 authentication state management.
+    """
+    return {
+        'authenticated': True,
+        'user_id': f"auth0|{secrets.token_hex(12)}",
+        'session_id': secrets.token_urlsafe(32),
+        'auth_method': 'jwt',
+        'auth_provider': 'auth0',
+        'authenticated_at': datetime.now(timezone.utc).isoformat(),
+        'expires_at': (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
+        'permissions': ['read:profile', 'write:profile', 'read:documents'],
+        'roles': ['user'],
+        'mfa_verified': True,
+        'token_type': 'access_token',
+        'scope': 'read:profile write:profile read:documents',
+        'device_id': str(uuid.uuid4()),
+        'client_id': 'test_client_123',
+        'last_activity': datetime.now(timezone.utc).isoformat()
+    }
+
+
+@pytest.fixture
+def mock_core_authenticator(valid_jwt_token, authenticated_user):
+    """
+    Mock CoreJWTAuthenticator for testing authentication workflows
+    per Section 6.4.1 CoreJWTAuthenticator comprehensive authentication functionality.
+    """
+    with patch('src.auth.authentication.CoreJWTAuthenticator') as mock_authenticator:
+        mock_instance = MagicMock()
+        mock_authenticator.return_value = mock_instance
+        
+        # Mock authentication methods
+        async def mock_authenticate_request(token=None, required_permissions=None, allow_expired=False):
+            if token == valid_jwt_token['token']:
+                return authenticated_user
+            return None
+        
+        mock_instance.authenticate_request = AsyncMock(side_effect=mock_authenticate_request)
+        
+        # Mock token validation
+        async def mock_validate_jwt_token(token, allow_expired=False):
+            if token == valid_jwt_token['token']:
+                return valid_jwt_token['claims']
+            return None
+        
+        mock_instance._validate_jwt_token = AsyncMock(side_effect=mock_validate_jwt_token)
+        
+        # Mock health status
+        mock_instance.get_health_status.return_value = {
+            'status': 'healthy',
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'components': {
+                'jwt_manager': {'status': 'healthy'},
+                'cache_manager': {'status': 'healthy'},
+                'auth0_service': {'status': 'healthy'}
+            }
+        }
+        
+        yield mock_instance
+
+
+# =============================================================================
+# Testing Utilities and Helpers
+# =============================================================================
+
+@pytest.fixture
+def auth_test_client(flask_app, mock_flask_login_manager, mock_flask_session):
+    """
+    Configured test client with authentication and session management
+    per Section 6.6.1 Flask testing patterns and fixtures.
+    """
+    with flask_app.test_client() as client:
+        with flask_app.app_context():
+            yield client
+
+
+@pytest.fixture
+def authenticated_request_context(flask_app, authenticated_user, mock_flask_login_manager):
+    """
+    Flask request context with authenticated user for testing protected routes
+    per Section 6.4.1 Flask-Login integration.
+    """
+    with flask_app.test_request_context():
+        # Add user to users database
+        mock_flask_login_manager['users_db'][authenticated_user.user_id] = authenticated_user
+        
+        # Set Flask g context
+        g.authenticated_user = authenticated_user
+        g.current_user_id = authenticated_user.user_id
+        g.current_user_permissions = authenticated_user.permissions
+        
+        yield {
+            'user': authenticated_user,
+            'app_context': flask_app.app_context(),
+            'request_context': flask_app.test_request_context()
+        }
+
+
+@pytest.fixture
+def mock_datetime():
+    """Mock datetime for consistent testing across time-sensitive operations."""
+    fixed_datetime = datetime(2024, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
+    
+    with patch('src.auth.authentication.datetime') as mock_dt:
+        mock_dt.now.return_value = fixed_datetime
+        mock_dt.utcnow.return_value = fixed_datetime
+        mock_dt.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+        yield fixed_datetime
+
+
+@pytest.fixture
+def mock_secrets():
+    """Mock secrets module for predictable token generation in tests."""
+    with patch('src.auth.authentication.secrets') as mock_secrets_module:
+        mock_secrets_module.token_urlsafe.return_value = "test_token_12345"
+        mock_secrets_module.token_hex.return_value = "test_hex_abcdef"
+        yield mock_secrets_module
+
+
+@contextmanager
+def mock_request_context(method='GET', path='/', headers=None, json_data=None):
+    """
+    Context manager for mocking Flask request context in authentication tests
+    per Section 6.6.1 Flask-specific testing patterns.
+    """
+    with patch('flask.request') as mock_request:
+        mock_request.method = method
+        mock_request.path = path
+        mock_request.endpoint = f"{method.lower()}_{path.replace('/', '_')}"
+        mock_request.headers = headers or {}
+        mock_request.json = json_data
+        mock_request.remote_addr = '127.0.0.1'
+        mock_request.args = {}
+        mock_request.cookies = {}
+        yield mock_request
+
+
+# =============================================================================
+# Integration Test Fixtures
+# =============================================================================
+
+@pytest.fixture
+def complete_auth_system(
+    flask_app,
+    auth0_config,
+    mock_auth0_client,
+    mock_redis_client,
+    mock_flask_login_manager,
+    mock_flask_session,
+    rsa_key_pair
+):
+    """
+    Complete authentication system integration for end-to-end testing
+    per Section 6.6.1 production-equivalent test environment setup.
+    """
+    # Configure app with auth settings
+    flask_app.config.update(auth0_config)
+    flask_app.config['SECRET_KEY'] = 'test-secret-key'
+    flask_app.config['TESTING'] = True
+    
+    return {
+        'app': flask_app,
+        'auth0_config': auth0_config,
+        'auth0_client': mock_auth0_client,
+        'redis_client': mock_redis_client,
+        'login_manager': mock_flask_login_manager,
+        'session_config': mock_flask_session,
+        'rsa_keys': rsa_key_pair
+    }
+
+
+@pytest.fixture
+async def auth_performance_test_setup():
+    """
+    Performance testing setup for authentication system validation
+    per Section 6.6.1 performance optimization ensuring ≤10% variance.
+    """
+    # Performance baseline data
+    baseline_metrics = {
+        'token_validation_time': 0.05,  # 50ms baseline
+        'user_context_creation_time': 0.02,  # 20ms baseline
+        'permission_check_time': 0.01,  # 10ms baseline
+        'cache_operation_time': 0.005,  # 5ms baseline
+    }
+    
+    # Performance thresholds (≤10% variance)
+    thresholds = {
+        metric: baseline * 1.1 for metric, baseline in baseline_metrics.items()
+    }
+    
+    return {
+        'baseline_metrics': baseline_metrics,
+        'performance_thresholds': thresholds,
+        'variance_tolerance': 0.10  # 10% maximum variance
+    }
+
+
+# =============================================================================
+# Cleanup and Teardown Fixtures
+# =============================================================================
+
+@pytest.fixture(autouse=True)
+def auth_fixtures_cleanup():
+    """
+    Automatic cleanup for authentication fixtures ensuring test isolation
+    per Section 6.6.1 test data management with automated cleanup.
+    """
+    # Setup (before test)
+    yield
+    
+    # Cleanup (after test)
+    # Clear any global state
+    import gc
+    gc.collect()
+    
+    # Reset any module-level state
+    try:
+        # Clear Flask g context if it exists
+        if hasattr(g, 'authenticated_user'):
+            delattr(g, 'authenticated_user')
+        if hasattr(g, 'current_user_id'):
+            delattr(g, 'current_user_id')
+        if hasattr(g, 'current_user_permissions'):
+            delattr(g, 'current_user_permissions')
+    except RuntimeError:
+        # Outside application context
+        pass
+
+
+# Export all fixtures for easy importing
+__all__ = [
+    # Configuration fixtures
+    'auth0_config', 'mock_auth0_domain', 'mock_auth0_client_id', 
+    'mock_auth0_client_secret', 'mock_auth0_audience',
+    
+    # Cryptographic fixtures
+    'rsa_key_pair',
+    
+    # JWT token fixtures
+    'jwt_claims', 'valid_jwt_token', 'expired_jwt_token', 
+    'malformed_jwt_token', 'jwt_token_with_invalid_signature',
+    
+    # User and profile fixtures
+    'auth0_user_profile', 'authenticated_user', 'flask_login_user',
+    'anonymous_user', 'session_user',
+    
+    # Auth0 service mocking
+    'mock_auth0_jwks', 'mock_auth0_client', 'mock_auth0_circuit_breaker',
+    'mock_auth0_async_client',
+    
+    # Flask-Login integration
+    'mock_flask_login_manager',
+    
+    # Session management
+    'mock_redis_client', 'mock_encrypted_session_interface', 
+    'session_data', 'mock_flask_session',
+    
+    # Authorization testing
+    'permission_context', 'mock_authorization_manager', 'mock_permission_cache',
+    
+    # Security context
+    'security_context', 'mock_security_audit_logger',
+    
+    # Authentication state
+    'authentication_state', 'mock_core_authenticator',
+    
+    # Testing utilities
+    'auth_test_client', 'authenticated_request_context',
+    'mock_datetime', 'mock_secrets',
+    
+    # Integration testing
+    'complete_auth_system', 'auth_performance_test_setup',
+    
+    # Cleanup
+    'auth_fixtures_cleanup'
+]
