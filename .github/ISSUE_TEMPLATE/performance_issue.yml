@@ -1,0 +1,631 @@
+name: 🚀 Performance Issue
+description: Performance degradation, variance, or optimization issue for Flask migration monitoring
+title: "[PERFORMANCE] "
+labels: ["performance", "migration", "monitoring"]
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Performance Issue Template
+        
+        **Critical Migration Requirement**: This template enforces the ≤10% performance variance requirement from Node.js baseline per Section 0.1.1 of the technical specification.
+        
+        **Performance Monitoring Integration**: Issues reported here integrate with our comprehensive monitoring infrastructure including Prometheus metrics, Locust load testing, apache-bench validation, and automated baseline comparison systems.
+
+  - type: dropdown
+    id: performance-issue-type
+    attributes:
+      label: Performance Issue Type
+      description: Select the primary performance concern affecting the Flask migration
+      options:
+        - Response Time Degradation (>10% variance from Node.js baseline)
+        - CPU Utilization Spike (>70% sustained utilization)
+        - Memory Usage Anomaly (excessive garbage collection pauses)
+        - Throughput Regression (requests/second decline)
+        - Database Query Performance (MongoDB/Redis latency)
+        - External Service Integration Delays (Auth0, AWS, third-party APIs)
+        - WSGI Worker Pool Bottleneck (Gunicorn/uWSGI performance)
+        - Container Resource Constraint (cAdvisor metrics)
+        - APM Agent Performance Impact (Datadog/New Relic overhead)
+        - Load Testing Failure (Locust/k6 test issues)
+        - Baseline Comparison Validation Error
+        - Other Performance Issue
+    validations:
+      required: true
+
+  - type: dropdown
+    id: severity-level
+    attributes:
+      label: Performance Severity Level
+      description: Severity based on impact to ≤10% variance requirement and system availability
+      options:
+        - "P0 - CRITICAL: >10% variance from baseline, automated rollback triggered"
+        - "P1 - HIGH: 5-10% variance from baseline, approaching threshold"
+        - "P2 - MEDIUM: Noticeable degradation but <5% variance"
+        - "P3 - LOW: Minor optimization opportunity"
+        - "P4 - ENHANCEMENT: Performance improvement suggestion"
+    validations:
+      required: true
+
+  - type: textarea
+    id: performance-impact-description
+    attributes:
+      label: Performance Impact Description
+      description: Detailed description of the performance issue and its business impact
+      placeholder: |
+        Example:
+        - Observed 15% increase in response time for /api/users endpoint
+        - P95 response time degraded from 120ms to 180ms
+        - Affects user authentication workflow performance
+        - Detected during load testing with 500 concurrent users
+      value: |
+        **Performance Impact:**
+        - 
+        
+        **Business Impact:**
+        - 
+        
+        **User Experience Impact:**
+        - 
+    validations:
+      required: true
+
+  - type: textarea
+    id: baseline-comparison-data
+    attributes:
+      label: Node.js Baseline Comparison Data
+      description: Performance metrics comparison with original Node.js implementation
+      placeholder: |
+        **Node.js Baseline Metrics:**
+        - Response Time (Mean): 150ms
+        - Response Time (P95): 300ms
+        - Throughput: 100 req/sec
+        - Memory Usage: 180MB average
+        - CPU Utilization: 25% average
+        
+        **Current Flask Implementation:**
+        - Response Time (Mean): 165ms (+10% variance ⚠️)
+        - Response Time (P95): 330ms (+10% variance ⚠️)
+        - Throughput: 92 req/sec (-8% variance)
+        - Memory Usage: 205MB average (+14% increase)
+        - CPU Utilization: 28% average (+12% increase)
+        
+        **Variance Analysis:**
+        - Response time variance: +10% (AT THRESHOLD LIMIT)
+        - Throughput variance: -8% (within acceptable range)
+      value: |
+        **Node.js Baseline Metrics:**
+        - Response Time (Mean): 
+        - Response Time (P95): 
+        - Throughput: 
+        - Memory Usage: 
+        - CPU Utilization: 
+        
+        **Current Flask Implementation:**
+        - Response Time (Mean): 
+        - Response Time (P95): 
+        - Throughput: 
+        - Memory Usage: 
+        - CPU Utilization: 
+        
+        **Variance Calculation:**
+        - Response time variance: % ( ✅ | ⚠️ | ❌ )
+        - Throughput variance: % ( ✅ | ⚠️ | ❌ )
+        - Memory variance: % ( ✅ | ⚠️ | ❌ )
+        - Overall compliance status: ( ✅ PASS | ⚠️ WARNING | ❌ FAIL )
+    validations:
+      required: true
+
+  - type: textarea
+    id: monitoring-data-evidence
+    attributes:
+      label: Monitoring System Evidence
+      description: Data from Prometheus, APM, and monitoring infrastructure supporting this performance issue
+      placeholder: |
+        **Prometheus Metrics:**
+        - flask_request_duration_seconds{endpoint="/api/users"} histogram
+        - flask_migration_requests_total counter
+        - nodejs_baseline_requests_total counter for comparison
+        
+        **APM Data (Datadog/New Relic):**
+        - Trace ID: abc123def456
+        - Service: flask-migration-app
+        - Environment: production
+        - Sample rate: 0.1
+        
+        **Container Metrics (cAdvisor):**
+        - CPU utilization trend: 25% → 70% over 10 minutes
+        - Memory usage pattern: stable at 180MB baseline
+        - Network I/O: 1.2MB/s ingress, 800KB/s egress
+        
+        **WSGI Server Metrics (Gunicorn):**
+        - Active workers: 8/12 available
+        - Request queue depth: 15 (threshold: 10)
+        - Worker response time: 250ms average
+        
+        **Health Check Status:**
+        - /health/live: 200 OK (application responsive)
+        - /health/ready: 503 Service Unavailable (dependencies degraded)
+      value: |
+        **Prometheus Metrics:**
+        - 
+        
+        **APM Data:**
+        - Trace ID: 
+        - Service: 
+        - Environment: 
+        
+        **Container Metrics:**
+        - CPU utilization: 
+        - Memory usage: 
+        - Network I/O: 
+        
+        **WSGI Server Metrics:**
+        - Active workers: 
+        - Request queue depth: 
+        - Worker response time: 
+        
+        **Health Check Status:**
+        - /health/live: 
+        - /health/ready: 
+    validations:
+      required: true
+
+  - type: textarea
+    id: load-testing-context
+    attributes:
+      label: Load Testing Context
+      description: Results from Locust, k6, or apache-bench testing revealing the performance issue
+      placeholder: |
+        **Locust Load Testing Results:**
+        - Test Profile: moderate_load (250 users, 25 spawn rate, 10 minutes)
+        - Requests/sec: 85.2 (target: 100+ for baseline parity)
+        - Mean Response Time: 165ms (baseline: 150ms, +10% variance)
+        - P95 Response Time: 420ms (baseline: 300ms, +40% variance ❌)
+        - Error Rate: 0.02% (acceptable: <1%)
+        - Test Run URL: https://github.com/org/repo/actions/runs/123456
+        
+        **k6 Performance Analysis:**
+        - Test Scenario: sustained_load
+        - Duration: 5 minutes at 100 VUs
+        - Failed Thresholds: http_req_duration p(95)<500ms
+        - Data Transfer: 45MB received, 12MB sent
+        
+        **apache-bench Validation:**
+        - Command: ab -n 1000 -c 50 http://localhost:5000/api/health
+        - Requests/sec: 92.3 (baseline: 100.0, -7.7% variance)
+        - Connection errors: 0
+        - Transfer rate: 234.5 KB/sec
+      value: |
+        **Locust Load Testing Results:**
+        - Test Profile: 
+        - Requests/sec: 
+        - Mean Response Time: 
+        - P95 Response Time: 
+        - Error Rate: 
+        - Test Run URL: 
+        
+        **k6 Performance Analysis:**
+        - Test Scenario: 
+        - Duration: 
+        - Failed Thresholds: 
+        - Data Transfer: 
+        
+        **apache-bench Validation:**
+        - Command: 
+        - Requests/sec: 
+        - Connection errors: 
+        - Transfer rate: 
+    validations:
+      required: false
+
+  - type: dropdown
+    id: affected-endpoints
+    attributes:
+      label: Affected API Endpoints
+      description: Which endpoints or services are experiencing performance degradation
+      multiple: true
+      options:
+        - "/health (health check endpoint)"
+        - "/api/status (system status)"
+        - "/api/auth/* (authentication endpoints)"
+        - "/api/users/* (user management)"
+        - "/api/business/* (business logic endpoints)"
+        - "/api/data/* (data processing endpoints)"
+        - "/api/integrations/* (external service integrations)"
+        - "Database operations (MongoDB queries)"
+        - "Cache operations (Redis interactions)"
+        - "External service calls (Auth0, AWS, third-party)"
+        - "Static file serving"
+        - "WebSocket connections"
+        - "All endpoints (system-wide issue)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment-context
+    attributes:
+      label: Environment and Deployment Context
+      description: Environment details, deployment information, and infrastructure context
+      placeholder: |
+        **Environment:**
+        - Environment: production / staging / development
+        - Python Version: 3.11.2
+        - Flask Version: 2.3.1
+        - Container Image: python:3.11-slim
+        - Deployment Method: Kubernetes / Docker Compose / Direct deployment
+        
+        **Infrastructure:**
+        - Instance Type: t3.medium (2 vCPU, 4GB RAM)
+        - Container Limits: CPU 1000m, Memory 2Gi
+        - Kubernetes Cluster: EKS 1.28
+        - Load Balancer: AWS ALB
+        
+        **Deployment Info:**
+        - Deployment ID: deployment-abc123
+        - Git Commit: abcd1234ef567890
+        - Deployment Time: 2024-01-15 14:30:00 UTC
+        - Previous Performance: ✅ PASS (within 10% variance)
+        - Current Performance: ❌ FAIL (>10% variance detected)
+        
+        **Traffic Patterns:**
+        - Current Traffic: 50 req/min
+        - Peak Traffic: 200 req/min (14:00-16:00 UTC)
+        - User Sessions: 150 active users
+        - Geographic Distribution: 60% US, 25% EU, 15% APAC
+      value: |
+        **Environment:**
+        - Environment: 
+        - Python Version: 
+        - Flask Version: 
+        - Container Image: 
+        - Deployment Method: 
+        
+        **Infrastructure:**
+        - Instance Type: 
+        - Container Limits: 
+        - Kubernetes Cluster: 
+        - Load Balancer: 
+        
+        **Deployment Info:**
+        - Deployment ID: 
+        - Git Commit: 
+        - Deployment Time: 
+        - Previous Performance: 
+        - Current Performance: 
+        
+        **Traffic Patterns:**
+        - Current Traffic: 
+        - Peak Traffic: 
+        - User Sessions: 
+        - Geographic Distribution: 
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction-steps
+    attributes:
+      label: Reproduction Steps
+      description: Detailed steps to reproduce the performance issue for investigation
+      placeholder: |
+        **Reproduction Environment:**
+        1. Deploy Flask application to staging environment
+        2. Configure monitoring with Prometheus + Grafana
+        3. Initialize baseline comparison data
+        
+        **Load Generation:**
+        1. Run locust load test: `locust --headless --users 100 --spawn-rate 10 --host http://staging.example.com`
+        2. Execute for 10 minutes duration
+        3. Monitor response time metrics via Grafana dashboard
+        
+        **Performance Measurement:**
+        1. Compare P95 response times against Node.js baseline
+        2. Calculate variance percentage: ((current - baseline) / baseline) * 100
+        3. Verify if variance exceeds ±10% threshold
+        
+        **Expected vs Actual:**
+        - Expected: P95 response time ≤ 330ms (Node.js baseline + 10%)
+        - Actual: P95 response time = 450ms (+50% variance ❌)
+      value: |
+        **Reproduction Environment:**
+        1. 
+        2. 
+        3. 
+        
+        **Load Generation:**
+        1. 
+        2. 
+        3. 
+        
+        **Performance Measurement:**
+        1. 
+        2. 
+        3. 
+        
+        **Expected vs Actual:**
+        - Expected: 
+        - Actual: 
+    validations:
+      required: true
+
+  - type: textarea
+    id: investigation-analysis
+    attributes:
+      label: Initial Investigation Analysis
+      description: Any preliminary analysis, profiling data, or diagnostic information gathered
+      placeholder: |
+        **Performance Profiling:**
+        - Python profiler data (cProfile/py-spy): Memory allocations in user serialization
+        - Garbage collection analysis: 15% time spent in GC (threshold: 5%)
+        - Database query analysis: JOIN operations taking 200ms average
+        
+        **System Resource Analysis:**
+        - CPU utilization pattern: spikes to 85% during peak traffic
+        - Memory usage trend: gradual increase from 180MB to 320MB over 4 hours
+        - Network latency: 15ms to MongoDB, 45ms to Auth0
+        
+        **Application Layer Analysis:**
+        - Flask request middleware overhead: 25ms average
+        - Business logic processing time: 95ms average
+        - External service call latency: Auth0 JWT validation 30ms
+        
+        **Container Analysis:**
+        - Docker container resource constraints: CPU throttling detected
+        - Kubernetes HPA status: scaling triggered at 70% CPU
+        - Volume mount performance: log file I/O latency 10ms
+        
+        **Comparative Analysis:**
+        - Node.js vs Flask memory patterns: Flask using 45% more memory
+        - Request handling efficiency: Flask processing 18% fewer requests/worker
+        - Cold start performance: 500ms vs 200ms for Node.js
+      value: |
+        **Performance Profiling:**
+        - 
+        
+        **System Resource Analysis:**
+        - 
+        
+        **Application Layer Analysis:**
+        - 
+        
+        **Container Analysis:**
+        - 
+        
+        **Comparative Analysis:**
+        - 
+    validations:
+      required: false
+
+  - type: dropdown
+    id: automated-rollback-triggered
+    attributes:
+      label: Automated Rollback Status
+      description: Has the performance monitoring system triggered automated rollback procedures?
+      options:
+        - "YES - Rollback triggered due to >10% variance threshold breach"
+        - "NO - Performance degradation detected but within rollback threshold"
+        - "MANUAL - Manual rollback initiated by operations team"
+        - "PENDING - Rollback consideration in progress"
+        - "N/A - Issue does not warrant rollback procedures"
+    validations:
+      required: true
+
+  - type: textarea
+    id: monitoring-alerts-triggered
+    attributes:
+      label: Monitoring Alerts and Notifications
+      description: List of monitoring alerts, PagerDuty incidents, or Slack notifications triggered by this performance issue
+      placeholder: |
+        **Prometheus Alerts:**
+        - PerformanceVarianceExceeded: FIRING since 14:25 UTC
+        - CPUUtilizationHigh: FIRING since 14:23 UTC  
+        - ResponseTimeP95High: FIRING since 14:24 UTC
+        
+        **PagerDuty Incidents:**
+        - Incident #12345: Flask Migration Performance Degradation
+        - Severity: P1 (High)
+        - Assigned: Performance Engineering Team
+        - Status: Investigating
+        
+        **Slack Notifications:**
+        - Channel: #performance-engineering
+        - Alert Time: 2024-01-15 14:25:00 UTC
+        - Message: "🚨 CRITICAL: Flask migration variance >10% detected"
+        
+        **APM Alerts:**
+        - Datadog: Response time anomaly detected
+        - New Relic: Apdex score dropped below 0.7 threshold
+        - Service degradation alert sent to oncall rotation
+        
+        **Feature Flag Status:**
+        - new-migration flag: ENABLED (traffic at 100% Flask)
+        - Rollback consideration: ACTIVE
+        - Traffic split recommendation: Return to 50/50 Node.js/Flask
+      value: |
+        **Prometheus Alerts:**
+        - 
+        
+        **PagerDuty Incidents:**
+        - 
+        
+        **Slack Notifications:**
+        - 
+        
+        **APM Alerts:**
+        - 
+        
+        **Feature Flag Status:**
+        - 
+    validations:
+      required: false
+
+  - type: textarea
+    id: performance-optimization-suggestions
+    attributes:
+      label: Performance Optimization Suggestions
+      description: Proposed solutions, optimizations, or next steps to address the performance issue
+      placeholder: |
+        **Immediate Actions:**
+        1. Increase Gunicorn worker count from 8 to 12 workers
+        2. Optimize database query with selective field projection
+        3. Implement Redis caching for frequently accessed user data
+        
+        **Medium-term Optimizations:**
+        1. Profile and optimize business logic algorithms
+        2. Implement connection pooling for external service calls
+        3. Add database query result caching with 5-minute TTL
+        
+        **Infrastructure Adjustments:**
+        1. Increase container CPU limits from 1000m to 1500m
+        2. Add horizontal pod autoscaling with target 60% CPU utilization
+        3. Implement CDN for static asset delivery
+        
+        **Code-level Optimizations:**
+        1. Replace synchronous external calls with async/await patterns
+        2. Optimize JSON serialization with faster libraries (orjson)
+        3. Implement lazy loading for heavy object initialization
+        
+        **Monitoring Enhancements:**
+        1. Add custom metrics for business logic timing
+        2. Implement distributed tracing for external service calls
+        3. Create alert thresholds for early performance degradation warning
+      value: |
+        **Immediate Actions:**
+        1. 
+        2. 
+        3. 
+        
+        **Medium-term Optimizations:**
+        1. 
+        2. 
+        3. 
+        
+        **Infrastructure Adjustments:**
+        1. 
+        2. 
+        3. 
+        
+        **Code-level Optimizations:**
+        1. 
+        2. 
+        3. 
+        
+        **Monitoring Enhancements:**
+        1. 
+        2. 
+        3. 
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: performance-validation-checklist
+    attributes:
+      label: Performance Validation Checklist
+      description: Verification steps to ensure comprehensive performance analysis
+      options:
+        - label: "✅ Node.js baseline comparison data provided"
+          required: true
+        - label: "✅ Current Flask implementation metrics documented"
+          required: true
+        - label: "✅ Variance calculation completed (≤10% requirement)"
+          required: true
+        - label: "✅ Load testing evidence provided (Locust/k6/apache-bench)"
+        - label: "✅ Monitoring system data included (Prometheus/APM)"
+        - label: "✅ Container resource utilization analyzed (cAdvisor)"
+        - label: "✅ WSGI server performance metrics reviewed (Gunicorn)"
+        - label: "✅ Database query performance investigated (MongoDB/Redis)"
+        - label: "✅ External service integration latency measured"
+        - label: "✅ Health check endpoint status verified"
+        - label: "✅ Alert thresholds and notifications documented"
+        - label: "✅ Rollback procedures considered/executed"
+        - label: "✅ Performance optimization recommendations provided"
+        - label: "✅ Business impact assessment completed"
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional Context and Attachments
+      description: Any additional information, log files, profiling data, or monitoring screenshots
+      placeholder: |
+        **Log File Excerpts:**
+        ```
+        2024-01-15 14:25:32 WARNING [flask.app] Response time exceeded threshold: 450ms
+        2024-01-15 14:25:33 ERROR [performance.monitor] Variance threshold breached: +15%
+        ```
+        
+        **Monitoring Screenshots:**
+        - Grafana dashboard: [screenshot-url]
+        - APM trace visualization: [trace-url]
+        - Container metrics: [cadvisor-url]
+        
+        **Related Issues:**
+        - Previous performance issue: #123
+        - Infrastructure incident: #456
+        - Migration tracking issue: #789
+        
+        **External Dependencies:**
+        - MongoDB cluster status: degraded performance on replica set
+        - Auth0 service status: elevated response times reported
+        - AWS region latency: increased network latency in us-east-1
+        
+        **Testing Artifacts:**
+        - Load test results: tests/performance/reports/locust_moderate_load_report.html
+        - Profiling data: tests/performance/profiles/flask_profile_20240115.prof
+        - Baseline comparison: tests/performance/data/baseline_comparison_20240115.json
+      value: |
+        **Log File Excerpts:**
+        ```
+        
+        ```
+        
+        **Monitoring Screenshots:**
+        - 
+        
+        **Related Issues:**
+        - 
+        
+        **External Dependencies:**
+        - 
+        
+        **Testing Artifacts:**
+        - 
+    validations:
+      required: false
+
+  - type: markdown
+    attributes:
+      value: |
+        ---
+        
+        ## Performance Issue Guidelines
+        
+        **Critical Performance Requirements:**
+        - ✅ **≤10% Variance**: All metrics must stay within 10% of Node.js baseline
+        - ⚠️ **5-10% Variance**: Warning threshold requiring investigation
+        - ❌ **>10% Variance**: Critical threshold triggering rollback consideration
+        
+        **Monitoring Integration:**
+        - **Prometheus**: Custom Flask migration metrics and alerting
+        - **APM**: Datadog/New Relic distributed tracing and performance monitoring
+        - **Load Testing**: Locust (load testing), k6 (performance analysis), apache-bench (HTTP benchmarking)
+        - **Container Monitoring**: cAdvisor resource utilization tracking
+        - **Health Checks**: Kubernetes liveness/readiness probes
+        
+        **Automated Systems:**
+        - **Baseline Validator**: `tests/performance/baseline_validator.py` for variance calculation
+        - **Performance Workflow**: `.github/workflows/performance.yml` for automated testing
+        - **Rollback Procedures**: Feature flag and traffic management automation
+        
+        **Escalation:**
+        - **P0/P1 Issues**: Automatically route to Performance Engineering Team
+        - **>10% Variance**: Immediate escalation to on-call engineering manager
+        - **Response SLA**: 5 minutes for critical performance issues
+        
+        **Documentation:**
+        - Technical Specification Section 0.1.1: ≤10% variance requirement
+        - Section 6.6: Testing Strategy and Performance Validation
+        - Section 6.5: Monitoring and Observability architecture
+        
+        Thank you for helping maintain the Flask migration performance standards! 🚀

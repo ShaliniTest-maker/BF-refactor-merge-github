@@ -1,0 +1,40 @@
+# Security scanning tools and dependencies
+# Required packages for comprehensive security analysis and reporting
+
+# Core security scanning tools
+bandit[toml]==1.7.5
+safety==3.0.1
+semgrep==1.45.0
+
+# Dependency scanning and auditing
+pip-audit==2.7.3
+cyclone-dx-bom>=3.11.0
+
+# Additional security linting tools
+flake8-bandit>=4.1.1
+dlint>=0.14.1
+dodgy>=0.2.1
+
+# Data processing and analysis
+jsonschema>=4.19.0
+pydantic>=2.5.0
+python-dateutil>=2.8.2
+
+# Report generation and formatting
+jq>=1.6.0
+yq>=3.2.0
+
+# HTTP clients for vulnerability database queries
+requests>=2.31.0
+httpx>=0.25.0
+
+# Enterprise monitoring and metrics
+prometheus-client>=0.19.0
+
+# Development and testing tools
+pytest>=7.4.0
+pytest-mock>=3.12.0
+coverage>=7.3.0
+
+# Container and infrastructure scanning
+# Note: Trivy and Docker Scout are installed separately in workflow

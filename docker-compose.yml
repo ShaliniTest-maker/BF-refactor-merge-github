@@ -1,0 +1,605 @@
+# ============================================================================
+# Docker Compose Development Environment Configuration
+# ============================================================================
+# This configuration provides local development environment parity with
+# production deployment for the Flask application migration from Node.js.
+# Implements comprehensive service orchestration with MongoDB, Redis, and
+# Flask application containers optimized for integration testing and
+# development workflow efficiency.
+#
+# Based on:
+# - Section 8.5.2 Local development with Docker Compose for integration testing
+# - Section 3.4.1 MongoDB integration for primary data persistence
+# - Section 3.4.2 Redis integration for session management and caching
+# - Section 3.5.1 Virtual environment management for dependency isolation
+# - Section 8.3.1 Container Platform Strategy - Development environment consistency
+# ============================================================================
+
+version: '3.8'
+
+# ============================================================================
+# SERVICES CONFIGURATION
+# ============================================================================
+
+services:
+  # ==========================================================================
+  # FLASK APPLICATION SERVICE
+  # ==========================================================================
+  # Python/Flask application service replacing Node.js service per Section 0.1.1
+  # Implements Gunicorn WSGI server with development configuration for local testing
+  # and production parity validation per Section 3.5.1 Production Server Testing
+  
+  flask-app:
+    # Container configuration and metadata
+    container_name: flask-migration-app
+    hostname: flask-app
+    
+    # Build configuration using local Dockerfile with multi-stage build
+    # Section 8.3.3 Multi-Stage Build Strategy with pip-tools integration
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+      args:
+        # Build-time environment variables for optimized container creation
+        BUILDKIT_INLINE_CACHE: 1
+        PYTHON_VERSION: 3.11
+        PIP_TOOLS_VERSION: 7.3.0
+        GUNICORN_VERSION: 23.0.0
+    
+    # Image tagging for development environment identification
+    image: flask-migration-app:development
+    
+    # Port mapping for Flask application and metrics endpoint
+    # 8000: Flask application (Gunicorn WSGI server)
+    # 8001: Prometheus metrics endpoint (if enabled)
+    ports:
+      - "8000:8000"   # Flask application port
+      - "8001:8001"   # Metrics endpoint port
+    
+    # Environment variables for Flask development configuration
+    # Uses .env file for local development per Section 3.5.1 Environment Configuration
+    environment:
+      # Flask application configuration
+      - FLASK_ENV=development
+      - FLASK_DEBUG=True
+      - FLASK_APP=app:app
+      
+      # Database configuration for MongoDB integration
+      - MONGODB_URL=mongodb://mongodb:27017/flask_dev_db
+      - MONGODB_HOST=mongodb
+      - MONGODB_PORT=27017
+      - MONGODB_DATABASE=flask_dev_db
+      - MONGODB_MAX_POOL_SIZE=50
+      - MONGODB_MIN_POOL_SIZE=10
+      
+      # Redis configuration for caching and session management
+      - REDIS_URL=redis://redis:6379/0
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - REDIS_SESSION_DB=1
+      - REDIS_CACHE_DB=2
+      - REDIS_LIMITER_DB=3
+      
+      # Gunicorn WSGI server configuration for development
+      - GUNICORN_WORKERS=2
+      - GUNICORN_WORKER_CLASS=sync
+      - GUNICORN_TIMEOUT=120
+      - GUNICORN_KEEPALIVE=5
+      - GUNICORN_MAX_REQUESTS=1000
+      - GUNICORN_BIND=0.0.0.0:8000
+      
+      # Development-specific configuration
+      - DEV_FLASK_DEBUG=True
+      - DEV_FLASK_ENV=development
+      - DEV_RELOAD=True
+      - DEV_USE_DEBUGGER=True
+      
+      # Security configuration for development
+      - SECRET_KEY=dev-secret-key-change-in-production
+      - JWT_SECRET_KEY=dev-jwt-secret-key
+      
+      # CORS configuration for development
+      - CORS_ORIGINS=http://localhost:3000,http://localhost:8080
+      - DEV_CORS_ALLOW_ALL_ORIGINS=True
+      
+      # Logging configuration
+      - LOG_LEVEL=DEBUG
+      - LOG_FORMAT=json
+      
+      # Health check configuration
+      - HEALTH_CHECK_PATH=/health
+      - HEALTH_READY_PATH=/health/ready
+      - HEALTH_LIVE_PATH=/health/live
+    
+    # Load additional environment variables from .env file
+    # Per Section 3.5.1 Environment Configuration with python-dotenv
+    env_file:
+      - .env
+    
+    # Volume mounts for development workflow per Section 3.5.1
+    # Enables hot reloading and development workflow efficiency
+    volumes:
+      # Source code mounting for hot reloading during development
+      - ./src:/app/src:ro
+      - ./config:/app/config:ro
+      - ./tests:/app/tests:ro
+      
+      # Configuration files for development
+      - ./gunicorn.conf.py:/app/gunicorn.conf.py:ro
+      - ./.env:/app/.env:ro
+      
+      # Log directory for development debugging
+      - ./logs:/var/log/app:rw
+      
+      # Upload directory for file processing testing
+      - ./uploads:/tmp/uploads:rw
+      
+      # Temporary directory for application data
+      - /tmp/prometheus_multiproc:/tmp/prometheus_multiproc:rw
+    
+    # Health check configuration for container orchestration
+    # Per Section 8.3.2 Production Runtime Configuration health check integration
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    
+    # Service dependencies ensuring proper startup order
+    # Flask application requires MongoDB and Redis to be available
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    
+    # Network configuration for service communication
+    networks:
+      - flask-migration-network
+    
+    # Container restart policy for development stability
+    restart: unless-stopped
+    
+    # Resource limits for development environment
+    # Prevents resource exhaustion during local development
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+        reservations:
+          memory: 512M
+          cpus: '0.5'
+    
+    # Container labels for identification and management
+    labels:
+      - "com.company.service=flask-migration-app"
+      - "com.company.environment=development"
+      - "com.company.version=1.0.0"
+      - "com.company.framework=flask"
+      - "com.company.language=python"
+
+  # ==========================================================================
+  # MONGODB DATABASE SERVICE
+  # ==========================================================================
+  # MongoDB service for primary data persistence per Section 3.4.1
+  # Provides development environment matching production database configuration
+  # with comprehensive data persistence and authentication support
+  
+  mongodb:
+    # Official MongoDB image with enterprise-grade features
+    # Version pinned for consistency with production environment
+    image: mongo:7.0.12
+    container_name: flask-mongodb
+    hostname: mongodb
+    
+    # Port mapping for development database access
+    # 27017: MongoDB default port for database connections
+    ports:
+      - "27017:27017"
+    
+    # MongoDB configuration environment variables
+    # Authentication and database setup for development environment
+    environment:
+      # MongoDB authentication configuration
+      - MONGO_INITDB_ROOT_USERNAME=admin
+      - MONGO_INITDB_ROOT_PASSWORD=development_password_123
+      - MONGO_INITDB_DATABASE=flask_dev_db
+      
+      # MongoDB server configuration
+      - MONGO_REPLICA_SET_NAME=
+      - MONGO_OPLOG_SIZE=128
+    
+    # Volume configuration for MongoDB data persistence
+    # Ensures database data survives container restarts
+    volumes:
+      # MongoDB data directory for persistent storage
+      - mongodb_data:/data/db
+      
+      # MongoDB configuration directory
+      - mongodb_config:/data/configdb
+      
+      # MongoDB logs for development debugging
+      - ./logs/mongodb:/var/log/mongodb:rw
+      
+      # MongoDB initialization scripts for development setup
+      - ./scripts/mongodb-init:/docker-entrypoint-initdb.d:ro
+    
+    # MongoDB health check configuration
+    # Validates database readiness for Flask application connection
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    
+    # Network configuration for service communication
+    networks:
+      - flask-migration-network
+    
+    # Container restart policy for development stability
+    restart: unless-stopped
+    
+    # Resource limits for MongoDB development instance
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+        reservations:
+          memory: 512M
+          cpus: '0.25'
+    
+    # MongoDB command configuration for development optimization
+    # Optimizes MongoDB for development environment performance
+    command: 
+      - mongod
+      - --auth
+      - --bind_ip_all
+      - --replSet=rs0
+      - --oplogSize=128
+      - --logpath=/var/log/mongodb/mongod.log
+      - --logappend
+    
+    # Container labels for identification
+    labels:
+      - "com.company.service=mongodb"
+      - "com.company.environment=development"
+      - "com.company.version=7.0.12"
+      - "com.company.type=database"
+
+  # ==========================================================================
+  # REDIS CACHE AND SESSION SERVICE
+  # ==========================================================================
+  # Redis service for caching and session management per Section 3.4.2
+  # Implements distributed session support and application caching
+  # with enterprise-grade performance and persistence configuration
+  
+  redis:
+    # Official Redis image with enterprise features
+    # Version pinned for consistency with production environment
+    image: redis:7.2.3-alpine
+    container_name: flask-redis
+    hostname: redis
+    
+    # Port mapping for development cache access
+    # 6379: Redis default port for cache connections
+    ports:
+      - "6379:6379"
+    
+    # Redis configuration environment variables
+    environment:
+      # Redis server configuration
+      - REDIS_PASSWORD=development_redis_password
+      - REDIS_DATABASES=16
+      - REDIS_MAXMEMORY=512mb
+      - REDIS_MAXMEMORY_POLICY=allkeys-lru
+    
+    # Volume configuration for Redis data persistence
+    # Ensures cache data and session persistence during development
+    volumes:
+      # Redis data directory for persistent storage
+      - redis_data:/data
+      
+      # Redis configuration file for development optimization
+      - ./config/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+      
+      # Redis logs for development debugging
+      - ./logs/redis:/var/log/redis:rw
+    
+    # Redis health check configuration
+    # Validates cache readiness for Flask application connection
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    
+    # Network configuration for service communication
+    networks:
+      - flask-migration-network
+    
+    # Container restart policy for development stability
+    restart: unless-stopped
+    
+    # Resource limits for Redis development instance
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 128M
+          cpus: '0.1'
+    
+    # Redis command configuration for development optimization
+    # Configures Redis for optimal development environment performance
+    command: 
+      - redis-server
+      - /usr/local/etc/redis/redis.conf
+      - --requirepass
+      - development_redis_password
+      - --maxmemory
+      - 512mb
+      - --maxmemory-policy
+      - allkeys-lru
+      - --save
+      - "900 1"
+      - --save
+      - "300 10"
+      - --save
+      - "60 10000"
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - "everysec"
+    
+    # Container labels for identification
+    labels:
+      - "com.company.service=redis"
+      - "com.company.environment=development"
+      - "com.company.version=7.2.3"
+      - "com.company.type=cache"
+
+  # ==========================================================================
+  # OPTIONAL: PROMETHEUS MONITORING SERVICE
+  # ==========================================================================
+  # Prometheus monitoring service for development metrics collection
+  # Enables local monitoring and performance analysis during development
+  # Comment out if monitoring is not needed in development environment
+  
+  prometheus:
+    # Official Prometheus image for metrics collection
+    image: prom/prometheus:v2.47.2
+    container_name: flask-prometheus
+    hostname: prometheus
+    
+    # Port mapping for Prometheus web interface
+    ports:
+      - "9090:9090"
+    
+    # Prometheus configuration for Flask application monitoring
+    volumes:
+      - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    
+    # Prometheus command configuration
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.enable-lifecycle'
+    
+    # Network configuration
+    networks:
+      - flask-migration-network
+    
+    # Container restart policy
+    restart: unless-stopped
+    
+    # Container labels
+    labels:
+      - "com.company.service=prometheus"
+      - "com.company.environment=development"
+      - "com.company.type=monitoring"
+
+  # ==========================================================================
+  # OPTIONAL: GRAFANA VISUALIZATION SERVICE
+  # ==========================================================================
+  # Grafana service for metrics visualization and dashboard management
+  # Provides comprehensive monitoring dashboards for development environment
+  # Comment out if visualization is not needed in development
+  
+  grafana:
+    # Official Grafana image for metrics visualization
+    image: grafana/grafana:10.2.0
+    container_name: flask-grafana
+    hostname: grafana
+    
+    # Port mapping for Grafana web interface
+    ports:
+      - "3000:3000"
+    
+    # Grafana configuration environment variables
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=development_grafana_password
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_DOMAIN=localhost
+      - GF_SERVER_ROOT_URL=http://localhost:3000/
+    
+    # Grafana data persistence
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    
+    # Service dependencies
+    depends_on:
+      - prometheus
+    
+    # Network configuration
+    networks:
+      - flask-migration-network
+    
+    # Container restart policy
+    restart: unless-stopped
+    
+    # Container labels
+    labels:
+      - "com.company.service=grafana"
+      - "com.company.environment=development"
+      - "com.company.type=visualization"
+
+# ============================================================================
+# NETWORKS CONFIGURATION
+# ============================================================================
+# Custom network configuration for service communication and isolation
+# Provides controlled networking environment for development services
+
+networks:
+  flask-migration-network:
+    # Custom bridge network for service communication
+    driver: bridge
+    name: flask-migration-network
+    
+    # Network configuration for development environment
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/16
+          gateway: 172.20.0.1
+    
+    # Network labels for identification
+    labels:
+      - "com.company.network=flask-migration"
+      - "com.company.environment=development"
+
+# ============================================================================
+# VOLUMES CONFIGURATION
+# ============================================================================
+# Named volumes for persistent data storage across container restarts
+# Ensures data persistence and development workflow continuity
+
+volumes:
+  # MongoDB data persistence volume
+  # Stores MongoDB database files and ensures data survives container restarts
+  mongodb_data:
+    driver: local
+    name: flask_mongodb_data
+    labels:
+      - "com.company.service=mongodb"
+      - "com.company.type=database-data"
+      - "com.company.environment=development"
+  
+  # MongoDB configuration persistence volume
+  # Stores MongoDB configuration and ensures settings survive restarts
+  mongodb_config:
+    driver: local
+    name: flask_mongodb_config
+    labels:
+      - "com.company.service=mongodb"
+      - "com.company.type=database-config"
+      - "com.company.environment=development"
+  
+  # Redis data persistence volume
+  # Stores Redis cache data and session information
+  redis_data:
+    driver: local
+    name: flask_redis_data
+    labels:
+      - "com.company.service=redis"
+      - "com.company.type=cache-data"
+      - "com.company.environment=development"
+  
+  # Prometheus data persistence volume
+  # Stores metrics data for development monitoring
+  prometheus_data:
+    driver: local
+    name: flask_prometheus_data
+    labels:
+      - "com.company.service=prometheus"
+      - "com.company.type=monitoring-data"
+      - "com.company.environment=development"
+  
+  # Grafana data persistence volume
+  # Stores dashboard configurations and user settings
+  grafana_data:
+    driver: local
+    name: flask_grafana_data
+    labels:
+      - "com.company.service=grafana"
+      - "com.company.type=visualization-data"
+      - "com.company.environment=development"
+
+# ============================================================================
+# DEVELOPMENT USAGE INSTRUCTIONS
+# ============================================================================
+#
+# Starting the development environment:
+# docker-compose up -d
+#
+# Viewing logs from all services:
+# docker-compose logs -f
+#
+# Viewing logs from specific service:
+# docker-compose logs -f flask-app
+#
+# Stopping the development environment:
+# docker-compose down
+#
+# Stopping and removing all data (USE WITH CAUTION):
+# docker-compose down -v
+#
+# Rebuilding Flask application container:
+# docker-compose build --no-cache flask-app
+# docker-compose up -d flask-app
+#
+# Accessing services:
+# - Flask Application: http://localhost:8000
+# - Flask Health Check: http://localhost:8000/health
+# - Flask Metrics: http://localhost:8001/metrics
+# - MongoDB: mongodb://admin:development_password_123@localhost:27017/flask_dev_db
+# - Redis: redis://localhost:6379 (password: development_redis_password)
+# - Prometheus: http://localhost:9090
+# - Grafana: http://localhost:3000 (admin/development_grafana_password)
+#
+# Development workflow:
+# 1. Start environment: docker-compose up -d
+# 2. Develop code with hot reloading enabled
+# 3. Test integration with MongoDB and Redis
+# 4. Monitor application with Prometheus/Grafana
+# 5. Stop environment: docker-compose down
+#
+# Production parity testing:
+# 1. Build production image: docker-compose build flask-app
+# 2. Test with production-like configuration
+# 3. Validate performance against Node.js baseline
+# 4. Verify MongoDB and Redis integration
+#
+# Troubleshooting:
+# - Check service logs: docker-compose logs [service-name]
+# - Verify service health: docker-compose ps
+# - Restart specific service: docker-compose restart [service-name]
+# - Access container shell: docker-compose exec [service-name] /bin/bash
+#
+# Security considerations for development:
+# - Default passwords are for development only
+# - Change all passwords before production deployment
+# - Ensure .env file contains production credentials
+# - Review volume mounts for security implications
+# - Validate network isolation requirements
+#
+# Performance monitoring:
+# - Access Flask metrics at http://localhost:8001/metrics
+# - Monitor MongoDB performance through Prometheus
+# - Track Redis cache hit rates in Grafana dashboards
+# - Compare performance with Node.js baseline metrics
+#
+# ============================================================================

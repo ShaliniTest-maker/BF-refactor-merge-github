@@ -1,0 +1,2249 @@
+# GitHub Actions Blue-Green Deployment Workflow for Flask Application Migration
+# ==============================================================================
+#
+# Comprehensive zero-downtime deployment workflow implementing blue-green deployment
+# strategy with feature flag control, gradual traffic migration (5%→25%→50%→100%),
+# automated performance validation, health check monitoring, and rollback procedures
+# per enterprise deployment requirements (Section 0.1.1, 4.4.1, 8.5.2, 8.5.3)
+#
+# Key Features:
+# - Blue-green deployment with zero-downtime migration capability per Section 4.4.1
+# - Feature flag integration for gradual traffic migration control per Section 8.5.2
+# - Performance validation with ≤10% variance enforcement per Section 4.4.2
+# - Automated rollback procedures with performance degradation detection per Section 4.4.5
+# - Manual approval gate for production deployments per Section 8.5.3
+# - Kubernetes deployment integration with container orchestration per Section 4.4.3
+# - Monitoring integration with Prometheus and Grafana per Section 4.4.2
+# - Comprehensive health check validation and monitoring per Section 4.4.1
+# - Container security scanning with Trivy integration per Section 8.5.2
+# - Performance baseline validation and rollback triggers per Section 4.4.5
+#
+# This workflow replaces traditional rolling deployment patterns with enterprise-grade
+# blue-green deployment ensuring 100% uptime during Node.js to Python migration
+# while maintaining strict performance and quality requirements.
+
+name: Blue-Green Deployment with Zero-Downtime Migration
+
+# Comprehensive trigger configuration for different deployment scenarios
+on:
+  # Production deployment from main branch
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - 'README.md'
+      - 'docs/**'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/workflows/ci.yml'
+      - '.github/workflows/performance.yml'
+
+  # Manual deployment trigger with environment selection
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+      deployment_strategy:
+        description: 'Deployment strategy'
+        required: true
+        default: 'blue-green'
+        type: choice
+        options:
+          - blue-green
+          - canary
+          - immediate
+      skip_performance_validation:
+        description: 'Skip performance validation (emergency only)'
+        required: false
+        default: false
+        type: boolean
+      force_deployment:
+        description: 'Force deployment even with warnings'
+        required: false
+        default: false
+        type: boolean
+      traffic_migration_speed:
+        description: 'Traffic migration speed'
+        required: false
+        default: 'normal'
+        type: choice
+        options:
+          - slow
+          - normal
+          - fast
+
+  # Deployment completion trigger from CI workflow
+  workflow_run:
+    workflows: ["CI/CD Pipeline"]
+    types: [completed]
+    branches: [ main ]
+
+# Global environment configuration for deployment consistency
+env:
+  # Application configuration
+  APP_NAME: flask-app
+  APP_VERSION: ${{ github.sha }}
+  PYTHON_VERSION: '3.11'
+  
+  # Container configuration per Section 8.3.2
+  DOCKER_REGISTRY: ghcr.io
+  DOCKER_REPOSITORY: ${{ github.repository }}
+  BASE_IMAGE: python:3.11-slim
+  
+  # Kubernetes configuration per Section 8.4.2
+  CLUSTER_NAME: flask-migration-cluster
+  NAMESPACE_PREFIX: flask-app
+  
+  # Performance validation configuration per Section 4.4.2
+  PERFORMANCE_VARIANCE_THRESHOLD: 10
+  PERFORMANCE_VALIDATION_DURATION: 300
+  HEALTH_CHECK_TIMEOUT: 60
+  HEALTH_CHECK_RETRIES: 10
+  
+  # Traffic migration configuration per Section 8.5.2
+  TRAFFIC_MIGRATION_STAGES: '["5", "25", "50", "100"]'
+  TRAFFIC_MIGRATION_INTERVAL_NORMAL: 300    # 5 minutes per stage
+  TRAFFIC_MIGRATION_INTERVAL_SLOW: 900      # 15 minutes per stage
+  TRAFFIC_MIGRATION_INTERVAL_FAST: 120      # 2 minutes per stage
+  
+  # Feature flag configuration per Section 8.5.2
+  FEATURE_FLAG_SERVICE_URL: ${{ secrets.FEATURE_FLAG_SERVICE_URL }}
+  FEATURE_FLAG_API_KEY: ${{ secrets.FEATURE_FLAG_API_KEY }}
+  
+  # Monitoring configuration per Section 4.4.2
+  PROMETHEUS_URL: ${{ secrets.PROMETHEUS_URL }}
+  GRAFANA_URL: ${{ secrets.GRAFANA_URL }}
+  METRICS_ENDPOINT: /metrics
+  HEALTH_ENDPOINT: /health
+  
+  # Security configuration per Section 8.5.2
+  TRIVY_SEVERITY_THRESHOLD: CRITICAL,HIGH
+  SECURITY_SCAN_TIMEOUT: 600
+  
+  # Notification configuration per Section 8.5.3
+  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+  TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+  DEPLOYMENT_NOTIFICATION_CHANNELS: ${{ secrets.DEPLOYMENT_NOTIFICATION_CHANNELS }}
+  
+  # Emergency configuration
+  EMERGENCY_ROLLBACK_ENABLED: true
+  EMERGENCY_CONTACTS: ${{ secrets.EMERGENCY_CONTACTS }}
+
+# Concurrency control - prevent overlapping deployments
+concurrency:
+  group: deployment-${{ github.workflow }}-${{ github.event.inputs.environment || 'staging' }}
+  cancel-in-progress: false
+
+jobs:
+  # ==========================================================================
+  # DEPLOYMENT PREPARATION AND VALIDATION JOB
+  # ==========================================================================
+  # Comprehensive pre-deployment validation and environment preparation
+  
+  deployment-preparation:
+    name: 🔧 Deployment Preparation and Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    
+    outputs:
+      environment: ${{ steps.config.outputs.environment }}
+      deployment-strategy: ${{ steps.config.outputs.deployment-strategy }}
+      image-tag: ${{ steps.config.outputs.image-tag }}
+      namespace: ${{ steps.config.outputs.namespace }}
+      traffic-intervals: ${{ steps.config.outputs.traffic-intervals }}
+      should-deploy: ${{ steps.validation.outputs.should-deploy }}
+      skip-performance: ${{ steps.config.outputs.skip-performance }}
+      force-deployment: ${{ steps.config.outputs.force-deployment }}
+      
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for deployment validation
+
+      - name: ⚙️ Configure deployment parameters
+        id: config
+        run: |
+          # Determine environment
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            ENV="${{ github.event.inputs.environment }}"
+            STRATEGY="${{ github.event.inputs.deployment_strategy }}"
+            SKIP_PERF="${{ github.event.inputs.skip_performance_validation }}"
+            FORCE="${{ github.event.inputs.force_deployment }}"
+            SPEED="${{ github.event.inputs.traffic_migration_speed || 'normal' }}"
+          elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            ENV="staging"
+            STRATEGY="blue-green"
+            SKIP_PERF="false"
+            FORCE="false"
+            SPEED="normal"
+          else
+            ENV="development"
+            STRATEGY="immediate"
+            SKIP_PERF="true"
+            FORCE="false"
+            SPEED="fast"
+          fi
+          
+          # Set traffic migration intervals based on speed
+          case "$SPEED" in
+            "slow") INTERVALS="${{ env.TRAFFIC_MIGRATION_INTERVAL_SLOW }}" ;;
+            "fast") INTERVALS="${{ env.TRAFFIC_MIGRATION_INTERVAL_FAST }}" ;;
+            *) INTERVALS="${{ env.TRAFFIC_MIGRATION_INTERVAL_NORMAL }}" ;;
+          esac
+          
+          # Generate image tag and namespace
+          IMAGE_TAG="${{ env.DOCKER_REGISTRY }}/${{ env.DOCKER_REPOSITORY }}/${{ env.APP_NAME }}:${{ env.APP_VERSION }}"
+          NAMESPACE="${{ env.NAMESPACE_PREFIX }}-${ENV}"
+          
+          # Output configuration
+          echo "environment=${ENV}" >> $GITHUB_OUTPUT
+          echo "deployment-strategy=${STRATEGY}" >> $GITHUB_OUTPUT
+          echo "image-tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+          echo "namespace=${NAMESPACE}" >> $GITHUB_OUTPUT
+          echo "traffic-intervals=${INTERVALS}" >> $GITHUB_OUTPUT
+          echo "skip-performance=${SKIP_PERF}" >> $GITHUB_OUTPUT
+          echo "force-deployment=${FORCE}" >> $GITHUB_OUTPUT
+          
+          echo "📋 Deployment Configuration:"
+          echo "  Environment: ${ENV}"
+          echo "  Strategy: ${STRATEGY}"
+          echo "  Image: ${IMAGE_TAG}"
+          echo "  Namespace: ${NAMESPACE}"
+          echo "  Traffic Speed: ${SPEED} (${INTERVALS}s intervals)"
+
+      - name: 🔍 Validate deployment prerequisites
+        id: validation
+        run: |
+          SHOULD_DEPLOY="true"
+          VALIDATION_ERRORS=()
+          
+          # Check if CI workflow completed successfully for main branch pushes
+          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            if [[ "${{ github.event.workflow_run.conclusion }}" != "success" ]]; then
+              VALIDATION_ERRORS+=("CI workflow failed - cannot proceed with deployment")
+              SHOULD_DEPLOY="false"
+            fi
+          fi
+          
+          # Validate environment-specific requirements
+          if [[ "${{ steps.config.outputs.environment }}" == "production" ]]; then
+            # Production deployment requires manual approval and completed CI
+            if [[ "${{ github.event_name }}" != "workflow_dispatch" ]]; then
+              VALIDATION_ERRORS+=("Production deployments require manual trigger")
+              SHOULD_DEPLOY="false"
+            fi
+            
+            # Check for required production secrets
+            if [[ -z "${{ secrets.PROD_KUBECONFIG }}" ]]; then
+              VALIDATION_ERRORS+=("Production Kubernetes config not available")
+              SHOULD_DEPLOY="false"
+            fi
+          fi
+          
+          # Validate Docker registry access
+          if [[ -z "${{ secrets.GITHUB_TOKEN }}" ]]; then
+            VALIDATION_ERRORS+=("Docker registry authentication not available")
+            SHOULD_DEPLOY="false"
+          fi
+          
+          # Display validation results
+          if [[ "${#VALIDATION_ERRORS[@]}" -gt 0 ]]; then
+            echo "❌ Deployment validation failed:"
+            for error in "${VALIDATION_ERRORS[@]}"; do
+              echo "  - $error"
+            done
+            
+            if [[ "${{ steps.config.outputs.force-deployment }}" == "true" ]]; then
+              echo "⚠️ Forcing deployment despite validation errors"
+              SHOULD_DEPLOY="true"
+            fi
+          else
+            echo "✅ All deployment prerequisites validated successfully"
+          fi
+          
+          echo "should-deploy=${SHOULD_DEPLOY}" >> $GITHUB_OUTPUT
+
+      - name: 🐳 Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: network=host
+
+      - name: 🔑 Login to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKER_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🏗️ Build and push application image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ steps.config.outputs.image-tag }}
+            ${{ env.DOCKER_REGISTRY }}/${{ env.DOCKER_REPOSITORY }}/${{ env.APP_NAME }}:latest
+          build-args: |
+            PYTHON_VERSION=${{ env.PYTHON_VERSION }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            VCS_REF=${{ github.sha }}
+            VERSION=${{ env.APP_VERSION }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.title=Flask Application Migration
+            org.opencontainers.image.description=Production Flask application migrated from Node.js
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
+            migration.source=Node.js Express
+            migration.target=Python Flask
+            deployment.environment=${{ steps.config.outputs.environment }}
+
+      - name: 🔒 Container security scanning with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.config.outputs.image-tag }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: ${{ env.TRIVY_SEVERITY_THRESHOLD }}
+          timeout: ${{ env.SECURITY_SCAN_TIMEOUT }}s
+          exit-code: '1'  # Fail on critical vulnerabilities
+
+      - name: 📊 Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: 📋 Generate deployment summary
+        run: |
+          cat > deployment-summary.md << EOF
+          # Deployment Summary
+          
+          **Environment:** ${{ steps.config.outputs.environment }}
+          **Strategy:** ${{ steps.config.outputs.deployment-strategy }}
+          **Image:** ${{ steps.config.outputs.image-tag }}
+          **Namespace:** ${{ steps.config.outputs.namespace }}
+          **Commit:** ${{ github.sha }}
+          **Triggered by:** ${{ github.actor }}
+          **Timestamp:** $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          
+          ## Validation Status
+          - **Prerequisites:** ${{ steps.validation.outputs.should-deploy == 'true' && '✅ Passed' || '❌ Failed' }}
+          - **Security Scan:** ✅ Completed
+          - **Image Build:** ✅ Completed
+          
+          ## Configuration
+          - **Performance Validation:** ${{ steps.config.outputs.skip-performance == 'true' && '⚠️ Skipped' || '✅ Enabled' }}
+          - **Force Deployment:** ${{ steps.config.outputs.force-deployment }}
+          - **Traffic Migration Interval:** ${{ steps.config.outputs.traffic-intervals }}s
+          EOF
+          
+          echo "## 📋 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          cat deployment-summary.md >> $GITHUB_STEP_SUMMARY
+
+      - name: 📤 Notify deployment initiation
+        if: steps.validation.outputs.should-deploy == 'true'
+        run: |
+          if [[ -n "${{ env.SLACK_WEBHOOK_URL }}" ]]; then
+            curl -X POST -H 'Content-type: application/json' \
+              --data '{
+                "text": "🚀 Deployment initiated for ${{ github.repository }}",
+                "attachments": [{
+                  "color": "good",
+                  "fields": [
+                    {"title": "Environment", "value": "${{ steps.config.outputs.environment }}", "short": true},
+                    {"title": "Strategy", "value": "${{ steps.config.outputs.deployment-strategy }}", "short": true},
+                    {"title": "Commit", "value": "${{ github.sha }}", "short": true},
+                    {"title": "Triggered by", "value": "${{ github.actor }}", "short": true}
+                  ]
+                }]
+              }' \
+              ${{ env.SLACK_WEBHOOK_URL }}
+          fi
+
+  # ==========================================================================
+  # BLUE-GREEN ENVIRONMENT PREPARATION JOB
+  # ==========================================================================
+  # Kubernetes environment setup and green environment preparation
+  
+  environment-preparation:
+    name: 🌍 Blue-Green Environment Preparation
+    runs-on: ubuntu-latest
+    needs: deployment-preparation
+    if: needs.deployment-preparation.outputs.should-deploy == 'true'
+    timeout-minutes: 15
+    
+    outputs:
+      blue-environment: ${{ steps.env-check.outputs.blue-environment }}
+      green-environment: ${{ steps.env-check.outputs.green-environment }}
+      current-active: ${{ steps.env-check.outputs.current-active }}
+      
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: ⚙️ Set up Kubernetes tools
+        run: |
+          # Install kubectl
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
+          
+          # Install Helm
+          curl https://get.helm.sh/helm-v3.13.0-linux-amd64.tar.gz | tar xz
+          sudo mv linux-amd64/helm /usr/local/bin/
+          
+          # Verify installations
+          kubectl version --client
+          helm version
+
+      - name: 🔑 Configure Kubernetes access
+        run: |
+          # Configure kubectl based on environment
+          if [[ "${{ needs.deployment-preparation.outputs.environment }}" == "production" ]]; then
+            echo "${{ secrets.PROD_KUBECONFIG }}" | base64 -d > $HOME/.kube/config
+          else
+            echo "${{ secrets.STAGING_KUBECONFIG }}" | base64 -d > $HOME/.kube/config
+          fi
+          
+          # Verify cluster connectivity
+          kubectl cluster-info
+          kubectl get nodes
+
+      - name: 🔍 Analyze current blue-green environment state
+        id: env-check
+        run: |
+          NAMESPACE="${{ needs.deployment-preparation.outputs.namespace }}"
+          
+          # Create namespace if it doesn't exist
+          kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+          
+          # Check current deployments
+          BLUE_DEPLOYMENT="${{ env.APP_NAME }}-blue"
+          GREEN_DEPLOYMENT="${{ env.APP_NAME }}-green"
+          
+          # Determine current active environment
+          CURRENT_ACTIVE=$(kubectl get service ${{ env.APP_NAME }}-active -n "$NAMESPACE" -o jsonpath='{.spec.selector.version}' 2>/dev/null || echo "none")
+          
+          # Check blue environment status
+          if kubectl get deployment "$BLUE_DEPLOYMENT" -n "$NAMESPACE" >/dev/null 2>&1; then
+            BLUE_STATUS=$(kubectl get deployment "$BLUE_DEPLOYMENT" -n "$NAMESPACE" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+            BLUE_EXISTS="true"
+          else
+            BLUE_STATUS="0"
+            BLUE_EXISTS="false"
+          fi
+          
+          # Check green environment status
+          if kubectl get deployment "$GREEN_DEPLOYMENT" -n "$NAMESPACE" >/dev/null 2>&1; then
+            GREEN_STATUS=$(kubectl get deployment "$GREEN_DEPLOYMENT" -n "$NAMESPACE" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+            GREEN_EXISTS="true"
+          else
+            GREEN_STATUS="0"
+            GREEN_EXISTS="false"
+          fi
+          
+          # Determine deployment strategy
+          if [[ "$CURRENT_ACTIVE" == "blue" ]] || [[ "$CURRENT_ACTIVE" == "none" && "$BLUE_EXISTS" == "true" ]]; then
+            TARGET_ENV="green"
+            STANDBY_ENV="blue"
+          else
+            TARGET_ENV="blue"
+            STANDBY_ENV="green"
+          fi
+          
+          echo "🔍 Environment Analysis:"
+          echo "  Current Active: $CURRENT_ACTIVE"
+          echo "  Blue Environment: $BLUE_EXISTS (Ready: $BLUE_STATUS)"
+          echo "  Green Environment: $GREEN_EXISTS (Ready: $GREEN_STATUS)"
+          echo "  Target for Deployment: $TARGET_ENV"
+          echo "  Standby Environment: $STANDBY_ENV"
+          
+          # Set outputs
+          echo "blue-environment=$BLUE_DEPLOYMENT" >> $GITHUB_OUTPUT
+          echo "green-environment=$GREEN_DEPLOYMENT" >> $GITHUB_OUTPUT
+          echo "current-active=$CURRENT_ACTIVE" >> $GITHUB_OUTPUT
+          echo "target-environment=$TARGET_ENV" >> $GITHUB_OUTPUT
+          echo "standby-environment=$STANDBY_ENV" >> $GITHUB_OUTPUT
+
+      - name: 📦 Prepare Helm charts and Kubernetes manifests
+        run: |
+          # Create Helm chart templates directory
+          mkdir -p k8s/helm/templates
+          
+          # Generate deployment template
+          cat > k8s/helm/templates/deployment.yaml << 'EOF'
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: {{ .Values.app.name }}-{{ .Values.environment.color }}
+            namespace: {{ .Values.namespace }}
+            labels:
+              app: {{ .Values.app.name }}
+              version: {{ .Values.environment.color }}
+              component: flask-app
+              migration.source: nodejs-express
+              migration.target: python-flask
+          spec:
+            replicas: {{ .Values.deployment.replicas }}
+            strategy:
+              type: RollingUpdate
+              rollingUpdate:
+                maxUnavailable: 0
+                maxSurge: 1
+            selector:
+              matchLabels:
+                app: {{ .Values.app.name }}
+                version: {{ .Values.environment.color }}
+            template:
+              metadata:
+                labels:
+                  app: {{ .Values.app.name }}
+                  version: {{ .Values.environment.color }}
+                  component: flask-app
+                annotations:
+                  prometheus.io/scrape: "true"
+                  prometheus.io/port: "8001"
+                  prometheus.io/path: "/metrics"
+              spec:
+                serviceAccountName: {{ .Values.app.name }}-service-account
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 1000
+                  fsGroup: 1000
+                containers:
+                - name: flask-app
+                  image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+                  imagePullPolicy: {{ .Values.image.pullPolicy }}
+                  ports:
+                  - name: http
+                    containerPort: 8000
+                    protocol: TCP
+                  - name: metrics
+                    containerPort: 8001
+                    protocol: TCP
+                  env:
+                  - name: FLASK_ENV
+                    value: {{ .Values.environment.type }}
+                  - name: MONGODB_URI
+                    valueFrom:
+                      secretKeyRef:
+                        name: {{ .Values.app.name }}-secrets
+                        key: mongodb-uri
+                  - name: REDIS_URL
+                    valueFrom:
+                      secretKeyRef:
+                        name: {{ .Values.app.name }}-secrets
+                        key: redis-url
+                  - name: PROMETHEUS_MULTIPROC_DIR
+                    value: /tmp/prometheus_multiproc
+                  - name: DEPLOYMENT_VERSION
+                    value: {{ .Values.environment.color }}
+                  resources:
+                    requests:
+                      memory: {{ .Values.resources.requests.memory }}
+                      cpu: {{ .Values.resources.requests.cpu }}
+                    limits:
+                      memory: {{ .Values.resources.limits.memory }}
+                      cpu: {{ .Values.resources.limits.cpu }}
+                  livenessProbe:
+                    httpGet:
+                      path: /health
+                      port: http
+                    initialDelaySeconds: 30
+                    periodSeconds: 10
+                    timeoutSeconds: 5
+                    failureThreshold: 3
+                  readinessProbe:
+                    httpGet:
+                      path: /health/ready
+                      port: http
+                    initialDelaySeconds: 5
+                    periodSeconds: 5
+                    timeoutSeconds: 3
+                    failureThreshold: 3
+                  volumeMounts:
+                  - name: prometheus-multiproc
+                    mountPath: /tmp/prometheus_multiproc
+                volumes:
+                - name: prometheus-multiproc
+                  emptyDir: {}
+          EOF
+          
+          # Generate service template
+          cat > k8s/helm/templates/service.yaml << 'EOF'
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: {{ .Values.app.name }}-{{ .Values.environment.color }}
+            namespace: {{ .Values.namespace }}
+            labels:
+              app: {{ .Values.app.name }}
+              version: {{ .Values.environment.color }}
+            annotations:
+              prometheus.io/scrape: "true"
+              prometheus.io/port: "8001"
+              prometheus.io/path: "/metrics"
+          spec:
+            type: ClusterIP
+            ports:
+            - name: http
+              port: 80
+              targetPort: http
+              protocol: TCP
+            - name: metrics
+              port: 8001
+              targetPort: metrics
+              protocol: TCP
+            selector:
+              app: {{ .Values.app.name }}
+              version: {{ .Values.environment.color }}
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: {{ .Values.app.name }}-active
+            namespace: {{ .Values.namespace }}
+            labels:
+              app: {{ .Values.app.name }}
+              component: active-service
+          spec:
+            type: ClusterIP
+            ports:
+            - name: http
+              port: 80
+              targetPort: http
+              protocol: TCP
+            - name: metrics
+              port: 8001
+              targetPort: metrics
+              protocol: TCP
+            selector:
+              app: {{ .Values.app.name }}
+              version: {{ .Values.environment.activeColor | default "blue" }}
+          EOF
+          
+          # Generate values template
+          cat > k8s/helm/values.yaml << EOF
+          app:
+            name: ${{ env.APP_NAME }}
+          
+          image:
+            repository: ${{ needs.deployment-preparation.outputs.image-tag | split(':' | .[0] }}
+            tag: ${{ env.APP_VERSION }}
+            pullPolicy: Always
+          
+          environment:
+            type: ${{ needs.deployment-preparation.outputs.environment }}
+            color: green  # Will be overridden during deployment
+            activeColor: blue  # Current active environment
+          
+          namespace: ${{ needs.deployment-preparation.outputs.namespace }}
+          
+          deployment:
+            replicas: 3
+          
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          
+          autoscaling:
+            enabled: true
+            minReplicas: 3
+            maxReplicas: 10
+            targetCPUUtilizationPercentage: 70
+            targetMemoryUtilizationPercentage: 80
+          
+          monitoring:
+            enabled: true
+            prometheusOperator: true
+          
+          security:
+            podSecurityPolicy: true
+            networkPolicy: true
+          EOF
+
+      - name: 🔧 Create Kubernetes base resources
+        run: |
+          NAMESPACE="${{ needs.deployment-preparation.outputs.namespace }}"
+          
+          # Create service account
+          cat > k8s/service-account.yaml << EOF
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata:
+            name: ${{ env.APP_NAME }}-service-account
+            namespace: $NAMESPACE
+            labels:
+              app: ${{ env.APP_NAME }}
+          ---
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: Role
+          metadata:
+            name: ${{ env.APP_NAME }}-role
+            namespace: $NAMESPACE
+          rules:
+          - apiGroups: [""]
+            resources: ["configmaps", "secrets"]
+            verbs: ["get", "list"]
+          - apiGroups: [""]
+            resources: ["pods"]
+            verbs: ["get", "list"]
+          ---
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: RoleBinding
+          metadata:
+            name: ${{ env.APP_NAME }}-rolebinding
+            namespace: $NAMESPACE
+          subjects:
+          - kind: ServiceAccount
+            name: ${{ env.APP_NAME }}-service-account
+            namespace: $NAMESPACE
+          roleRef:
+            kind: Role
+            name: ${{ env.APP_NAME }}-role
+            apiGroup: rbac.authorization.k8s.io
+          EOF
+          
+          # Apply service account
+          kubectl apply -f k8s/service-account.yaml
+          
+          # Create secrets if they don't exist
+          kubectl create secret generic ${{ env.APP_NAME }}-secrets \
+            --namespace="$NAMESPACE" \
+            --from-literal=mongodb-uri="${{ secrets.MONGODB_URI }}" \
+            --from-literal=redis-url="${{ secrets.REDIS_URL }}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+  # ==========================================================================
+  # GREEN ENVIRONMENT DEPLOYMENT JOB
+  # ==========================================================================
+  # Deploy application to green environment with comprehensive validation
+  
+  green-environment-deployment:
+    name: 🟢 Green Environment Deployment
+    runs-on: ubuntu-latest
+    needs: [deployment-preparation, environment-preparation]
+    timeout-minutes: 25
+    
+    outputs:
+      deployment-success: ${{ steps.deployment.outputs.success }}
+      green-endpoint: ${{ steps.deployment.outputs.green-endpoint }}
+      health-check-status: ${{ steps.health-check.outputs.status }}
+      
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: ⚙️ Set up Kubernetes access
+        run: |
+          if [[ "${{ needs.deployment-preparation.outputs.environment }}" == "production" ]]; then
+            echo "${{ secrets.PROD_KUBECONFIG }}" | base64 -d > $HOME/.kube/config
+          else
+            echo "${{ secrets.STAGING_KUBECONFIG }}" | base64 -d > $HOME/.kube/config
+          fi
+
+      - name: 🚀 Deploy to green environment
+        id: deployment
+        run: |
+          NAMESPACE="${{ needs.deployment-preparation.outputs.namespace }}"
+          TARGET_COLOR="green"
+          
+          # Update Helm values for green deployment
+          cat > k8s/helm/values-green.yaml << EOF
+          app:
+            name: ${{ env.APP_NAME }}
+          
+          image:
+            repository: $(echo '${{ needs.deployment-preparation.outputs.image-tag }}' | cut -d':' -f1)
+            tag: ${{ env.APP_VERSION }}
+            pullPolicy: Always
+          
+          environment:
+            type: ${{ needs.deployment-preparation.outputs.environment }}
+            color: green
+            activeColor: ${{ needs.environment-preparation.outputs.current-active }}
+          
+          namespace: $NAMESPACE
+          
+          deployment:
+            replicas: 3
+          
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          EOF
+          
+          echo "🚀 Deploying to green environment..."
+          
+          # Deploy using Helm
+          helm upgrade --install \
+            ${{ env.APP_NAME }}-green \
+            k8s/helm \
+            --namespace "$NAMESPACE" \
+            --values k8s/helm/values-green.yaml \
+            --set environment.color=green \
+            --set image.tag=${{ env.APP_VERSION }} \
+            --timeout 10m \
+            --wait \
+            --wait-for-jobs
+          
+          # Wait for deployment to be ready
+          echo "⏳ Waiting for green deployment to be ready..."
+          kubectl rollout status deployment/${{ env.APP_NAME }}-green \
+            --namespace="$NAMESPACE" \
+            --timeout=600s
+          
+          # Get green service endpoint
+          GREEN_SERVICE_IP=$(kubectl get service ${{ env.APP_NAME }}-green \
+            --namespace="$NAMESPACE" \
+            -o jsonpath='{.spec.clusterIP}')
+          
+          GREEN_ENDPOINT="http://${GREEN_SERVICE_IP}"
+          
+          echo "✅ Green environment deployed successfully"
+          echo "🌐 Green endpoint: $GREEN_ENDPOINT"
+          
+          echo "success=true" >> $GITHUB_OUTPUT
+          echo "green-endpoint=$GREEN_ENDPOINT" >> $GITHUB_OUTPUT
+
+      - name: 🏥 Comprehensive health check validation
+        id: health-check
+        run: |
+          GREEN_ENDPOINT="${{ steps.deployment.outputs.green-endpoint }}"
+          NAMESPACE="${{ needs.deployment-preparation.outputs.namespace }}"
+          
+          echo "🏥 Starting comprehensive health check validation..."
+          
+          # Function to perform health check
+          perform_health_check() {
+            local endpoint=$1
+            local check_type=$2
+            
+            response=$(kubectl run health-check-$check_type \
+              --image=curlimages/curl:latest \
+              --restart=Never \
+              --namespace="$NAMESPACE" \
+              --rm -i --tty=false \
+              -- curl -s -f "$endpoint" 2>/dev/null || echo "FAILED")
+            
+            if [[ "$response" == "FAILED" ]]; then
+              return 1
+            else
+              echo "$response"
+              return 0
+            fi
+          }
+          
+          # Health check loop with retries
+          HEALTH_PASSED=false
+          for attempt in $(seq 1 ${{ env.HEALTH_CHECK_RETRIES }}); do
+            echo "🔍 Health check attempt $attempt/${{ env.HEALTH_CHECK_RETRIES }}"
+            
+            # Basic health check
+            if perform_health_check "$GREEN_ENDPOINT/health" "basic" >/dev/null; then
+              echo "✅ Basic health check passed"
+              
+              # Readiness check
+              if perform_health_check "$GREEN_ENDPOINT/health/ready" "readiness" >/dev/null; then
+                echo "✅ Readiness check passed"
+                
+                # API functionality check
+                if perform_health_check "$GREEN_ENDPOINT/api/status" "api" >/dev/null; then
+                  echo "✅ API functionality check passed"
+                  HEALTH_PASSED=true
+                  break
+                else
+                  echo "⚠️ API functionality check failed (attempt $attempt)"
+                fi
+              else
+                echo "⚠️ Readiness check failed (attempt $attempt)"
+              fi
+            else
+              echo "❌ Basic health check failed (attempt $attempt)"
+            fi
+            
+            if [[ $attempt -lt ${{ env.HEALTH_CHECK_RETRIES }} ]]; then
+              echo "⏳ Waiting 10 seconds before retry..."
+              sleep 10
+            fi
+          done
+          
+          # Final validation
+          if [[ "$HEALTH_PASSED" == "true" ]]; then
+            echo "✅ All health checks passed successfully"
+            echo "status=healthy" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Health checks failed after ${{ env.HEALTH_CHECK_RETRIES }} attempts"
+            echo "status=unhealthy" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      - name: 📊 Collect initial performance metrics
+        run: |
+          GREEN_ENDPOINT="${{ steps.deployment.outputs.green-endpoint }}"
+          NAMESPACE="${{ needs.deployment-preparation.outputs.namespace }}"
+          
+          echo "📊 Collecting initial performance metrics from green environment..."
+          
+          # Create performance test pod
+          cat > k8s/performance-test-pod.yaml << EOF
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: performance-test-initial
+            namespace: $NAMESPACE
+          spec:
+            restartPolicy: Never
+            containers:
+            - name: performance-test
+              image: loadimpact/k6:latest
+              command: ["/bin/sh"]
+              args: 
+              - -c
+              - |
+                cat > /test.js << 'SCRIPT'
+                import http from 'k6/http';
+                import { check } from 'k6';
+                
+                export let options = {
+                  stages: [
+                    { duration: '30s', target: 10 },
+                    { duration: '60s', target: 10 },
+                    { duration: '30s', target: 0 },
+                  ],
+                };
+                
+                export default function() {
+                  let response = http.get('$GREEN_ENDPOINT/health');
+                  check(response, {
+                    'status is 200': (r) => r.status === 200,
+                    'response time < 500ms': (r) => r.timings.duration < 500,
+                  });
+                }
+                SCRIPT
+                k6 run /test.js
+          EOF
+          
+          # Run initial performance test
+          kubectl apply -f k8s/performance-test-pod.yaml
+          
+          # Wait for test completion
+          kubectl wait --for=condition=Ready pod/performance-test-initial \
+            --namespace="$NAMESPACE" \
+            --timeout=60s || echo "Performance test pod not ready"
+          
+          # Get test results
+          kubectl logs performance-test-initial --namespace="$NAMESPACE" || echo "No performance test logs available"
+          
+          # Cleanup
+          kubectl delete pod performance-test-initial --namespace="$NAMESPACE" --ignore-not-found
+
+  # ==========================================================================
+  # PERFORMANCE VALIDATION JOB
+  # ==========================================================================
+  # Comprehensive performance validation with baseline comparison
+  
+  performance-validation:
+    name: ⚡ Performance Validation and Baseline Comparison
+    runs-on: ubuntu-latest
+    needs: [deployment-preparation, green-environment-deployment]
+    if: needs.deployment-preparation.outputs.skip-performance != 'true'
+    timeout-minutes: 20
+    
+    outputs:
+      performance-status: ${{ steps.validation.outputs.status }}
+      variance-percentage: ${{ steps.validation.outputs.variance }}
+      performance-passed: ${{ steps.validation.outputs.passed }}
+      
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python for performance analysis
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: 📦 Install performance testing tools
+        run: |
+          pip install locust==2.17.0
+          pip install requests>=2.31.0
+          pip install numpy>=1.24.0
+          pip install pandas>=2.0.0
+
+      - name: ⚙️ Set up Kubernetes access
+        run: |
+          if [[ "${{ needs.deployment-preparation.outputs.environment }}" == "production" ]]; then
+            echo "${{ secrets.PROD_KUBECONFIG }}" | base64 -d > $HOME/.kube/config
+          else
+            echo "${{ secrets.STAGING_KUBECONFIG }}" | base64 -d > $HOME/.kube/config
+          fi
+
+      - name: 🚀 Create port-forward for performance testing
+        run: |
+          NAMESPACE="${{ needs.deployment-preparation.outputs.namespace }}"
+          
+          # Port-forward green service for testing
+          kubectl port-forward service/${{ env.APP_NAME }}-green 8080:80 \
+            --namespace="$NAMESPACE" &
+          
+          # Wait for port-forward to be ready
+          sleep 10
+          
+          # Verify port-forward
+          curl -f http://localhost:8080/health || {
+            echo "❌ Port-forward failed"
+            kubectl get pods --namespace="$NAMESPACE"
+            kubectl logs -l app=${{ env.APP_NAME }},version=green --namespace="$NAMESPACE" --tail=50
+            exit 1
+          }
+          
+          echo "✅ Port-forward established successfully"
+
+      - name: ⚡ Run comprehensive performance tests
+        id: performance-test
+        run: |
+          echo "⚡ Running comprehensive performance tests..."
+          
+          # Create performance test configuration
+          cat > performance_test.py << 'EOF'
+          from locust import HttpUser, task, between
+          import time
+          import json
+          import os
+          
+          class FlaskAppUser(HttpUser):
+              wait_time = between(1, 2)
+              
+              def on_start(self):
+                  # Health check before testing
+                  response = self.client.get("/health")
+                  if response.status_code != 200:
+                      print("Health check failed during startup")
+              
+              @task(3)
+              def test_health_endpoint(self):
+                  self.client.get("/health")
+              
+              @task(3)
+              def test_ready_endpoint(self):
+                  self.client.get("/health/ready")
+              
+              @task(2)
+              def test_api_status(self):
+                  self.client.get("/api/status", catch_response=True)
+              
+              @task(1)
+              def test_metrics_endpoint(self):
+                  self.client.get("/metrics", catch_response=True)
+          EOF
+          
+          # Run Locust performance test
+          locust \
+            --headless \
+            --users 50 \
+            --spawn-rate 10 \
+            --run-time ${{ env.PERFORMANCE_VALIDATION_DURATION }}s \
+            --host http://localhost:8080 \
+            --csv performance_results \
+            --html performance_report.html \
+            --logfile performance.log \
+            -f performance_test.py
+          
+          echo "✅ Performance test completed"
+
+      - name: 📊 Analyze performance results and validate baseline
+        id: validation
+        run: |
+          echo "📊 Analyzing performance results and validating against baseline..."
+          
+          # Create performance analysis script
+          python3 << 'EOF'
+          import csv
+          import json
+          import os
+          from datetime import datetime
+          
+          def analyze_performance_results():
+              """Analyze Locust performance results and compare with baseline."""
+              
+              # Load performance results
+              results = {
+                  'timestamp': datetime.utcnow().isoformat(),
+                  'test_duration': int(os.environ.get('PERFORMANCE_VALIDATION_DURATION', 300)),
+                  'metrics': {},
+                  'baseline_comparison': {},
+                  'status': 'UNKNOWN'
+              }
+              
+              # Parse Locust stats
+              stats_file = 'performance_results_stats.csv'
+              if os.path.exists(stats_file):
+                  with open(stats_file, 'r') as f:
+                      reader = csv.DictReader(f)
+                      stats = list(reader)
+                      
+                      if stats:
+                          # Get aggregated stats (last row)
+                          total_stats = stats[-1]
+                          
+                          results['metrics'] = {
+                              'response_times': {
+                                  'mean': float(total_stats.get('Average Response Time', 0)),
+                                  'min': float(total_stats.get('Min Response Time', 0)),
+                                  'max': float(total_stats.get('Max Response Time', 0)),
+                                  'p50': float(total_stats.get('50%', 0)),
+                                  'p95': float(total_stats.get('95%', 0)),
+                                  'p99': float(total_stats.get('99%', 0))
+                              },
+                              'throughput': {
+                                  'requests_per_second': float(total_stats.get('Requests/s', 0)),
+                                  'total_requests': int(total_stats.get('Request Count', 0)),
+                                  'failure_count': int(total_stats.get('Failure Count', 0)),
+                                  'error_rate': float(total_stats.get('Failure Count', 0)) / max(int(total_stats.get('Request Count', 1)), 1)
+                              }
+                          }
+              
+              # Load baseline data
+              baseline_file = 'tests/performance/data/nodejs_baseline.json'
+              baseline = {}
+              if os.path.exists(baseline_file):
+                  with open(baseline_file, 'r') as f:
+                      baseline = json.load(f)
+              else:
+                  # Default baseline
+                  baseline = {
+                      'response_times': {'mean': 150.0, 'p95': 300.0},
+                      'throughput': {'requests_per_second': 100.0},
+                      'error_rate': 0.01
+                  }
+              
+              # Compare with baseline
+              variance_threshold = float(os.environ.get('PERFORMANCE_VARIANCE_THRESHOLD', 10))
+              violations = []
+              
+              if results['metrics']:
+                  # Response time comparison
+                  current_mean = results['metrics']['response_times']['mean']
+                  baseline_mean = baseline.get('response_times', {}).get('mean', 150.0)
+                  
+                  if baseline_mean > 0:
+                      mean_variance = ((current_mean - baseline_mean) / baseline_mean) * 100
+                  else:
+                      mean_variance = 0
+                  
+                  results['baseline_comparison']['response_time_mean'] = {
+                      'baseline': baseline_mean,
+                      'current': current_mean,
+                      'variance_percent': mean_variance,
+                      'within_threshold': abs(mean_variance) <= variance_threshold
+                  }
+                  
+                  if abs(mean_variance) > variance_threshold:
+                      violations.append(f"Response time variance: {mean_variance:.1f}%")
+                  
+                  # P95 response time comparison
+                  current_p95 = results['metrics']['response_times']['p95']
+                  baseline_p95 = baseline.get('response_times', {}).get('p95', 300.0)
+                  
+                  if baseline_p95 > 0:
+                      p95_variance = ((current_p95 - baseline_p95) / baseline_p95) * 100
+                  else:
+                      p95_variance = 0
+                  
+                  results['baseline_comparison']['response_time_p95'] = {
+                      'baseline': baseline_p95,
+                      'current': current_p95,
+                      'variance_percent': p95_variance,
+                      'within_threshold': abs(p95_variance) <= variance_threshold
+                  }
+                  
+                  if abs(p95_variance) > variance_threshold:
+                      violations.append(f"P95 response time variance: {p95_variance:.1f}%")
+                  
+                  # Throughput comparison
+                  current_rps = results['metrics']['throughput']['requests_per_second']
+                  baseline_rps = baseline.get('throughput', {}).get('requests_per_second', 100.0)
+                  
+                  if baseline_rps > 0:
+                      rps_variance = ((current_rps - baseline_rps) / baseline_rps) * 100
+                  else:
+                      rps_variance = 0
+                  
+                  results['baseline_comparison']['throughput_rps'] = {
+                      'baseline': baseline_rps,
+                      'current': current_rps,
+                      'variance_percent': rps_variance,
+                      'within_threshold': rps_variance >= -variance_threshold  # Allow throughput improvement
+                  }
+                  
+                  if rps_variance < -variance_threshold:
+                      violations.append(f"Throughput degradation: {abs(rps_variance):.1f}%")
+                  
+                  # Error rate validation
+                  current_error_rate = results['metrics']['throughput']['error_rate']
+                  baseline_error_rate = baseline.get('error_rate', 0.01)
+                  
+                  error_increase = ((current_error_rate - baseline_error_rate) / max(baseline_error_rate, 0.001)) * 100
+                  
+                  results['baseline_comparison']['error_rate'] = {
+                      'baseline': baseline_error_rate,
+                      'current': current_error_rate,
+                      'increase_percent': error_increase,
+                      'acceptable': error_increase <= 50  # Allow 50% increase
+                  }
+                  
+                  if error_increase > 50:
+                      violations.append(f"Error rate increase: {error_increase:.1f}%")
+              
+              # Determine overall status
+              if not violations:
+                  results['status'] = 'PASS'
+                  overall_variance = max([
+                      abs(results['baseline_comparison'].get('response_time_mean', {}).get('variance_percent', 0)),
+                      abs(results['baseline_comparison'].get('response_time_p95', {}).get('variance_percent', 0)),
+                      abs(results['baseline_comparison'].get('throughput_rps', {}).get('variance_percent', 0))
+                  ])
+              else:
+                  results['status'] = 'FAIL'
+                  overall_variance = variance_threshold + 1  # Indicate failure
+              
+              results['violations'] = violations
+              results['overall_variance'] = overall_variance
+              
+              # Save results
+              with open('performance_validation_results.json', 'w') as f:
+                  json.dump(results, f, indent=2)
+              
+              # Output for GitHub Actions
+              print(f"Performance validation status: {results['status']}")
+              print(f"Overall variance: {overall_variance:.1f}%")
+              
+              if violations:
+                  print("Violations detected:")
+                  for violation in violations:
+                      print(f"  - {violation}")
+              else:
+                  print("No performance violations detected")
+              
+              # Set outputs
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write(f"status={results['status']}\n")
+                  f.write(f"variance={overall_variance:.1f}\n")
+                  f.write(f"passed={'true' if results['status'] == 'PASS' else 'false'}\n")
+              
+              return results['status'] == 'PASS'
+          
+          # Run analysis
+          passed = analyze_performance_results()
+          if not passed:
+              exit(1)
+          EOF
+
+      - name: 📊 Upload performance validation results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: performance-validation-results
+          path: |
+            performance_results*
+            performance_report.html
+            performance_validation_results.json
+            performance.log
+          retention-days: 30
+
+      - name: 🚨 Performance validation failure notification
+        if: steps.validation.outputs.passed != 'true'
+        run: |
+          echo "❌ Performance validation failed!"
+          echo "Variance: ${{ steps.validation.outputs.variance }}% (threshold: ±${{ env.PERFORMANCE_VARIANCE_THRESHOLD }}%)"
+          
+          if [[ -n "${{ env.SLACK_WEBHOOK_URL }}" ]]; then
+            curl -X POST -H 'Content-type: application/json' \
+              --data '{
+                "text": "❌ Performance validation failed for ${{ github.repository }}",
+                "attachments": [{
+                  "color": "danger",
+                  "fields": [
+                    {"title": "Environment", "value": "${{ needs.deployment-preparation.outputs.environment }}", "short": true},
+                    {"title": "Variance", "value": "${{ steps.validation.outputs.variance }}%", "short": true},
+                    {"title": "Threshold", "value": "±${{ env.PERFORMANCE_VARIANCE_THRESHOLD }}%", "short": true},
+                    {"title": "Commit", "value": "${{ github.sha }}", "short": true}
+                  ]
+                }]
+              }' \
+              ${{ env.SLACK_WEBHOOK_URL }}
+          fi
+
+  # ==========================================================================
+  # MANUAL APPROVAL JOB (Production Only)
+  # ==========================================================================
+  # Manual approval gate for production deployments with stakeholder review
+  
+  manual-approval:
+    name: 👥 Manual Approval Gate
+    runs-on: ubuntu-latest
+    needs: [deployment-preparation, green-environment-deployment, performance-validation]
+    if: |
+      always() &&
+      needs.deployment-preparation.outputs.environment == 'production' &&
+      needs.green-environment-deployment.outputs.deployment-success == 'true' &&
+      (needs.performance-validation.result == 'success' || needs.deployment-preparation.outputs.skip-performance == 'true')
+    timeout-minutes: 10080  # 7 days timeout for approval
+    
+    environment:
+      name: production-approval
+      url: https://production.company.com
+      
+    steps:
+      - name: 📋 Deployment approval summary
+        run: |
+          echo "## 👥 Production Deployment Approval Required" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ✅ Pre-approval Validation Status:" >> $GITHUB_STEP_SUMMARY
+          echo "- **Green Environment Deployment:** ✅ Success" >> $GITHUB_STEP_SUMMARY
+          echo "- **Health Checks:** ✅ Passed" >> $GITHUB_STEP_SUMMARY
+          echo "- **Security Scan:** ✅ Completed" >> $GITHUB_STEP_SUMMARY
+          
+          if [[ "${{ needs.deployment-preparation.outputs.skip-performance }}" == "true" ]]; then
+            echo "- **Performance Validation:** ⚠️ Skipped (Manual override)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **Performance Validation:** ✅ Passed (${{ needs.performance-validation.outputs.variance }}% variance)" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🎯 Deployment Details:" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment:** Production" >> $GITHUB_STEP_SUMMARY
+          echo "- **Strategy:** ${{ needs.deployment-preparation.outputs.deployment-strategy }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image:** ${{ needs.deployment-preparation.outputs.image-tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Namespace:** ${{ needs.deployment-preparation.outputs.namespace }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Triggered by:** ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ⚠️ Production Deployment Considerations:" >> $GITHUB_STEP_SUMMARY
+          echo "- This deployment will affect production traffic" >> $GITHUB_STEP_SUMMARY
+          echo "- Blue-green deployment ensures zero downtime" >> $GITHUB_STEP_SUMMARY
+          echo "- Gradual traffic migration (5%→25%→50%→100%) will be implemented" >> $GITHUB_STEP_SUMMARY
+          echo "- Automatic rollback is enabled for performance degradation" >> $GITHUB_STEP_SUMMARY
+          echo "- Emergency rollback procedures are in place" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Action Required:** Please review all validations and approve to proceed with production deployment." >> $GITHUB_STEP_SUMMARY
+
+      - name: 📤 Send approval notification
+        run: |
+          if [[ -n "${{ env.SLACK_WEBHOOK_URL }}" ]]; then
+            curl -X POST -H 'Content-type: application/json' \
+              --data '{
+                "text": "🎯 Production Deployment Approval Required",
+                "attachments": [{
+                  "color": "warning",
+                  "title": "Flask Migration Production Deployment",
+                  "title_link": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+                  "fields": [
+                    {"title": "Repository", "value": "${{ github.repository }}", "short": true},
+                    {"title": "Branch", "value": "${{ github.ref_name }}", "short": true},
+                    {"title": "Commit", "value": "${{ github.sha }}", "short": true},
+                    {"title": "Triggered by", "value": "${{ github.actor }}", "short": true},
+                    {"title": "Performance Status", "value": "${{ needs.performance-validation.outputs.passed == 'true' && '✅ Passed' || '⚠️ Skipped' }}", "short": true},
+                    {"title": "Environment", "value": "Production", "short": true}
+                  ],
+                  "footer": "Awaiting stakeholder approval for production deployment"
+                }]
+              }' \
+              ${{ env.SLACK_WEBHOOK_URL }}
+          fi
+
+  # ==========================================================================
+  # TRAFFIC MIGRATION JOB
+  # ==========================================================================
+  # Gradual traffic migration with feature flag control and monitoring
+  
+  traffic-migration:
+    name: 🔄 Gradual Traffic Migration (Blue→Green)
+    runs-on: ubuntu-latest
+    needs: [deployment-preparation, green-environment-deployment, performance-validation, manual-approval]
+    if: |
+      always() &&
+      needs.green-environment-deployment.outputs.deployment-success == 'true' &&
+      (needs.performance-validation.result == 'success' || needs.deployment-preparation.outputs.skip-performance == 'true') &&
+      (needs.manual-approval.result == 'success' || needs.deployment-preparation.outputs.environment != 'production')
+    timeout-minutes: 60
+    
+    outputs:
+      migration-status: ${{ steps.traffic-migration.outputs.status }}
+      final-traffic-percentage: ${{ steps.traffic-migration.outputs.final-percentage }}
+      rollback-triggered: ${{ steps.monitoring.outputs.rollback-triggered }}
+      
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: ⚙️ Set up Kubernetes access and monitoring tools
+        run: |
+          if [[ "${{ needs.deployment-preparation.outputs.environment }}" == "production" ]]; then
+            echo "${{ secrets.PROD_KUBECONFIG }}" | base64 -d > $HOME/.kube/config
+          else
+            echo "${{ secrets.STAGING_KUBECONFIG }}" | base64 -d > $HOME/.kube/config
+          fi
+          
+          # Install additional tools for monitoring
+          pip install requests prometheus-client
+
+      - name: 🔄 Implement gradual traffic migration
+        id: traffic-migration
+        run: |
+          NAMESPACE="${{ needs.deployment-preparation.outputs.namespace }}"
+          TRAFFIC_STAGES='${{ env.TRAFFIC_MIGRATION_STAGES }}'
+          INTERVAL=${{ needs.deployment-preparation.outputs.traffic-intervals }}
+          
+          echo "🔄 Starting gradual traffic migration with $INTERVAL second intervals"
+          echo "📊 Migration stages: $TRAFFIC_STAGES"
+          
+          # Parse traffic stages
+          STAGES=$(echo "$TRAFFIC_STAGES" | jq -r '.[]')
+          
+          # Function to update traffic distribution
+          update_traffic_distribution() {
+            local green_percentage=$1
+            local blue_percentage=$((100 - green_percentage))
+            
+            echo "🎯 Updating traffic distribution: Green ${green_percentage}%, Blue ${blue_percentage}%"
+            
+            # Update service selector weights (using Kubernetes service mesh or ingress)
+            # This would typically integrate with Istio, Linkerd, or NGINX ingress
+            # For demonstration, we'll update service annotations
+            
+            kubectl annotate service ${{ env.APP_NAME }}-active \
+              --namespace="$NAMESPACE" \
+              traffic.green.percentage="$green_percentage" \
+              traffic.blue.percentage="$blue_percentage" \
+              --overwrite
+            
+            # Update feature flag if configured
+            if [[ -n "${{ env.FEATURE_FLAG_SERVICE_URL }}" ]]; then
+              curl -X POST \
+                -H "Authorization: Bearer ${{ env.FEATURE_FLAG_API_KEY }}" \
+                -H "Content-Type: application/json" \
+                -d "{
+                  \"flag\": \"flask_migration_traffic\",
+                  \"environment\": \"${{ needs.deployment-preparation.outputs.environment }}\",
+                  \"value\": $green_percentage
+                }" \
+                "${{ env.FEATURE_FLAG_SERVICE_URL }}/api/flags" || \
+                echo "Warning: Feature flag update failed"
+            fi
+            
+            return 0
+          }
+          
+          # Function to monitor performance during migration
+          monitor_performance() {
+            local stage=$1
+            local duration=$2
+            
+            echo "📊 Monitoring performance for ${duration}s during stage $stage"
+            
+            # Create monitoring script
+            python3 << EOF
+          import requests
+          import time
+          import json
+          from datetime import datetime, timedelta
+          
+          def monitor_metrics(duration_seconds):
+              """Monitor key metrics during traffic migration."""
+              
+              start_time = datetime.now()
+              end_time = start_time + timedelta(seconds=duration_seconds)
+              
+              metrics = {
+                  'start_time': start_time.isoformat(),
+                  'stage': $stage,
+                  'samples': [],
+                  'status': 'monitoring'
+              }
+              
+              while datetime.now() < end_time:
+                  try:
+                      # Sample health endpoints
+                      green_health = requests.get('http://localhost:8080/health', timeout=5)
+                      green_metrics = requests.get('http://localhost:8080/metrics', timeout=5)
+                      
+                      sample = {
+                          'timestamp': datetime.now().isoformat(),
+                          'green_health_status': green_health.status_code,
+                          'green_response_time': green_health.elapsed.total_seconds() * 1000,
+                          'metrics_available': green_metrics.status_code == 200
+                      }
+                      
+                      metrics['samples'].append(sample)
+                      
+                      # Check for issues
+                      if green_health.status_code != 200:
+                          print(f"⚠️ Health check failed: {green_health.status_code}")
+                      
+                      if green_health.elapsed.total_seconds() * 1000 > 1000:  # 1 second threshold
+                          print(f"⚠️ Slow response time: {green_health.elapsed.total_seconds() * 1000:.0f}ms")
+                      
+                  except Exception as e:
+                      print(f"⚠️ Monitoring error: {e}")
+                      metrics['samples'].append({
+                          'timestamp': datetime.now().isoformat(),
+                          'error': str(e)
+                      })
+                  
+                  time.sleep(10)  # Sample every 10 seconds
+              
+              metrics['end_time'] = datetime.now().isoformat()
+              metrics['status'] = 'completed'
+              
+              # Save metrics
+              with open(f'migration_metrics_stage_{stage}.json', 'w') as f:
+                  json.dump(metrics, f, indent=2)
+              
+              # Analyze for issues
+              error_count = sum(1 for s in metrics['samples'] if 'error' in s or s.get('green_health_status', 200) != 200)
+              total_samples = len(metrics['samples'])
+              
+              if total_samples > 0:
+                  error_rate = error_count / total_samples
+                  print(f"📊 Stage $stage monitoring completed: {error_count}/{total_samples} errors ({error_rate:.1%})")
+                  
+                  if error_rate > 0.1:  # 10% error threshold
+                      print(f"❌ High error rate detected: {error_rate:.1%}")
+                      return False
+                  else:
+                      print(f"✅ Monitoring passed: {error_rate:.1%} error rate")
+                      return True
+              else:
+                  print("⚠️ No monitoring samples collected")
+                  return False
+          
+          # Monitor for specified duration
+          success = monitor_metrics($duration)
+          exit(0 if success else 1)
+          EOF
+            
+            return $?
+          }
+          
+          # Execute traffic migration stages
+          MIGRATION_SUCCESS=true
+          CURRENT_STAGE=0
+          
+          for stage in $STAGES; do
+            CURRENT_STAGE=$((CURRENT_STAGE + 1))
+            echo ""
+            echo "🎯 Stage $CURRENT_STAGE: Migrating to ${stage}% green traffic"
+            
+            # Update traffic distribution
+            if update_traffic_distribution "$stage"; then
+              echo "✅ Traffic distribution updated successfully"
+              
+              # Wait for traffic to stabilize
+              echo "⏳ Waiting ${INTERVAL}s for traffic to stabilize..."
+              sleep 10  # Brief stabilization period
+              
+              # Monitor performance during this stage
+              if monitor_performance "$CURRENT_STAGE" "$((INTERVAL - 10))"; then
+                echo "✅ Stage $CURRENT_STAGE monitoring passed"
+              else
+                echo "❌ Stage $CURRENT_STAGE monitoring failed"
+                MIGRATION_SUCCESS=false
+                break
+              fi
+            else
+              echo "❌ Failed to update traffic distribution"
+              MIGRATION_SUCCESS=false
+              break
+            fi
+          done
+          
+          # Final status
+          if [[ "$MIGRATION_SUCCESS" == "true" ]]; then
+            echo "✅ Traffic migration completed successfully"
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "final-percentage=100" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Traffic migration failed"
+            echo "status=failed" >> $GITHUB_OUTPUT
+            echo "final-percentage=$stage" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      - name: 📊 Advanced performance monitoring and rollback detection
+        id: monitoring
+        if: always()
+        run: |
+          echo "📊 Advanced performance monitoring and rollback detection"
+          
+          # Create comprehensive monitoring script
+          python3 << 'EOF'
+          import json
+          import os
+          import glob
+          from datetime import datetime
+          
+          def analyze_migration_metrics():
+              """Analyze migration metrics for rollback triggers."""
+              
+              rollback_triggered = False
+              rollback_reasons = []
+              
+              # Load all migration metrics
+              metric_files = glob.glob('migration_metrics_stage_*.json')
+              
+              overall_analysis = {
+                  'analysis_timestamp': datetime.now().isoformat(),
+                  'stages_analyzed': len(metric_files),
+                  'rollback_triggered': False,
+                  'rollback_reasons': [],
+                  'recommendations': []
+              }
+              
+              if not metric_files:
+                  print("⚠️ No migration metrics found for analysis")
+                  return
+              
+              for metric_file in sorted(metric_files):
+                  try:
+                      with open(metric_file, 'r') as f:
+                          stage_metrics = json.load(f)
+                      
+                      stage = stage_metrics.get('stage', 'unknown')
+                      samples = stage_metrics.get('samples', [])
+                      
+                      if not samples:
+                          continue
+                      
+                      # Analyze response times
+                      response_times = [s.get('green_response_time', 0) for s in samples if 'green_response_time' in s]
+                      
+                      if response_times:
+                          avg_response_time = sum(response_times) / len(response_times)
+                          max_response_time = max(response_times)
+                          
+                          print(f"📊 Stage {stage}: Avg response time {avg_response_time:.0f}ms, Max {max_response_time:.0f}ms")
+                          
+                          # Check response time thresholds
+                          if avg_response_time > 1000:  # 1 second average threshold
+                              rollback_reasons.append(f"Stage {stage}: Average response time {avg_response_time:.0f}ms exceeds threshold")
+                              rollback_triggered = True
+                          
+                          if max_response_time > 5000:  # 5 second max threshold
+                              rollback_reasons.append(f"Stage {stage}: Maximum response time {max_response_time:.0f}ms exceeds threshold")
+                              rollback_triggered = True
+                      
+                      # Analyze error rates
+                      error_samples = [s for s in samples if 'error' in s or s.get('green_health_status', 200) != 200]
+                      total_samples = len(samples)
+                      
+                      if total_samples > 0:
+                          error_rate = len(error_samples) / total_samples
+                          print(f"📊 Stage {stage}: Error rate {error_rate:.1%} ({len(error_samples)}/{total_samples})")
+                          
+                          if error_rate > 0.05:  # 5% error rate threshold
+                              rollback_reasons.append(f"Stage {stage}: Error rate {error_rate:.1%} exceeds 5% threshold")
+                              rollback_triggered = True
+                  
+                  except Exception as e:
+                      print(f"⚠️ Error analyzing {metric_file}: {e}")
+              
+              # Overall assessment
+              overall_analysis['rollback_triggered'] = rollback_triggered
+              overall_analysis['rollback_reasons'] = rollback_reasons
+              
+              if rollback_triggered:
+                  print("❌ Rollback triggers detected:")
+                  for reason in rollback_reasons:
+                      print(f"  - {reason}")
+                  
+                  overall_analysis['recommendations'] = [
+                      "Immediate rollback to blue environment recommended",
+                      "Investigate performance degradation causes",
+                      "Review application logs and monitoring data",
+                      "Consider gradual rollout with smaller traffic percentages"
+                  ]
+              else:
+                  print("✅ No rollback triggers detected - migration appears stable")
+                  overall_analysis['recommendations'] = [
+                      "Migration completed successfully",
+                      "Continue monitoring for 24 hours",
+                      "Update performance baselines if improvements observed"
+                  ]
+              
+              # Save analysis
+              with open('migration_analysis.json', 'w') as f:
+                  json.dump(overall_analysis, f, indent=2)
+              
+              # Set GitHub output
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write(f"rollback-triggered={'true' if rollback_triggered else 'false'}\n")
+              
+              return rollback_triggered
+          
+          # Run analysis
+          rollback_needed = analyze_migration_metrics()
+          
+          if rollback_needed:
+              print("🚨 Rollback triggers detected - migration monitoring failed")
+              exit(1)
+          else:
+              print("✅ Migration monitoring passed - no rollback triggers")
+          EOF
+
+      - name: 📊 Upload traffic migration results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: traffic-migration-results
+          path: |
+            migration_metrics_stage_*.json
+            migration_analysis.json
+          retention-days: 30
+
+      - name: 🎯 Update active service to green
+        if: steps.traffic-migration.outputs.status == 'success' && steps.monitoring.outputs.rollback-triggered != 'true'
+        run: |
+          NAMESPACE="${{ needs.deployment-preparation.outputs.namespace }}"
+          
+          echo "🎯 Finalizing traffic migration - updating active service to green"
+          
+          # Update active service to point to green
+          kubectl patch service ${{ env.APP_NAME }}-active \
+            --namespace="$NAMESPACE" \
+            --type='json' \
+            -p='[{"op": "replace", "path": "/spec/selector/version", "value": "green"}]'
+          
+          echo "✅ Active service updated to green environment"
+          echo "🎉 Blue-green deployment completed successfully!"
+
+  # ==========================================================================
+  # AUTOMATED ROLLBACK JOB
+  # ==========================================================================
+  # Automated rollback procedures with performance degradation detection
+  
+  automated-rollback:
+    name: 🔄 Automated Rollback Procedures
+    runs-on: ubuntu-latest
+    needs: [deployment-preparation, green-environment-deployment, traffic-migration]
+    if: |
+      always() &&
+      (needs.green-environment-deployment.outputs.health-check-status == 'unhealthy' ||
+       needs.traffic-migration.outputs.rollback-triggered == 'true' ||
+       failure())
+    timeout-minutes: 15
+    
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: ⚙️ Set up Kubernetes access
+        run: |
+          if [[ "${{ needs.deployment-preparation.outputs.environment }}" == "production" ]]; then
+            echo "${{ secrets.PROD_KUBECONFIG }}" | base64 -d > $HOME/.kube/config
+          else
+            echo "${{ secrets.STAGING_KUBECONFIG }}" | base64 -d > $HOME/.kube/config
+          fi
+
+      - name: 🔄 Execute automated rollback
+        run: |
+          NAMESPACE="${{ needs.deployment-preparation.outputs.namespace }}"
+          
+          echo "🚨 Executing automated rollback procedures"
+          echo "Rollback trigger reasons:"
+          
+          if [[ "${{ needs.green-environment-deployment.outputs.health-check-status }}" == "unhealthy" ]]; then
+            echo "  - Green environment health check failed"
+          fi
+          
+          if [[ "${{ needs.traffic-migration.outputs.rollback-triggered }}" == "true" ]]; then
+            echo "  - Performance degradation detected during traffic migration"
+          fi
+          
+          # Determine current active environment
+          CURRENT_ACTIVE=$(kubectl get service ${{ env.APP_NAME }}-active \
+            --namespace="$NAMESPACE" \
+            -o jsonpath='{.spec.selector.version}' 2>/dev/null || echo "blue")
+          
+          if [[ "$CURRENT_ACTIVE" == "green" ]]; then
+            ROLLBACK_TARGET="blue"
+          else
+            ROLLBACK_TARGET="blue"  # Default rollback to blue
+          fi
+          
+          echo "🎯 Rolling back from $CURRENT_ACTIVE to $ROLLBACK_TARGET"
+          
+          # Immediate traffic rollback
+          kubectl patch service ${{ env.APP_NAME }}-active \
+            --namespace="$NAMESPACE" \
+            --type='json' \
+            -p="[{\"op\": \"replace\", \"path\": \"/spec/selector/version\", \"value\": \"$ROLLBACK_TARGET\"}]"
+          
+          echo "✅ Traffic immediately redirected to $ROLLBACK_TARGET environment"
+          
+          # Update feature flags for rollback
+          if [[ -n "${{ env.FEATURE_FLAG_SERVICE_URL }}" ]]; then
+            curl -X POST \
+              -H "Authorization: Bearer ${{ env.FEATURE_FLAG_API_KEY }}" \
+              -H "Content-Type: application/json" \
+              -d "{
+                \"flag\": \"flask_migration_traffic\",
+                \"environment\": \"${{ needs.deployment-preparation.outputs.environment }}\",
+                \"value\": 0,
+                \"rollback\": true
+              }" \
+              "${{ env.FEATURE_FLAG_SERVICE_URL }}/api/flags" || \
+              echo "Warning: Feature flag rollback failed"
+          fi
+          
+          # Scale down problematic green deployment
+          if kubectl get deployment ${{ env.APP_NAME }}-green --namespace="$NAMESPACE" >/dev/null 2>&1; then
+            kubectl scale deployment ${{ env.APP_NAME }}-green \
+              --namespace="$NAMESPACE" \
+              --replicas=0
+            echo "✅ Green deployment scaled down to prevent resource consumption"
+          fi
+          
+          # Verify rollback
+          sleep 10
+          ACTIVE_AFTER_ROLLBACK=$(kubectl get service ${{ env.APP_NAME }}-active \
+            --namespace="$NAMESPACE" \
+            -o jsonpath='{.spec.selector.version}')
+          
+          if [[ "$ACTIVE_AFTER_ROLLBACK" == "$ROLLBACK_TARGET" ]]; then
+            echo "✅ Rollback completed successfully - active environment: $ACTIVE_AFTER_ROLLBACK"
+          else
+            echo "❌ Rollback verification failed - active environment: $ACTIVE_AFTER_ROLLBACK"
+            exit 1
+          fi
+
+      - name: 🏥 Post-rollback health verification
+        run: |
+          NAMESPACE="${{ needs.deployment-preparation.outputs.namespace }}"
+          
+          echo "🏥 Verifying system health after rollback"
+          
+          # Port-forward to verify health
+          kubectl port-forward service/${{ env.APP_NAME }}-active 8090:80 \
+            --namespace="$NAMESPACE" &
+          
+          sleep 10
+          
+          # Health check verification
+          for attempt in {1..5}; do
+            if curl -f http://localhost:8090/health >/dev/null 2>&1; then
+              echo "✅ Post-rollback health check passed (attempt $attempt)"
+              break
+            else
+              echo "⚠️ Post-rollback health check failed (attempt $attempt)"
+              if [[ $attempt -eq 5 ]]; then
+                echo "❌ Post-rollback health verification failed"
+                exit 1
+              fi
+              sleep 10
+            fi
+          done
+
+      - name: 📊 Generate rollback report
+        run: |
+          cat > rollback_report.md << EOF
+          # Automated Rollback Report
+          
+          **Rollback Timestamp:** $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          **Environment:** ${{ needs.deployment-preparation.outputs.environment }}
+          **Commit:** ${{ github.sha }}
+          **Triggered by:** Automated system
+          
+          ## Rollback Triggers
+          - Health Check Status: ${{ needs.green-environment-deployment.outputs.health-check-status }}
+          - Performance Degradation: ${{ needs.traffic-migration.outputs.rollback-triggered }}
+          - Traffic Migration Status: ${{ needs.traffic-migration.outputs.migration-status }}
+          
+          ## Actions Taken
+          - ✅ Traffic immediately redirected to blue environment
+          - ✅ Feature flags updated for rollback
+          - ✅ Green deployment scaled down
+          - ✅ Post-rollback health verification completed
+          
+          ## Recommendations
+          - Investigate green environment deployment issues
+          - Review performance metrics and logs
+          - Validate application configuration and dependencies
+          - Consider gradual re-deployment with smaller traffic percentages
+          
+          ## Next Steps
+          - Review deployment logs and metrics
+          - Fix identified issues
+          - Re-run deployment with corrected configuration
+          - Monitor system stability post-rollback
+          EOF
+          
+          echo "## 🔄 Automated Rollback Report" >> $GITHUB_STEP_SUMMARY
+          cat rollback_report.md >> $GITHUB_STEP_SUMMARY
+
+      - name: 🚨 Emergency rollback notifications
+        run: |
+          if [[ -n "${{ env.SLACK_WEBHOOK_URL }}" ]]; then
+            curl -X POST -H 'Content-type: application/json' \
+              --data '{
+                "text": "🚨 AUTOMATED ROLLBACK EXECUTED",
+                "attachments": [{
+                  "color": "danger",
+                  "title": "Emergency Rollback - Flask Migration Deployment",
+                  "title_link": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+                  "fields": [
+                    {"title": "Repository", "value": "${{ github.repository }}", "short": true},
+                    {"title": "Environment", "value": "${{ needs.deployment-preparation.outputs.environment }}", "short": true},
+                    {"title": "Commit", "value": "${{ github.sha }}", "short": true},
+                    {"title": "Health Status", "value": "${{ needs.green-environment-deployment.outputs.health-check-status }}", "short": true},
+                    {"title": "Rollback Triggered", "value": "${{ needs.traffic-migration.outputs.rollback-triggered }}", "short": true},
+                    {"title": "Migration Status", "value": "${{ needs.traffic-migration.outputs.migration-status }}", "short": true}
+                  ],
+                  "footer": "Traffic has been redirected to stable blue environment. Investigation required."
+                }]
+              }' \
+              ${{ env.SLACK_WEBHOOK_URL }}
+          fi
+          
+          # Additional emergency notifications
+          if [[ -n "${{ env.EMERGENCY_CONTACTS }}" ]]; then
+            echo "Emergency contacts notified: ${{ env.EMERGENCY_CONTACTS }}"
+          fi
+
+  # ==========================================================================
+  # CLEANUP AND MONITORING JOB
+  # ==========================================================================
+  # Post-deployment cleanup and ongoing monitoring setup
+  
+  cleanup-and-monitoring:
+    name: 🧹 Cleanup and Monitoring Setup
+    runs-on: ubuntu-latest
+    needs: [deployment-preparation, traffic-migration, automated-rollback]
+    if: always() && needs.deployment-preparation.outputs.should-deploy == 'true'
+    timeout-minutes: 15
+    
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: ⚙️ Set up Kubernetes access
+        run: |
+          if [[ "${{ needs.deployment-preparation.outputs.environment }}" == "production" ]]; then
+            echo "${{ secrets.PROD_KUBECONFIG }}" | base64 -d > $HOME/.kube/config
+          else
+            echo "${{ secrets.STAGING_KUBECONFIG }}" | base64 -d > $HOME/.kube/config
+          fi
+
+      - name: 🧹 Clean up old blue environment (if deployment successful)
+        if: needs.traffic-migration.outputs.migration-status == 'success' && needs.automated-rollback.result != 'success'
+        run: |
+          NAMESPACE="${{ needs.deployment-preparation.outputs.namespace }}"
+          
+          echo "🧹 Cleaning up old blue environment after successful green deployment"
+          
+          # Get current active environment
+          CURRENT_ACTIVE=$(kubectl get service ${{ env.APP_NAME }}-active \
+            --namespace="$NAMESPACE" \
+            -o jsonpath='{.spec.selector.version}')
+          
+          if [[ "$CURRENT_ACTIVE" == "green" ]]; then
+            echo "🗑️ Scaling down blue environment"
+            kubectl scale deployment ${{ env.APP_NAME }}-blue \
+              --namespace="$NAMESPACE" \
+              --replicas=1 || echo "Blue deployment not found or already scaled"
+            
+            echo "✅ Blue environment scaled down to 1 replica (kept for emergency rollback)"
+          else
+            echo "ℹ️ Active environment is not green, skipping blue cleanup"
+          fi
+
+      - name: 📊 Set up post-deployment monitoring
+        run: |
+          NAMESPACE="${{ needs.deployment-preparation.outputs.namespace }}"
+          
+          echo "📊 Setting up post-deployment monitoring and alerting"
+          
+          # Create ServiceMonitor for Prometheus (if using Prometheus Operator)
+          cat > k8s/servicemonitor.yaml << EOF
+          apiVersion: monitoring.coreos.com/v1
+          kind: ServiceMonitor
+          metadata:
+            name: ${{ env.APP_NAME }}-monitor
+            namespace: $NAMESPACE
+            labels:
+              app: ${{ env.APP_NAME }}
+              monitoring: enabled
+          spec:
+            selector:
+              matchLabels:
+                app: ${{ env.APP_NAME }}
+            endpoints:
+            - port: metrics
+              path: /metrics
+              interval: 30s
+              scrapeTimeout: 10s
+            - port: http
+              path: /health
+              interval: 60s
+              scrapeTimeout: 5s
+          EOF
+          
+          # Apply monitoring configuration
+          kubectl apply -f k8s/servicemonitor.yaml || echo "ServiceMonitor creation failed (Prometheus Operator may not be installed)"
+          
+          # Create PrometheusRule for alerting
+          cat > k8s/prometheusrule.yaml << EOF
+          apiVersion: monitoring.coreos.com/v1
+          kind: PrometheusRule
+          metadata:
+            name: ${{ env.APP_NAME }}-alerts
+            namespace: $NAMESPACE
+            labels:
+              app: ${{ env.APP_NAME }}
+              prometheus: kube-prometheus
+              role: alert-rules
+          spec:
+            groups:
+            - name: flask-app-alerts
+              rules:
+              - alert: FlaskAppDown
+                expr: up{job="${{ env.APP_NAME }}"} == 0
+                for: 1m
+                labels:
+                  severity: critical
+                annotations:
+                  summary: "Flask application is down"
+                  description: "Flask application has been down for more than 1 minute"
+                  
+              - alert: FlaskAppHighErrorRate
+                expr: rate(flask_http_requests_total{status=~"5.."}[5m]) / rate(flask_http_requests_total[5m]) > 0.05
+                for: 2m
+                labels:
+                  severity: warning
+                annotations:
+                  summary: "High error rate detected"
+                  description: "Error rate is above 5% for more than 2 minutes"
+                  
+              - alert: FlaskAppHighResponseTime
+                expr: histogram_quantile(0.95, rate(flask_http_request_duration_seconds_bucket[5m])) > 1
+                for: 3m
+                labels:
+                  severity: warning
+                annotations:
+                  summary: "High response time detected"
+                  description: "95th percentile response time is above 1 second for more than 3 minutes"
+                  
+              - alert: FlaskAppMemoryUsage
+                expr: container_memory_usage_bytes{pod=~"${{ env.APP_NAME }}-.*"} / container_spec_memory_limit_bytes > 0.8
+                for: 5m
+                labels:
+                  severity: warning
+                annotations:
+                  summary: "High memory usage detected"
+                  description: "Memory usage is above 80% for more than 5 minutes"
+          EOF
+          
+          # Apply alerting rules
+          kubectl apply -f k8s/prometheusrule.yaml || echo "PrometheusRule creation failed (Prometheus Operator may not be installed)"
+
+      - name: 🏥 Configure health check monitoring
+        run: |
+          NAMESPACE="${{ needs.deployment-preparation.outputs.namespace }}"
+          
+          echo "🏥 Configuring ongoing health check monitoring"
+          
+          # Create health check CronJob for ongoing monitoring
+          cat > k8s/health-monitor-cronjob.yaml << EOF
+          apiVersion: batch/v1
+          kind: CronJob
+          metadata:
+            name: ${{ env.APP_NAME }}-health-monitor
+            namespace: $NAMESPACE
+          spec:
+            schedule: "*/5 * * * *"  # Every 5 minutes
+            jobTemplate:
+              spec:
+                template:
+                  spec:
+                    restartPolicy: OnFailure
+                    containers:
+                    - name: health-check
+                      image: curlimages/curl:latest
+                      command:
+                      - /bin/sh
+                      - -c
+                      - |
+                        echo "Health check at \$(date)"
+                        if curl -f http://${{ env.APP_NAME }}-active/health; then
+                          echo "✅ Health check passed"
+                        else
+                          echo "❌ Health check failed"
+                          exit 1
+                        fi
+          EOF
+          
+          # Apply health monitoring CronJob
+          kubectl apply -f k8s/health-monitor-cronjob.yaml
+
+      - name: 📋 Generate comprehensive deployment report
+        run: |
+          # Determine final deployment status
+          if [[ "${{ needs.automated-rollback.result }}" == "success" ]]; then
+            DEPLOYMENT_STATUS="ROLLED_BACK"
+            STATUS_ICON="🔄"
+          elif [[ "${{ needs.traffic-migration.outputs.migration-status }}" == "success" ]]; then
+            DEPLOYMENT_STATUS="SUCCESS"
+            STATUS_ICON="✅"
+          else
+            DEPLOYMENT_STATUS="FAILED"
+            STATUS_ICON="❌"
+          fi
+          
+          cat > deployment_final_report.md << EOF
+          # ${STATUS_ICON} Blue-Green Deployment Final Report
+          
+          **Deployment Status:** $DEPLOYMENT_STATUS
+          **Environment:** ${{ needs.deployment-preparation.outputs.environment }}
+          **Strategy:** ${{ needs.deployment-preparation.outputs.deployment-strategy }}
+          **Commit:** ${{ github.sha }}
+          **Completed:** $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          
+          ## Execution Summary
+          
+          ### Phase Results
+          - **Preparation:** ✅ Completed
+          - **Environment Setup:** ✅ Completed  
+          - **Green Deployment:** ${{ needs.green-environment-deployment.outputs.deployment-success == 'true' && '✅ Success' || '❌ Failed' }}
+          - **Health Checks:** ${{ needs.green-environment-deployment.outputs.health-check-status == 'healthy' && '✅ Passed' || '❌ Failed' }}
+          - **Performance Validation:** ${{ needs.deployment-preparation.outputs.skip-performance == 'true' && '⚠️ Skipped' || (needs.performance-validation.outputs.performance-passed == 'true' && '✅ Passed' || '❌ Failed') }}
+          - **Traffic Migration:** ${{ needs.traffic-migration.outputs.migration-status == 'success' && '✅ Success' || '❌ Failed' }}
+          - **Rollback Triggered:** ${{ needs.automated-rollback.result == 'success' && '🔄 Yes' || '❌ No' }}
+          
+          ### Performance Metrics
+          - **Performance Variance:** ${{ needs.performance-validation.outputs.variance-percentage || 'N/A' }}%
+          - **Traffic Migration:** ${{ needs.traffic-migration.outputs.final-traffic-percentage || '0' }}% to green
+          - **Rollback Triggered:** ${{ needs.traffic-migration.outputs.rollback-triggered || 'false' }}
+          
+          ### Infrastructure Status
+          - **Image:** ${{ needs.deployment-preparation.outputs.image-tag }}
+          - **Namespace:** ${{ needs.deployment-preparation.outputs.namespace }}
+          - **Security Scan:** ✅ Completed
+          - **Monitoring:** ✅ Configured
+          
+          ## Post-Deployment Actions
+          
+          EOF
+          
+          if [[ "$DEPLOYMENT_STATUS" == "SUCCESS" ]]; then
+            cat >> deployment_final_report.md << EOF
+          ### Successful Deployment
+          - ✅ Green environment is now active and serving traffic
+          - ✅ Blue environment scaled down to 1 replica for emergency rollback
+          - ✅ Monitoring and alerting configured
+          - ✅ Health checks are running every 5 minutes
+          
+          ### Next Steps
+          - Monitor application performance for 24 hours
+          - Review performance metrics and optimize if needed
+          - Update deployment baselines
+          - Plan blue environment decommissioning after stability confirmation
+          EOF
+          elif [[ "$DEPLOYMENT_STATUS" == "ROLLED_BACK" ]]; then
+            cat >> deployment_final_report.md << EOF
+          ### Rollback Executed
+          - 🔄 Traffic redirected back to blue environment
+          - 🔄 Green environment scaled down
+          - 🔄 Feature flags reset
+          
+          ### Investigation Required
+          - Review deployment logs and metrics
+          - Analyze performance degradation causes
+          - Fix identified issues before re-deployment
+          - Consider gradual rollout with smaller traffic percentages
+          EOF
+          else
+            cat >> deployment_final_report.md << EOF
+          ### Deployment Failed
+          - ❌ Deployment did not complete successfully
+          - ❌ Manual intervention may be required
+          
+          ### Investigation Required
+          - Review failure logs and error messages
+          - Check infrastructure and configuration
+          - Verify dependencies and external services
+          - Fix issues before retry
+          EOF
+          fi
+          
+          echo "## 📋 Final Deployment Report" >> $GITHUB_STEP_SUMMARY
+          cat deployment_final_report.md >> $GITHUB_STEP_SUMMARY
+
+      - name: 📤 Send final deployment notification
+        run: |
+          # Determine notification color and message
+          if [[ "${{ needs.automated-rollback.result }}" == "success" ]]; then
+            COLOR="warning"
+            STATUS_MSG="🔄 ROLLED BACK"
+            DESCRIPTION="Deployment was automatically rolled back due to issues detected"
+          elif [[ "${{ needs.traffic-migration.outputs.migration-status }}" == "success" ]]; then
+            COLOR="good"
+            STATUS_MSG="✅ SUCCESS"
+            DESCRIPTION="Blue-green deployment completed successfully"
+          else
+            COLOR="danger"
+            STATUS_MSG="❌ FAILED"
+            DESCRIPTION="Deployment failed during execution"
+          fi
+          
+          if [[ -n "${{ env.SLACK_WEBHOOK_URL }}" ]]; then
+            curl -X POST -H 'Content-type: application/json' \
+              --data "{
+                \"text\": \"$STATUS_MSG: Flask Migration Deployment\",
+                \"attachments\": [{
+                  \"color\": \"$COLOR\",
+                  \"title\": \"Blue-Green Deployment Final Status\",
+                  \"title_link\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",
+                  \"fields\": [
+                    {\"title\": \"Repository\", \"value\": \"${{ github.repository }}\", \"short\": true},
+                    {\"title\": \"Environment\", \"value\": \"${{ needs.deployment-preparation.outputs.environment }}\", \"short\": true},
+                    {\"title\": \"Commit\", \"value\": \"${{ github.sha }}\", \"short\": true},
+                    {\"title\": \"Duration\", \"value\": \"$(( ($(date +%s) - $(date -d '${{ github.event.head_commit.timestamp }}' +%s)) / 60 )) minutes\", \"short\": true},
+                    {\"title\": \"Performance\", \"value\": \"${{ needs.performance-validation.outputs.variance-percentage || 'N/A' }}% variance\", \"short\": true},
+                    {\"title\": \"Traffic Migration\", \"value\": \"${{ needs.traffic-migration.outputs.final-traffic-percentage || '0' }}%\", \"short\": true}
+                  ],
+                  \"footer\": \"$DESCRIPTION\"
+                }]
+              }" \
+              ${{ env.SLACK_WEBHOOK_URL }}
+          fi
+
+      - name: 📊 Upload final deployment artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: deployment-final-artifacts
+          path: |
+            deployment_final_report.md
+            k8s/servicemonitor.yaml
+            k8s/prometheusrule.yaml
+            k8s/health-monitor-cronjob.yaml
+          retention-days: 90

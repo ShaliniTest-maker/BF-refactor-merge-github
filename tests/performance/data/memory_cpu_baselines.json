@@ -1,0 +1,470 @@
+{
+  "metadata": {
+    "version": "1.0.0",
+    "created_date": "2024-01-15T00:00:00Z",
+    "last_updated": "2024-01-15T00:00:00Z",
+    "description": "System resource utilization baselines for Node.js to Python/Flask migration performance validation",
+    "migration_requirements": {
+      "performance_variance_threshold": "≤10%",
+      "cpu_utilization_limit": "≤70%",
+      "memory_utilization_limit": "≤80%",
+      "baseline_compliance": "Memory profiling for ≤10% variance compliance per Section 6.6.1"
+    },
+    "testing_framework": {
+      "load_testing": "locust (≥2.x)",
+      "performance_measurement": "apache-bench",
+      "monitoring_integration": "CI/CD pipeline continuous validation"
+    }
+  },
+  "nodejs_baseline_metrics": {
+    "description": "Original Node.js implementation performance baselines",
+    "runtime_environment": {
+      "node_version": "18.x",
+      "platform": "linux-x64",
+      "container_base": "node:18-alpine"
+    },
+    "memory_usage_patterns": {
+      "idle_state": {
+        "rss_memory_mb": 45.2,
+        "heap_used_mb": 28.5,
+        "heap_total_mb": 35.8,
+        "external_mb": 2.1,
+        "array_buffers_mb": 0.3
+      },
+      "light_load": {
+        "concurrent_users": 10,
+        "requests_per_second": 50,
+        "rss_memory_mb": 68.7,
+        "heap_used_mb": 42.3,
+        "heap_total_mb": 55.2,
+        "external_mb": 3.8,
+        "array_buffers_mb": 0.7,
+        "gc_frequency_per_minute": 12,
+        "gc_duration_ms_avg": 3.2
+      },
+      "medium_load": {
+        "concurrent_users": 100,
+        "requests_per_second": 200,
+        "rss_memory_mb": 125.4,
+        "heap_used_mb": 78.9,
+        "heap_total_mb": 102.6,
+        "external_mb": 8.4,
+        "array_buffers_mb": 1.8,
+        "gc_frequency_per_minute": 45,
+        "gc_duration_ms_avg": 8.7
+      },
+      "peak_load": {
+        "concurrent_users": 1000,
+        "requests_per_second": 500,
+        "rss_memory_mb": 245.8,
+        "heap_used_mb": 156.3,
+        "heap_total_mb": 201.4,
+        "external_mb": 18.7,
+        "array_buffers_mb": 4.2,
+        "gc_frequency_per_minute": 120,
+        "gc_duration_ms_avg": 18.4
+      },
+      "endurance_test": {
+        "test_duration_minutes": 30,
+        "concurrent_users": 250,
+        "requests_per_second": 150,
+        "memory_baseline_mb": 95.3,
+        "memory_peak_mb": 134.7,
+        "memory_final_mb": 98.1,
+        "memory_growth_rate_mb_per_hour": 2.8,
+        "gc_cycles_total": 1247
+      }
+    },
+    "cpu_utilization_patterns": {
+      "idle_state": {
+        "cpu_usage_percent": 0.8,
+        "user_time_percent": 0.3,
+        "system_time_percent": 0.5,
+        "event_loop_delay_ms": 0.12
+      },
+      "light_load": {
+        "concurrent_users": 10,
+        "requests_per_second": 50,
+        "cpu_usage_percent": 12.4,
+        "user_time_percent": 8.7,
+        "system_time_percent": 3.7,
+        "event_loop_delay_ms": 2.3,
+        "v8_compile_time_ms": 45.2
+      },
+      "medium_load": {
+        "concurrent_users": 100,
+        "requests_per_second": 200,
+        "cpu_usage_percent": 35.8,
+        "user_time_percent": 26.1,
+        "system_time_percent": 9.7,
+        "event_loop_delay_ms": 8.9,
+        "v8_compile_time_ms": 156.7
+      },
+      "peak_load": {
+        "concurrent_users": 1000,
+        "requests_per_second": 500,
+        "cpu_usage_percent": 68.3,
+        "user_time_percent": 51.2,
+        "system_time_percent": 17.1,
+        "event_loop_delay_ms": 35.6,
+        "v8_compile_time_ms": 423.1
+      },
+      "endurance_test": {
+        "test_duration_minutes": 30,
+        "concurrent_users": 250,
+        "requests_per_second": 150,
+        "cpu_usage_avg_percent": 42.7,
+        "cpu_usage_peak_percent": 58.9,
+        "cpu_usage_min_percent": 38.1,
+        "cpu_variance_coefficient": 0.15
+      }
+    },
+    "response_time_baselines": {
+      "api_endpoints": {
+        "authentication": {
+          "light_load_ms": 45.2,
+          "medium_load_ms": 67.8,
+          "peak_load_ms": 156.3,
+          "95th_percentile_ms": 189.7
+        },
+        "business_logic": {
+          "light_load_ms": 78.4,
+          "medium_load_ms": 124.6,
+          "peak_load_ms": 287.9,
+          "95th_percentile_ms": 334.2
+        },
+        "database_operations": {
+          "light_load_ms": 23.7,
+          "medium_load_ms": 38.9,
+          "peak_load_ms": 89.3,
+          "95th_percentile_ms": 145.6
+        }
+      }
+    }
+  },
+  "python_target_thresholds": {
+    "description": "Target performance thresholds for Python/Flask implementation",
+    "runtime_environment": {
+      "python_version": "3.11",
+      "platform": "linux-x64",
+      "container_base": "python:3.11-slim",
+      "wsgi_server": "gunicorn"
+    },
+    "memory_usage_targets": {
+      "idle_state": {
+        "max_rss_memory_mb": 49.7,
+        "variance_tolerance_percent": 10,
+        "target_range_mb": {
+          "min": 40.7,
+          "max": 49.7
+        }
+      },
+      "light_load": {
+        "concurrent_users": 10,
+        "requests_per_second": 50,
+        "max_rss_memory_mb": 75.6,
+        "variance_tolerance_percent": 10,
+        "target_range_mb": {
+          "min": 61.8,
+          "max": 75.6
+        },
+        "gc_frequency_target_per_minute": "≤15",
+        "gc_duration_target_ms_avg": "≤5.0"
+      },
+      "medium_load": {
+        "concurrent_users": 100,
+        "requests_per_second": 200,
+        "max_rss_memory_mb": 138.0,
+        "variance_tolerance_percent": 10,
+        "target_range_mb": {
+          "min": 112.9,
+          "max": 138.0
+        },
+        "gc_frequency_target_per_minute": "≤50",
+        "gc_duration_target_ms_avg": "≤12.0"
+      },
+      "peak_load": {
+        "concurrent_users": 1000,
+        "requests_per_second": 500,
+        "max_rss_memory_mb": 270.4,
+        "variance_tolerance_percent": 10,
+        "target_range_mb": {
+          "min": 221.2,
+          "max": 270.4
+        },
+        "utilization_limit_percent": 80,
+        "gc_frequency_target_per_minute": "≤140",
+        "gc_duration_target_ms_avg": "≤25.0"
+      },
+      "endurance_test": {
+        "test_duration_minutes": 30,
+        "concurrent_users": 250,
+        "requests_per_second": 150,
+        "max_memory_growth_mb": 104.8,
+        "memory_leak_tolerance_mb_per_hour": 3.1,
+        "memory_stability_variance_percent": 5
+      }
+    },
+    "cpu_utilization_targets": {
+      "idle_state": {
+        "max_cpu_usage_percent": 1.2,
+        "variance_tolerance_percent": 10
+      },
+      "light_load": {
+        "concurrent_users": 10,
+        "requests_per_second": 50,
+        "max_cpu_usage_percent": 13.6,
+        "variance_tolerance_percent": 10,
+        "target_range_percent": {
+          "min": 11.2,
+          "max": 13.6
+        }
+      },
+      "medium_load": {
+        "concurrent_users": 100,
+        "requests_per_second": 200,
+        "max_cpu_usage_percent": 39.4,
+        "variance_tolerance_percent": 10,
+        "target_range_percent": {
+          "min": 32.2,
+          "max": 39.4
+        }
+      },
+      "peak_load": {
+        "concurrent_users": 1000,
+        "requests_per_second": 500,
+        "max_cpu_usage_percent": 70.0,
+        "variance_tolerance_percent": 10,
+        "utilization_limit_percent": 70,
+        "target_range_percent": {
+          "min": 61.5,
+          "max": 70.0
+        }
+      },
+      "endurance_test": {
+        "test_duration_minutes": 30,
+        "concurrent_users": 250,
+        "requests_per_second": 150,
+        "max_cpu_avg_percent": 47.0,
+        "cpu_stability_variance_percent": 15
+      }
+    },
+    "response_time_targets": {
+      "api_endpoints": {
+        "authentication": {
+          "light_load_max_ms": 49.7,
+          "medium_load_max_ms": 74.6,
+          "peak_load_max_ms": 171.9,
+          "95th_percentile_max_ms": 208.7
+        },
+        "business_logic": {
+          "light_load_max_ms": 86.2,
+          "medium_load_max_ms": 137.1,
+          "peak_load_max_ms": 316.7,
+          "95th_percentile_max_ms": 367.6
+        },
+        "database_operations": {
+          "light_load_max_ms": 26.1,
+          "medium_load_max_ms": 42.8,
+          "peak_load_max_ms": 98.2,
+          "95th_percentile_max_ms": 160.2
+        }
+      }
+    }
+  },
+  "resource_constraint_validation": {
+    "description": "Resource utilization limits and validation metrics per Section 4.6.3",
+    "mandatory_limits": {
+      "cpu_utilization_limit_percent": 70,
+      "memory_utilization_limit_percent": 80,
+      "error_rate_limit_percent": 0.1,
+      "response_time_95th_percentile_limit_ms": 500
+    },
+    "monitoring_intervals": {
+      "real_time_monitoring_seconds": 5,
+      "performance_reporting_minutes": 15,
+      "baseline_comparison_hours": 24,
+      "trend_analysis_days": 7
+    },
+    "alert_thresholds": {
+      "cpu_warning_percent": 60,
+      "cpu_critical_percent": 75,
+      "memory_warning_percent": 70,
+      "memory_critical_percent": 85,
+      "response_time_warning_ms": 400,
+      "response_time_critical_ms": 600
+    },
+    "performance_degradation_triggers": {
+      "variance_threshold_percent": 10,
+      "consecutive_failures_limit": 3,
+      "rollback_trigger_conditions": [
+        "CPU usage >75% for >5 minutes",
+        "Memory usage >85% for >3 minutes",
+        "Response time >500ms 95th percentile",
+        "Error rate >0.1% for >2 minutes"
+      ]
+    }
+  },
+  "memory_profiling_data": {
+    "description": "Detailed memory profiling baseline data for ≤10% variance compliance per Section 6.6.1",
+    "profiling_scenarios": {
+      "startup_memory_profile": {
+        "nodejs_baseline": {
+          "initial_memory_mb": 25.3,
+          "post_initialization_mb": 45.2,
+          "module_loading_overhead_mb": 19.9,
+          "startup_time_seconds": 2.1
+        },
+        "python_target": {
+          "max_initial_memory_mb": 27.8,
+          "max_post_initialization_mb": 49.7,
+          "max_module_loading_overhead_mb": 21.9,
+          "max_startup_time_seconds": 2.3
+        }
+      },
+      "request_processing_memory": {
+        "memory_per_request": {
+          "nodejs_baseline_kb": 0.45,
+          "python_target_max_kb": 0.50,
+          "variance_tolerance_percent": 10
+        },
+        "concurrent_request_scaling": {
+          "10_requests": {
+            "nodejs_memory_increment_mb": 4.5,
+            "python_target_max_mb": 5.0
+          },
+          "100_requests": {
+            "nodejs_memory_increment_mb": 45.2,
+            "python_target_max_mb": 49.7
+          },
+          "1000_requests": {
+            "nodejs_memory_increment_mb": 452.1,
+            "python_target_max_mb": 497.3
+          }
+        }
+      },
+      "garbage_collection_patterns": {
+        "nodejs_v8_gc": {
+          "minor_gc_frequency_per_minute": 12,
+          "major_gc_frequency_per_minute": 2,
+          "minor_gc_duration_ms_avg": 3.2,
+          "major_gc_duration_ms_avg": 15.7
+        },
+        "python_gc_target": {
+          "gc_frequency_per_minute": 15,
+          "gc_duration_ms_avg_max": 5.0,
+          "gc_efficiency_improvement_percent": 20
+        }
+      }
+    },
+    "memory_leak_detection": {
+      "baseline_growth_rate_mb_per_hour": 2.8,
+      "acceptable_growth_rate_mb_per_hour": 3.1,
+      "leak_detection_threshold_mb_per_hour": 5.0,
+      "monitoring_duration_hours": 24,
+      "leak_validation_test_hours": 8
+    }
+  },
+  "system_resource_trends": {
+    "description": "System resource trend analysis data per Section 6.6.1 performance monitoring",
+    "historical_patterns": {
+      "daily_usage_cycles": {
+        "peak_hours": ["09:00-11:00", "14:00-16:00", "19:00-21:00"],
+        "low_usage_hours": ["02:00-06:00", "23:00-01:00"],
+        "memory_variance_during_peaks_percent": 25,
+        "cpu_variance_during_peaks_percent": 45
+      },
+      "weekly_trends": {
+        "high_load_days": ["Monday", "Tuesday", "Wednesday"],
+        "low_load_days": ["Saturday", "Sunday"],
+        "weekly_memory_baseline_variance_percent": 15,
+        "weekly_cpu_baseline_variance_percent": 30
+      }
+    },
+    "performance_regression_detection": {
+      "comparison_window_days": 7,
+      "regression_threshold_percent": 5,
+      "baseline_recalibration_frequency_days": 30,
+      "trend_analysis_metrics": [
+        "memory_usage_trend",
+        "cpu_utilization_trend", 
+        "response_time_trend",
+        "error_rate_trend",
+        "throughput_trend"
+      ]
+    },
+    "capacity_planning_data": {
+      "projected_growth_rates": {
+        "monthly_traffic_growth_percent": 5,
+        "memory_scaling_factor": 1.15,
+        "cpu_scaling_factor": 1.20,
+        "infrastructure_headroom_percent": 25
+      },
+      "scaling_thresholds": {
+        "horizontal_scaling_cpu_percent": 60,
+        "horizontal_scaling_memory_percent": 70,
+        "vertical_scaling_evaluation_percent": 80
+      }
+    }
+  },
+  "testing_configuration": {
+    "description": "Performance testing configuration for baseline validation",
+    "load_testing_tools": {
+      "locust": {
+        "version": "≥2.x",
+        "user_scaling": "10 → 50 → 100 → 250 → 500 → 1000",
+        "ramp_up_duration_seconds": 300,
+        "test_duration_minutes": 30,
+        "concurrent_worker_processes": 4
+      },
+      "apache_bench": {
+        "version": "2.3+",
+        "concurrent_connections": [10, 50, 100, 200],
+        "total_requests": 10000,
+        "keep_alive": true,
+        "timeout_seconds": 30
+      }
+    },
+    "monitoring_integration": {
+      "metrics_collection_interval_seconds": 5,
+      "baseline_comparison_frequency_minutes": 15,
+      "performance_report_generation_hours": 24,
+      "alert_notification_systems": ["slack", "teams", "email"]
+    },
+    "validation_criteria": {
+      "performance_variance_tolerance_percent": 10,
+      "memory_efficiency_improvement_target_percent": 5,
+      "cpu_optimization_target_percent": 5,
+      "response_time_consistency_coefficient_max": 0.2
+    }
+  },
+  "compliance_validation": {
+    "description": "Compliance validation metrics for migration success criteria",
+    "migration_success_criteria": {
+      "performance_parity_achieved": "Response time variance ≤10%",
+      "resource_efficiency_maintained": "Memory and CPU within acceptable limits",
+      "stability_demonstrated": "24-hour endurance test completion",
+      "scalability_preserved": "1000 concurrent user capacity maintained"
+    },
+    "quality_gates": {
+      "deployment_blockers": [
+        "Performance variance >10%",
+        "CPU utilization >70% during normal load",
+        "Memory utilization >80% during normal load",
+        "Response time 95th percentile >500ms"
+      ],
+      "performance_approvals_required": [
+        "24-hour stability test completion",
+        "Load test with 1000 concurrent users",
+        "Memory leak validation test",
+        "Baseline comparison validation"
+      ]
+    },
+    "reporting_requirements": {
+      "daily_performance_summary": true,
+      "weekly_trend_analysis": true,
+      "monthly_capacity_planning_report": true,
+      "incident_performance_impact_analysis": true
+    }
+  }
+}

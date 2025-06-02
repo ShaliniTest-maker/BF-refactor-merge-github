@@ -1,0 +1,725 @@
+{
+  "metadata": {
+    "version": "1.0.0",
+    "description": "Comprehensive API test data for Flask migration performance testing",
+    "created_for": "BF-refactor-merge Node.js to Python migration",
+    "performance_targets": {
+      "response_time_variance": "≤10%",
+      "throughput_minimum": "100 requests/second",
+      "error_rate_maximum": "0.1%",
+      "concurrent_users": "10-1000 progressive scaling"
+    },
+    "test_categories": [
+      "user_behavior_simulation",
+      "authentication_validation", 
+      "business_logic_testing",
+      "multi_tenant_scenarios",
+      "edge_cases_boundary_values"
+    ]
+  },
+  
+  "authentication": {
+    "jwt_tokens": {
+      "valid_admin_token": {
+        "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyLCJyb2xlIjoiYWRtaW4iLCJleHAiOjE3MzY4NjA4MDB9.abc123def456ghi789",
+        "decoded_payload": {
+          "sub": "1234567890",
+          "name": "John Doe",
+          "iat": 1516239022,
+          "role": "admin",
+          "exp": 1736860800,
+          "auth0_id": "auth0|admin123",
+          "permissions": ["read:all", "write:all", "delete:all"]
+        }
+      },
+      "valid_user_token": {
+        "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI5ODc2NTQzMjEwIiwibmFtZSI6IkphbmUgU21pdGgiLCJpYXQiOjE1MTYyMzkwMjIsInJvbGUiOiJ1c2VyIiwiZXhwIjoxNzM2ODYwODAwfQ.xyz789abc123def456",
+        "decoded_payload": {
+          "sub": "9876543210",
+          "name": "Jane Smith",
+          "iat": 1516239022,
+          "role": "user",
+          "exp": 1736860800,
+          "auth0_id": "auth0|user456",
+          "permissions": ["read:own", "write:own"]
+        }
+      },
+      "expired_token": {
+        "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyLCJleHAiOjE1MTYyNDI2MjJ9.expired123",
+        "decoded_payload": {
+          "sub": "1234567890",
+          "name": "John Doe",
+          "iat": 1516239022,
+          "exp": 1516242622,
+          "auth0_id": "auth0|expired789"
+        }
+      },
+      "invalid_signature_token": {
+        "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.invalid_signature_here"
+      },
+      "malformed_token": {
+        "token": "not.a.valid.jwt.token.format"
+      }
+    },
+    "auth0_test_data": {
+      "tenant": "test-tenant.auth0.com",
+      "client_id": "test_client_id_12345",
+      "client_secret": "test_client_secret_abcdef",
+      "audience": "https://api.test-app.com",
+      "scope": "openid profile email"
+    }
+  },
+  
+  "user_profiles": {
+    "diverse_users": [
+      {
+        "user_id": "user_001",
+        "profile": {
+          "name": "Alice Johnson",
+          "email": "alice.johnson@testcorp.com",
+          "role": "admin",
+          "department": "Engineering",
+          "location": "US-East",
+          "timezone": "America/New_York",
+          "preferences": {
+            "theme": "dark",
+            "language": "en-US",
+            "notifications": true
+          }
+        },
+        "behavior_pattern": "high_frequency_user",
+        "request_rate": "50-100 requests/minute",
+        "session_duration": "2-4 hours"
+      },
+      {
+        "user_id": "user_002", 
+        "profile": {
+          "name": "Carlos Rodriguez",
+          "email": "carlos.rodriguez@testcorp.com",
+          "role": "manager",
+          "department": "Sales",
+          "location": "EU-West",
+          "timezone": "Europe/Madrid",
+          "preferences": {
+            "theme": "light",
+            "language": "es-ES",
+            "notifications": false
+          }
+        },
+        "behavior_pattern": "moderate_frequency_user",
+        "request_rate": "20-40 requests/minute",
+        "session_duration": "1-2 hours"
+      },
+      {
+        "user_id": "user_003",
+        "profile": {
+          "name": "Priya Patel",
+          "email": "priya.patel@testcorp.com",
+          "role": "analyst", 
+          "department": "Finance",
+          "location": "APAC-South",
+          "timezone": "Asia/Mumbai",
+          "preferences": {
+            "theme": "auto",
+            "language": "en-IN",
+            "notifications": true
+          }
+        },
+        "behavior_pattern": "low_frequency_user",
+        "request_rate": "5-15 requests/minute",
+        "session_duration": "30-60 minutes"
+      },
+      {
+        "user_id": "user_004",
+        "profile": {
+          "name": "Emma Wilson",
+          "email": "emma.wilson@partner.com",
+          "role": "external_partner",
+          "department": "External",
+          "location": "AU-East",
+          "timezone": "Australia/Sydney",
+          "preferences": {
+            "theme": "light",
+            "language": "en-AU",
+            "notifications": true
+          }
+        },
+        "behavior_pattern": "burst_user",
+        "request_rate": "100-200 requests in 5 minutes, then idle",
+        "session_duration": "15-30 minutes"
+      }
+    ]
+  },
+  
+  "api_request_payloads": {
+    "user_management": {
+      "create_user": {
+        "method": "POST",
+        "endpoint": "/api/users",
+        "headers": {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer {admin_token}",
+          "X-Request-ID": "req_12345",
+          "User-Agent": "TestRunner/1.0"
+        },
+        "payload": {
+          "name": "Test User",
+          "email": "test.user@example.com",
+          "role": "user",
+          "department": "Engineering",
+          "metadata": {
+            "created_by": "admin",
+            "source": "api_test"
+          }
+        },
+        "expected_status": 201,
+        "performance_target": "≤200ms"
+      },
+      "update_user": {
+        "method": "PUT",
+        "endpoint": "/api/users/{user_id}",
+        "headers": {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer {user_token}",
+          "X-Request-ID": "req_12346"
+        },
+        "payload": {
+          "name": "Updated Test User",
+          "preferences": {
+            "theme": "dark",
+            "notifications": false
+          }
+        },
+        "expected_status": 200,
+        "performance_target": "≤150ms"
+      },
+      "get_user_profile": {
+        "method": "GET",
+        "endpoint": "/api/users/{user_id}",
+        "headers": {
+          "Authorization": "Bearer {user_token}",
+          "X-Request-ID": "req_12347"
+        },
+        "expected_status": 200,
+        "performance_target": "≤100ms"
+      },
+      "delete_user": {
+        "method": "DELETE",
+        "endpoint": "/api/users/{user_id}",
+        "headers": {
+          "Authorization": "Bearer {admin_token}",
+          "X-Request-ID": "req_12348"
+        },
+        "expected_status": 204,
+        "performance_target": "≤150ms"
+      }
+    },
+    
+    "file_operations": {
+      "upload_file": {
+        "method": "POST",
+        "endpoint": "/api/files/upload",
+        "headers": {
+          "Authorization": "Bearer {user_token}",
+          "X-Request-ID": "req_12349"
+        },
+        "payload": {
+          "file": "multipart_file_data",
+          "filename": "test_document.pdf",
+          "description": "Test file upload",
+          "tags": ["test", "performance"],
+          "metadata": {
+            "size": 1024000,
+            "mimetype": "application/pdf"
+          }
+        },
+        "expected_status": 201,
+        "performance_target": "≤2000ms"
+      },
+      "get_file_metadata": {
+        "method": "GET",
+        "endpoint": "/api/files/{file_id}",
+        "headers": {
+          "Authorization": "Bearer {user_token}",
+          "X-Request-ID": "req_12350"
+        },
+        "expected_status": 200,
+        "performance_target": "≤100ms"
+      },
+      "download_file": {
+        "method": "GET",
+        "endpoint": "/api/files/{file_id}/download",
+        "headers": {
+          "Authorization": "Bearer {user_token}",
+          "X-Request-ID": "req_12351"
+        },
+        "expected_status": 200,
+        "performance_target": "≤1000ms"
+      }
+    },
+    
+    "business_transactions": {
+      "create_transaction": {
+        "method": "POST",
+        "endpoint": "/api/transactions",
+        "headers": {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer {user_token}",
+          "X-Request-ID": "req_12352"
+        },
+        "payload": {
+          "type": "purchase",
+          "amount": 149.99,
+          "currency": "USD",
+          "description": "Premium subscription",
+          "customer": {
+            "id": "cust_123",
+            "email": "customer@example.com"
+          },
+          "metadata": {
+            "plan": "premium",
+            "billing_cycle": "monthly"
+          }
+        },
+        "expected_status": 201,
+        "performance_target": "≤300ms"
+      },
+      "process_refund": {
+        "method": "POST",
+        "endpoint": "/api/transactions/{transaction_id}/refund",
+        "headers": {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer {admin_token}",
+          "X-Request-ID": "req_12353"
+        },
+        "payload": {
+          "amount": 149.99,
+          "reason": "customer_request",
+          "refund_method": "original_payment"
+        },
+        "expected_status": 200,
+        "performance_target": "≤500ms"
+      },
+      "get_transaction_history": {
+        "method": "GET",
+        "endpoint": "/api/transactions",
+        "headers": {
+          "Authorization": "Bearer {user_token}",
+          "X-Request-ID": "req_12354"
+        },
+        "query_params": {
+          "limit": 50,
+          "offset": 0,
+          "date_from": "2024-01-01",
+          "date_to": "2024-12-31",
+          "status": "completed"
+        },
+        "expected_status": 200,
+        "performance_target": "≤200ms"
+      }
+    },
+    
+    "analytics_reporting": {
+      "generate_report": {
+        "method": "POST",
+        "endpoint": "/api/reports/generate",
+        "headers": {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer {admin_token}",
+          "X-Request-ID": "req_12355"
+        },
+        "payload": {
+          "report_type": "user_activity",
+          "date_range": {
+            "start": "2024-01-01T00:00:00Z",
+            "end": "2024-12-31T23:59:59Z"
+          },
+          "filters": {
+            "department": ["Engineering", "Sales"],
+            "role": ["admin", "manager"]
+          },
+          "format": "json",
+          "include_details": true
+        },
+        "expected_status": 202,
+        "performance_target": "≤1000ms"
+      },
+      "get_report_status": {
+        "method": "GET",
+        "endpoint": "/api/reports/{report_id}/status",
+        "headers": {
+          "Authorization": "Bearer {admin_token}",
+          "X-Request-ID": "req_12356"
+        },
+        "expected_status": 200,
+        "performance_target": "≤50ms"
+      }
+    }
+  },
+  
+  "multi_tenant_data": {
+    "tenants": [
+      {
+        "tenant_id": "tenant_001",
+        "name": "TechCorp Inc",
+        "region": "us-east-1",
+        "tier": "enterprise",
+        "limits": {
+          "max_users": 1000,
+          "storage_gb": 100,
+          "api_calls_per_hour": 10000
+        },
+        "features": ["advanced_analytics", "sso", "api_access"],
+        "test_scenarios": [
+          "high_volume_concurrent_users",
+          "bulk_data_operations",
+          "enterprise_security_validation"
+        ]
+      },
+      {
+        "tenant_id": "tenant_002", 
+        "name": "StartupXYZ",
+        "region": "eu-west-1",
+        "tier": "professional",
+        "limits": {
+          "max_users": 100,
+          "storage_gb": 25,
+          "api_calls_per_hour": 1000
+        },
+        "features": ["basic_analytics", "api_access"],
+        "test_scenarios": [
+          "moderate_volume_testing",
+          "feature_limitation_validation"
+        ]
+      },
+      {
+        "tenant_id": "tenant_003",
+        "name": "GlobalPartner Ltd",
+        "region": "ap-southeast-1", 
+        "tier": "basic",
+        "limits": {
+          "max_users": 25,
+          "storage_gb": 5,
+          "api_calls_per_hour": 500
+        },
+        "features": ["api_access"],
+        "test_scenarios": [
+          "low_volume_testing",
+          "resource_constraint_validation"
+        ]
+      }
+    ],
+    "geographic_distribution": {
+      "regions": [
+        {
+          "region": "us-east-1",
+          "load_percentage": 40,
+          "expected_latency": "50-100ms",
+          "peak_hours": "09:00-17:00 EST"
+        },
+        {
+          "region": "eu-west-1", 
+          "load_percentage": 35,
+          "expected_latency": "60-120ms",
+          "peak_hours": "08:00-18:00 CET"
+        },
+        {
+          "region": "ap-southeast-1",
+          "load_percentage": 25,
+          "expected_latency": "80-150ms",
+          "peak_hours": "09:00-18:00 SGT"
+        }
+      ]
+    }
+  },
+  
+  "edge_cases_boundary_values": {
+    "payload_sizes": {
+      "minimal_request": {
+        "description": "Smallest valid JSON request",
+        "payload": {},
+        "size_bytes": 2
+      },
+      "large_request": {
+        "description": "Near maximum payload size",
+        "payload": {
+          "data": "x".repeat(1000000)
+        },
+        "size_bytes": 1000000
+      },
+      "maximum_json_depth": {
+        "description": "Deeply nested JSON structure",
+        "payload": {
+          "level1": {
+            "level2": {
+              "level3": {
+                "level4": {
+                  "level5": {
+                    "data": "deep_nesting_test"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "nesting_depth": 5
+      }
+    },
+    
+    "string_boundaries": {
+      "empty_string": "",
+      "single_character": "a",
+      "max_length_255": "a".repeat(255),
+      "unicode_characters": "🚀🌟💫⭐🔥💯🎯🎪🎨🎭🎪🎨",
+      "special_characters": "!@#$%^&*()_+-=[]{}|;':\",./<>?",
+      "sql_injection_attempt": "'; DROP TABLE users; --",
+      "xss_attempt": "<script>alert('xss')</script>",
+      "null_character": "\x00",
+      "newline_characters": "line1\nline2\r\nline3"
+    },
+    
+    "numeric_boundaries": {
+      "zero": 0,
+      "negative_zero": -0,
+      "positive_integer_max": 2147483647,
+      "negative_integer_min": -2147483648,
+      "positive_float_large": 1.7976931348623157e+308,
+      "negative_float_large": -1.7976931348623157e+308,
+      "float_precision_limit": 0.1234567890123456789,
+      "infinity": "Infinity",
+      "negative_infinity": "-Infinity",
+      "not_a_number": "NaN"
+    },
+    
+    "date_time_boundaries": {
+      "unix_epoch": "1970-01-01T00:00:00Z",
+      "y2k": "2000-01-01T00:00:00Z",
+      "leap_year": "2024-02-29T23:59:59Z",
+      "future_date": "2099-12-31T23:59:59Z",
+      "invalid_date": "2024-13-45T25:99:99Z",
+      "malformed_iso": "not-a-date",
+      "timezone_variations": [
+        "2024-01-01T12:00:00Z",
+        "2024-01-01T12:00:00+05:30",
+        "2024-01-01T12:00:00-08:00"
+      ]
+    },
+    
+    "array_boundaries": {
+      "empty_array": [],
+      "single_item": ["item"],
+      "large_array": Array.from({length: 1000}, (_, i) => `item_${i}`),
+      "mixed_types": [1, "string", true, null, {}, []],
+      "nested_arrays": [[1, 2], [3, 4], [[5, 6], [7, 8]]]
+    },
+    
+    "concurrent_request_scenarios": {
+      "high_concurrency": {
+        "description": "Maximum concurrent users stress test",
+        "concurrent_users": 1000,
+        "requests_per_user": 10,
+        "duration_minutes": 5,
+        "ramp_up_time": "30 seconds"
+      },
+      "sustained_load": {
+        "description": "Sustained moderate load test",
+        "concurrent_users": 200,
+        "requests_per_user": 100,
+        "duration_minutes": 30,
+        "ramp_up_time": "2 minutes"
+      },
+      "spike_load": {
+        "description": "Sudden load spike simulation",
+        "initial_users": 10,
+        "spike_users": 500,
+        "spike_duration": "30 seconds",
+        "requests_per_user": 50
+      }
+    }
+  },
+  
+  "error_scenarios": {
+    "authentication_errors": [
+      {
+        "scenario": "missing_authorization_header",
+        "request": {
+          "method": "GET",
+          "endpoint": "/api/users/profile",
+          "headers": {}
+        },
+        "expected_status": 401,
+        "expected_error": "Authorization header required"
+      },
+      {
+        "scenario": "invalid_jwt_format",
+        "request": {
+          "method": "GET", 
+          "endpoint": "/api/users/profile",
+          "headers": {
+            "Authorization": "Bearer invalid.jwt.token"
+          }
+        },
+        "expected_status": 401,
+        "expected_error": "Invalid token format"
+      },
+      {
+        "scenario": "expired_token",
+        "request": {
+          "method": "GET",
+          "endpoint": "/api/users/profile", 
+          "headers": {
+            "Authorization": "Bearer {expired_token}"
+          }
+        },
+        "expected_status": 401,
+        "expected_error": "Token has expired"
+      }
+    ],
+    
+    "validation_errors": [
+      {
+        "scenario": "missing_required_field",
+        "request": {
+          "method": "POST",
+          "endpoint": "/api/users",
+          "payload": {
+            "email": "test@example.com"
+          }
+        },
+        "expected_status": 400,
+        "expected_error": "Name field is required"
+      },
+      {
+        "scenario": "invalid_email_format",
+        "request": {
+          "method": "POST",
+          "endpoint": "/api/users",
+          "payload": {
+            "name": "Test User",
+            "email": "invalid-email"
+          }
+        },
+        "expected_status": 400,
+        "expected_error": "Invalid email format"
+      }
+    ],
+    
+    "business_logic_errors": [
+      {
+        "scenario": "insufficient_permissions",
+        "request": {
+          "method": "DELETE",
+          "endpoint": "/api/users/{other_user_id}",
+          "headers": {
+            "Authorization": "Bearer {user_token}"
+          }
+        },
+        "expected_status": 403,
+        "expected_error": "Insufficient permissions"
+      },
+      {
+        "scenario": "resource_not_found",
+        "request": {
+          "method": "GET",
+          "endpoint": "/api/users/non_existent_id",
+          "headers": {
+            "Authorization": "Bearer {user_token}"
+          }
+        },
+        "expected_status": 404,
+        "expected_error": "User not found"
+      }
+    ]
+  },
+  
+  "performance_test_configurations": {
+    "baseline_comparison": {
+      "description": "Node.js vs Python Flask performance comparison",
+      "metrics": [
+        "response_time_p95",
+        "response_time_p99", 
+        "throughput_rps",
+        "memory_usage_mb",
+        "cpu_utilization_percent"
+      ],
+      "variance_threshold": "10%",
+      "test_duration": "30 minutes"
+    },
+    
+    "load_test_profiles": [
+      {
+        "name": "light_load",
+        "users": 50,
+        "ramp_up": "30s",
+        "duration": "10m",
+        "requests_per_second": 25
+      },
+      {
+        "name": "moderate_load",
+        "users": 200,
+        "ramp_up": "2m",
+        "duration": "20m", 
+        "requests_per_second": 100
+      },
+      {
+        "name": "heavy_load",
+        "users": 500,
+        "ramp_up": "5m",
+        "duration": "30m",
+        "requests_per_second": 250
+      },
+      {
+        "name": "stress_test",
+        "users": 1000,
+        "ramp_up": "10m",
+        "duration": "30m",
+        "requests_per_second": 500
+      }
+    ]
+  },
+  
+  "monitoring_and_observability": {
+    "health_check_endpoints": [
+      {
+        "endpoint": "/health",
+        "method": "GET",
+        "expected_status": 200,
+        "expected_response": {"status": "healthy"},
+        "check_frequency": "30s"
+      },
+      {
+        "endpoint": "/health/ready",
+        "method": "GET", 
+        "expected_status": 200,
+        "expected_response": {"status": "ready"},
+        "check_frequency": "10s"
+      },
+      {
+        "endpoint": "/metrics",
+        "method": "GET",
+        "expected_status": 200,
+        "expected_content_type": "text/plain",
+        "check_frequency": "60s"
+      }
+    ],
+    
+    "custom_metrics": [
+      "api_request_duration_seconds",
+      "api_request_total",
+      "database_connection_pool_size",
+      "redis_cache_hit_ratio",
+      "external_service_call_duration",
+      "jwt_validation_duration",
+      "file_upload_size_bytes"
+    ]
+  },
+  
+  "test_execution_matrix": {
+    "environments": ["development", "staging", "production"],
+    "test_types": ["unit", "integration", "performance", "security"],
+    "browsers": ["chrome", "firefox", "safari", "edge"],
+    "devices": ["desktop", "tablet", "mobile"],
+    "network_conditions": ["fast_3g", "slow_3g", "offline"],
+    "data_volumes": ["small", "medium", "large", "extra_large"]
+  }
+}

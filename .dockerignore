@@ -1,0 +1,388 @@
+# .dockerignore - Docker build context exclusion file
+# Optimizes container build performance by excluding development files, test data, 
+# and build artifacts from Docker context per Section 8.3.4 Build Optimization Techniques
+
+# =============================================================================
+# PYTHON-SPECIFIC BUILD ARTIFACTS
+# Exclude Python bytecode, cache files, and compiled artifacts per Section 8.3.4
+# =============================================================================
+
+# Python bytecode and cache directories
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging artifacts
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller artifacts
+*.manifest
+*.spec
+
+# Python virtual environments per Section 3.5.1 Development Environment
+venv/
+.venv/
+env/
+.env/
+ENV/
+env.bak/
+venv.bak/
+virtualenv/
+.virtualenv/
+
+# =============================================================================
+# DEVELOPMENT AND TESTING FILES  
+# Exclude development, testing, and debugging files per Section 8.3.4
+# =============================================================================
+
+# Testing frameworks and coverage reports
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+htmlcov/
+.tox/
+.nox/
+.cache
+nosetests.xml
+coverage/
+tests/fixtures/test_data/
+tests/performance/reports/
+tests/performance/data/
+tests/e2e/screenshots/
+tests/e2e/videos/
+
+# Test result artifacts
+pytest-results.xml
+test-results/
+test-reports/
+junit.xml
+
+# Performance testing data per Section 8.5.2 Automated Performance Testing
+locust_results/
+k6_results/
+performance_results/
+performance_baseline/
+load_test_data/
+
+# Security scanning results per Section 8.5.1 Security Analysis  
+trivy-results/
+bandit-results/
+safety-results/
+vulnerability-scan/
+security-reports/
+
+# =============================================================================
+# VERSION CONTROL AND IDE FILES
+# Exclude version control and IDE files for security and performance per Section 8.3.5
+# =============================================================================
+
+# Git version control
+.git/
+.gitignore
+.gitattributes
+.gitmodules
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Visual Studio Code
+.vscode/
+*.code-workspace
+
+# PyCharm
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Vim
+*.vim
+.netrwhist
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+.\#*
+
+# =============================================================================
+# CONFIGURATION AND ENVIRONMENT FILES
+# Exclude sensitive configuration and environment files per Section 8.3.5
+# =============================================================================
+
+# Environment and configuration files
+.env
+.env.*
+!.env.example
+.envrc
+config.ini
+config.cfg
+instance/
+
+# Database files (development only)
+*.db
+*.sqlite
+*.sqlite3
+
+# Log files
+*.log
+logs/
+log/
+
+# Temporary files
+tmp/
+temp/
+.tmp/
+
+# =============================================================================
+# DOCUMENTATION AND PROJECT FILES
+# Exclude documentation and project management files
+# =============================================================================
+
+# Documentation
+docs/
+*.md
+*.rst
+*.txt
+!requirements.txt
+!requirements.in
+LICENSE
+CHANGELOG*
+
+# Project management files
+.github/
+.gitlab/
+.gitlab-ci.yml
+.travis.yml
+.appveyor.yml
+circle.yml
+azure-pipelines.yml
+
+# Package manager files
+package.json
+package-lock.json
+yarn.lock
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# =============================================================================
+# SECURITY AND QUALITY ASSURANCE FILES
+# Exclude security scanning and quality assurance configuration per Section 8.5.1
+# =============================================================================
+
+# Security scanning configuration and results
+.bandit
+bandit.yaml
+.safety
+safety.json
+security/
+sec/
+
+# Code quality tools configuration
+.flake8
+mypy.ini
+pylint.rc
+.pylintrc
+setup.cfg
+pyproject.toml
+tox.ini
+
+# Pre-commit hooks
+.pre-commit-config.yaml
+.pre-commit-hooks.yaml
+
+# =============================================================================
+# BUILD AND DEPLOYMENT ARTIFACTS
+# Exclude build tools and deployment artifacts per Section 8.3.4
+# =============================================================================
+
+# Docker artifacts (except production files)
+Dockerfile.dev
+Dockerfile.test
+docker-compose.yml
+docker-compose.*.yml
+.dockerignore
+
+# CI/CD artifacts
+.github/
+Jenkinsfile
+.circleci/
+.azure/
+.buildkite/
+
+# Build tools
+Makefile
+build.sh
+deploy.sh
+scripts/
+tools/
+
+# Terraform and infrastructure as code
+*.tf
+*.tfvars
+*.tfstate
+*.tfstate.backup
+.terraform/
+
+# Kubernetes manifests (development)
+k8s/
+kubernetes/
+helm/
+charts/
+manifests/
+
+# =============================================================================
+# MONITORING AND OBSERVABILITY FILES
+# Exclude monitoring configuration and data per Section 8.5.1
+# =============================================================================
+
+# Monitoring and metrics
+prometheus/
+grafana/
+monitoring/
+metrics/
+alerting/
+
+# APM and tracing
+newrelic.ini
+datadog.yaml
+jaeger/
+zipkin/
+
+# =============================================================================
+# CACHE AND TEMPORARY DIRECTORIES
+# Exclude cache directories and temporary files
+# =============================================================================
+
+# General cache directories
+.cache/
+cache/
+.sass-cache/
+
+# Node.js artifacts (if any remain from migration)
+node_modules/
+npm-debug.log*
+
+# Python cache and temporary files
+pip-log.txt
+pip-delete-this-directory.txt
+.Python
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile
+Pipfile.lock
+
+# Poetry
+poetry.lock
+pyproject.toml
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# pytype static type analyzer
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# =============================================================================
+# ENTERPRISE SECURITY EXCLUSIONS
+# Additional security exclusions for enterprise deployment per Section 8.3.5
+# =============================================================================
+
+# SSL certificates and keys (should be managed externally)
+*.pem
+*.key
+*.crt
+*.csr
+*.cer
+*.p12
+*.pfx
+certs/
+certificates/
+
+# Backup files
+*.bak
+*.backup
+*.old
+*~
+
+# Core dump files
+core.*
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*

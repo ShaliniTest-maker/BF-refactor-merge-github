@@ -1,0 +1,351 @@
+# ===============================================
+# Python/Flask Project .gitignore
+# BF-refactor-merge: Node.js to Python Migration
+# ===============================================
+
+# ===============================================
+# PYTHON RUNTIME & BYTECODE
+# ===============================================
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ===============================================
+# VIRTUAL ENVIRONMENTS & DEPENDENCY MANAGEMENT
+# ===============================================
+# Virtual environments (Section 3.5.1)
+venv/
+.venv/
+env/
+.env/
+ENV/
+env.bak/
+venv.bak/
+.virtualenv/
+virtualenv/
+
+# pip-tools generated files (Section 8.3.3)
+requirements.txt
+requirements-dev.txt
+requirements-prod.txt
+requirements-test.txt
+
+# pip
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ===============================================
+# FLASK APPLICATION & CONFIGURATION
+# ===============================================
+# Flask instance folder and configuration secrets
+instance/
+.instance/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+.envrc
+
+# Flask session files
+flask_session/
+
+# Flask configuration secrets
+config/local.py
+config/secrets.py
+config/production.py
+secret_key.txt
+
+# ===============================================
+# DEVELOPMENT & TESTING
+# ===============================================
+# pytest (Section 3.5.1)
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# Testing artifacts
+test-reports/
+test-results/
+junit.xml
+pytest.ini.local
+
+# Performance testing (locust, apache-bench)
+locustfile.py.local
+performance-results/
+load-test-reports/
+
+# ===============================================
+# LOGGING & MONITORING
+# ===============================================
+# Application logs (structlog, python-json-logger)
+logs/
+*.log
+*.log.*
+log/
+
+# Flask-Monitoring-Dashboard data
+flask_monitoringdashboard.db
+
+# APM and monitoring data
+apm-data/
+metrics/
+traces/
+
+# Prometheus metrics
+prometheus-data/
+
+# ===============================================
+# DATABASE & CACHE
+# ===============================================
+# SQLite databases (if any)
+*.db
+*.sqlite
+*.sqlite3
+
+# MongoDB local dumps
+mongo-dumps/
+*.bson
+
+# Redis dumps and persistence
+dump.rdb
+appendonly.aof
+redis-data/
+
+# ===============================================
+# AWS & CLOUD SERVICES
+# ===============================================
+# AWS credentials and config
+.aws/
+boto3-credentials/
+aws-credentials/
+
+# S3 sync artifacts
+.s3cfg
+s3cmd.ini
+
+# ===============================================
+# DOCKER & CONTAINERIZATION
+# ===============================================
+# Docker build context
+.docker/
+docker-compose.override.yml
+docker-compose.local.yml
+
+# Docker volumes and data
+volumes/
+docker-data/
+
+# Container build artifacts
+.dockerignore.local
+
+# Gunicorn process files
+gunicorn.pid
+gunicorn.sock
+
+# ===============================================
+# IDE & EDITOR FILES
+# ===============================================
+# PyCharm
+.idea/
+*.iws
+*.iml
+*.ipr
+
+# VSCode
+.vscode/
+!.vscode/settings.json.example
+!.vscode/extensions.json.example
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+.\#*
+
+# ===============================================
+# CI/CD & DEPLOYMENT
+# ===============================================
+# CI/CD artifacts
+ci-reports/
+deployment-logs/
+.circleci/local/
+
+# GitHub Actions local
+.github/local/
+
+# Deployment artifacts
+deploy/
+deployment-keys/
+*.pem
+*.key
+!*.key.example
+
+# ===============================================
+# SECURITY & SECRETS
+# ===============================================
+# Security scanning results
+security-reports/
+vulnerability-scan/
+bandit-report/
+
+# SSH keys and certificates
+*.pem
+*.key
+*.crt
+*.csr
+id_rsa*
+id_dsa*
+id_ecdsa*
+id_ed25519*
+
+# JWT secrets and keys
+jwt-keys/
+auth-keys/
+
+# ===============================================
+# TEMPORARY & SYSTEM FILES
+# ===============================================
+# Temporary files
+*.tmp
+*.temp
+.temp/
+tmp/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Backup files
+*.bak
+*.backup
+*.old
+*~
+
+# ===============================================
+# PROJECT SPECIFIC EXCLUSIONS
+# ===============================================
+# Migration artifacts
+migration-logs/
+node-js-backup/
+migration-reports/
+
+# Performance comparison data
+performance-baseline/
+migration-metrics/
+
+# Feature flag configurations
+feature-flags.local.json
+flags/local/
+
+# Local development overrides
+local-config/
+dev-overrides/
+
+# Custom development scripts
+scripts/local/
+scripts/dev/
+
+# ===============================================
+# DATA & UPLOADS
+# ===============================================
+# File uploads and media
+uploads/
+media/
+static/uploads/
+
+# Data exports and backups
+exports/
+backups/
+data-dumps/
+
+# ===============================================
+# DOCUMENTATION BUILD ARTIFACTS
+# ===============================================
+# Sphinx documentation
+docs/_build/
+docs/build/
+
+# MkDocs
+site/
+
+# ===============================================
+# PROFILING & DEBUGGING
+# ===============================================
+# Profiling data
+*.prof
+profiling-data/
+cprofile-output/
+
+# Debugging artifacts
+debug-logs/
+core
+*.core
+
+# Memory dumps
+*.dump
+memory-dumps/
+
+# ===============================================
+# DEPENDENCY VULNERABILITY SCANNING
+# ===============================================
+# Safety and pip-audit reports
+safety-report.json
+pip-audit-report.json
+vulnerability-reports/
+
+# ===============================================
+# END OF .gitignore
+# ===============================================
